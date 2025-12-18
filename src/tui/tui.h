@@ -114,6 +114,12 @@ typedef struct {
     char sidebar_filter[64];   /* Filter string */
     size_t sidebar_filter_len; /* Filter string length */
 
+    /* Sidebar name scroll animation */
+    size_t sidebar_name_scroll;      /* Current scroll offset for highlighted name */
+    int sidebar_name_scroll_dir;     /* Scroll direction: 1=right, -1=left */
+    int sidebar_name_scroll_delay;   /* Pause counter at ends */
+    size_t sidebar_last_highlight;   /* Previous highlight to detect changes */
+
     /* Status message */
     char *status_msg;
     bool status_is_error;

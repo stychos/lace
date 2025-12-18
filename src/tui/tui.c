@@ -27,6 +27,7 @@
 /* Forward declarations */
 static void tui_confirm_edit(TuiState *state);
 static void tui_trim_loaded_data(TuiState *state);
+static size_t get_filtered_table_index(TuiState *state, size_t filtered_idx);
 
 /*
  * Translate keyboard input from non-Latin layouts to Latin equivalents
@@ -205,6 +206,12 @@ bool tui_init(TuiState *state) {
     /* Sidebar hidden by default (shown when connected) */
     state->sidebar_visible = false;
 
+    /* Initialize sidebar scroll animation */
+    state->sidebar_name_scroll = 0;
+    state->sidebar_name_scroll_dir = 1;
+    state->sidebar_name_scroll_delay = 0;
+    state->sidebar_last_highlight = (size_t)-1;
+
     /* Initialize workspaces */
     state->num_workspaces = 0;
     state->current_workspace = 0;
@@ -280,6 +287,7 @@ static void tui_recreate_windows(TuiState *state) {
         state->sidebar_win = newwin(main_height, SIDEBAR_WIDTH, main_start_y, 0);
         if (state->sidebar_win) {
             keypad(state->sidebar_win, TRUE);
+            wtimeout(state->sidebar_win, 80);  /* For scroll animation */
         }
         main_start_x = SIDEBAR_WIDTH;
         main_width = state->term_cols - SIDEBAR_WIDTH;
@@ -616,13 +624,15 @@ bool tui_load_tables(TuiState *state) {
     }
 
     state->current_table = 0;
-
-    /* Focus sidebar to let user choose a table */
-    state->sidebar_focused = true;
     state->sidebar_highlight = 0;
 
     if (state->num_tables == 0) {
         tui_set_status(state, "No tables found");
+        state->sidebar_focused = true;
+    } else {
+        /* Auto-load first table */
+        workspace_create(state, 0);
+        state->sidebar_focused = false;
     }
 
     return true;
@@ -1330,13 +1340,15 @@ void tui_draw_status(TuiState *state) {
         wbkgd(state->status_win, COLOR_PAIR(COLOR_STATUS));
     }
 
-    /* Left: status/error message */
-    if (state->status_msg) {
-        mvwprintw(state->status_win, 0, 1, "%s", state->status_msg);
-    }
-
-    /* Middle: column info from schema */
-    if (state->schema && state->cursor_col < state->schema->num_columns) {
+    /* Left: show table name when sidebar focused, otherwise column info */
+    if (state->sidebar_focused && state->tables && state->num_tables > 0) {
+        /* Show highlighted table name */
+        size_t actual_idx = get_filtered_table_index(state, state->sidebar_highlight);
+        if (actual_idx < state->num_tables && state->tables[actual_idx]) {
+            const char *name = state->tables[actual_idx];
+            mvwprintw(state->status_win, 0, 1, "%s", name);
+        }
+    } else if (state->schema && state->cursor_col < state->schema->num_columns) {
         ColumnDef *col = &state->schema->columns[state->cursor_col];
 
         /* Build column info string */
@@ -1362,10 +1374,15 @@ void tui_draw_status(TuiState *state) {
             pos += snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s", col->default_val);
         }
 
-        /* Center the column info */
-        int info_len = (int)strlen(info);
-        int center_x = (state->term_cols - info_len) / 2;
-        mvwprintw(state->status_win, 0, center_x, "%s", info);
+        mvwprintw(state->status_win, 0, 1, "%s", info);
+    }
+
+    /* Center: status/error message */
+    if (state->status_msg) {
+        int msg_len = (int)strlen(state->status_msg);
+        int center_x = (state->term_cols - msg_len) / 2;
+        if (center_x < 1) center_x = 1;
+        mvwprintw(state->status_win, 0, center_x, "%s", state->status_msg);
     }
 
     /* Right: row position */
@@ -1476,8 +1493,18 @@ void tui_draw_sidebar(TuiState *state) {
 
         /* Truncate name if too long */
         char display_name[SIDEBAR_WIDTH];
-        if ((int)strlen(name) > max_name_len) {
-            snprintf(display_name, sizeof(display_name), "%.*s..", max_name_len - 2, name);
+        int name_len = (int)strlen(name);
+        if (name_len > max_name_len) {
+            if (is_highlighted && state->sidebar_focused && !state->sidebar_filter_active) {
+                /* Apply scroll animation for highlighted item */
+                size_t scroll = state->sidebar_name_scroll;
+                if (scroll > (size_t)(name_len - max_name_len)) {
+                    scroll = name_len - max_name_len;
+                }
+                snprintf(display_name, sizeof(display_name), "%.*s", max_name_len, name + scroll);
+            } else {
+                snprintf(display_name, sizeof(display_name), "%.*s..", max_name_len - 2, name);
+            }
         } else {
             snprintf(display_name, sizeof(display_name), "%s", name);
         }
@@ -1539,7 +1566,8 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     }
 
     /* Adjust scroll */
-    int visible_rows = state->term_rows - 5;
+    /* Visible rows = main window height - 3 header rows (border + headers + separator) */
+    int visible_rows = state->term_rows - 6;
     if (visible_rows < 1) visible_rows = 1;
 
     if (state->cursor_row < state->scroll_row) {
@@ -1583,7 +1611,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
 void tui_page_up(TuiState *state) {
     if (!state || !state->data) return;
 
-    int page_size = state->term_rows - 5;
+    int page_size = state->term_rows - 6;
     if (page_size < 1) page_size = 1;
 
     if (state->cursor_row > (size_t)page_size) {
@@ -1598,6 +1626,13 @@ void tui_page_up(TuiState *state) {
         state->scroll_row = 0;
     }
 
+    /* Ensure cursor remains visible after scroll adjustment */
+    if (state->cursor_row < state->scroll_row) {
+        state->scroll_row = state->cursor_row;
+    } else if (state->cursor_row >= state->scroll_row + (size_t)page_size) {
+        state->scroll_row = state->cursor_row - page_size + 1;
+    }
+
     /* Check if we need to load previous rows */
     tui_check_load_more(state);
 }
@@ -1605,7 +1640,7 @@ void tui_page_up(TuiState *state) {
 void tui_page_down(TuiState *state) {
     if (!state || !state->data) return;
 
-    int page_size = state->term_rows - 5;
+    int page_size = state->term_rows - 6;
     if (page_size < 1) page_size = 1;
 
     state->cursor_row += page_size;
@@ -1618,6 +1653,13 @@ void tui_page_down(TuiState *state) {
                         state->data->num_rows - page_size : 0;
     if (state->scroll_row > max_scroll) {
         state->scroll_row = max_scroll;
+    }
+
+    /* Ensure cursor remains visible after scroll adjustment */
+    if (state->cursor_row < state->scroll_row) {
+        state->scroll_row = state->cursor_row;
+    } else if (state->cursor_row >= state->scroll_row + (size_t)page_size) {
+        state->scroll_row = state->cursor_row - page_size + 1;
     }
 
     /* Check if we need to load more rows */
@@ -1653,11 +1695,11 @@ void tui_end(TuiState *state) {
     state->cursor_row = state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
     state->cursor_col = state->data->num_columns > 0 ? state->data->num_columns - 1 : 0;
 
-    int page_size = state->term_rows - 5;
-    if (page_size < 1) page_size = 1;
+    int visible_rows = state->term_rows - 6;
+    if (visible_rows < 1) visible_rows = 1;
 
-    state->scroll_row = state->data->num_rows > (size_t)page_size ?
-                        state->data->num_rows - page_size : 0;
+    state->scroll_row = state->data->num_rows > (size_t)visible_rows ?
+                        state->data->num_rows - visible_rows : 0;
 }
 
 void tui_next_table(TuiState *state) {
@@ -2712,10 +2754,75 @@ static bool handle_mouse_event(TuiState *state) {
     return false;
 }
 
+/* Update sidebar name scroll animation */
+static void update_sidebar_scroll_animation(TuiState *state) {
+    if (!state || !state->sidebar_focused || !state->tables) return;
+
+    /* Reset scroll when highlight changes */
+    if (state->sidebar_highlight != state->sidebar_last_highlight) {
+        state->sidebar_name_scroll = 0;
+        state->sidebar_name_scroll_dir = 1;
+        state->sidebar_name_scroll_delay = 3;  /* Initial pause */
+        state->sidebar_last_highlight = state->sidebar_highlight;
+        return;
+    }
+
+    /* Get highlighted table name */
+    size_t actual_idx = get_filtered_table_index(state, state->sidebar_highlight);
+    if (actual_idx >= state->num_tables) return;
+
+    const char *name = state->tables[actual_idx];
+    if (!name) return;
+
+    int max_name_len = SIDEBAR_WIDTH - 4;
+    int name_len = (int)strlen(name);
+
+    /* Only animate if name is truncated */
+    if (name_len <= max_name_len) {
+        state->sidebar_name_scroll = 0;
+        return;
+    }
+
+    int max_scroll = name_len - max_name_len;
+
+    /* Handle pause at ends */
+    if (state->sidebar_name_scroll_delay > 0) {
+        state->sidebar_name_scroll_delay--;
+        return;
+    }
+
+    /* Update scroll position */
+    if (state->sidebar_name_scroll_dir > 0) {
+        /* Scrolling right (showing more of the end) */
+        if ((int)state->sidebar_name_scroll < max_scroll) {
+            state->sidebar_name_scroll++;
+        } else {
+            /* Reached end, pause and reverse */
+            state->sidebar_name_scroll_dir = -1;
+            state->sidebar_name_scroll_delay = 5;
+        }
+    } else {
+        /* Scrolling left (back to start) */
+        if (state->sidebar_name_scroll > 0) {
+            state->sidebar_name_scroll--;
+        } else {
+            /* Reached start, pause and reverse */
+            state->sidebar_name_scroll_dir = 1;
+            state->sidebar_name_scroll_delay = 5;
+        }
+    }
+}
+
 void tui_run(TuiState *state) {
     if (!state) return;
 
     tui_refresh(state);
+
+    /* Set timeout for animation (80ms) */
+    wtimeout(state->main_win, 80);
+    if (state->sidebar_win) {
+        wtimeout(state->sidebar_win, 80);
+    }
 
     while (state->running) {
         /* Get input from appropriate window */
@@ -2723,6 +2830,13 @@ void tui_run(TuiState *state) {
                             ? state->sidebar_win
                             : state->main_win;
         int ch = wgetch(input_win);
+
+        /* Handle timeout - update animations */
+        if (ch == ERR) {
+            update_sidebar_scroll_animation(state);
+            tui_draw_sidebar(state);
+            continue;
+        }
 
         /* Clear status message on any keypress */
         if (state->status_msg) {

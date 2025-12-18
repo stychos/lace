@@ -373,8 +373,8 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     } else {
         mvwprintw(win, status_y, 2, "L%zu/%zu C%zu",
                   state->cursor_line + 1, state->num_lines, state->cursor_col + 1);
-        /* "[F2] Save [^N] NULL [^D] Empty [Esc]" = 36 chars + 1 for padding */
-        mvwprintw(win, status_y, width - 37, "[F2] Save [^N] NULL [^D] Empty [Esc]");
+        /* "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel" = 43 chars */
+        mvwprintw(win, status_y, width - 45, "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel");
     }
 
     /* Position cursor */
@@ -397,7 +397,7 @@ EditorResult editor_view_show(TuiState *state, const char *title,
     int width = term_cols * 80 / 100;
 
     if (height < 15) height = 15;
-    if (width < 40) width = 40;
+    if (width < 50) width = 50;
     if (height > 40) height = 40;
     if (width > 120) width = 120;
     if (height > term_rows - 2) height = term_rows - 2;
@@ -451,26 +451,25 @@ EditorResult editor_view_show(TuiState *state, const char *title,
                                 running = false;  /* Same as Escape */
                             }
                         } else {
-                            /* "[F2] Save [^N] NULL [^D] Empty [Esc]" at width - 37 */
-                            /* [F2] Save: w-37 to w-28, [^N] NULL: w-27 to w-18, [^D] Empty: w-17 to w-7, [Esc]: w-6 to w-2 */
-                            if (mouse_x >= width - 37 && mouse_x < width - 28) {
+                            /* "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel" at width - 45 */
+                            if (mouse_x >= width - 45 && mouse_x < width - 35) {
                                 /* Clicked [F2] Save */
                                 result.saved = true;
                                 result.content = str_dup(editor.buf.data);
                                 running = false;
-                            } else if (mouse_x >= width - 27 && mouse_x < width - 18) {
+                            } else if (mouse_x >= width - 35 && mouse_x < width - 25) {
                                 /* Clicked [^N] NULL */
                                 result.saved = true;
                                 result.set_null = true;
                                 result.content = NULL;
                                 running = false;
-                            } else if (mouse_x >= width - 17 && mouse_x < width - 7) {
+                            } else if (mouse_x >= width - 25 && mouse_x < width - 14) {
                                 /* Clicked [^D] Empty */
                                 result.saved = true;
                                 result.content = str_dup("");
                                 running = false;
-                            } else if (mouse_x >= width - 6 && mouse_x < width - 2) {
-                                /* Clicked [Esc] */
+                            } else if (mouse_x >= width - 14 && mouse_x < width - 2) {
+                                /* Clicked [Esc] Cancel */
                                 running = false;
                             }
                         }
