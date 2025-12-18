@@ -12,9 +12,7 @@
 typedef struct {
     char *connstr;          /* Connection string */
     bool  tui_mode;         /* Use TUI (default: true) */
-    bool  verbose;          /* Verbose output */
     bool  help;             /* Show help */
-    bool  version;          /* Show version */
     char *query;            /* Direct query mode */
 } AppConfig;
 
@@ -26,9 +24,6 @@ void app_config_free(AppConfig *config);
 
 /* Print usage */
 void app_print_usage(const char *prog);
-
-/* Print version */
-void app_print_version(void);
 
 /* Run the application */
 int app_run(AppConfig *config);

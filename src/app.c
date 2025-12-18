@@ -14,8 +14,6 @@
 
 static struct option long_options[] = {
     {"help",    no_argument,       NULL, 'h'},
-    {"version", no_argument,       NULL, 'V'},
-    {"verbose", no_argument,       NULL, 'v'},
     {"query",   required_argument, NULL, 'q'},
     {"no-tui",  no_argument,       NULL, 'n'},
     {NULL,      0,                 NULL,  0 }
@@ -28,16 +26,10 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
     config->tui_mode = true;
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "hVvq:n", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "hq:n", long_options, NULL)) != -1) {
         switch (opt) {
             case 'h':
                 config->help = true;
-                break;
-            case 'V':
-                config->version = true;
-                break;
-            case 'v':
-                config->verbose = true;
                 break;
             case 'q':
                 config->query = str_dup(optarg);
@@ -77,45 +69,15 @@ void app_print_usage(const char *prog) {
     printf("\n");
     printf("Options:\n");
     printf("  -h, --help       Show this help message\n");
-    printf("  -V, --version    Show version information\n");
-    printf("  -v, --verbose    Verbose output\n");
     printf("  -q, --query SQL  Execute query and exit\n");
     printf("  -n, --no-tui     Disable TUI mode\n");
-    printf("\n");
-    printf("TUI Navigation:\n");
-    printf("  Arrow keys, hjkl  Move cursor\n");
-    printf("  Page Up/Down      Scroll pages\n");
-    printf("  Home/End          Go to first/last column\n");
-    printf("  a, g, Ctrl+Home   Go to first row\n");
-    printf("  z, G, Ctrl+End    Go to last row\n");
-    printf("  /, F5, Ctrl+G     Go to row number\n");
-    printf("  t, F9             Toggle tables sidebar\n");
-    printf("  s, F3             Show table schema\n");
-    printf("  c, F2             Connect to database\n");
-    printf("  q, F10, Ctrl+Q    Quit\n");
-    printf("  F1, ?             Show help\n");
-    printf("\n");
-    printf("Tabs:\n");
-    printf("  ]/F6, [/F7        Next/previous tab\n");
-    printf("  +/= (sidebar)     Open table in new tab\n");
-    printf("  -/_               Close current tab\n");
-    printf("\n");
-    printf("Editing:\n");
-    printf("  Enter             Edit cell (inline)\n");
-    printf("  e, F4             Edit cell (modal)\n");
-    printf("  n, Ctrl+N         Set cell to NULL\n");
-    printf("  d, Ctrl+D         Set cell to empty\n");
-    printf("  x, Delete         Delete row\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s sqlite:///data.db\n", prog);
     printf("  %s postgres://localhost/mydb\n", prog);
     printf("  %s -q 'SELECT * FROM users' sqlite:///data.db\n", prog);
-}
-
-void app_print_version(void) {
-    printf("%s %s\n", LACE_NAME, LACE_VERSION);
-    printf("Compiled with Fil-C\n");
+    printf("\n");
+    printf("Press ? or F1 in TUI for keyboard shortcuts.\n");
 }
 
 static int run_query_mode(AppConfig *config) {
@@ -228,11 +190,6 @@ int app_run(AppConfig *config) {
 
     if (config->help) {
         app_print_usage("lace");
-        return 0;
-    }
-
-    if (config->version) {
-        app_print_version();
         return 0;
     }
 
