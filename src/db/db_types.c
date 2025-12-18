@@ -1,0 +1,373 @@
+/*
+ * lace - Database Viewer and Manager
+ * Database type implementations
+ */
+
+#include "db_types.h"
+#include "../util/str.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+const char *db_value_type_name(DbValueType type) {
+    switch (type) {
+        case DB_TYPE_NULL:      return "NULL";
+        case DB_TYPE_INT:       return "INTEGER";
+        case DB_TYPE_FLOAT:     return "FLOAT";
+        case DB_TYPE_TEXT:      return "TEXT";
+        case DB_TYPE_BLOB:      return "BLOB";
+        case DB_TYPE_BOOL:      return "BOOLEAN";
+        case DB_TYPE_DATE:      return "DATE";
+        case DB_TYPE_TIMESTAMP: return "TIMESTAMP";
+        default:                return "UNKNOWN";
+    }
+}
+
+DbValueType db_value_type_from_name(const char *name) {
+    if (!name) return DB_TYPE_NULL;
+
+    /* Convert to uppercase for comparison */
+    char *upper = str_dup(name);
+    if (!upper) return DB_TYPE_NULL;
+    str_upper(upper);
+
+    DbValueType type = DB_TYPE_TEXT;  /* Default */
+
+    if (strstr(upper, "INT")) {
+        type = DB_TYPE_INT;
+    } else if (strstr(upper, "SERIAL")) {
+        type = DB_TYPE_INT;
+    } else if (strstr(upper, "FLOAT") || strstr(upper, "DOUBLE") ||
+               strstr(upper, "REAL") || strstr(upper, "NUMERIC") ||
+               strstr(upper, "DECIMAL")) {
+        type = DB_TYPE_FLOAT;
+    } else if (strstr(upper, "BOOL")) {
+        type = DB_TYPE_BOOL;
+    } else if (strstr(upper, "BLOB") || strstr(upper, "BYTEA") ||
+               strstr(upper, "BINARY")) {
+        type = DB_TYPE_BLOB;
+    } else if (str_eq(upper, "DATE")) {
+        type = DB_TYPE_DATE;
+    } else if (strstr(upper, "TIMESTAMP") || strstr(upper, "DATETIME")) {
+        type = DB_TYPE_TIMESTAMP;
+    } else if (strstr(upper, "TEXT") || strstr(upper, "CHAR") ||
+               strstr(upper, "VARCHAR") || strstr(upper, "STRING")) {
+        type = DB_TYPE_TEXT;
+    }
+
+    free(upper);
+    return type;
+}
+
+/* Value creation helpers */
+
+DbValue db_value_null(void) {
+    DbValue v = { .type = DB_TYPE_NULL, .is_null = true };
+    return v;
+}
+
+DbValue db_value_int(int64_t val) {
+    DbValue v = { .type = DB_TYPE_INT, .int_val = val, .is_null = false };
+    return v;
+}
+
+DbValue db_value_float(double val) {
+    DbValue v = { .type = DB_TYPE_FLOAT, .float_val = val, .is_null = false };
+    return v;
+}
+
+DbValue db_value_text(const char *str) {
+    DbValue v = { .type = DB_TYPE_TEXT, .is_null = false };
+    if (str) {
+        v.text.len = strlen(str);
+        v.text.data = str_dup(str);
+    } else {
+        v.is_null = true;
+    }
+    return v;
+}
+
+DbValue db_value_text_len(const char *str, size_t len) {
+    DbValue v = { .type = DB_TYPE_TEXT, .is_null = false };
+    if (str) {
+        v.text.len = len;
+        v.text.data = str_ndup(str, len);
+    } else {
+        v.is_null = true;
+    }
+    return v;
+}
+
+DbValue db_value_blob(const uint8_t *data, size_t len) {
+    DbValue v = { .type = DB_TYPE_BLOB, .is_null = false };
+    if (data && len > 0) {
+        v.blob.len = len;
+        v.blob.data = malloc(len);
+        if (v.blob.data) {
+            memcpy(v.blob.data, data, len);
+        }
+    } else {
+        v.is_null = true;
+    }
+    return v;
+}
+
+DbValue db_value_bool(bool val) {
+    DbValue v = { .type = DB_TYPE_BOOL, .bool_val = val, .is_null = false };
+    return v;
+}
+
+/* Memory management */
+
+void db_value_free(DbValue *val) {
+    if (!val) return;
+
+    switch (val->type) {
+        case DB_TYPE_TEXT:
+            free(val->text.data);
+            val->text.data = NULL;
+            val->text.len = 0;
+            break;
+        case DB_TYPE_BLOB:
+            free(val->blob.data);
+            val->blob.data = NULL;
+            val->blob.len = 0;
+            break;
+        default:
+            break;
+    }
+    val->is_null = true;
+}
+
+void db_row_free(Row *row) {
+    if (!row) return;
+
+    for (size_t i = 0; i < row->num_cells; i++) {
+        db_value_free(&row->cells[i]);
+    }
+    free(row->cells);
+    row->cells = NULL;
+    row->num_cells = 0;
+}
+
+void db_column_free(ColumnDef *col) {
+    if (!col) return;
+
+    free(col->name);
+    free(col->type_name);
+    free(col->default_val);
+    free(col->foreign_key);
+    memset(col, 0, sizeof(ColumnDef));
+}
+
+void db_index_free(IndexDef *idx) {
+    if (!idx) return;
+
+    free(idx->name);
+    free(idx->type);
+    for (size_t i = 0; i < idx->num_columns; i++) {
+        free(idx->columns[i]);
+    }
+    free(idx->columns);
+    memset(idx, 0, sizeof(IndexDef));
+}
+
+void db_fk_free(ForeignKeyDef *fk) {
+    if (!fk) return;
+
+    free(fk->name);
+    for (size_t i = 0; i < fk->num_columns; i++) {
+        free(fk->columns[i]);
+    }
+    free(fk->columns);
+    free(fk->ref_table);
+    for (size_t i = 0; i < fk->num_ref_columns; i++) {
+        free(fk->ref_columns[i]);
+    }
+    free(fk->ref_columns);
+    free(fk->on_delete);
+    free(fk->on_update);
+    memset(fk, 0, sizeof(ForeignKeyDef));
+}
+
+void db_schema_free(TableSchema *schema) {
+    if (!schema) return;
+
+    free(schema->name);
+    free(schema->schema);
+
+    for (size_t i = 0; i < schema->num_columns; i++) {
+        db_column_free(&schema->columns[i]);
+    }
+    free(schema->columns);
+
+    for (size_t i = 0; i < schema->num_indexes; i++) {
+        db_index_free(&schema->indexes[i]);
+    }
+    free(schema->indexes);
+
+    for (size_t i = 0; i < schema->num_foreign_keys; i++) {
+        db_fk_free(&schema->foreign_keys[i]);
+    }
+    free(schema->foreign_keys);
+
+    free(schema);
+}
+
+void db_result_free(ResultSet *rs) {
+    if (!rs) return;
+
+    for (size_t i = 0; i < rs->num_columns; i++) {
+        db_column_free(&rs->columns[i]);
+    }
+    free(rs->columns);
+
+    for (size_t i = 0; i < rs->num_rows; i++) {
+        db_row_free(&rs->rows[i]);
+    }
+    free(rs->rows);
+
+    free(rs->error);
+    free(rs);
+}
+
+/* Value conversion */
+
+char *db_value_to_string(const DbValue *val) {
+    if (!val || val->is_null) {
+        return str_dup("NULL");
+    }
+
+    switch (val->type) {
+        case DB_TYPE_NULL:
+            return str_dup("NULL");
+
+        case DB_TYPE_INT:
+            return str_printf("%lld", (long long)val->int_val);
+
+        case DB_TYPE_FLOAT:
+            return str_printf("%g", val->float_val);
+
+        case DB_TYPE_TEXT:
+            return val->text.data ? str_dup(val->text.data) : str_dup("");
+
+        case DB_TYPE_BLOB: {
+            /* Try to display as text if it's valid UTF-8 with printable chars */
+            if (val->blob.data && val->blob.len > 0) {
+                bool is_text = true;
+                for (size_t i = 0; i < val->blob.len; i++) {
+                    unsigned char c = val->blob.data[i];
+                    /* Allow printable ASCII, tab, newline, and UTF-8 continuation bytes */
+                    if (c < 32 && c != '\t' && c != '\n' && c != '\r') {
+                        is_text = false;
+                        break;
+                    }
+                    if (c == 127) {  /* DEL character */
+                        is_text = false;
+                        break;
+                    }
+                }
+                if (is_text) {
+                    /* Return as string */
+                    char *str = malloc(val->blob.len + 1);
+                    if (str) {
+                        memcpy(str, val->blob.data, val->blob.len);
+                        str[val->blob.len] = '\0';
+                        return str;
+                    }
+                }
+            }
+
+            /* Convert to hex for binary data */
+            size_t hex_len = val->blob.len * 2 + 3;  /* "x'" + hex + "'" */
+            char *hex = malloc(hex_len + 1);
+            if (!hex) return NULL;
+
+            hex[0] = 'x';
+            hex[1] = '\'';
+            for (size_t i = 0; i < val->blob.len && i < 32; i++) {
+                sprintf(hex + 2 + i * 2, "%02x", val->blob.data[i]);
+            }
+            if (val->blob.len > 32) {
+                strcat(hex, "...");
+            }
+            strcat(hex, "'");
+            return hex;
+        }
+
+        case DB_TYPE_BOOL:
+            return str_dup(val->bool_val ? "true" : "false");
+
+        case DB_TYPE_DATE:
+        case DB_TYPE_TIMESTAMP:
+            /* These are typically stored as text */
+            return val->text.data ? str_dup(val->text.data) : str_dup("");
+
+        default:
+            return str_dup("???");
+    }
+}
+
+bool db_value_to_bool(const DbValue *val) {
+    if (!val || val->is_null) return false;
+
+    switch (val->type) {
+        case DB_TYPE_BOOL:
+            return val->bool_val;
+        case DB_TYPE_INT:
+            return val->int_val != 0;
+        case DB_TYPE_FLOAT:
+            return val->float_val != 0.0;
+        case DB_TYPE_TEXT:
+            if (!val->text.data) return false;
+            return str_eq_nocase(val->text.data, "true") ||
+                   str_eq_nocase(val->text.data, "yes") ||
+                   str_eq_nocase(val->text.data, "1");
+        default:
+            return false;
+    }
+}
+
+int64_t db_value_to_int(const DbValue *val) {
+    if (!val || val->is_null) return 0;
+
+    switch (val->type) {
+        case DB_TYPE_INT:
+            return val->int_val;
+        case DB_TYPE_FLOAT:
+            return (int64_t)val->float_val;
+        case DB_TYPE_BOOL:
+            return val->bool_val ? 1 : 0;
+        case DB_TYPE_TEXT: {
+            int64_t result = 0;
+            if (val->text.data) {
+                str_to_int64(val->text.data, &result);
+            }
+            return result;
+        }
+        default:
+            return 0;
+    }
+}
+
+double db_value_to_float(const DbValue *val) {
+    if (!val || val->is_null) return 0.0;
+
+    switch (val->type) {
+        case DB_TYPE_FLOAT:
+            return val->float_val;
+        case DB_TYPE_INT:
+            return (double)val->int_val;
+        case DB_TYPE_BOOL:
+            return val->bool_val ? 1.0 : 0.0;
+        case DB_TYPE_TEXT: {
+            double result = 0.0;
+            if (val->text.data) {
+                str_to_double(val->text.data, &result);
+            }
+            return result;
+        }
+        default:
+            return 0.0;
+    }
+}
