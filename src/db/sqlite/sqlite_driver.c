@@ -97,11 +97,13 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
             val.type = DB_TYPE_TEXT;
             const char *text = (const char *)sqlite3_column_text(stmt, col);
             int len = sqlite3_column_bytes(stmt, col);
-            val.text.data = malloc(len + 1);
-            if (val.text.data) {
-                memcpy(val.text.data, text, len);
-                val.text.data[len] = '\0';
-                val.text.len = len;
+            if (text && len >= 0) {
+                val.text.data = malloc(len + 1);
+                if (val.text.data) {
+                    memcpy(val.text.data, text, len);
+                    val.text.data[len] = '\0';
+                    val.text.len = len;
+                }
             }
             break;
         }
@@ -110,10 +112,12 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
             val.type = DB_TYPE_BLOB;
             const void *blob = sqlite3_column_blob(stmt, col);
             int len = sqlite3_column_bytes(stmt, col);
-            val.blob.data = malloc(len);
-            if (val.blob.data) {
-                memcpy(val.blob.data, blob, len);
-                val.blob.len = len;
+            if (blob && len > 0) {
+                val.blob.data = malloc(len);
+                if (val.blob.data) {
+                    memcpy(val.blob.data, blob, len);
+                    val.blob.len = len;
+                }
             }
             break;
         }

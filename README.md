@@ -2,7 +2,7 @@
 
 A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and MySQL.
 
-[![asciicast](https://asciinema.org/a/thzoRMidllfDoAp85xFRdE1pu.svg)](https://asciinema.org/a/thzoRMidllfDoAp85xFRdE1pu)
+[![asciicast](https://asciinema.org/a/ZBXGyPBcaUoAYaIVRtmPheudu.svg)](https://asciinema.org/a/ZBXGyPBcaUoAYaIVRtmPheudu)
 
 ## Features
 
