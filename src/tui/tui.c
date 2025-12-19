@@ -173,8 +173,8 @@ bool tui_init(TuiState *state) {
     define_key("\033[1;5F", KEY_F(62));   /* Ctrl+End - xterm */
     define_key("\033[8^", KEY_F(62));     /* Ctrl+End - rxvt */
 
-    /* Enable mouse support */
-    mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED, NULL);
+    /* Enable mouse support (including scroll wheel) */
+    mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON4_PRESSED | BUTTON5_PRESSED, NULL);
     mouseinterval(300);  /* Double-click interval in ms */
 
     /* Disable XON/XOFF flow control so Ctrl+S works */
@@ -2788,11 +2788,51 @@ static bool handle_mouse_event(TuiState *state) {
     int mouse_x = event.x;
     bool is_double = (event.bstate & BUTTON1_DOUBLE_CLICKED) != 0;
     bool is_click = (event.bstate & BUTTON1_CLICKED) != 0;
-
-    if (!is_click && !is_double) return false;
+    bool is_scroll_up = (event.bstate & BUTTON4_PRESSED) != 0;
+    bool is_scroll_down = (event.bstate & BUTTON5_PRESSED) != 0;
 
     /* Determine click location */
     int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
+
+    /* Handle scroll wheel - scroll relative to cursor */
+    if (is_scroll_up || is_scroll_down) {
+        /* Only scroll in main table area */
+        if (mouse_x >= sidebar_width && state->data && state->data->num_rows > 0) {
+            int scroll_amount = 3;  /* Scroll 3 rows at a time */
+
+            if (is_scroll_up) {
+                /* Scroll up - move cursor up */
+                if (state->cursor_row >= (size_t)scroll_amount) {
+                    state->cursor_row -= scroll_amount;
+                } else {
+                    state->cursor_row = 0;
+                }
+            } else {
+                /* Scroll down - move cursor down */
+                state->cursor_row += scroll_amount;
+                if (state->cursor_row >= state->data->num_rows) {
+                    state->cursor_row = state->data->num_rows - 1;
+                }
+            }
+
+            /* Adjust scroll to keep cursor visible */
+            int visible_rows = state->term_rows - 6;
+            if (visible_rows < 1) visible_rows = 1;
+            if (state->cursor_row < state->scroll_row) {
+                state->scroll_row = state->cursor_row;
+            } else if (state->cursor_row >= state->scroll_row + (size_t)visible_rows) {
+                state->scroll_row = state->cursor_row - visible_rows + 1;
+            }
+
+            /* Check if we need to load more rows (pagination) */
+            tui_check_load_more(state);
+
+            state->sidebar_focused = false;
+        }
+        return true;
+    }
+
+    if (!is_click && !is_double) return false;
 
     /* Check if click is in sidebar */
     if (state->sidebar_visible && mouse_x < sidebar_width) {
@@ -2801,9 +2841,9 @@ static bool handle_mouse_event(TuiState *state) {
             tui_confirm_edit(state);
         }
 
-        /* Sidebar layout (inside sidebar_win which starts at screen y=1):
+        /* Sidebar layout (inside sidebar_win which starts at screen y=2):
            row 0 = border+title, row 1 = filter, row 2 = separator, row 3+ = table list */
-        int sidebar_row = mouse_y - 1;  /* Convert to sidebar_win coordinates */
+        int sidebar_row = mouse_y - 2;  /* Convert to sidebar_win coordinates */
 
         /* Click on filter field (row 1 in sidebar_win = screen row 2) */
         if (sidebar_row == 1) {
@@ -2867,9 +2907,9 @@ static bool handle_mouse_event(TuiState *state) {
             return true;  /* No data to select, but filter is deactivated */
         }
 
-        /* Adjust x coordinate relative to main window */
+        /* Adjust coordinates relative to main window (starts at screen y=2) */
         int rel_x = mouse_x - sidebar_width;
-        int rel_y = mouse_y - 1;  /* -1 for header row */
+        int rel_y = mouse_y - 2;
 
         /* Data rows start at y=3 in main window (after header line, column names, separator) */
         int data_start_y = 3;
