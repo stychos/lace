@@ -101,10 +101,14 @@ DbValue db_value_text_len(const char *str, size_t len) {
 DbValue db_value_blob(const uint8_t *data, size_t len) {
     DbValue v = { .type = DB_TYPE_BLOB, .is_null = false };
     if (data && len > 0) {
-        v.blob.len = len;
         v.blob.data = malloc(len);
         if (v.blob.data) {
             memcpy(v.blob.data, data, len);
+            v.blob.len = len;
+        } else {
+            /* Malloc failed - return null value */
+            v.is_null = true;
+            v.blob.len = 0;
         }
     } else {
         v.is_null = true;
@@ -134,6 +138,9 @@ DbValue db_value_copy(const DbValue *src) {
 
     switch (src->type) {
         case DB_TYPE_TEXT:
+        case DB_TYPE_DATE:
+        case DB_TYPE_TIMESTAMP:
+            /* DATE and TIMESTAMP are stored as text */
             if (src->text.data) {
                 v.text.data = malloc(src->text.len + 1);
                 if (v.text.data) {

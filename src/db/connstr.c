@@ -358,6 +358,12 @@ char *connstr_build(const char *driver, const char *user, const char *password,
             if (i > 0) sb_append_char(sb, '&');
             char *encoded_key = str_url_encode(option_keys[i]);
             char *encoded_val = str_url_encode(option_values[i]);
+            if (!encoded_key || !encoded_val) {
+                free(encoded_key);
+                free(encoded_val);
+                sb_free(sb);
+                return NULL;
+            }
             sb_printf(sb, "%s=%s", encoded_key, encoded_val);
             free(encoded_key);
             free(encoded_val);

@@ -698,6 +698,20 @@ static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
     }
 
     int num_rows = PQntuples(res);
+
+    /* Handle zero tables - return empty array (not NULL) to distinguish from error */
+    if (num_rows == 0) {
+        PQclear(res);
+        char **tables = calloc(1, sizeof(char *));
+        if (!tables) {
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
+        tables[0] = NULL;  /* NULL-terminated empty array */
+        *count = 0;
+        return tables;
+    }
+
     char **tables = malloc(num_rows * sizeof(char *));
     if (!tables) {
         PQclear(res);

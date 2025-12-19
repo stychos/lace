@@ -158,8 +158,23 @@ char *str_replace(const char *s, const char *old, const char *new_str) {
 
     if (count == 0) return str_dup(s);
 
-    /* Allocate result */
-    size_t result_len = strlen(s) + count * (new_len - old_len);
+    /* Calculate result size safely to avoid integer overflow */
+    size_t s_len = strlen(s);
+    size_t result_len;
+    if (new_len >= old_len) {
+        size_t added = new_len - old_len;
+        /* Check for overflow: count * added must not overflow */
+        if (added > 0 && count > (SIZE_MAX - s_len) / added) {
+            return NULL;  /* Would overflow */
+        }
+        result_len = s_len + count * added;
+    } else {
+        size_t removed = old_len - new_len;
+        size_t total_removed = count * removed;
+        /* This subtraction is safe since we found 'count' occurrences */
+        result_len = s_len - total_removed;
+    }
+
     char *result = malloc(result_len + 1);
     if (!result) return NULL;
 

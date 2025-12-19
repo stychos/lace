@@ -157,24 +157,30 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col, M
             break;
 
         case DB_TYPE_BLOB:
-            val.type = DB_TYPE_BLOB;
-            val.blob.len = (size_t)lengths[col];
             val.blob.data = malloc((size_t)lengths[col]);
             if (val.blob.data) {
+                val.type = DB_TYPE_BLOB;
+                val.blob.len = (size_t)lengths[col];
                 memcpy(val.blob.data, row[col], (size_t)lengths[col]);
             } else {
+                /* Malloc failed - return null value */
+                val.type = DB_TYPE_NULL;
+                val.is_null = true;
                 val.blob.len = 0;
             }
             break;
 
         default:
-            val.type = DB_TYPE_TEXT;
-            val.text.len = (size_t)lengths[col];
             val.text.data = malloc((size_t)lengths[col] + 1);
             if (val.text.data) {
+                val.type = DB_TYPE_TEXT;
+                val.text.len = (size_t)lengths[col];
                 memcpy(val.text.data, row[col], (size_t)lengths[col]);
                 val.text.data[(size_t)lengths[col]] = '\0';
             } else {
+                /* Malloc failed - return null value */
+                val.type = DB_TYPE_NULL;
+                val.is_null = true;
                 val.text.len = 0;
             }
             break;
@@ -718,6 +724,20 @@ static char **mysql_driver_list_tables(DbConnection *conn, size_t *count, char *
     }
 
     size_t num_rows = mysql_num_rows(result);
+
+    /* Handle zero tables - return empty array (not NULL) to distinguish from error */
+    if (num_rows == 0) {
+        mysql_free_result(result);
+        char **tables = calloc(1, sizeof(char *));
+        if (!tables) {
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
+        tables[0] = NULL;  /* NULL-terminated empty array */
+        *count = 0;
+        return tables;
+    }
+
     char **tables = malloc(num_rows * sizeof(char *));
     if (!tables) {
         mysql_free_result(result);
@@ -759,7 +779,15 @@ static TableSchema *mysql_driver_get_table_schema(DbConnection *conn, const char
         return NULL;
     }
 
-    char *sql = str_printf("DESCRIBE `%s`", table);
+    /* Escape identifier to prevent SQL injection */
+    char *escaped_table = str_escape_identifier_backtick(table);
+    if (!escaped_table) {
+        if (err) *err = str_dup("Memory allocation failed");
+        return NULL;
+    }
+
+    char *sql = str_printf("DESCRIBE %s", escaped_table);
+    free(escaped_table);
     if (!sql) {
         if (err) *err = str_dup("Memory allocation failed");
         return NULL;

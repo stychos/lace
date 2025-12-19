@@ -290,7 +290,15 @@ static char **sqlite_list_tables(DbConnection *conn, size_t *count, char **err) 
 
     if (num_tables == 0) {
         sqlite3_finalize(stmt);
-        return NULL;
+        /* Return empty array (not NULL) to distinguish from error */
+        char **tables = calloc(1, sizeof(char *));
+        if (!tables) {
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
+        tables[0] = NULL;  /* NULL-terminated empty array */
+        *count = 0;
+        return tables;
     }
 
     /* Allocate array */
@@ -347,7 +355,16 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn, const char *tabl
     }
 
     /* Get column info using PRAGMA table_info */
-    char *sql = str_printf("PRAGMA table_info(\"%s\")", table);
+    /* Use proper identifier escaping for table name */
+    char *escaped_table = str_escape_identifier_dquote(table);
+    if (!escaped_table) {
+        if (err) *err = str_dup("Memory allocation failed");
+        db_schema_free(schema);
+        return NULL;
+    }
+    char *sql = str_printf("PRAGMA table_info(%s)", escaped_table);
+    free(escaped_table);
+    escaped_table = NULL;
     sqlite3_stmt *stmt = NULL;
     int rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
     free(sql);
@@ -422,9 +439,19 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn, const char *tabl
     }
 
     /* Get index info */
-    sql = str_printf("PRAGMA index_list(\"%s\")", table);
-    rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
-    free(sql);
+    escaped_table = str_escape_identifier_dquote(table);
+    if (escaped_table) {
+        sql = str_printf("PRAGMA index_list(%s)", escaped_table);
+        free(escaped_table);
+    } else {
+        sql = NULL;
+    }
+    if (sql) {
+        rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
+        free(sql);
+    } else {
+        rc = SQLITE_ERROR;
+    }
 
     if (rc == SQLITE_OK) {
         /* Count indexes */
@@ -444,9 +471,11 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn, const char *tabl
                     index->unique = sqlite3_column_int(stmt, 2) != 0;
 
                     /* Get index columns */
-                    char *idx_sql = str_printf("PRAGMA index_info(\"%s\")", index->name);
+                    char *escaped_idx = str_escape_identifier_dquote(index->name);
+                    char *idx_sql = escaped_idx ? str_printf("PRAGMA index_info(%s)", escaped_idx) : NULL;
+                    free(escaped_idx);
                     sqlite3_stmt *idx_stmt = NULL;
-                    if (sqlite3_prepare_v2(data->db, idx_sql, -1, &idx_stmt, NULL) == SQLITE_OK) {
+                    if (idx_sql && sqlite3_prepare_v2(data->db, idx_sql, -1, &idx_stmt, NULL) == SQLITE_OK) {
                         /* Count columns in index */
                         size_t ncols = 0;
                         while (sqlite3_step(idx_stmt) == SQLITE_ROW) ncols++;
@@ -476,9 +505,19 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn, const char *tabl
     }
 
     /* Get foreign key info */
-    sql = str_printf("PRAGMA foreign_key_list(\"%s\")", table);
-    rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
-    free(sql);
+    escaped_table = str_escape_identifier_dquote(table);
+    if (escaped_table) {
+        sql = str_printf("PRAGMA foreign_key_list(%s)", escaped_table);
+        free(escaped_table);
+    } else {
+        sql = NULL;
+    }
+    if (sql) {
+        rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
+        free(sql);
+    } else {
+        rc = SQLITE_ERROR;
+    }
 
     if (rc == SQLITE_OK) {
         /* Count foreign keys */
