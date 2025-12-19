@@ -86,6 +86,12 @@ static bool editor_buffer_set(EditorBuffer *buf, const char *content) {
 static bool editor_buffer_insert(EditorBuffer *buf, size_t pos, char ch) {
   if (buf->len + 2 > buf->cap) {
     size_t new_cap = buf->cap * 2;
+    if (new_cap < buf->cap || new_cap == 0) {
+      /* Overflow or zero capacity - use safe fallback */
+      new_cap = buf->cap + 256;
+      if (new_cap < buf->cap)
+        return false; /* Still overflow, give up */
+    }
     char *new_data = realloc(buf->data, new_cap);
     if (!new_data)
       return false;
@@ -268,6 +274,10 @@ static void editor_page_up(EditorState *state) {
 }
 
 static void editor_page_down(EditorState *state) {
+  if (state->num_lines == 0) {
+    state->cursor_line = 0;
+    return;
+  }
   state->cursor_line += state->view_rows;
   if (state->cursor_line >= state->num_lines) {
     state->cursor_line = state->num_lines - 1;
@@ -392,9 +402,15 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
               "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel");
   }
 
-  /* Position cursor */
-  int cursor_y = content_y + (state->cursor_line - state->scroll_line);
-  int cursor_x = content_x + (state->cursor_col - state->scroll_col);
+  /* Position cursor - ensure no underflow from size_t subtraction */
+  int cursor_y = content_y;
+  int cursor_x = content_x;
+  if (state->cursor_line >= state->scroll_line) {
+    cursor_y += (int)(state->cursor_line - state->scroll_line);
+  }
+  if (state->cursor_col >= state->scroll_col) {
+    cursor_x += (int)(state->cursor_col - state->scroll_col);
+  }
   wmove(win, cursor_y, cursor_x);
 
   wrefresh(win);

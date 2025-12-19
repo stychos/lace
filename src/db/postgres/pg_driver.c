@@ -7,15 +7,21 @@
 #include "../connstr.h"
 #include "../db.h"
 #include <ctype.h>
+#include <errno.h>
 #include <libpq-fe.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Helper to safely cast size_t to int for libpq paramLengths */
+/* Helper to safely cast size_t to int for libpq paramLengths.
+ * Returns INT_MAX on overflow - callers must validate inputs beforehand.
+ * Note: paramLengths is only used for binary format; text format ignores it. */
 static inline int safe_size_to_int(size_t sz) {
-  return (sz > INT_MAX) ? INT_MAX : (int)sz;
+  if (sz > (size_t)INT_MAX) {
+    return -1; /* Overflow indicator - caller should have validated */
+  }
+  return (int)sz;
 }
 
 /* PostgreSQL connection data */
@@ -120,18 +126,77 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
   val.is_null = false;
   char *value = PQgetvalue(res, row, col);
   int len = PQgetlength(res, row, col);
+
+  /* Validate length is non-negative */
+  if (len < 0) {
+    val.type = DB_TYPE_NULL;
+    val.is_null = true;
+    return val;
+  }
+
+  /* For oversized fields, show placeholder text instead of loading data */
+  if ((size_t)len > MAX_FIELD_SIZE) {
+    char placeholder[64];
+    snprintf(placeholder, sizeof(placeholder), "[DATA: %d bytes]", len);
+    val.text.data = str_dup(placeholder);
+    if (val.text.data) {
+      val.type = DB_TYPE_TEXT;
+      val.text.len = strlen(val.text.data);
+    } else {
+      val.type = DB_TYPE_NULL;
+      val.is_null = true;
+    }
+    return val;
+  }
+
   DbValueType type = pg_oid_to_db_type(oid);
 
   switch (type) {
-  case DB_TYPE_INT:
-    val.type = DB_TYPE_INT;
-    val.int_val = strtoll(value, NULL, 10);
+  case DB_TYPE_INT: {
+    char *endptr;
+    errno = 0;
+    long long parsed = strtoll(value, &endptr, 10);
+    if (errno == 0 && endptr != value && *endptr == '\0') {
+      val.type = DB_TYPE_INT;
+      val.int_val = parsed;
+    } else {
+      /* Conversion failed - store as text instead */
+      val.text.data = malloc(len + 1);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = len;
+        memcpy(val.text.data, value, len);
+        val.text.data[len] = '\0';
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    }
     break;
+  }
 
-  case DB_TYPE_FLOAT:
-    val.type = DB_TYPE_FLOAT;
-    val.float_val = strtod(value, NULL);
+  case DB_TYPE_FLOAT: {
+    char *endptr;
+    errno = 0;
+    double parsed = strtod(value, &endptr);
+    if (errno == 0 && endptr != value && *endptr == '\0') {
+      val.type = DB_TYPE_FLOAT;
+      val.float_val = parsed;
+    } else {
+      /* Conversion failed - store as text instead */
+      val.text.data = malloc(len + 1);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = len;
+        memcpy(val.text.data, value, len);
+        val.text.data[len] = '\0';
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    }
     break;
+  }
 
   case DB_TYPE_BOOL:
     val.type = DB_TYPE_BOOL;
@@ -164,17 +229,35 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
         val.blob.len = 0;
         break;
       }
+      /* Validate all hex characters first */
+      bool valid_hex = true;
+      for (size_t i = 0; i < hex_chars; i++) {
+        if (!isxdigit((unsigned char)value[2 + i])) {
+          valid_hex = false;
+          break;
+        }
+      }
+      if (!valid_hex) {
+        /* Invalid hex characters - treat as raw data */
+        val.blob.data = malloc(len);
+        if (val.blob.data) {
+          val.type = DB_TYPE_BLOB;
+          memcpy(val.blob.data, value, len);
+          val.blob.len = len;
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
+        break;
+      }
       val.blob.data = malloc(hex_len);
       if (val.blob.data) {
         val.type = DB_TYPE_BLOB;
         val.blob.len = hex_len;
         for (size_t i = 0; i < hex_len; i++) {
-          unsigned int byte = 0;
-          if (sscanf(value + 2 + i * 2, "%2x", &byte) != 1) {
-            /* Invalid hex - treat rest as zero */
-            byte = 0;
-          }
-          val.blob.data[i] = (uint8_t)byte;
+          /* Convert two hex chars to byte - already validated above */
+          char hex_pair[3] = {value[2 + i * 2], value[2 + i * 2 + 1], '\0'};
+          val.blob.data[i] = (uint8_t)strtoul(hex_pair, NULL, 16);
         }
       } else {
         /* Malloc failed - mark as null */
@@ -397,7 +480,15 @@ static int64_t pg_exec(DbConnection *conn, const char *sql, char **err) {
   }
 
   char *affected = PQcmdTuples(res);
-  int64_t count = affected && *affected ? strtoll(affected, NULL, 10) : 0;
+  int64_t count = 0;
+  if (affected && *affected) {
+    char *endptr;
+    errno = 0;
+    long long parsed = strtoll(affected, &endptr, 10);
+    if (errno == 0 && endptr != affected) {
+      count = parsed;
+    }
+  }
   PQclear(res);
   return count;
 }
@@ -410,6 +501,13 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
       !new_val) {
     if (err)
       *err = str_dup("Invalid parameters");
+    return false;
+  }
+
+  /* Validate num_pk_cols fits in int for libpq (with room for +1) */
+  if (num_pk_cols > (size_t)(INT_MAX - 1)) {
+    if (err)
+      *err = str_dup("Too many primary key columns");
     return false;
   }
 
@@ -478,6 +576,13 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
 
   /* Prepare parameter values: 1 new value + N pk values */
   size_t num_params = 1 + num_pk_cols;
+  /* PostgreSQL supports max 65535 parameters */
+  if (num_params > 65535) {
+    free(sql);
+    if (err)
+      *err = str_dup("Too many parameters (PostgreSQL limit: 65535)");
+    return false;
+  }
   const char **paramValues = malloc(sizeof(char *) * num_params);
   int *paramLengths = malloc(sizeof(int) * num_params);
   int *paramFormats = calloc(num_params, sizeof(int)); /* All text format (0) */
@@ -496,7 +601,7 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
   }
 
   /* Parameter 1: new value */
-  char new_buf[64];
+  char new_buf[128]; /* Large enough for any numeric representation */
   if (new_val->is_null) {
     paramValues[0] = NULL;
     paramLengths[0] = 0;
@@ -589,6 +694,13 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  /* PostgreSQL supports max 65535 parameters */
+  if (num_pk_cols > 65535) {
+    if (err)
+      *err = str_dup("Too many primary key columns (PostgreSQL limit: 65535)");
+    return false;
+  }
+
   PgData *data = conn->driver_data;
   if (!data || !data->conn) {
     if (err)
@@ -674,13 +786,37 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
       switch (pk_val->type) {
       case DB_TYPE_INT:
         pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
+        if (!pk_bufs[i]) {
+          for (size_t j = 0; j < i; j++)
+            free(pk_bufs[j]);
+          free(pk_bufs);
+          free(paramValues);
+          free(paramLengths);
+          free(paramFormats);
+          free(sql);
+          if (err)
+            *err = str_dup("Memory allocation failed");
+          return false;
+        }
         paramValues[i] = pk_bufs[i];
-        paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        paramLengths[i] = safe_size_to_int(strlen(pk_bufs[i]));
         break;
       case DB_TYPE_FLOAT:
         pk_bufs[i] = str_printf("%g", pk_val->float_val);
+        if (!pk_bufs[i]) {
+          for (size_t j = 0; j < i; j++)
+            free(pk_bufs[j]);
+          free(pk_bufs);
+          free(paramValues);
+          free(paramLengths);
+          free(paramFormats);
+          free(sql);
+          if (err)
+            *err = str_dup("Memory allocation failed");
+          return false;
+        }
         paramValues[i] = pk_bufs[i];
-        paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        paramLengths[i] = safe_size_to_int(strlen(pk_bufs[i]));
         break;
       default:
         paramValues[i] = pk_val->text.data;
@@ -741,6 +877,12 @@ static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
   }
 
   int num_rows = PQntuples(res);
+  if (num_rows < 0) {
+    PQclear(res);
+    if (err)
+      *err = str_dup("Invalid row count from database");
+    return NULL;
+  }
 
   /* Handle zero tables - return empty array (not NULL) to distinguish from
    * error */
@@ -835,7 +977,14 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
     return NULL;
   }
   int num_rows = PQntuples(res);
-  schema->columns = calloc(num_rows, sizeof(ColumnDef));
+  if (num_rows < 0) {
+    PQclear(res);
+    db_schema_free(schema);
+    if (err)
+      *err = str_dup("Invalid row count from database");
+    return NULL;
+  }
+  schema->columns = calloc(num_rows > 0 ? (size_t)num_rows : 1, sizeof(ColumnDef));
   if (!schema->columns) {
     PQclear(res);
     db_schema_free(schema);
@@ -957,8 +1106,15 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
 
   /* Get column info */
   int num_fields = PQnfields(res);
-  rs->num_columns = num_fields;
-  rs->columns = calloc(num_fields, sizeof(ColumnDef));
+  if (num_fields < 0) {
+    PQclear(res);
+    free(rs);
+    if (err)
+      *err = str_dup("Invalid column count from database");
+    return NULL;
+  }
+  rs->num_columns = (size_t)num_fields;
+  rs->columns = calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(ColumnDef));
   if (!rs->columns) {
     PQclear(res);
     free(rs);
@@ -982,8 +1138,15 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
 
   /* Get rows */
   int num_rows = PQntuples(res);
+  if (num_rows < 0) {
+    PQclear(res);
+    db_result_free(rs);
+    if (err)
+      *err = str_dup("Invalid row count from database");
+    return NULL;
+  }
   if (num_rows > 0) {
-    rs->rows = calloc(num_rows, sizeof(Row));
+    rs->rows = calloc((size_t)num_rows, sizeof(Row));
     if (!rs->rows) {
       PQclear(res);
       db_result_free(rs);
@@ -995,8 +1158,8 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
 
   for (int r = 0; r < num_rows; r++) {
     Row *row = &rs->rows[rs->num_rows];
-    row->cells = calloc(num_fields, sizeof(DbValue));
-    row->num_cells = num_fields;
+    row->cells = calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(DbValue));
+    row->num_cells = (size_t)num_fields;
 
     if (!row->cells) {
       PQclear(res);

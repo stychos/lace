@@ -81,6 +81,9 @@ void arena_reset(Arena *arena) {
 }
 
 static size_t align_up(size_t size, size_t alignment) {
+  /* Check for overflow: size + alignment - 1 could wrap */
+  if (size > SIZE_MAX - alignment + 1)
+    return SIZE_MAX; /* Return max to signal overflow - caller should check */
   return (size + alignment - 1) & ~(alignment - 1);
 }
 
@@ -91,6 +94,10 @@ void *arena_alloc_aligned(Arena *arena, size_t size, size_t alignment) {
   /* Find space in current block */
   ArenaBlock *block = arena->current;
   size_t aligned_offset = align_up(block->used, alignment);
+
+  /* Check for overflow in needed calculation */
+  if (aligned_offset > SIZE_MAX - size)
+    return NULL;
   size_t needed = aligned_offset + size;
 
   if (needed <= block->size) {
@@ -104,6 +111,9 @@ void *arena_alloc_aligned(Arena *arena, size_t size, size_t alignment) {
   /* Need a new block */
   size_t new_block_size = arena->block_size;
   if (size > new_block_size) {
+    /* Check for overflow in align_up */
+    if (size > SIZE_MAX - MIN_BLOCK_SIZE + 1)
+      return NULL;
     new_block_size = align_up(size, MIN_BLOCK_SIZE);
   }
 

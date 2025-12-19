@@ -279,11 +279,21 @@ char *str_join(const char **parts, size_t count, const char *sep) {
   size_t total_len = 0;
 
   for (size_t i = 0; i < count; i++) {
-    if (parts[i])
-      total_len += strlen(parts[i]);
-    if (i < count - 1)
+    if (parts[i]) {
+      size_t part_len = strlen(parts[i]);
+      if (total_len > SIZE_MAX - part_len)
+        return NULL; /* Overflow */
+      total_len += part_len;
+    }
+    if (i < count - 1) {
+      if (total_len > SIZE_MAX - sep_len)
+        return NULL; /* Overflow */
       total_len += sep_len;
+    }
   }
+
+  if (total_len > SIZE_MAX - 1)
+    return NULL; /* Overflow for null terminator */
 
   char *result = malloc(total_len + 1);
   if (!result)
@@ -343,8 +353,8 @@ char *str_url_decode(const char *s) {
       char hex[3] = {p[1], p[2], '\0'};
       char *endptr;
       long val = strtol(hex, &endptr, 16);
-      if (*endptr == '\0') {
-        *dst++ = (char)val;
+      if (*endptr == '\0' && val >= 0 && val <= 255) {
+        *dst++ = (unsigned char)val;
         p += 2;
         continue;
       }
@@ -432,7 +442,7 @@ char *str_unescape(const char *s) {
           char hex[3] = {p[1], p[2], '\0'};
           char *endptr;
           long val = strtol(hex, &endptr, 16);
-          if (*endptr == '\0') {
+          if (*endptr == '\0' && val >= 0 && val <= 255) {
             *dst++ = (char)val;
             p += 2;
             continue;

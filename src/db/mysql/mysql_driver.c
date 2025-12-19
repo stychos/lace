@@ -7,10 +7,15 @@
 #include "../connstr.h"
 #include "../db.h"
 #include <ctype.h>
+#include <errno.h>
 #include <mysql/mysql.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Maximum iterations for consuming pending results (prevents infinite loops) */
+#define MAX_RESULT_CONSUME_ITERATIONS 1000
 
 /* MySQL connection data */
 typedef struct {
@@ -150,19 +155,78 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
     return val;
   }
 
+  /* Validate length doesn't exceed SIZE_MAX (for +1 overflow safety) */
+  if (lengths[col] > SIZE_MAX - 1) {
+    val.type = DB_TYPE_NULL;
+    val.is_null = true;
+    return val;
+  }
+
+  /* For oversized fields, show placeholder text instead of loading data */
+  if (lengths[col] > MAX_FIELD_SIZE) {
+    char placeholder[64];
+    snprintf(placeholder, sizeof(placeholder), "[DATA: %lu bytes]",
+             (unsigned long)lengths[col]);
+    val.text.data = str_dup(placeholder);
+    if (val.text.data) {
+      val.type = DB_TYPE_TEXT;
+      val.text.len = strlen(val.text.data);
+    } else {
+      val.type = DB_TYPE_NULL;
+      val.is_null = true;
+    }
+    return val;
+  }
+
   val.is_null = false;
   DbValueType type = mysql_type_to_db_type(field->type);
 
   switch (type) {
-  case DB_TYPE_INT:
-    val.type = DB_TYPE_INT;
-    val.int_val = strtoll(row[col], NULL, 10);
+  case DB_TYPE_INT: {
+    char *endptr;
+    errno = 0;
+    long long parsed = strtoll(row[col], &endptr, 10);
+    if (errno == 0 && endptr != row[col] && *endptr == '\0') {
+      val.type = DB_TYPE_INT;
+      val.int_val = parsed;
+    } else {
+      /* Conversion failed - store as text instead */
+      val.text.data = malloc((size_t)lengths[col] + 1);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = (size_t)lengths[col];
+        memcpy(val.text.data, row[col], (size_t)lengths[col]);
+        val.text.data[(size_t)lengths[col]] = '\0';
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    }
     break;
+  }
 
-  case DB_TYPE_FLOAT:
-    val.type = DB_TYPE_FLOAT;
-    val.float_val = strtod(row[col], NULL);
+  case DB_TYPE_FLOAT: {
+    char *endptr;
+    errno = 0;
+    double parsed = strtod(row[col], &endptr);
+    if (errno == 0 && endptr != row[col] && *endptr == '\0') {
+      val.type = DB_TYPE_FLOAT;
+      val.float_val = parsed;
+    } else {
+      /* Conversion failed - store as text instead */
+      val.text.data = malloc((size_t)lengths[col] + 1);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = (size_t)lengths[col];
+        memcpy(val.text.data, row[col], (size_t)lengths[col]);
+        val.text.data[(size_t)lengths[col]] = '\0';
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    }
     break;
+  }
 
   case DB_TYPE_BLOB:
     val.blob.data = malloc((size_t)lengths[col]);
@@ -225,14 +289,32 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
 
   /* Set connection timeout */
   unsigned int timeout = 10;
-  mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+  if (mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &timeout) != 0) {
+    mysql_close(mysql);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Failed to set connection timeout");
+    return NULL;
+  }
 
   /* Enable automatic reconnection */
   bool reconnect = true;
-  mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect);
+  if (mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect) != 0) {
+    mysql_close(mysql);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Failed to set reconnect option");
+    return NULL;
+  }
 
   /* Set character set */
-  mysql_options(mysql, MYSQL_SET_CHARSET_NAME, "utf8mb4");
+  if (mysql_options(mysql, MYSQL_SET_CHARSET_NAME, "utf8mb4") != 0) {
+    mysql_close(mysql);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Failed to set character set");
+    return NULL;
+  }
 
   const char *host = cs->host ? cs->host : "localhost";
   int port = cs->port > 0 ? cs->port : 3306;
@@ -567,10 +649,15 @@ static bool mysql_driver_update_cell(DbConnection *conn, const char *table,
     success = false;
   }
 
+  /* Consume any results from the statement before closing */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_stmt_next_result(stmt) == 0; loop_guard++) {
+    /* Just consume, no results expected from UPDATE */
+  }
+
   mysql_stmt_close(stmt);
 
-  /* Clear any pending results on the connection */
-  while (mysql_next_result(data->mysql) == 0) {
+  /* Clear any pending results on the connection (for multi-statement safety) */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_next_result(data->mysql) == 0; loop_guard++) {
     MYSQL_RES *res = mysql_store_result(data->mysql);
     if (res)
       mysql_free_result(res);
@@ -729,10 +816,15 @@ static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
     success = false;
   }
 
+  /* Consume any results from the statement before closing */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_stmt_next_result(stmt) == 0; loop_guard++) {
+    /* Just consume, no results expected from DELETE */
+  }
+
   mysql_stmt_close(stmt);
 
-  /* Clear any pending results on the connection */
-  while (mysql_next_result(data->mysql) == 0) {
+  /* Clear any pending results on the connection (for multi-statement safety) */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_next_result(data->mysql) == 0; loop_guard++) {
     MYSQL_RES *res = mysql_store_result(data->mysql);
     if (res)
       mysql_free_result(res);
@@ -900,7 +992,7 @@ static TableSchema *mysql_driver_get_table_schema(DbConnection *conn,
 
   /* DESCRIBE returns: Field, Type, Null, Key, Default, Extra */
   MYSQL_ROW row;
-  while ((row = mysql_fetch_row(result))) {
+  while ((row = mysql_fetch_row(result)) && schema->num_columns < num_rows) {
     ColumnDef *col = &schema->columns[schema->num_columns];
     memset(col, 0, sizeof(ColumnDef));
 
@@ -989,6 +1081,13 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   /* Get column info */
   unsigned int num_fields = mysql_num_fields(result);
   MYSQL_FIELD *fields = mysql_fetch_fields(result);
+  if (!fields && num_fields > 0) {
+    mysql_free_result(result);
+    free(rs);
+    if (err)
+      *err = str_dup("Failed to get field metadata");
+    return NULL;
+  }
 
   rs->num_columns = num_fields;
   rs->columns = calloc(num_fields, sizeof(ColumnDef));
@@ -1025,7 +1124,20 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   while ((row = mysql_fetch_row(result))) {
     /* Check if we need to expand the rows array */
     if (rs->num_rows >= allocated_rows) {
-      size_t new_size = allocated_rows == 0 ? 16 : allocated_rows * 2;
+      size_t new_size;
+      if (allocated_rows == 0) {
+        new_size = 16;
+      } else {
+        /* Check for overflow before doubling */
+        new_size = allocated_rows * 2;
+        if (new_size < allocated_rows || new_size > SIZE_MAX / sizeof(Row)) {
+          mysql_free_result(result);
+          db_result_free(rs);
+          if (err)
+            *err = str_dup("Row count overflow");
+          return NULL;
+        }
+      }
       Row *new_rows = realloc(rs->rows, new_size * sizeof(Row));
       if (!new_rows) {
         mysql_free_result(result);

@@ -81,8 +81,17 @@ release: clean all
 format:
 	find src -name "*.c" -o -name "*.h" | xargs clang-format -i
 
+# Static analysis with clang analyzer
+analyze:
+	@mkdir -p $(BUILD_DIR)/analyze
+	@for src in $(SRCS); do \
+		echo "Analyzing $$src..."; \
+		$(CC) --analyze $(CFLAGS) -o $(BUILD_DIR)/analyze/$$(basename $$src .c).plist $$src 2>&1; \
+	done
+	@echo "Analysis complete. Results in $(BUILD_DIR)/analyze/"
+
 # Print variables for debugging
 print-%:
 	@echo $* = $($*)
 
-.PHONY: all clean run debug release format
+.PHONY: all clean run debug release format analyze

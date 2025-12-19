@@ -226,8 +226,16 @@ ConnString *connstr_parse(const char *str, char **err) {
         cs->option_keys[i] = decode_component(p, end - p);
         cs->option_values[i] = str_dup("");
       }
-      i++;
 
+      /* Check for allocation failure */
+      if (!cs->option_keys[i] || !cs->option_values[i]) {
+        cs->num_options = i + 1; /* Include partial for cleanup */
+        set_error(err, "Out of memory");
+        connstr_free(cs);
+        return NULL;
+      }
+
+      i++;
       p = amp ? (amp + 1) : end;
     }
     cs->num_options = i;

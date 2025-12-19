@@ -98,7 +98,22 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
   case SQLITE_TEXT: {
     const char *text = (const char *)sqlite3_column_text(stmt, col);
     int len = sqlite3_column_bytes(stmt, col);
-    if (text && len >= 0) {
+    if (!text || len < 0) {
+      val.type = DB_TYPE_NULL;
+      val.is_null = true;
+    } else if ((size_t)len > MAX_FIELD_SIZE) {
+      /* Oversized field - show placeholder */
+      char placeholder[64];
+      snprintf(placeholder, sizeof(placeholder), "[TEXT: %d bytes]", len);
+      val.text.data = str_dup(placeholder);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = strlen(val.text.data);
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    } else {
       val.text.data = malloc(len + 1);
       if (val.text.data) {
         memcpy(val.text.data, text, len);
@@ -106,13 +121,9 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
         val.text.len = len;
         val.type = DB_TYPE_TEXT;
       } else {
-        /* Malloc failed - mark as null */
         val.type = DB_TYPE_NULL;
         val.is_null = true;
       }
-    } else {
-      val.type = DB_TYPE_NULL;
-      val.is_null = true;
     }
     break;
   }
@@ -120,20 +131,31 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
   case SQLITE_BLOB: {
     const void *blob = sqlite3_column_blob(stmt, col);
     int len = sqlite3_column_bytes(stmt, col);
-    if (blob && len > 0) {
+    if (!blob || len <= 0) {
+      val.type = DB_TYPE_NULL;
+      val.is_null = true;
+    } else if ((size_t)len > MAX_FIELD_SIZE) {
+      /* Oversized field - show placeholder */
+      char placeholder[64];
+      snprintf(placeholder, sizeof(placeholder), "[BLOB: %d bytes]", len);
+      val.text.data = str_dup(placeholder);
+      if (val.text.data) {
+        val.type = DB_TYPE_TEXT;
+        val.text.len = strlen(val.text.data);
+      } else {
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
+    } else {
       val.blob.data = malloc(len);
       if (val.blob.data) {
         memcpy(val.blob.data, blob, len);
         val.blob.len = len;
         val.type = DB_TYPE_BLOB;
       } else {
-        /* Malloc failed - mark as null */
         val.type = DB_TYPE_NULL;
         val.is_null = true;
       }
-    } else {
-      val.type = DB_TYPE_NULL;
-      val.is_null = true;
     }
     break;
   }
@@ -664,19 +686,19 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
   bool oom = false;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     if (rs->num_rows >= row_cap) {
-      /* Check for overflow before doubling: ensure row_cap * 2 * sizeof(Row)
-       * won't overflow */
-      if (row_cap > SIZE_MAX / (2 * sizeof(Row))) {
+      /* Check for overflow before doubling */
+      size_t new_cap = row_cap * 2;
+      if (new_cap < row_cap || new_cap > SIZE_MAX / sizeof(Row)) {
         oom = true;
         break;
       }
-      row_cap *= 2;
-      Row *new_rows = realloc(rs->rows, row_cap * sizeof(Row));
+      Row *new_rows = realloc(rs->rows, new_cap * sizeof(Row));
       if (!new_rows) {
         oom = true;
         break;
       }
       rs->rows = new_rows;
+      row_cap = new_cap;
     }
 
     Row *row = &rs->rows[rs->num_rows];

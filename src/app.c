@@ -128,12 +128,15 @@ static int run_query_mode(AppConfig *config) {
 
   /* Print rows */
   for (size_t row = 0; row < rs->num_rows; row++) {
+    Row *r = &rs->rows[row];
     for (size_t col = 0; col < rs->num_columns; col++) {
       if (col > 0)
         printf("\t");
-      char *str = db_value_to_string(&rs->rows[row].cells[col]);
-      printf("%s", str ? str : "");
-      free(str);
+      if (r->cells && col < r->num_cells) {
+        char *str = db_value_to_string(&r->cells[col]);
+        printf("%s", str ? str : "");
+        free(str);
+      }
     }
     printf("\n");
   }

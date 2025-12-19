@@ -10,6 +10,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Maximum size for a single field value (1MB) to prevent DoS/OOM.
+ * Fields exceeding this are displayed as placeholder text. */
+#define MAX_FIELD_SIZE (1024 * 1024)
+
 /* Database value types */
 typedef enum {
   DB_TYPE_NULL,

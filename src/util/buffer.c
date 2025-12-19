@@ -10,6 +10,7 @@
 
 #define INITIAL_CAP 256
 #define GROWTH_FACTOR 2
+#define MAX_BUFFER_CAP (256 * 1024 * 1024) /* 256 MB limit to prevent OOM */
 
 Buffer *buf_new(size_t initial_cap) {
   Buffer *buf = malloc(sizeof(Buffer));
@@ -70,15 +71,27 @@ bool buf_reserve(Buffer *buf, size_t additional) {
 }
 
 bool buf_grow(Buffer *buf, size_t min_cap) {
-  size_t new_cap = buf->cap;
+  /* Enforce maximum capacity to prevent OOM */
+  if (min_cap > MAX_BUFFER_CAP)
+    return false;
+
+  /* Handle edge case where cap is 0 */
+  size_t new_cap = buf->cap > 0 ? buf->cap : INITIAL_CAP;
+
   while (new_cap < min_cap) {
     /* Check for overflow before multiplying */
     if (new_cap > SIZE_MAX / GROWTH_FACTOR) {
-      /* Would overflow, try exact allocation */
+      /* Would overflow, try exact allocation if min_cap is valid */
+      if (min_cap == 0) {
+        return false; /* Invalid request */
+      }
       new_cap = min_cap;
       break;
     }
     new_cap *= GROWTH_FACTOR;
+    /* Enforce maximum capacity */
+    if (new_cap > MAX_BUFFER_CAP)
+      new_cap = MAX_BUFFER_CAP;
   }
 
   uint8_t *new_data = realloc(buf->data, new_cap);

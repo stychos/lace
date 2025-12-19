@@ -359,9 +359,15 @@ char *db_value_to_string(const DbValue *val) {
     }
 
     /* Convert to hex for binary data (show max 32 bytes) */
+    /* Handle empty or null blob data */
+    if (!val->blob.data || val->blob.len == 0) {
+      return str_dup("x''");
+    }
     size_t display_len = val->blob.len > 32 ? 32 : val->blob.len;
-    /* Format: x'HEXHEX...' + optional "..." = 2 + display_len*2 + 1 + 3 + 1 */
-    size_t hex_len = 2 + display_len * 2 + 1 + (val->blob.len > 32 ? 3 : 0) + 1;
+    /* Format: x'HEXHEX...' + optional "..." = 2 + display_len*2 + 1 + 3 + 1
+     * With display_len <= 32, hex_len is at most 2 + 64 + 1 + 3 + 1 = 71 bytes */
+    size_t hex_len =
+        2 + (display_len * 2) + 1 + (val->blob.len > 32 ? 3 : 0) + 1;
     char *hex = malloc(hex_len);
     if (!hex)
       return NULL;

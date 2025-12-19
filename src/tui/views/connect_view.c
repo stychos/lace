@@ -24,7 +24,7 @@ typedef struct {
 
 static void input_init(InputField *input, int width) {
   memset(input, 0, sizeof(InputField));
-  input->width = width;
+  input->width = width < 3 ? 3 : width; /* Minimum 3 for borders + 1 char */
 }
 
 static void input_draw(InputField *input, WINDOW *win, int y, int x) {
@@ -65,7 +65,11 @@ static void input_handle_key(InputField *input, int ch) {
     if (input->cursor < input->len) {
       input->cursor++;
       if (input->cursor >= input->scroll + input->width - 2) {
-        input->scroll = input->cursor - input->width + 3;
+        if (input->cursor > (size_t)(input->width - 3)) {
+          input->scroll = input->cursor - input->width + 3;
+        } else {
+          input->scroll = 0;
+        }
       }
     }
     break;
@@ -80,14 +84,18 @@ static void input_handle_key(InputField *input, int ch) {
   case 5: /* Ctrl+E */
     input->cursor = input->len;
     if (input->cursor >= input->scroll + input->width - 2) {
-      input->scroll = input->cursor - input->width + 3;
+      if (input->cursor > (size_t)(input->width - 3)) {
+        input->scroll = input->cursor - input->width + 3;
+      } else {
+        input->scroll = 0;
+      }
     }
     break;
 
   case KEY_BACKSPACE:
   case 127:
   case 8:
-    if (input->cursor > 0) {
+    if (input->cursor > 0 && input->cursor <= input->len) {
       memmove(input->buffer + input->cursor - 1, input->buffer + input->cursor,
               input->len - input->cursor + 1);
       input->cursor--;
@@ -120,7 +128,8 @@ static void input_handle_key(InputField *input, int ch) {
     break;
 
   default:
-    if (ch >= 32 && ch < 127 && input->len < MAX_CONNSTR_LEN - 1) {
+    if (ch >= 32 && ch < 127 && input->len < MAX_CONNSTR_LEN - 1 &&
+        input->cursor <= input->len) {
       /* Insert character */
       memmove(input->buffer + input->cursor + 1, input->buffer + input->cursor,
               input->len - input->cursor + 1);
@@ -128,7 +137,12 @@ static void input_handle_key(InputField *input, int ch) {
       input->cursor++;
       input->len++;
       if (input->cursor >= input->scroll + input->width - 2) {
-        input->scroll = input->cursor - input->width + 3;
+        /* Guard against underflow: ensure cursor > width - 3 before subtraction */
+        if (input->cursor > (size_t)(input->width - 3)) {
+          input->scroll = input->cursor - input->width + 3;
+        } else {
+          input->scroll = 0;
+        }
       }
     }
     break;

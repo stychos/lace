@@ -6,6 +6,7 @@
 #include "../util/str.h"
 #include "connstr.h"
 #include "db.h"
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,13 +303,19 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   }
 
   int64_t count = -1;
-  if (rs->num_rows > 0 && rs->num_columns > 0 && rs->rows[0].cells &&
-      rs->rows[0].num_cells > 0) {
+  if (rs->num_rows > 0 && rs->num_columns > 0 && rs->rows &&
+      rs->rows[0].cells && rs->rows[0].num_cells > 0) {
     DbValue *val = &rs->rows[0].cells[0];
     if (val->type == DB_TYPE_INT) {
       count = val->int_val;
     } else if (val->type == DB_TYPE_TEXT && val->text.data) {
-      count = strtoll(val->text.data, NULL, 10);
+      char *endptr;
+      errno = 0;
+      long long parsed = strtoll(val->text.data, &endptr, 10);
+      if (errno == 0 && endptr != val->text.data && *endptr == '\0') {
+        count = parsed;
+      }
+      /* On parse error, count remains -1 */
     }
   }
 
