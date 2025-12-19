@@ -220,41 +220,59 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
       if (state->num_workspaces == 0) {
         /* No tabs yet - create first one */
         workspace_create(state, actual_idx);
-      } else if (actual_idx != state->current_table) {
-        /* Replace current tab's table */
+      } else {
         Workspace *ws = &state->workspaces[state->current_workspace];
+        if (ws->type == WORKSPACE_TYPE_QUERY) {
+          /* Query tab active - check if table tab already exists */
+          bool found = false;
+          for (size_t i = 0; i < state->num_workspaces; i++) {
+            Workspace *w = &state->workspaces[i];
+            if (w->type == WORKSPACE_TYPE_TABLE &&
+                w->table_index == actual_idx) {
+              /* Found existing tab - switch to it */
+              workspace_switch(state, i);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            /* No existing tab - create new one */
+            workspace_create(state, actual_idx);
+          }
+        } else if (actual_idx != state->current_table) {
+          /* Replace current tab's table */
+          /* Free old data */
+          db_result_free(ws->data);
+          db_schema_free(ws->schema);
+          free(ws->col_widths);
+          free(ws->table_name);
 
-        /* Free old data */
-        db_result_free(ws->data);
-        db_schema_free(ws->schema);
-        free(ws->col_widths);
-        free(ws->table_name);
+          /* Update workspace */
+          ws->table_index = actual_idx;
+          ws->table_name = str_dup(state->tables[actual_idx]);
 
-        /* Update workspace */
-        ws->table_index = actual_idx;
-        ws->table_name = str_dup(state->tables[actual_idx]);
+          /* Clear state and load new table */
+          state->data = NULL;
+          state->schema = NULL;
+          state->col_widths = NULL;
+          state->num_col_widths = 0;
+          state->current_table = actual_idx;
 
-        /* Clear state and load new table */
-        state->data = NULL;
-        state->schema = NULL;
-        state->col_widths = NULL;
-        state->num_col_widths = 0;
-        state->current_table = actual_idx;
+          tui_load_table_data(state, state->tables[actual_idx]);
 
-        tui_load_table_data(state, state->tables[actual_idx]);
-
-        /* Save to workspace */
-        ws->data = state->data;
-        ws->schema = state->schema;
-        ws->col_widths = state->col_widths;
-        ws->num_col_widths = state->num_col_widths;
-        ws->total_rows = state->total_rows;
-        ws->loaded_offset = state->loaded_offset;
-        ws->loaded_count = state->loaded_count;
-        ws->cursor_row = state->cursor_row;
-        ws->cursor_col = state->cursor_col;
-        ws->scroll_row = state->scroll_row;
-        ws->scroll_col = state->scroll_col;
+          /* Save to workspace */
+          ws->data = state->data;
+          ws->schema = state->schema;
+          ws->col_widths = state->col_widths;
+          ws->num_col_widths = state->num_col_widths;
+          ws->total_rows = state->total_rows;
+          ws->loaded_offset = state->loaded_offset;
+          ws->loaded_count = state->loaded_count;
+          ws->cursor_row = state->cursor_row;
+          ws->cursor_col = state->cursor_col;
+          ws->scroll_row = state->scroll_row;
+          ws->scroll_col = state->scroll_col;
+        }
       }
       state->sidebar_focused = false;
     }
@@ -309,16 +327,25 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
 
   case 'q':
   case 'Q':
-    state->running = false;
-    break;
-
+  case 'p':
+  case 'P':
   case '[':
   case ']':
   case '-':
   case '_':
-  case KEY_F(6):
-  case KEY_F(7):
-    /* Pass through to main handler for tab switching */
+  case 's':
+  case 'S':
+  case 'c':
+  case 'C':
+  case 7:         /* Ctrl+G - Go to row */
+  case KEY_F(2):  /* Connect */
+  case KEY_F(3):  /* Schema */
+  case KEY_F(5):  /* Go to row */
+  case KEY_F(6):  /* Next tab */
+  case KEY_F(7):  /* Previous tab */
+  case KEY_F(10): /* Quit */
+  case 24:        /* Ctrl+X - Quit */
+    /* Pass through to main handler for global hotkeys */
     return false;
 
   default:

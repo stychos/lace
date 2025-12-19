@@ -984,7 +984,8 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
       *err = str_dup("Invalid row count from database");
     return NULL;
   }
-  schema->columns = calloc(num_rows > 0 ? (size_t)num_rows : 1, sizeof(ColumnDef));
+  schema->columns =
+      calloc(num_rows > 0 ? (size_t)num_rows : 1, sizeof(ColumnDef));
   if (!schema->columns) {
     PQclear(res);
     db_schema_free(schema);
@@ -1114,7 +1115,8 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
     return NULL;
   }
   rs->num_columns = (size_t)num_fields;
-  rs->columns = calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(ColumnDef));
+  rs->columns =
+      calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(ColumnDef));
   if (!rs->columns) {
     PQclear(res);
     free(rs);
@@ -1158,7 +1160,8 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
 
   for (int r = 0; r < num_rows; r++) {
     Row *row = &rs->rows[rs->num_rows];
-    row->cells = calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(DbValue));
+    row->cells =
+        calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(DbValue));
     row->num_cells = (size_t)num_fields;
 
     if (!row->cells) {

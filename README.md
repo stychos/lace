@@ -6,11 +6,13 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 
 ## Features
 
-- Memory efficient, browse millions of rows
-- Classic & vim-like navigation
+- Memory efficient, browse millions of rows with lazy loading
+- Classic & vim-like spatial navigation
+- Full mouse support (click, double-click, scroll wheel)
+- Multi-tab workspaces
+- SQL query editor
+- Inline data editing with live updates
 - Linux & macOS compatible
-- Inline editing with live updates
-- Multi-tabs
 - Works over SSH
 
 ## Installation
@@ -47,13 +49,68 @@ Binary will be at `build/lace`.
 
 ## Keyboard Shortcuts
 
+### Navigation
+
 | Key | Action |
 |-----|--------|
-| `h/j/k/l` or arrows | Navigate |
+| `h/j/k/l` or arrows | Navigate cells |
+| `PgUp` / `PgDn` | Page up/down |
+| `Home` / `End` | First/last column |
+| `g` or `a` | Go to first row |
+| `G` or `z` | Go to last row |
+| `/` or `Ctrl+G` or `F5` | Go to specific row |
+
+### Editing
+
+| Key | Action |
+|-----|--------|
 | `Enter` | Edit cell inline |
-| `e` | Open modal editor |
-| `t` | Toggle tables list |
-| `q` | Quit |
+| `e` or `F4` | Open modal editor |
+| `n` or `Ctrl+N` | Set cell to NULL |
+| `d` or `Ctrl+D` | Set cell to empty |
+| `x` or `Delete` | Delete row |
+
+### Tabs & Sidebar
+
+| Key | Action |
+|-----|--------|
+| `t` or `F9` | Toggle sidebar |
+| `[` or `F7` | Previous tab |
+| `]` or `F6` | Next tab |
+| `-` | Close current tab |
+| `+` | Open table in new tab (in sidebar) |
+| `f` or `/` | Filter tables (in sidebar) |
+
+### Query Tab
+
+| Key | Action |
+|-----|--------|
+| `p` | Open query tab |
+| `Ctrl+R` | Execute query under cursor |
+| `Ctrl+A` | Execute all queries |
+| `Ctrl+M` | Execute all in transaction |
+| `Tab` / `Esc` | Switch focus (editor/results) |
+| Arrows / `PgUp` / `PgDn` | Navigate editor or results |
+
+### Other
+
+| Key | Action |
+|-----|--------|
+| `s` or `F3` | Show table schema |
+| `c` or `F2` | Connection dialog |
+| `?` or `F1` | Help |
+| `q` or `Ctrl+X` or `F10` | Quit |
+
+## Mouse
+
+| Action | Effect |
+|--------|--------|
+| Click on tab | Switch to tab |
+| Click on table | Load in current tab |
+| Double-click on table | Open in new tab |
+| Click on cell | Select cell |
+| Double-click on cell | Edit cell |
+| Scroll wheel | Scroll rows |
 
 ## License
 

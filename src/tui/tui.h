@@ -30,12 +30,20 @@
 /* Tab bar height */
 #define TAB_BAR_HEIGHT 1
 
+/* Workspace type */
+typedef enum {
+  WORKSPACE_TYPE_TABLE, /* Table data view */
+  WORKSPACE_TYPE_QUERY  /* SQL query editor */
+} WorkspaceType;
+
 /* Workspace - holds per-tab state */
 typedef struct {
+  WorkspaceType type; /* Type of workspace content */
+
   size_t table_index; /* Index into tables array */
   char *table_name;   /* Table name (for display) */
 
-  /* View data */
+  /* View data (table mode) */
   ResultSet *data;
   TableSchema *schema;
 
@@ -53,6 +61,38 @@ typedef struct {
   /* Column widths */
   int *col_widths;
   size_t num_col_widths;
+
+  /* Query mode fields */
+  char *query_text;         /* SQL text in editor */
+  size_t query_len;         /* Length of query_text */
+  size_t query_capacity;    /* Allocated size of query_text */
+  size_t query_cursor;      /* Cursor byte offset */
+  size_t query_scroll_line; /* First visible line */
+  size_t query_scroll_col;  /* Horizontal scroll */
+  ResultSet *query_results; /* Query execution results */
+  int64_t query_affected;   /* Rows affected (non-SELECT) */
+  char *query_error;        /* Last error message */
+  bool query_focus_results; /* Focus on results pane */
+  size_t query_result_row;  /* Cursor row in results */
+  size_t query_result_col;  /* Cursor col in results */
+  size_t query_result_scroll_row;
+  size_t query_result_scroll_col;
+  int *query_result_col_widths; /* Column widths for results */
+  size_t query_result_num_cols;
+
+  /* Query results editing */
+  bool query_result_editing;        /* Whether editing in results */
+  char *query_result_edit_buf;      /* Edit buffer for results */
+  size_t query_result_edit_pos;     /* Cursor pos in edit buffer */
+  char *query_source_table;         /* Source table for simple SELECT queries */
+  TableSchema *query_source_schema; /* Schema of source table for PK lookup */
+
+  /* Query results pagination */
+  char *query_base_sql; /* Base query without LIMIT/OFFSET (for pagination) */
+  size_t query_total_rows;    /* Estimated/known total rows */
+  size_t query_loaded_offset; /* Offset of currently loaded data */
+  size_t query_loaded_count;  /* Number of rows currently loaded */
+  bool query_paginated;       /* Whether query uses pagination */
 
   /* Is this workspace active/used */
   bool active;
@@ -181,5 +221,14 @@ void tui_set_error(TuiState *state, const char *fmt, ...);
 /* Utility */
 int tui_get_column_width(TuiState *state, size_t col);
 void tui_calculate_column_widths(TuiState *state);
+
+/* Query tab */
+bool workspace_create_query(TuiState *state);
+void tui_draw_query(TuiState *state);
+bool tui_handle_query_input(TuiState *state, int ch);
+void tui_query_start_result_edit(TuiState *state);
+void tui_query_confirm_result_edit(TuiState *state);
+void tui_query_scroll_results(TuiState *state, int delta);
+bool query_load_rows_at(TuiState *state, Workspace *ws, size_t offset);
 
 #endif /* LACE_TUI_H */

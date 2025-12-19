@@ -219,6 +219,17 @@ void workspace_close(TuiState *state) {
   db_result_free(ws->data);
   db_schema_free(ws->schema);
   free(ws->col_widths);
+
+  /* Free query-specific data */
+  free(ws->query_text);
+  db_result_free(ws->query_results);
+  free(ws->query_error);
+  free(ws->query_result_col_widths);
+  free(ws->query_result_edit_buf);
+  free(ws->query_source_table);
+  db_schema_free(ws->query_source_schema);
+  free(ws->query_base_sql);
+
   memset(ws, 0, sizeof(Workspace));
 
   /* Shift remaining workspaces down */

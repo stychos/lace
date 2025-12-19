@@ -650,14 +650,18 @@ static bool mysql_driver_update_cell(DbConnection *conn, const char *table,
   }
 
   /* Consume any results from the statement before closing */
-  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_stmt_next_result(stmt) == 0; loop_guard++) {
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_stmt_next_result(stmt) == 0;
+       loop_guard++) {
     /* Just consume, no results expected from UPDATE */
   }
 
   mysql_stmt_close(stmt);
 
   /* Clear any pending results on the connection (for multi-statement safety) */
-  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_next_result(data->mysql) == 0; loop_guard++) {
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_next_result(data->mysql) == 0;
+       loop_guard++) {
     MYSQL_RES *res = mysql_store_result(data->mysql);
     if (res)
       mysql_free_result(res);
@@ -817,14 +821,18 @@ static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
   }
 
   /* Consume any results from the statement before closing */
-  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_stmt_next_result(stmt) == 0; loop_guard++) {
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_stmt_next_result(stmt) == 0;
+       loop_guard++) {
     /* Just consume, no results expected from DELETE */
   }
 
   mysql_stmt_close(stmt);
 
   /* Clear any pending results on the connection (for multi-statement safety) */
-  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS && mysql_next_result(data->mysql) == 0; loop_guard++) {
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_next_result(data->mysql) == 0;
+       loop_guard++) {
     MYSQL_RES *res = mysql_store_result(data->mysql);
     if (res)
       mysql_free_result(res);

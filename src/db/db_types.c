@@ -365,7 +365,8 @@ char *db_value_to_string(const DbValue *val) {
     }
     size_t display_len = val->blob.len > 32 ? 32 : val->blob.len;
     /* Format: x'HEXHEX...' + optional "..." = 2 + display_len*2 + 1 + 3 + 1
-     * With display_len <= 32, hex_len is at most 2 + 64 + 1 + 3 + 1 = 71 bytes */
+     * With display_len <= 32, hex_len is at most 2 + 64 + 1 + 3 + 1 = 71 bytes
+     */
     size_t hex_len =
         2 + (display_len * 2) + 1 + (val->blob.len > 32 ? 3 : 0) + 1;
     char *hex = malloc(hex_len);

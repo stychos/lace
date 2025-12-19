@@ -8,9 +8,150 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Show confirmation dialog - returns true if user confirms */
+bool tui_show_confirm_dialog(TuiState *state, const char *message) {
+  if (!state)
+    return false;
+
+  int term_rows, term_cols;
+  getmaxyx(stdscr, term_rows, term_cols);
+
+  int msg_len = (int)strlen(message);
+  int width = msg_len + 6;
+  if (width < 30)
+    width = 30;
+  if (width > term_cols - 4)
+    width = term_cols - 4;
+
+  int height = 7;
+  int start_y = (term_rows - height) / 2;
+  int start_x = (term_cols - width) / 2;
+
+  WINDOW *dialog = newwin(height, width, start_y, start_x);
+  if (!dialog)
+    return false;
+
+  keypad(dialog, TRUE);
+  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+  box(dialog, 0, 0);
+
+  /* Title */
+  wattron(dialog, A_BOLD);
+  mvwprintw(dialog, 0, (width - 9) / 2, " Confirm ");
+  wattroff(dialog, A_BOLD);
+
+  /* Message */
+  mvwprintw(dialog, 2, (width - msg_len) / 2, "%s", message);
+
+  /* Buttons */
+  int btn_y = 4;
+  int yes_x = width / 2 - 10;
+  int no_x = width / 2 + 3;
+
+  bool selected = false; /* false = No (default), true = Yes */
+
+  while (1) {
+    /* Draw buttons */
+    if (selected) {
+      wattron(dialog, A_REVERSE);
+      mvwprintw(dialog, btn_y, yes_x, " Yes ");
+      wattroff(dialog, A_REVERSE);
+      mvwprintw(dialog, btn_y, no_x, " No ");
+    } else {
+      mvwprintw(dialog, btn_y, yes_x, " Yes ");
+      wattron(dialog, A_REVERSE);
+      mvwprintw(dialog, btn_y, no_x, " No ");
+      wattroff(dialog, A_REVERSE);
+    }
+
+    wrefresh(dialog);
+
+    int ch = wgetch(dialog);
+    switch (ch) {
+    case 'y':
+    case 'Y':
+      delwin(dialog);
+      touchwin(stdscr);
+      return true;
+
+    case 'n':
+    case 'N':
+    case 27: /* Escape */
+      delwin(dialog);
+      touchwin(stdscr);
+      return false;
+
+    case '\n':
+    case KEY_ENTER:
+      delwin(dialog);
+      touchwin(stdscr);
+      return selected;
+
+    case KEY_LEFT:
+    case KEY_RIGHT:
+    case '\t':
+    case 'h':
+    case 'l':
+      selected = !selected;
+      break;
+
+    case KEY_MOUSE: {
+      MEVENT event;
+      if (getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED)) {
+        /* Convert to window-relative coordinates */
+        int mouse_y = event.y - start_y;
+        int mouse_x = event.x - start_x;
+
+        /* Check if click is on button row */
+        if (mouse_y == btn_y) {
+          /* Yes button: position yes_x, width 5 (" Yes ") */
+          if (mouse_x >= yes_x && mouse_x < yes_x + 5) {
+            delwin(dialog);
+            touchwin(stdscr);
+            return true;
+          }
+          /* No button: position no_x, width 4 (" No ") */
+          if (mouse_x >= no_x && mouse_x < no_x + 4) {
+            delwin(dialog);
+            touchwin(stdscr);
+            return false;
+          }
+        }
+      }
+      break;
+    }
+    }
+  }
+}
+
 /* Show go-to row dialog */
 void tui_show_goto_dialog(TuiState *state) {
-  if (!state || !state->data)
+  if (!state)
+    return;
+
+  /* Determine if we're in a query tab with results */
+  Workspace *ws = NULL;
+  bool is_query = false;
+  size_t total_rows = 0;
+
+  if (state->num_workspaces > 0) {
+    ws = &state->workspaces[state->current_workspace];
+    if (ws->type == WORKSPACE_TYPE_QUERY && ws->query_results &&
+        ws->query_results->num_rows > 0) {
+      is_query = true;
+      total_rows = ws->query_paginated ? ws->query_total_rows
+                                       : ws->query_results->num_rows;
+    }
+  }
+
+  /* Fall back to regular table data if not in query tab */
+  if (!is_query) {
+    if (!state->data)
+      return;
+    total_rows = state->total_rows;
+  }
+
+  if (total_rows == 0)
     return;
 
   int term_rows, term_cols;
@@ -40,7 +181,7 @@ void tui_show_goto_dialog(TuiState *state) {
     mvwprintw(win, 0, (width - 14) / 2, " Go to Row ");
     wattroff(win, A_BOLD);
 
-    mvwprintw(win, 2, 2, "Enter row number (1-%zu):", state->total_rows);
+    mvwprintw(win, 2, 2, "Enter row number (1-%zu):", total_rows);
 
     /* Draw input field */
     wattron(win, A_REVERSE);
@@ -64,29 +205,71 @@ void tui_show_goto_dialog(TuiState *state) {
     case KEY_ENTER:
       if (input_len > 0) {
         size_t row_num = (size_t)strtoll(input, NULL, 10);
-        if (row_num > 0 && row_num <= state->total_rows) {
-          /* Load data at that offset and position cursor */
+        if (row_num > 0 && row_num <= total_rows) {
           size_t target_row = row_num - 1; /* 0-indexed */
 
-          /* Check if target is in currently loaded range */
-          if (target_row >= state->loaded_offset &&
-              target_row < state->loaded_offset + state->loaded_count) {
-            /* Already loaded, just move cursor */
-            state->cursor_row = target_row - state->loaded_offset;
-          } else {
-            /* Need to load new data */
-            size_t load_offset =
-                target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
-            tui_load_rows_at(state, load_offset);
-            state->cursor_row = target_row - state->loaded_offset;
-          }
+          if (is_query) {
+            /* Handle query results navigation */
+            if (ws->query_paginated) {
+              /* Check if target is in currently loaded range */
+              if (target_row >= ws->query_loaded_offset &&
+                  target_row <
+                      ws->query_loaded_offset + ws->query_loaded_count) {
+                /* Already loaded, just move cursor */
+                ws->query_result_row = target_row - ws->query_loaded_offset;
+              } else {
+                /* Need to load new data */
+                size_t load_offset =
+                    target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
+                query_load_rows_at(state, ws, load_offset);
+                ws->query_result_row = target_row - ws->query_loaded_offset;
+              }
+            } else {
+              /* Non-paginated - just move cursor */
+              ws->query_result_row = target_row;
+            }
 
-          /* Adjust scroll */
-          if (state->cursor_row < state->scroll_row) {
-            state->scroll_row = state->cursor_row;
-          } else if (state->cursor_row >=
-                     state->scroll_row + (size_t)state->content_rows) {
-            state->scroll_row = state->cursor_row - state->content_rows + 1;
+            /* Adjust scroll */
+            int win_rows = state->term_rows - 4;
+            int editor_height = (win_rows - 1) * 3 / 10;
+            if (editor_height < 3)
+              editor_height = 3;
+            int visible = win_rows - editor_height - 4;
+            if (visible < 1)
+              visible = 1;
+
+            if (ws->query_result_row < ws->query_result_scroll_row) {
+              ws->query_result_scroll_row = ws->query_result_row;
+            } else if (ws->query_result_row >=
+                       ws->query_result_scroll_row + (size_t)visible) {
+              ws->query_result_scroll_row =
+                  ws->query_result_row - (size_t)visible + 1;
+            }
+
+            /* Ensure focus is on results */
+            ws->query_focus_results = true;
+          } else {
+            /* Handle regular table navigation */
+            /* Check if target is in currently loaded range */
+            if (target_row >= state->loaded_offset &&
+                target_row < state->loaded_offset + state->loaded_count) {
+              /* Already loaded, just move cursor */
+              state->cursor_row = target_row - state->loaded_offset;
+            } else {
+              /* Need to load new data */
+              size_t load_offset =
+                  target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
+              tui_load_rows_at(state, load_offset);
+              state->cursor_row = target_row - state->loaded_offset;
+            }
+
+            /* Adjust scroll */
+            if (state->cursor_row < state->scroll_row) {
+              state->scroll_row = state->cursor_row;
+            } else if (state->cursor_row >=
+                       state->scroll_row + (size_t)state->content_rows) {
+              state->scroll_row = state->cursor_row - state->content_rows + 1;
+            }
           }
         } else {
           /* Invalid row number - flash or beep */
@@ -173,7 +356,7 @@ void tui_show_schema(TuiState *state) {
 #define DRAW_LINE(fmt, ...)                                                    \
   do {                                                                         \
     if (line >= scroll_offset && y < height - 2) {                             \
-      mvwprintw(schema_win, y++, 2, fmt, ##__VA_ARGS__);                        \
+      mvwprintw(schema_win, y++, 2, fmt, ##__VA_ARGS__);                       \
     }                                                                          \
     line++;                                                                    \
   } while (0)
@@ -483,7 +666,7 @@ void tui_show_table_selector(TuiState *state) {
 
 /* Show help dialog */
 void tui_show_help(TuiState *state) {
-  int height = 44;
+  int height = 50;
   int width = 60;
   int starty = (state->term_rows - height) / 2;
   int startx = (state->term_cols - width) / 2;
@@ -492,6 +675,7 @@ void tui_show_help(TuiState *state) {
   if (!help_win)
     return;
 
+  keypad(help_win, TRUE);
   box(help_win, 0, 0);
   wattron(help_win, A_BOLD);
   mvwprintw(help_win, 0, (width - 8) / 2, " Help ");
@@ -507,7 +691,7 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 4, "Home / End         First/last column");
   mvwprintw(help_win, y++, 4, "g / a              Go to first row");
   mvwprintw(help_win, y++, 4, "G / z              Go to last row");
-  mvwprintw(help_win, y++, 4, "/ (or Ctrl+G)      Go to row number");
+  mvwprintw(help_win, y++, 4, "/ (or Ctrl+G, F5)  Go to row number");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
@@ -524,16 +708,26 @@ void tui_show_help(TuiState *state) {
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
   mvwprintw(help_win, y++, 2, "Tabs");
   wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "[ / ]              Previous/next tab");
+  mvwprintw(help_win, y++, 4, "[ / ] (or F7/F6)   Previous/next tab");
   mvwprintw(help_win, y++, 4, "- / _              Close current tab");
   mvwprintw(help_win, y++, 4, "+                  Open table in new tab");
+  y++;
+
+  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+  mvwprintw(help_win, y++, 2, "Query Tab");
+  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+  mvwprintw(help_win, y++, 4, "p                  Perform query");
+  mvwprintw(help_win, y++, 4, "Ctrl+R             Execute query at cursor");
+  mvwprintw(help_win, y++, 4, "Ctrl+A             Execute all queries");
+  mvwprintw(help_win, y++, 4, "Ctrl+M             Execute all in transaction");
+  mvwprintw(help_win, y++, 4, "Tab / Esc          Switch editor/results");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
   mvwprintw(help_win, y++, 2, "Sidebar");
   wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
   mvwprintw(help_win, y++, 4, "t (or F9)          Toggle sidebar");
-  mvwprintw(help_win, y++, 4, "/ (in sidebar)     Filter tables");
+  mvwprintw(help_win, y++, 4, "/ or f             Filter tables");
   mvwprintw(help_win, y++, 4, "Enter              Select table");
   mvwprintw(help_win, y++, 4, "Left/Right         Focus sidebar/table");
   y++;
@@ -544,7 +738,7 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 4, "s (or F3)          Show table schema");
   mvwprintw(help_win, y++, 4, "c (or F2)          Connect dialog");
   mvwprintw(help_win, y++, 4, "? (or F1)          This help");
-  mvwprintw(help_win, y++, 4, "q (or F10)         Quit");
+  mvwprintw(help_win, y++, 4, "q (or Ctrl+X, F10) Quit");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));

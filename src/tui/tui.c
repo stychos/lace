@@ -466,7 +466,19 @@ void tui_refresh(TuiState *state) {
   tui_draw_header(state);
   tui_draw_tabs(state);
   tui_draw_sidebar(state);
-  tui_draw_table(state);
+
+  /* Dispatch drawing based on workspace type */
+  if (state->num_workspaces > 0) {
+    Workspace *ws = &state->workspaces[state->current_workspace];
+    if (ws->type == WORKSPACE_TYPE_QUERY) {
+      tui_draw_query(state);
+    } else {
+      tui_draw_table(state);
+    }
+  } else {
+    tui_draw_table(state);
+  }
+
   tui_draw_status(state);
 
   /* Ensure cursor is only visible when filter is active */
@@ -556,6 +568,17 @@ void tui_run(TuiState *state) {
       continue;
     }
 
+    /* Handle query tab input (no key translation - user is typing SQL) */
+    if (state->num_workspaces > 0 && !state->sidebar_focused) {
+      Workspace *ws = &state->workspaces[state->current_workspace];
+      if (ws->type == WORKSPACE_TYPE_QUERY) {
+        if (tui_handle_query_input(state, ch)) {
+          tui_refresh(state);
+          continue;
+        }
+      }
+    }
+
     /* Handle sidebar filter input (no translation - user is typing filter text)
      */
     if (state->sidebar_focused && state->sidebar_filter_active) {
@@ -577,9 +600,17 @@ void tui_run(TuiState *state) {
     switch (ch) {
     case 'q':
     case 'Q':
-    case 17:        /* Ctrl+Q - universal quit */
+    case 24:        /* Ctrl+X - quit */
     case KEY_F(10): /* F10 - universal quit */
-      state->running = false;
+      if (tui_show_confirm_dialog(state, "Quit application?")) {
+        state->running = false;
+      }
+      break;
+
+    case 'p':
+    case 'P':
+      /* Open query tab */
+      workspace_create_query(state);
       break;
 
     case '\n':
@@ -701,6 +732,16 @@ void tui_run(TuiState *state) {
     case '_':
       /* Close current tab */
       if (state->num_workspaces > 0) {
+        Workspace *ws = &state->workspaces[state->current_workspace];
+        /* Check if query tab has content */
+        if (ws->type == WORKSPACE_TYPE_QUERY &&
+            ((ws->query_text && ws->query_len > 0) || ws->query_results)) {
+          /* Ask for confirmation */
+          if (!tui_show_confirm_dialog(
+                  state, "Close query tab with unsaved content?")) {
+            break; /* User cancelled */
+          }
+        }
         workspace_close(state);
       }
       break;

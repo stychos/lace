@@ -6,9 +6,9 @@
 #ifndef LACE_TUI_INTERNAL_H
 #define LACE_TUI_INTERNAL_H
 
-#include "tui.h"
 #include "../db/db.h"
 #include "../util/str.h"
+#include "tui.h"
 #include <menu.h>
 #include <ncurses.h>
 #include <stdbool.h>
@@ -25,7 +25,8 @@
 
 /* ============================================================================
  * Helper functions (tui.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Translate keyboard input from non-Latin layouts to Latin equivalents */
 int tui_translate_key(int ch);
@@ -41,7 +42,8 @@ void tui_recreate_windows(TuiState *state);
 
 /* ============================================================================
  * Workspace functions (workspace.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Save current state to workspace */
 void workspace_save(TuiState *state);
@@ -60,7 +62,8 @@ void workspace_close(TuiState *state);
 
 /* ============================================================================
  * Sidebar functions (sidebar.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Count tables matching current filter */
 size_t tui_count_filtered_tables(TuiState *state);
@@ -79,7 +82,8 @@ void tui_update_sidebar_scroll_animation(TuiState *state);
 
 /* ============================================================================
  * Pagination functions (pagination.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Load more rows at end of current data */
 bool tui_load_more_rows(TuiState *state);
@@ -98,7 +102,8 @@ void tui_check_load_more(TuiState *state);
 
 /* ============================================================================
  * Edit functions (edit.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Find primary key column indices */
 size_t tui_find_pk_columns(TuiState *state, size_t *pk_indices, size_t max_pks);
@@ -126,24 +131,54 @@ bool tui_handle_edit_input(TuiState *state, int ch);
 
 /* ============================================================================
  * Navigation functions (navigation.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Note: tui_move_cursor, tui_page_up/down, tui_home/end,
  * tui_next/prev_table are declared in tui.h as public API */
 
 /* ============================================================================
  * Draw functions (draw.c)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Note: tui_draw_header, tui_draw_table, tui_draw_status, tui_draw_sidebar
  * are declared in tui.h as public API */
+
+/* Parameters for drawing a result grid */
+typedef struct {
+  WINDOW *win;           /* Window to draw in */
+  int start_y;           /* Starting Y position in window */
+  int start_x;           /* Starting X position in window */
+  int height;            /* Available height for grid */
+  int width;             /* Available width for grid */
+  ResultSet *data;       /* Data to display */
+  int *col_widths;       /* Column widths array */
+  size_t num_col_widths; /* Number of column widths */
+  size_t cursor_row;     /* Current cursor row */
+  size_t cursor_col;     /* Current cursor column */
+  size_t scroll_row;     /* Vertical scroll offset */
+  size_t scroll_col;     /* Horizontal scroll offset */
+  bool is_focused;       /* Whether this grid has focus */
+  bool is_editing;       /* Whether editing is active */
+  char *edit_buffer;     /* Edit buffer content */
+  size_t edit_pos;       /* Cursor position in edit buffer */
+  bool show_header_line; /* Whether to draw top border line */
+} GridDrawParams;
+
+/* Draw a result set grid (used by table view and query results) */
+void tui_draw_result_grid(TuiState *state, GridDrawParams *params);
 
 /* Handle mouse events */
 bool tui_handle_mouse_event(TuiState *state);
 
 /* ============================================================================
  * Dialog functions (dialogs.c)
- * ============================================================================ */
+ * ============================================================================
+ */
+
+/* Show confirmation dialog - returns true if user confirms */
+bool tui_show_confirm_dialog(TuiState *state, const char *message);
 
 /* Show go-to row dialog */
 void tui_show_goto_dialog(TuiState *state);

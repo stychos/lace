@@ -137,7 +137,8 @@ static void input_handle_key(InputField *input, int ch) {
       input->cursor++;
       input->len++;
       if (input->cursor >= input->scroll + input->width - 2) {
-        /* Guard against underflow: ensure cursor > width - 3 before subtraction */
+        /* Guard against underflow: ensure cursor > width - 3 before subtraction
+         */
         if (input->cursor > (size_t)(input->width - 3)) {
           input->scroll = input->cursor - input->width + 3;
         } else {
