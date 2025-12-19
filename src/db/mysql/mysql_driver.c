@@ -42,6 +42,7 @@ static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
 static void mysql_driver_free_result(ResultSet *rs);
 static void mysql_driver_free_schema(TableSchema *schema);
 static void mysql_driver_free_string_list(char **list, size_t count);
+static void mysql_driver_library_cleanup(void);
 
 /* Driver definitions - both mysql and mariadb use the same implementation */
 DbDriver mysql_driver = {
@@ -67,6 +68,7 @@ DbDriver mysql_driver = {
     .free_result = mysql_driver_free_result,
     .free_schema = mysql_driver_free_schema,
     .free_string_list = mysql_driver_free_string_list,
+    .library_cleanup = mysql_driver_library_cleanup,
 };
 
 DbDriver mariadb_driver = {
@@ -92,6 +94,7 @@ DbDriver mariadb_driver = {
     .free_result = mysql_driver_free_result,
     .free_schema = mysql_driver_free_schema,
     .free_string_list = mysql_driver_free_string_list,
+    .library_cleanup = mysql_driver_library_cleanup,
 };
 
 /* Map MySQL field type to DbValueType */
@@ -808,4 +811,11 @@ static void mysql_driver_free_string_list(char **list, size_t count) {
         free(list[i]);
     }
     free(list);
+}
+
+static void mysql_driver_library_cleanup(void) {
+    static bool cleaned_up = false;
+    if (cleaned_up) return;
+    cleaned_up = true;
+    mysql_library_end();
 }

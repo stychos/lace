@@ -60,6 +60,9 @@ typedef struct DbDriver {
     void (*free_schema)(TableSchema *schema);
     void (*free_string_list)(char **list, size_t count);
 
+    /* Library cleanup (called once at program exit) */
+    void (*library_cleanup)(void);
+
 } DbDriver;
 
 /* Connection structure (base) */

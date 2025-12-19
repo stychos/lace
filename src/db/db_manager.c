@@ -37,6 +37,13 @@ void db_init(void) {
 }
 
 void db_cleanup(void) {
+    /* Call library cleanup for all drivers */
+    for (size_t i = 0; i < g_num_drivers; i++) {
+        if (g_drivers[i] && g_drivers[i]->library_cleanup) {
+            g_drivers[i]->library_cleanup();
+        }
+    }
+
     g_num_drivers = 0;
     g_initialized = false;
 }
@@ -252,7 +259,8 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
     }
 
     int64_t count = -1;
-    if (rs->num_rows > 0 && rs->num_columns > 0) {
+    if (rs->num_rows > 0 && rs->num_columns > 0 &&
+        rs->rows[0].cells && rs->rows[0].num_cells > 0) {
         DbValue *val = &rs->rows[0].cells[0];
         if (val->type == DB_TYPE_INT) {
             count = val->int_val;

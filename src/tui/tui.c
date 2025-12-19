@@ -1128,8 +1128,10 @@ void tui_calculate_column_widths(TuiState *state) {
 
     /* Check data widths */
     for (size_t row = 0; row < state->data->num_rows && row < 100; row++) {
-        for (size_t col = 0; col < state->data->num_columns; col++) {
-            char *str = db_value_to_string(&state->data->rows[row].cells[col]);
+        Row *r = &state->data->rows[row];
+        if (!r->cells) continue;
+        for (size_t col = 0; col < state->data->num_columns && col < r->num_cells; col++) {
+            char *str = db_value_to_string(&r->cells[col]);
             if (str) {
                 int len = (int)strlen(str);
                 if (len > state->col_widths[col]) {
@@ -1226,6 +1228,9 @@ void tui_draw_table(TuiState *state) {
          row < state->data->num_rows && y < win_rows;
          row++) {
 
+        Row *r = &state->data->rows[row];
+        if (!r->cells) continue;
+
         x = 1;
         /* Only show row selection when sidebar is not focused */
         bool is_selected_row = (row == state->cursor_row) && !state->sidebar_focused;
@@ -1234,7 +1239,7 @@ void tui_draw_table(TuiState *state) {
             wattron(state->main_win, A_BOLD);
         }
 
-        for (size_t col = state->scroll_col; col < state->data->num_columns; col++) {
+        for (size_t col = state->scroll_col; col < state->data->num_columns && col < r->num_cells; col++) {
             int width = tui_get_column_width(state, col);
             if (x + width + 3 > win_cols) break;
 
@@ -1278,7 +1283,7 @@ void tui_draw_table(TuiState *state) {
             } else if (is_selected) {
                 wattron(state->main_win, COLOR_PAIR(COLOR_SELECTED));
 
-                DbValue *val = &state->data->rows[row].cells[col];
+                DbValue *val = &r->cells[col];
                 if (val->is_null) {
                     mvwprintw(state->main_win, y, x, "%-*s", width, "NULL");
                 } else {
@@ -1293,7 +1298,7 @@ void tui_draw_table(TuiState *state) {
 
                 wattroff(state->main_win, COLOR_PAIR(COLOR_SELECTED));
             } else {
-                DbValue *val = &state->data->rows[row].cells[col];
+                DbValue *val = &r->cells[col];
                 if (val->is_null) {
                     wattron(state->main_win, COLOR_PAIR(COLOR_NULL));
                     mvwprintw(state->main_win, y, x, "%-*s", width, "NULL");
