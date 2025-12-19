@@ -10,10 +10,10 @@
 
 /* Application configuration */
 typedef struct {
-    char *connstr;          /* Connection string */
-    bool  tui_mode;         /* Use TUI (default: true) */
-    bool  help;             /* Show help */
-    char *query;            /* Direct query mode */
+  char *connstr; /* Connection string */
+  bool tui_mode; /* Use TUI (default: true) */
+  bool help;     /* Show help */
+  char *query;   /* Direct query mode */
 } AppConfig;
 
 /* Parse command line arguments */

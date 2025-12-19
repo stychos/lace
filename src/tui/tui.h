@@ -6,20 +6,20 @@
 #ifndef LACE_TUI_H
 #define LACE_TUI_H
 
-#include <stdbool.h>
-#include <ncurses.h>
 #include "../db/db.h"
+#include <ncurses.h>
+#include <stdbool.h>
 
 /* Color pairs */
-#define COLOR_HEADER     1
-#define COLOR_SELECTED   2
-#define COLOR_STATUS     3
-#define COLOR_ERROR      4
-#define COLOR_BORDER     5
-#define COLOR_TITLE      6
-#define COLOR_NULL       7
-#define COLOR_NUMBER     8
-#define COLOR_EDIT       9
+#define COLOR_HEADER 1
+#define COLOR_SELECTED 2
+#define COLOR_STATUS 3
+#define COLOR_ERROR 4
+#define COLOR_BORDER 5
+#define COLOR_TITLE 6
+#define COLOR_NULL 7
+#define COLOR_NUMBER 8
+#define COLOR_EDIT 9
 
 /* Sidebar width */
 #define SIDEBAR_WIDTH 20
@@ -32,100 +32,101 @@
 
 /* Workspace - holds per-tab state */
 typedef struct {
-    size_t table_index;      /* Index into tables array */
-    char *table_name;        /* Table name (for display) */
+  size_t table_index; /* Index into tables array */
+  char *table_name;   /* Table name (for display) */
 
-    /* View data */
-    ResultSet *data;
-    TableSchema *schema;
+  /* View data */
+  ResultSet *data;
+  TableSchema *schema;
 
-    /* Cursor position */
-    size_t cursor_row;
-    size_t cursor_col;
-    size_t scroll_row;
-    size_t scroll_col;
+  /* Cursor position */
+  size_t cursor_row;
+  size_t cursor_col;
+  size_t scroll_row;
+  size_t scroll_col;
 
-    /* Pagination */
-    size_t total_rows;
-    size_t loaded_offset;
-    size_t loaded_count;
+  /* Pagination */
+  size_t total_rows;
+  size_t loaded_offset;
+  size_t loaded_count;
 
-    /* Column widths */
-    int *col_widths;
-    size_t num_col_widths;
+  /* Column widths */
+  int *col_widths;
+  size_t num_col_widths;
 
-    /* Is this workspace active/used */
-    bool active;
+  /* Is this workspace active/used */
+  bool active;
 } Workspace;
 
 /* TUI state */
 typedef struct {
-    /* Windows */
-    WINDOW *main_win;
-    WINDOW *status_win;
-    WINDOW *header_win;
-    WINDOW *sidebar_win;
-    WINDOW *tab_win;
+  /* Windows */
+  WINDOW *main_win;
+  WINDOW *status_win;
+  WINDOW *header_win;
+  WINDOW *sidebar_win;
+  WINDOW *tab_win;
 
-    /* Database */
-    DbConnection *conn;
-    char **tables;
-    size_t num_tables;
+  /* Database */
+  DbConnection *conn;
+  char **tables;
+  size_t num_tables;
 
-    /* Workspaces/Tabs */
-    Workspace workspaces[MAX_WORKSPACES];
-    size_t num_workspaces;
-    size_t current_workspace;
+  /* Workspaces/Tabs */
+  Workspace workspaces[MAX_WORKSPACES];
+  size_t num_workspaces;
+  size_t current_workspace;
 
-    /* Convenience pointers to current workspace data */
-    size_t current_table;    /* Alias for workspaces[current_workspace].table_index */
-    ResultSet *data;         /* Alias for workspaces[current_workspace].data */
-    TableSchema *schema;     /* Alias for workspaces[current_workspace].schema */
-    size_t cursor_row;
-    size_t cursor_col;
-    size_t scroll_row;
-    size_t scroll_col;
-    size_t total_rows;
-    size_t loaded_offset;
-    size_t loaded_count;
-    int *col_widths;
-    size_t num_col_widths;
+  /* Convenience pointers to current workspace data */
+  size_t
+      current_table;   /* Alias for workspaces[current_workspace].table_index */
+  ResultSet *data;     /* Alias for workspaces[current_workspace].data */
+  TableSchema *schema; /* Alias for workspaces[current_workspace].schema */
+  size_t cursor_row;
+  size_t cursor_col;
+  size_t scroll_row;
+  size_t scroll_col;
+  size_t total_rows;
+  size_t loaded_offset;
+  size_t loaded_count;
+  int *col_widths;
+  size_t num_col_widths;
 
-    /* Page size (shared) */
-    size_t page_size;
+  /* Page size (shared) */
+  size_t page_size;
 
-    /* Dimensions */
-    int term_rows;
-    int term_cols;
-    int content_rows;
-    int content_cols;
+  /* Dimensions */
+  int term_rows;
+  int term_cols;
+  int content_rows;
+  int content_cols;
 
-    /* Mode */
-    bool editing;
-    char *edit_buffer;
-    size_t edit_pos;
+  /* Mode */
+  bool editing;
+  char *edit_buffer;
+  size_t edit_pos;
 
-    /* Sidebar */
-    bool sidebar_visible;
-    size_t sidebar_highlight;  /* Currently highlighted table in sidebar */
-    size_t sidebar_scroll;     /* Scroll offset for sidebar */
-    bool sidebar_focused;      /* Whether sidebar has focus */
-    bool sidebar_filter_active; /* Whether filter input is active */
-    char sidebar_filter[64];   /* Filter string */
-    size_t sidebar_filter_len; /* Filter string length */
+  /* Sidebar */
+  bool sidebar_visible;
+  size_t sidebar_highlight;   /* Currently highlighted table in sidebar */
+  size_t sidebar_scroll;      /* Scroll offset for sidebar */
+  bool sidebar_focused;       /* Whether sidebar has focus */
+  bool sidebar_filter_active; /* Whether filter input is active */
+  char sidebar_filter[64];    /* Filter string */
+  size_t sidebar_filter_len;  /* Filter string length */
 
-    /* Sidebar name scroll animation */
-    size_t sidebar_name_scroll;      /* Current scroll offset for highlighted name */
-    int sidebar_name_scroll_dir;     /* Scroll direction: 1=right, -1=left */
-    int sidebar_name_scroll_delay;   /* Pause counter at ends */
-    size_t sidebar_last_highlight;   /* Previous highlight to detect changes */
+  /* Sidebar name scroll animation */
+  size_t sidebar_name_scroll;  /* Current scroll offset for highlighted name */
+  int sidebar_name_scroll_dir; /* Scroll direction: 1=right, -1=left */
+  int sidebar_name_scroll_delay; /* Pause counter at ends */
+  size_t sidebar_last_highlight; /* Previous highlight to detect changes */
 
-    /* Status message */
-    char *status_msg;
-    bool status_is_error;
+  /* Status message */
+  char *status_msg;
+  bool status_is_error;
 
-    /* Running */
-    bool running;
+  /* Running */
+  bool running;
 } TuiState;
 
 /* Initialize TUI */

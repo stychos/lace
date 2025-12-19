@@ -11,21 +11,21 @@
 
 /* Parsed connection string */
 typedef struct {
-    char    *driver;        /* Driver name: sqlite, postgres, mysql */
-    char    *user;          /* Username (optional) */
-    char    *password;      /* Password (optional) */
-    char    *host;          /* Hostname or IP (optional for sqlite) */
-    int      port;          /* Port number (0 for default) */
-    char    *database;      /* Database name or file path */
-    char    *schema;        /* Schema name (optional) */
+  char *driver;   /* Driver name: sqlite, postgres, mysql */
+  char *user;     /* Username (optional) */
+  char *password; /* Password (optional) */
+  char *host;     /* Hostname or IP (optional for sqlite) */
+  int port;       /* Port number (0 for default) */
+  char *database; /* Database name or file path */
+  char *schema;   /* Schema name (optional) */
 
-    /* Additional options as key-value pairs */
-    char   **option_keys;
-    char   **option_values;
-    size_t   num_options;
+  /* Additional options as key-value pairs */
+  char **option_keys;
+  char **option_values;
+  size_t num_options;
 
-    /* Raw connection string */
-    char    *raw;
+  /* Raw connection string */
+  char *raw;
 } ConnString;
 
 /*
@@ -72,6 +72,6 @@ bool connstr_validate(const ConnString *cs, char **err);
 
 /* Default ports for known drivers */
 #define CONNSTR_PORT_POSTGRES 5432
-#define CONNSTR_PORT_MYSQL    3306
+#define CONNSTR_PORT_MYSQL 3306
 
 #endif /* LACE_CONNSTR_H */

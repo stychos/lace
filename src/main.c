@@ -10,15 +10,15 @@
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
-    AppConfig config;
+  AppConfig config;
 
-    if (!app_parse_args(argc, argv, &config)) {
-        app_print_usage(argv[0]);
-        return 1;
-    }
+  if (!app_parse_args(argc, argv, &config)) {
+    app_print_usage(argv[0]);
+    return 1;
+  }
 
-    int result = app_run(&config);
+  int result = app_run(&config);
 
-    app_config_free(&config);
-    return result;
+  app_config_free(&config);
+  return result;
 }

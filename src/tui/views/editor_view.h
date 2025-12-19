@@ -10,9 +10,9 @@
 
 /* Result of editor modal */
 typedef struct {
-    bool saved;      /* True if user saved, false if cancelled */
-    bool set_null;   /* True if user requested NULL (Ctrl+N) */
-    char *content;   /* New content (only if saved, caller must free) */
+  bool saved;    /* True if user saved, false if cancelled */
+  bool set_null; /* True if user requested NULL (Ctrl+N) */
+  char *content; /* New content (only if saved, caller must free) */
 } EditorResult;
 
 /*

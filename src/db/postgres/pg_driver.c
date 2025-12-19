@@ -3,25 +3,25 @@
  * PostgreSQL driver - uses libpq C API
  */
 
-#include "../db.h"
-#include "../connstr.h"
 #include "../../util/str.h"
+#include "../connstr.h"
+#include "../db.h"
+#include <ctype.h>
+#include <libpq-fe.h>
+#include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
-#include <ctype.h>
-#include <limits.h>
-#include <libpq-fe.h>
 
 /* Helper to safely cast size_t to int for libpq paramLengths */
 static inline int safe_size_to_int(size_t sz) {
-    return (sz > INT_MAX) ? INT_MAX : (int)sz;
+  return (sz > INT_MAX) ? INT_MAX : (int)sz;
 }
 
 /* PostgreSQL connection data */
 typedef struct {
-    PGconn *conn;
-    char *database;
+  PGconn *conn;
+  char *database;
 } PgData;
 
 /* Forward declarations */
@@ -31,7 +31,8 @@ static bool pg_ping(DbConnection *conn);
 static ConnStatus pg_status(DbConnection *conn);
 static const char *pg_get_error(DbConnection *conn);
 static char **pg_list_tables(DbConnection *conn, size_t *count, char **err);
-static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table, char **err);
+static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
+                                        char **err);
 static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err);
 static int64_t pg_exec(DbConnection *conn, const char *sql, char **err);
 static ResultSet *pg_query_page(DbConnection *conn, const char *table,
@@ -39,9 +40,8 @@ static ResultSet *pg_query_page(DbConnection *conn, const char *table,
                                 const char *order_by, bool desc, char **err);
 static bool pg_update_cell(DbConnection *conn, const char *table,
                            const char **pk_cols, const DbValue *pk_vals,
-                           size_t num_pk_cols,
-                           const char *col, const DbValue *new_val,
-                           char **err);
+                           size_t num_pk_cols, const char *col,
+                           const DbValue *new_val, char **err);
 static bool pg_delete_row(DbConnection *conn, const char *table,
                           const char **pk_cols, const DbValue *pk_vals,
                           size_t num_pk_cols, char **err);
@@ -77,933 +77,1004 @@ DbDriver postgres_driver = {
 
 /* Map PostgreSQL OID to DbValueType */
 static DbValueType pg_oid_to_db_type(Oid oid) {
-    switch (oid) {
-        case 20:   /* int8 */
-        case 21:   /* int2 */
-        case 23:   /* int4 */
-        case 26:   /* oid */
-            return DB_TYPE_INT;
+  switch (oid) {
+  case 20: /* int8 */
+  case 21: /* int2 */
+  case 23: /* int4 */
+  case 26: /* oid */
+    return DB_TYPE_INT;
 
-        case 700:  /* float4 */
-        case 701:  /* float8 */
-        case 1700: /* numeric */
-            return DB_TYPE_FLOAT;
+  case 700:  /* float4 */
+  case 701:  /* float8 */
+  case 1700: /* numeric */
+    return DB_TYPE_FLOAT;
 
-        case 16:   /* bool */
-            return DB_TYPE_BOOL;
+  case 16: /* bool */
+    return DB_TYPE_BOOL;
 
-        case 17:   /* bytea */
-            return DB_TYPE_BLOB;
+  case 17: /* bytea */
+    return DB_TYPE_BLOB;
 
-        case 1082: /* date */
-        case 1083: /* time */
-        case 1114: /* timestamp */
-        case 1184: /* timestamptz */
-            return DB_TYPE_TIMESTAMP;
+  case 1082: /* date */
+  case 1083: /* time */
+  case 1114: /* timestamp */
+  case 1184: /* timestamptz */
+    return DB_TYPE_TIMESTAMP;
 
-        default:
-            return DB_TYPE_TEXT;
-    }
+  default:
+    return DB_TYPE_TEXT;
+  }
 }
 
 /* Get DbValue from PGresult */
 static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
-    DbValue val;
-    memset(&val, 0, sizeof(val));
+  DbValue val;
+  memset(&val, 0, sizeof(val));
 
-    if (PQgetisnull(res, row, col)) {
+  if (PQgetisnull(res, row, col)) {
+    val.type = DB_TYPE_NULL;
+    val.is_null = true;
+    return val;
+  }
+
+  val.is_null = false;
+  char *value = PQgetvalue(res, row, col);
+  int len = PQgetlength(res, row, col);
+  DbValueType type = pg_oid_to_db_type(oid);
+
+  switch (type) {
+  case DB_TYPE_INT:
+    val.type = DB_TYPE_INT;
+    val.int_val = strtoll(value, NULL, 10);
+    break;
+
+  case DB_TYPE_FLOAT:
+    val.type = DB_TYPE_FLOAT;
+    val.float_val = strtod(value, NULL);
+    break;
+
+  case DB_TYPE_BOOL:
+    val.type = DB_TYPE_BOOL;
+    val.bool_val = (value[0] == 't' || value[0] == 'T' || value[0] == '1');
+    break;
+
+  case DB_TYPE_BLOB:
+    /* PostgreSQL bytea in text format needs unescaping */
+    if (len >= 2 && value[0] == '\\' && value[1] == 'x') {
+      /* Hex format: \xDEADBEEF - must have even number of hex digits */
+      size_t hex_chars = len - 2;
+      if (hex_chars % 2 != 0) {
+        /* Odd number of hex digits - malformed, treat as raw */
+        val.blob.data = malloc(len);
+        if (val.blob.data) {
+          val.type = DB_TYPE_BLOB;
+          memcpy(val.blob.data, value, len);
+          val.blob.len = len;
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
+        break;
+      }
+      size_t hex_len = hex_chars / 2;
+      if (hex_len == 0) {
+        /* Empty blob \x */
+        val.type = DB_TYPE_BLOB;
+        val.blob.data = NULL;
+        val.blob.len = 0;
+        break;
+      }
+      val.blob.data = malloc(hex_len);
+      if (val.blob.data) {
+        val.type = DB_TYPE_BLOB;
+        val.blob.len = hex_len;
+        for (size_t i = 0; i < hex_len; i++) {
+          unsigned int byte = 0;
+          if (sscanf(value + 2 + i * 2, "%2x", &byte) != 1) {
+            /* Invalid hex - treat rest as zero */
+            byte = 0;
+          }
+          val.blob.data[i] = (uint8_t)byte;
+        }
+      } else {
+        /* Malloc failed - mark as null */
         val.type = DB_TYPE_NULL;
         val.is_null = true;
-        return val;
+      }
+    } else {
+      /* Escape format or raw */
+      val.blob.data = malloc(len);
+      if (val.blob.data) {
+        val.type = DB_TYPE_BLOB;
+        memcpy(val.blob.data, value, len);
+        val.blob.len = len;
+      } else {
+        /* Malloc failed - mark as null */
+        val.type = DB_TYPE_NULL;
+        val.is_null = true;
+      }
     }
+    break;
 
-    val.is_null = false;
-    char *value = PQgetvalue(res, row, col);
-    int len = PQgetlength(res, row, col);
-    DbValueType type = pg_oid_to_db_type(oid);
-
-    switch (type) {
-        case DB_TYPE_INT:
-            val.type = DB_TYPE_INT;
-            val.int_val = strtoll(value, NULL, 10);
-            break;
-
-        case DB_TYPE_FLOAT:
-            val.type = DB_TYPE_FLOAT;
-            val.float_val = strtod(value, NULL);
-            break;
-
-        case DB_TYPE_BOOL:
-            val.type = DB_TYPE_BOOL;
-            val.bool_val = (value[0] == 't' || value[0] == 'T' || value[0] == '1');
-            break;
-
-        case DB_TYPE_BLOB:
-            /* PostgreSQL bytea in text format needs unescaping */
-            if (len >= 2 && value[0] == '\\' && value[1] == 'x') {
-                /* Hex format: \xDEADBEEF - must have even number of hex digits */
-                size_t hex_chars = len - 2;
-                if (hex_chars % 2 != 0) {
-                    /* Odd number of hex digits - malformed, treat as raw */
-                    val.blob.data = malloc(len);
-                    if (val.blob.data) {
-                        val.type = DB_TYPE_BLOB;
-                        memcpy(val.blob.data, value, len);
-                        val.blob.len = len;
-                    } else {
-                        val.type = DB_TYPE_NULL;
-                        val.is_null = true;
-                    }
-                    break;
-                }
-                size_t hex_len = hex_chars / 2;
-                if (hex_len == 0) {
-                    /* Empty blob \x */
-                    val.type = DB_TYPE_BLOB;
-                    val.blob.data = NULL;
-                    val.blob.len = 0;
-                    break;
-                }
-                val.blob.data = malloc(hex_len);
-                if (val.blob.data) {
-                    val.type = DB_TYPE_BLOB;
-                    val.blob.len = hex_len;
-                    for (size_t i = 0; i < hex_len; i++) {
-                        unsigned int byte = 0;
-                        if (sscanf(value + 2 + i * 2, "%2x", &byte) != 1) {
-                            /* Invalid hex - treat rest as zero */
-                            byte = 0;
-                        }
-                        val.blob.data[i] = (uint8_t)byte;
-                    }
-                } else {
-                    /* Malloc failed - mark as null */
-                    val.type = DB_TYPE_NULL;
-                    val.is_null = true;
-                }
-            } else {
-                /* Escape format or raw */
-                val.blob.data = malloc(len);
-                if (val.blob.data) {
-                    val.type = DB_TYPE_BLOB;
-                    memcpy(val.blob.data, value, len);
-                    val.blob.len = len;
-                } else {
-                    /* Malloc failed - mark as null */
-                    val.type = DB_TYPE_NULL;
-                    val.is_null = true;
-                }
-            }
-            break;
-
-        default:
-            val.text.data = malloc(len + 1);
-            if (val.text.data) {
-                val.type = DB_TYPE_TEXT;
-                val.text.len = len;
-                memcpy(val.text.data, value, len);
-                val.text.data[len] = '\0';
-            } else {
-                /* Malloc failed - mark as null */
-                val.type = DB_TYPE_NULL;
-                val.is_null = true;
-            }
-            break;
+  default:
+    val.text.data = malloc(len + 1);
+    if (val.text.data) {
+      val.type = DB_TYPE_TEXT;
+      val.text.len = len;
+      memcpy(val.text.data, value, len);
+      val.text.data[len] = '\0';
+    } else {
+      /* Malloc failed - mark as null */
+      val.type = DB_TYPE_NULL;
+      val.is_null = true;
     }
+    break;
+  }
 
-    return val;
+  return val;
 }
 
 static DbConnection *pg_connect(const char *connstr, char **err) {
-    ConnString *cs = connstr_parse(connstr, err);
-    if (!cs) {
-        return NULL;
-    }
+  ConnString *cs = connstr_parse(connstr, err);
+  if (!cs) {
+    return NULL;
+  }
 
-    if (!str_eq(cs->driver, "postgres") && !str_eq(cs->driver, "postgresql")) {
-        connstr_free(cs);
-        if (err) *err = str_dup("Not a PostgreSQL connection string");
-        return NULL;
-    }
-
-    /* Build libpq connection string */
-    const char *host = cs->host ? cs->host : "localhost";
-    int port = cs->port > 0 ? cs->port : 5432;
-    const char *user = cs->user ? cs->user : "postgres";
-    const char *password = cs->password;
-    const char *database = cs->database ? cs->database : "postgres";
-
-    char *pq_connstr;
-    if (password) {
-        pq_connstr = str_printf("host=%s port=%d user=%s password=%s dbname=%s",
-                                host, port, user, password, database);
-    } else {
-        pq_connstr = str_printf("host=%s port=%d user=%s dbname=%s",
-                                host, port, user, database);
-    }
-
-    if (!pq_connstr) {
-        connstr_free(cs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    PGconn *pgconn = PQconnectdb(pq_connstr);
-    str_secure_free(pq_connstr);  /* Securely clear password from memory */
-
-    if (PQstatus(pgconn) != CONNECTION_OK) {
-        if (err) *err = str_printf("Connection failed: %s", PQerrorMessage(pgconn));
-        PQfinish(pgconn);
-        connstr_free(cs);
-        return NULL;
-    }
-
-    /* Set client encoding to UTF-8 */
-    PQsetClientEncoding(pgconn, "UTF8");
-
-    PgData *data = calloc(1, sizeof(PgData));
-    if (!data) {
-        PQfinish(pgconn);
-        connstr_free(cs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    data->conn = pgconn;
-    data->database = str_dup(database);
-    if (!data->database) {
-        PQfinish(pgconn);
-        free(data);
-        connstr_free(cs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    DbConnection *conn = calloc(1, sizeof(DbConnection));
-    if (!conn) {
-        PQfinish(pgconn);
-        free(data->database);
-        free(data);
-        connstr_free(cs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    conn->driver = &postgres_driver;
-    conn->connstr = str_dup(connstr);
-    conn->database = str_dup(database);
-    conn->host = str_dup(host);
-    conn->port = port;
-    conn->user = str_dup(user);
-
-    /* Check all allocations succeeded */
-    if (!conn->connstr || !conn->database || !conn->host || !conn->user) {
-        PQfinish(pgconn);
-        free(data->database);
-        free(data);
-        free(conn->connstr);
-        free(conn->database);
-        free(conn->host);
-        free(conn->user);
-        free(conn);
-        connstr_free(cs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    conn->status = CONN_STATUS_CONNECTED;
-    conn->driver_data = data;
-
+  if (!str_eq(cs->driver, "postgres") && !str_eq(cs->driver, "postgresql")) {
     connstr_free(cs);
-    return conn;
-}
+    if (err)
+      *err = str_dup("Not a PostgreSQL connection string");
+    return NULL;
+  }
 
-static void pg_disconnect(DbConnection *conn) {
-    if (!conn) return;
+  /* Build libpq connection string */
+  const char *host = cs->host ? cs->host : "localhost";
+  int port = cs->port > 0 ? cs->port : 5432;
+  const char *user = cs->user ? cs->user : "postgres";
+  const char *password = cs->password;
+  const char *database = cs->database ? cs->database : "postgres";
 
-    PgData *data = conn->driver_data;
-    if (data) {
-        if (data->conn) {
-            PQfinish(data->conn);
-        }
-        free(data->database);
-        free(data);
-    }
+  char *pq_connstr;
+  if (password) {
+    pq_connstr = str_printf("host=%s port=%d user=%s password=%s dbname=%s",
+                            host, port, user, password, database);
+  } else {
+    pq_connstr = str_printf("host=%s port=%d user=%s dbname=%s", host, port,
+                            user, database);
+  }
 
+  if (!pq_connstr) {
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  PGconn *pgconn = PQconnectdb(pq_connstr);
+  str_secure_free(pq_connstr); /* Securely clear password from memory */
+
+  if (PQstatus(pgconn) != CONNECTION_OK) {
+    if (err)
+      *err = str_printf("Connection failed: %s", PQerrorMessage(pgconn));
+    PQfinish(pgconn);
+    connstr_free(cs);
+    return NULL;
+  }
+
+  /* Set client encoding to UTF-8 */
+  PQsetClientEncoding(pgconn, "UTF8");
+
+  PgData *data = calloc(1, sizeof(PgData));
+  if (!data) {
+    PQfinish(pgconn);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  data->conn = pgconn;
+  data->database = str_dup(database);
+  if (!data->database) {
+    PQfinish(pgconn);
+    free(data);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  DbConnection *conn = calloc(1, sizeof(DbConnection));
+  if (!conn) {
+    PQfinish(pgconn);
+    free(data->database);
+    free(data);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  conn->driver = &postgres_driver;
+  conn->connstr = str_dup(connstr);
+  conn->database = str_dup(database);
+  conn->host = str_dup(host);
+  conn->port = port;
+  conn->user = str_dup(user);
+
+  /* Check all allocations succeeded */
+  if (!conn->connstr || !conn->database || !conn->host || !conn->user) {
+    PQfinish(pgconn);
+    free(data->database);
+    free(data);
     free(conn->connstr);
     free(conn->database);
     free(conn->host);
     free(conn->user);
-    free(conn->last_error);
     free(conn);
+    connstr_free(cs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  conn->status = CONN_STATUS_CONNECTED;
+  conn->driver_data = data;
+
+  connstr_free(cs);
+  return conn;
+}
+
+static void pg_disconnect(DbConnection *conn) {
+  if (!conn)
+    return;
+
+  PgData *data = conn->driver_data;
+  if (data) {
+    if (data->conn) {
+      PQfinish(data->conn);
+    }
+    free(data->database);
+    free(data);
+  }
+
+  free(conn->connstr);
+  free(conn->database);
+  free(conn->host);
+  free(conn->user);
+  free(conn->last_error);
+  free(conn);
 }
 
 static bool pg_ping(DbConnection *conn) {
-    if (!conn) return false;
+  if (!conn)
+    return false;
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) return false;
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn)
+    return false;
 
-    /* Check connection status */
-    if (PQstatus(data->conn) != CONNECTION_OK) {
-        /* Try to reset */
-        PQreset(data->conn);
-        return PQstatus(data->conn) == CONNECTION_OK;
-    }
+  /* Check connection status */
+  if (PQstatus(data->conn) != CONNECTION_OK) {
+    /* Try to reset */
+    PQreset(data->conn);
+    return PQstatus(data->conn) == CONNECTION_OK;
+  }
 
-    return true;
+  return true;
 }
 
 static ConnStatus pg_status(DbConnection *conn) {
-    return conn ? conn->status : CONN_STATUS_DISCONNECTED;
+  return conn ? conn->status : CONN_STATUS_DISCONNECTED;
 }
 
 static const char *pg_get_error(DbConnection *conn) {
-    return conn ? conn->last_error : NULL;
+  return conn ? conn->last_error : NULL;
 }
 
 static int64_t pg_exec(DbConnection *conn, const char *sql, char **err) {
-    if (!conn || !sql) {
-        if (err) *err = str_dup("Invalid parameters");
-        return -1;
-    }
+  if (!conn || !sql) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return -1;
+  }
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return -1;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return -1;
+  }
 
-    PGresult *res = PQexec(data->conn, sql);
-    ExecStatusType status = PQresultStatus(res);
+  PGresult *res = PQexec(data->conn, sql);
+  ExecStatusType status = PQresultStatus(res);
 
-    if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return -1;
-    }
-
-    char *affected = PQcmdTuples(res);
-    int64_t count = affected && *affected ? strtoll(affected, NULL, 10) : 0;
+  if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
     PQclear(res);
-    return count;
+    return -1;
+  }
+
+  char *affected = PQcmdTuples(res);
+  int64_t count = affected && *affected ? strtoll(affected, NULL, 10) : 0;
+  PQclear(res);
+  return count;
 }
 
 static bool pg_update_cell(DbConnection *conn, const char *table,
                            const char **pk_cols, const DbValue *pk_vals,
-                           size_t num_pk_cols,
-                           const char *col, const DbValue *new_val,
-                           char **err) {
-    if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0 || !col || !new_val) {
-        if (err) *err = str_dup("Invalid parameters");
-        return false;
-    }
+                           size_t num_pk_cols, const char *col,
+                           const DbValue *new_val, char **err) {
+  if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0 || !col ||
+      !new_val) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return false;
+  }
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return false;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return false;
+  }
 
-    /* Escape identifiers to prevent SQL injection */
-    char *escaped_table = str_escape_identifier_dquote(table);
-    char *escaped_col = str_escape_identifier_dquote(col);
-    if (!escaped_table || !escaped_col) {
-        free(escaped_table);
-        free(escaped_col);
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
-    }
-
-    /* Build WHERE clause for composite primary key */
-    char *where_clause = str_dup("");
-    for (size_t i = 0; i < num_pk_cols; i++) {
-        char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
-        if (!escaped_pk || !where_clause) {
-            free(escaped_pk);
-            free(where_clause);
-            free(escaped_table);
-            free(escaped_col);
-            if (err) *err = str_dup("Memory allocation failed");
-            return false;
-        }
-        char *new_where;
-        if (i == 0) {
-            new_where = str_printf("%s = $%zu", escaped_pk, i + 2);
-        } else {
-            new_where = str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 2);
-        }
-        free(escaped_pk);
-        free(where_clause);
-        where_clause = new_where;
-        if (!where_clause) {
-            free(escaped_table);
-            free(escaped_col);
-            if (err) *err = str_dup("Memory allocation failed");
-            return false;
-        }
-    }
-
-    /* Build parameterized UPDATE statement */
-    char *sql = str_printf("UPDATE %s SET %s = $1 WHERE %s",
-                           escaped_table, escaped_col, where_clause);
+  /* Escape identifiers to prevent SQL injection */
+  char *escaped_table = str_escape_identifier_dquote(table);
+  char *escaped_col = str_escape_identifier_dquote(col);
+  if (!escaped_table || !escaped_col) {
     free(escaped_table);
     free(escaped_col);
-    free(where_clause);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
 
-    if (!sql) {
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
+  /* Build WHERE clause for composite primary key */
+  char *where_clause = str_dup("");
+  for (size_t i = 0; i < num_pk_cols; i++) {
+    char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
+    if (!escaped_pk || !where_clause) {
+      free(escaped_pk);
+      free(where_clause);
+      free(escaped_table);
+      free(escaped_col);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
     }
-
-    /* Prepare parameter values: 1 new value + N pk values */
-    size_t num_params = 1 + num_pk_cols;
-    const char **paramValues = malloc(sizeof(char *) * num_params);
-    int *paramLengths = malloc(sizeof(int) * num_params);
-    int *paramFormats = calloc(num_params, sizeof(int));  /* All text format (0) */
-    char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
-    char *new_str = NULL;
-
-    if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
-        free(paramValues);
-        free(paramLengths);
-        free(paramFormats);
-        free(pk_bufs);
-        free(sql);
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
-    }
-
-    /* Parameter 1: new value */
-    char new_buf[64];
-    if (new_val->is_null) {
-        paramValues[0] = NULL;
-        paramLengths[0] = 0;
+    char *new_where;
+    if (i == 0) {
+      new_where = str_printf("%s = $%zu", escaped_pk, i + 2);
     } else {
-        switch (new_val->type) {
-            case DB_TYPE_INT:
-                snprintf(new_buf, sizeof(new_buf), "%lld", (long long)new_val->int_val);
-                paramValues[0] = new_buf;
-                paramLengths[0] = safe_size_to_int(strlen(new_buf));
-                break;
-            case DB_TYPE_FLOAT:
-                snprintf(new_buf, sizeof(new_buf), "%g", new_val->float_val);
-                paramValues[0] = new_buf;
-                paramLengths[0] = safe_size_to_int(strlen(new_buf));
-                break;
-            case DB_TYPE_BOOL:
-                paramValues[0] = new_val->bool_val ? "t" : "f";
-                paramLengths[0] = 1;
-                break;
-            case DB_TYPE_BLOB:
-                new_str = str_dup("\\x");
-                paramValues[0] = new_str;
-                paramLengths[0] = new_str ? safe_size_to_int(strlen(new_str)) : 0;
-                break;
-            default:
-                paramValues[0] = new_val->text.data;
-                paramLengths[0] = safe_size_to_int(new_val->text.len);
-                break;
-        }
+      new_where =
+          str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 2);
     }
-
-    /* Parameters 2..N+1: primary key values */
-    for (size_t i = 0; i < num_pk_cols; i++) {
-        const DbValue *pk_val = &pk_vals[i];
-        if (pk_val->is_null) {
-            paramValues[i + 1] = NULL;
-            paramLengths[i + 1] = 0;
-        } else {
-            switch (pk_val->type) {
-                case DB_TYPE_INT:
-                    pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
-                    paramValues[i + 1] = pk_bufs[i];
-                    paramLengths[i + 1] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
-                    break;
-                case DB_TYPE_FLOAT:
-                    pk_bufs[i] = str_printf("%g", pk_val->float_val);
-                    paramValues[i + 1] = pk_bufs[i];
-                    paramLengths[i + 1] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
-                    break;
-                default:
-                    paramValues[i + 1] = pk_val->text.data;
-                    paramLengths[i + 1] = safe_size_to_int(pk_val->text.len);
-                    break;
-            }
-        }
+    free(escaped_pk);
+    free(where_clause);
+    where_clause = new_where;
+    if (!where_clause) {
+      free(escaped_table);
+      free(escaped_col);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
     }
+  }
 
-    PGresult *res = PQexecParams(data->conn, sql, safe_size_to_int(num_params), NULL,
-                                  paramValues, paramLengths, paramFormats, 0);
-    free(sql);
-    free(new_str);
-    for (size_t i = 0; i < num_pk_cols; i++) free(pk_bufs[i]);
-    free(pk_bufs);
+  /* Build parameterized UPDATE statement */
+  char *sql = str_printf("UPDATE %s SET %s = $1 WHERE %s", escaped_table,
+                         escaped_col, where_clause);
+  free(escaped_table);
+  free(escaped_col);
+  free(where_clause);
+
+  if (!sql) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  /* Prepare parameter values: 1 new value + N pk values */
+  size_t num_params = 1 + num_pk_cols;
+  const char **paramValues = malloc(sizeof(char *) * num_params);
+  int *paramLengths = malloc(sizeof(int) * num_params);
+  int *paramFormats = calloc(num_params, sizeof(int)); /* All text format (0) */
+  char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
+  char *new_str = NULL;
+
+  if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
     free(paramValues);
     free(paramLengths);
     free(paramFormats);
+    free(pk_bufs);
+    free(sql);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
 
-    ExecStatusType status = PQresultStatus(res);
-    if (status != PGRES_COMMAND_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return false;
+  /* Parameter 1: new value */
+  char new_buf[64];
+  if (new_val->is_null) {
+    paramValues[0] = NULL;
+    paramLengths[0] = 0;
+  } else {
+    switch (new_val->type) {
+    case DB_TYPE_INT:
+      snprintf(new_buf, sizeof(new_buf), "%lld", (long long)new_val->int_val);
+      paramValues[0] = new_buf;
+      paramLengths[0] = safe_size_to_int(strlen(new_buf));
+      break;
+    case DB_TYPE_FLOAT:
+      snprintf(new_buf, sizeof(new_buf), "%g", new_val->float_val);
+      paramValues[0] = new_buf;
+      paramLengths[0] = safe_size_to_int(strlen(new_buf));
+      break;
+    case DB_TYPE_BOOL:
+      paramValues[0] = new_val->bool_val ? "t" : "f";
+      paramLengths[0] = 1;
+      break;
+    case DB_TYPE_BLOB:
+      new_str = str_dup("\\x");
+      paramValues[0] = new_str;
+      paramLengths[0] = new_str ? safe_size_to_int(strlen(new_str)) : 0;
+      break;
+    default:
+      paramValues[0] = new_val->text.data;
+      paramLengths[0] = safe_size_to_int(new_val->text.len);
+      break;
     }
+  }
 
+  /* Parameters 2..N+1: primary key values */
+  for (size_t i = 0; i < num_pk_cols; i++) {
+    const DbValue *pk_val = &pk_vals[i];
+    if (pk_val->is_null) {
+      paramValues[i + 1] = NULL;
+      paramLengths[i + 1] = 0;
+    } else {
+      switch (pk_val->type) {
+      case DB_TYPE_INT:
+        pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
+        paramValues[i + 1] = pk_bufs[i];
+        paramLengths[i + 1] =
+            pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        break;
+      case DB_TYPE_FLOAT:
+        pk_bufs[i] = str_printf("%g", pk_val->float_val);
+        paramValues[i + 1] = pk_bufs[i];
+        paramLengths[i + 1] =
+            pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        break;
+      default:
+        paramValues[i + 1] = pk_val->text.data;
+        paramLengths[i + 1] = safe_size_to_int(pk_val->text.len);
+        break;
+      }
+    }
+  }
+
+  PGresult *res =
+      PQexecParams(data->conn, sql, safe_size_to_int(num_params), NULL,
+                   paramValues, paramLengths, paramFormats, 0);
+  free(sql);
+  free(new_str);
+  for (size_t i = 0; i < num_pk_cols; i++)
+    free(pk_bufs[i]);
+  free(pk_bufs);
+  free(paramValues);
+  free(paramLengths);
+  free(paramFormats);
+
+  ExecStatusType status = PQresultStatus(res);
+  if (status != PGRES_COMMAND_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
     PQclear(res);
-    return true;
+    return false;
+  }
+
+  PQclear(res);
+  return true;
 }
 
 static bool pg_delete_row(DbConnection *conn, const char *table,
                           const char **pk_cols, const DbValue *pk_vals,
                           size_t num_pk_cols, char **err) {
-    if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0) {
-        if (err) *err = str_dup("Invalid parameters");
-        return false;
-    }
+  if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return false;
+  }
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return false;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return false;
+  }
 
-    /* Escape identifiers to prevent SQL injection */
-    char *escaped_table = str_escape_identifier_dquote(table);
-    if (!escaped_table) {
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
-    }
+  /* Escape identifiers to prevent SQL injection */
+  char *escaped_table = str_escape_identifier_dquote(table);
+  if (!escaped_table) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
 
-    /* Build WHERE clause for composite primary key */
-    char *where_clause = str_dup("");
-    for (size_t i = 0; i < num_pk_cols; i++) {
-        char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
-        if (!escaped_pk || !where_clause) {
-            free(escaped_pk);
-            free(where_clause);
-            free(escaped_table);
-            if (err) *err = str_dup("Memory allocation failed");
-            return false;
-        }
-        char *new_where;
-        if (i == 0) {
-            new_where = str_printf("%s = $%zu", escaped_pk, i + 1);
-        } else {
-            new_where = str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 1);
-        }
-        free(escaped_pk);
-        free(where_clause);
-        where_clause = new_where;
-        if (!where_clause) {
-            free(escaped_table);
-            if (err) *err = str_dup("Memory allocation failed");
-            return false;
-        }
+  /* Build WHERE clause for composite primary key */
+  char *where_clause = str_dup("");
+  for (size_t i = 0; i < num_pk_cols; i++) {
+    char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
+    if (!escaped_pk || !where_clause) {
+      free(escaped_pk);
+      free(where_clause);
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
     }
-
-    /* Build parameterized DELETE statement */
-    char *sql = str_printf("DELETE FROM %s WHERE %s", escaped_table, where_clause);
-    free(escaped_table);
+    char *new_where;
+    if (i == 0) {
+      new_where = str_printf("%s = $%zu", escaped_pk, i + 1);
+    } else {
+      new_where =
+          str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 1);
+    }
+    free(escaped_pk);
     free(where_clause);
-
-    if (!sql) {
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
+    where_clause = new_where;
+    if (!where_clause) {
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
     }
+  }
 
-    /* Prepare parameter values */
-    const char **paramValues = malloc(sizeof(char *) * num_pk_cols);
-    int *paramLengths = malloc(sizeof(int) * num_pk_cols);
-    int *paramFormats = calloc(num_pk_cols, sizeof(int));  /* All text format (0) */
-    char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
+  /* Build parameterized DELETE statement */
+  char *sql =
+      str_printf("DELETE FROM %s WHERE %s", escaped_table, where_clause);
+  free(escaped_table);
+  free(where_clause);
 
-    if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
-        free(paramValues);
-        free(paramLengths);
-        free(paramFormats);
-        free(pk_bufs);
-        free(sql);
-        if (err) *err = str_dup("Memory allocation failed");
-        return false;
-    }
+  if (!sql) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
 
-    /* Fill in primary key values */
-    for (size_t i = 0; i < num_pk_cols; i++) {
-        const DbValue *pk_val = &pk_vals[i];
-        if (pk_val->is_null) {
-            paramValues[i] = NULL;
-            paramLengths[i] = 0;
-        } else {
-            switch (pk_val->type) {
-                case DB_TYPE_INT:
-                    pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
-                    paramValues[i] = pk_bufs[i];
-                    paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
-                    break;
-                case DB_TYPE_FLOAT:
-                    pk_bufs[i] = str_printf("%g", pk_val->float_val);
-                    paramValues[i] = pk_bufs[i];
-                    paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
-                    break;
-                default:
-                    paramValues[i] = pk_val->text.data;
-                    paramLengths[i] = safe_size_to_int(pk_val->text.len);
-                    break;
-            }
-        }
-    }
+  /* Prepare parameter values */
+  const char **paramValues = malloc(sizeof(char *) * num_pk_cols);
+  int *paramLengths = malloc(sizeof(int) * num_pk_cols);
+  int *paramFormats =
+      calloc(num_pk_cols, sizeof(int)); /* All text format (0) */
+  char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
 
-    PGresult *res = PQexecParams(data->conn, sql, safe_size_to_int(num_pk_cols), NULL,
-                                  paramValues, paramLengths, paramFormats, 0);
-    free(sql);
-    for (size_t i = 0; i < num_pk_cols; i++) free(pk_bufs[i]);
-    free(pk_bufs);
+  if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
     free(paramValues);
     free(paramLengths);
     free(paramFormats);
+    free(pk_bufs);
+    free(sql);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
 
-    ExecStatusType status = PQresultStatus(res);
-    if (status != PGRES_COMMAND_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return false;
+  /* Fill in primary key values */
+  for (size_t i = 0; i < num_pk_cols; i++) {
+    const DbValue *pk_val = &pk_vals[i];
+    if (pk_val->is_null) {
+      paramValues[i] = NULL;
+      paramLengths[i] = 0;
+    } else {
+      switch (pk_val->type) {
+      case DB_TYPE_INT:
+        pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
+        paramValues[i] = pk_bufs[i];
+        paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        break;
+      case DB_TYPE_FLOAT:
+        pk_bufs[i] = str_printf("%g", pk_val->float_val);
+        paramValues[i] = pk_bufs[i];
+        paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+        break;
+      default:
+        paramValues[i] = pk_val->text.data;
+        paramLengths[i] = safe_size_to_int(pk_val->text.len);
+        break;
+      }
     }
+  }
 
+  PGresult *res =
+      PQexecParams(data->conn, sql, safe_size_to_int(num_pk_cols), NULL,
+                   paramValues, paramLengths, paramFormats, 0);
+  free(sql);
+  for (size_t i = 0; i < num_pk_cols; i++)
+    free(pk_bufs[i]);
+  free(pk_bufs);
+  free(paramValues);
+  free(paramLengths);
+  free(paramFormats);
+
+  ExecStatusType status = PQresultStatus(res);
+  if (status != PGRES_COMMAND_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
     PQclear(res);
-    return true;
+    return false;
+  }
+
+  PQclear(res);
+  return true;
 }
 
 static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
-    if (!conn || !count) {
-        if (err) *err = str_dup("Invalid parameters");
-        return NULL;
-    }
+  if (!conn || !count) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return NULL;
+  }
 
-    *count = 0;
+  *count = 0;
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return NULL;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return NULL;
+  }
 
-    const char *sql = "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename";
-    PGresult *res = PQexec(data->conn, sql);
+  const char *sql = "SELECT tablename FROM pg_tables WHERE schemaname = "
+                    "'public' ORDER BY tablename";
+  PGresult *res = PQexec(data->conn, sql);
 
-    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return NULL;
-    }
-
-    int num_rows = PQntuples(res);
-
-    /* Handle zero tables - return empty array (not NULL) to distinguish from error */
-    if (num_rows == 0) {
-        PQclear(res);
-        char **tables = calloc(1, sizeof(char *));
-        if (!tables) {
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-        tables[0] = NULL;  /* NULL-terminated empty array */
-        *count = 0;
-        return tables;
-    }
-
-    char **tables = malloc(num_rows * sizeof(char *));
-    if (!tables) {
-        PQclear(res);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    for (int i = 0; i < num_rows; i++) {
-        tables[i] = str_dup(PQgetvalue(res, i, 0));
-        if (!tables[i]) {
-            /* Free already allocated strings on failure */
-            for (int j = 0; j < i; j++) {
-                free(tables[j]);
-            }
-            free(tables);
-            PQclear(res);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-        (*count)++;
-    }
-
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
     PQclear(res);
+    return NULL;
+  }
+
+  int num_rows = PQntuples(res);
+
+  /* Handle zero tables - return empty array (not NULL) to distinguish from
+   * error */
+  if (num_rows == 0) {
+    PQclear(res);
+    char **tables = calloc(1, sizeof(char *));
+    if (!tables) {
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+    tables[0] = NULL; /* NULL-terminated empty array */
+    *count = 0;
     return tables;
+  }
+
+  char **tables = malloc(num_rows * sizeof(char *));
+  if (!tables) {
+    PQclear(res);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  for (int i = 0; i < num_rows; i++) {
+    tables[i] = str_dup(PQgetvalue(res, i, 0));
+    if (!tables[i]) {
+      /* Free already allocated strings on failure */
+      for (int j = 0; j < i; j++) {
+        free(tables[j]);
+      }
+      free(tables);
+      PQclear(res);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+    (*count)++;
+  }
+
+  PQclear(res);
+  return tables;
 }
 
-static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table, char **err) {
-    if (!conn || !table) {
-        if (err) *err = str_dup("Invalid parameters");
-        return NULL;
-    }
+static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
+                                        char **err) {
+  if (!conn || !table) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return NULL;
+  }
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return NULL;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return NULL;
+  }
 
-    /* Query column information */
-    const char *sql = "SELECT column_name, data_type, is_nullable, column_default "
-                      "FROM information_schema.columns "
-                      "WHERE table_schema = 'public' AND table_name = $1 "
-                      "ORDER BY ordinal_position";
+  /* Query column information */
+  const char *sql =
+      "SELECT column_name, data_type, is_nullable, column_default "
+      "FROM information_schema.columns "
+      "WHERE table_schema = 'public' AND table_name = $1 "
+      "ORDER BY ordinal_position";
 
-    const char *paramValues[1] = {table};
-    PGresult *res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
+  const char *paramValues[1] = {table};
+  PGresult *res =
+      PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
 
-    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return NULL;
-    }
-
-    TableSchema *schema = calloc(1, sizeof(TableSchema));
-    if (!schema) {
-        PQclear(res);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    schema->name = str_dup(table);
-    if (!schema->name) {
-        PQclear(res);
-        free(schema);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-    int num_rows = PQntuples(res);
-    schema->columns = calloc(num_rows, sizeof(ColumnDef));
-    if (!schema->columns) {
-        PQclear(res);
-        db_schema_free(schema);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    for (int i = 0; i < num_rows; i++) {
-        ColumnDef *col = &schema->columns[schema->num_columns];
-        memset(col, 0, sizeof(ColumnDef));
-
-        col->name = str_dup(PQgetvalue(res, i, 0));
-        col->type_name = str_dup(PQgetvalue(res, i, 1));
-        if (!col->name || !col->type_name) {
-            /* Free partially allocated column before cleanup */
-            free(col->name);
-            free(col->type_name);
-            PQclear(res);
-            db_schema_free(schema);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-        col->nullable = str_eq_nocase(PQgetvalue(res, i, 2), "YES");
-
-        char *default_val = PQgetvalue(res, i, 3);
-        col->default_val = (default_val && *default_val) ? str_dup(default_val) : NULL;
-
-        /* Map type - guard against NULL type_name */
-        char *type = col->type_name;
-        if (!type) {
-            col->type = DB_TYPE_TEXT;
-        } else if (strstr(type, "int") || strstr(type, "serial")) {
-            col->type = DB_TYPE_INT;
-        } else if (strstr(type, "float") || strstr(type, "double") ||
-                   strstr(type, "numeric") || strstr(type, "decimal")) {
-            col->type = DB_TYPE_FLOAT;
-        } else if (strstr(type, "bool")) {
-            col->type = DB_TYPE_BOOL;
-        } else if (strstr(type, "bytea")) {
-            col->type = DB_TYPE_BLOB;
-        } else if (strstr(type, "timestamp") || strstr(type, "date") || strstr(type, "time")) {
-            col->type = DB_TYPE_TIMESTAMP;
-        } else {
-            col->type = DB_TYPE_TEXT;
-        }
-
-        schema->num_columns++;
-    }
-
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
     PQclear(res);
+    return NULL;
+  }
 
-    /* Get primary key info */
-    sql = "SELECT a.attname FROM pg_index i "
-          "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
-          "WHERE i.indrelid = $1::regclass AND i.indisprimary";
+  TableSchema *schema = calloc(1, sizeof(TableSchema));
+  if (!schema) {
+    PQclear(res);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
 
-    paramValues[0] = table;
-    res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
+  schema->name = str_dup(table);
+  if (!schema->name) {
+    PQclear(res);
+    free(schema);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+  int num_rows = PQntuples(res);
+  schema->columns = calloc(num_rows, sizeof(ColumnDef));
+  if (!schema->columns) {
+    PQclear(res);
+    db_schema_free(schema);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
 
-    if (PQresultStatus(res) == PGRES_TUPLES_OK) {
-        int pk_rows = PQntuples(res);
-        for (int i = 0; i < pk_rows; i++) {
-            char *pk_col = PQgetvalue(res, i, 0);
-            for (size_t j = 0; j < schema->num_columns; j++) {
-                if (str_eq(schema->columns[j].name, pk_col)) {
-                    schema->columns[j].primary_key = true;
-                    break;
-                }
-            }
-        }
+  for (int i = 0; i < num_rows; i++) {
+    ColumnDef *col = &schema->columns[schema->num_columns];
+    memset(col, 0, sizeof(ColumnDef));
+
+    col->name = str_dup(PQgetvalue(res, i, 0));
+    col->type_name = str_dup(PQgetvalue(res, i, 1));
+    if (!col->name || !col->type_name) {
+      /* Free partially allocated column before cleanup */
+      free(col->name);
+      free(col->type_name);
+      PQclear(res);
+      db_schema_free(schema);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+    col->nullable = str_eq_nocase(PQgetvalue(res, i, 2), "YES");
+
+    char *default_val = PQgetvalue(res, i, 3);
+    col->default_val =
+        (default_val && *default_val) ? str_dup(default_val) : NULL;
+
+    /* Map type - guard against NULL type_name */
+    char *type = col->type_name;
+    if (!type) {
+      col->type = DB_TYPE_TEXT;
+    } else if (strstr(type, "int") || strstr(type, "serial")) {
+      col->type = DB_TYPE_INT;
+    } else if (strstr(type, "float") || strstr(type, "double") ||
+               strstr(type, "numeric") || strstr(type, "decimal")) {
+      col->type = DB_TYPE_FLOAT;
+    } else if (strstr(type, "bool")) {
+      col->type = DB_TYPE_BOOL;
+    } else if (strstr(type, "bytea")) {
+      col->type = DB_TYPE_BLOB;
+    } else if (strstr(type, "timestamp") || strstr(type, "date") ||
+               strstr(type, "time")) {
+      col->type = DB_TYPE_TIMESTAMP;
+    } else {
+      col->type = DB_TYPE_TEXT;
     }
 
-    PQclear(res);
-    return schema;
+    schema->num_columns++;
+  }
+
+  PQclear(res);
+
+  /* Get primary key info */
+  sql = "SELECT a.attname FROM pg_index i "
+        "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = "
+        "ANY(i.indkey) "
+        "WHERE i.indrelid = $1::regclass AND i.indisprimary";
+
+  paramValues[0] = table;
+  res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
+
+  if (PQresultStatus(res) == PGRES_TUPLES_OK) {
+    int pk_rows = PQntuples(res);
+    for (int i = 0; i < pk_rows; i++) {
+      char *pk_col = PQgetvalue(res, i, 0);
+      for (size_t j = 0; j < schema->num_columns; j++) {
+        if (str_eq(schema->columns[j].name, pk_col)) {
+          schema->columns[j].primary_key = true;
+          break;
+        }
+      }
+    }
+  }
+
+  PQclear(res);
+  return schema;
 }
 
 static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
-    if (!conn || !sql) {
-        if (err) *err = str_dup("Invalid parameters");
-        return NULL;
-    }
+  if (!conn || !sql) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return NULL;
+  }
 
-    PgData *data = conn->driver_data;
-    if (!data || !data->conn) {
-        if (err) *err = str_dup("Not connected");
-        return NULL;
-    }
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return NULL;
+  }
 
-    PGresult *res = PQexec(data->conn, sql);
-    ExecStatusType status = PQresultStatus(res);
+  PGresult *res = PQexec(data->conn, sql);
+  ExecStatusType status = PQresultStatus(res);
 
-    if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-        if (err) *err = str_dup(PQerrorMessage(data->conn));
-        PQclear(res);
-        return NULL;
-    }
+  if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
+    PQclear(res);
+    return NULL;
+  }
 
-    ResultSet *rs = calloc(1, sizeof(ResultSet));
-    if (!rs) {
-        PQclear(res);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
+  ResultSet *rs = calloc(1, sizeof(ResultSet));
+  if (!rs) {
+    PQclear(res);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
 
-    if (status == PGRES_COMMAND_OK) {
-        /* Non-SELECT statement */
-        PQclear(res);
-        return rs;
-    }
-
-    /* Get column info */
-    int num_fields = PQnfields(res);
-    rs->num_columns = num_fields;
-    rs->columns = calloc(num_fields, sizeof(ColumnDef));
-    if (!rs->columns) {
-        PQclear(res);
-        free(rs);
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    for (int i = 0; i < num_fields; i++) {
-        const char *fname = PQfname(res, i);
-        rs->columns[i].name = fname ? str_dup(fname) : str_dup("?");
-        if (!rs->columns[i].name) {
-            PQclear(res);
-            db_result_free(rs);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-        rs->columns[i].type = pg_oid_to_db_type(PQftype(res, i));
-    }
-
-    /* Get rows */
-    int num_rows = PQntuples(res);
-    if (num_rows > 0) {
-        rs->rows = calloc(num_rows, sizeof(Row));
-        if (!rs->rows) {
-            PQclear(res);
-            db_result_free(rs);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-    }
-
-    for (int r = 0; r < num_rows; r++) {
-        Row *row = &rs->rows[rs->num_rows];
-        row->cells = calloc(num_fields, sizeof(DbValue));
-        row->num_cells = num_fields;
-
-        if (!row->cells) {
-            PQclear(res);
-            db_result_free(rs);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-
-        for (int c = 0; c < num_fields; c++) {
-            row->cells[c] = pg_get_value(res, r, c, PQftype(res, c));
-        }
-
-        rs->num_rows++;
-    }
-
+  if (status == PGRES_COMMAND_OK) {
+    /* Non-SELECT statement */
     PQclear(res);
     return rs;
+  }
+
+  /* Get column info */
+  int num_fields = PQnfields(res);
+  rs->num_columns = num_fields;
+  rs->columns = calloc(num_fields, sizeof(ColumnDef));
+  if (!rs->columns) {
+    PQclear(res);
+    free(rs);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  for (int i = 0; i < num_fields; i++) {
+    const char *fname = PQfname(res, i);
+    rs->columns[i].name = fname ? str_dup(fname) : str_dup("?");
+    if (!rs->columns[i].name) {
+      PQclear(res);
+      db_result_free(rs);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+    rs->columns[i].type = pg_oid_to_db_type(PQftype(res, i));
+  }
+
+  /* Get rows */
+  int num_rows = PQntuples(res);
+  if (num_rows > 0) {
+    rs->rows = calloc(num_rows, sizeof(Row));
+    if (!rs->rows) {
+      PQclear(res);
+      db_result_free(rs);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+  }
+
+  for (int r = 0; r < num_rows; r++) {
+    Row *row = &rs->rows[rs->num_rows];
+    row->cells = calloc(num_fields, sizeof(DbValue));
+    row->num_cells = num_fields;
+
+    if (!row->cells) {
+      PQclear(res);
+      db_result_free(rs);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
+    }
+
+    for (int c = 0; c < num_fields; c++) {
+      row->cells[c] = pg_get_value(res, r, c, PQftype(res, c));
+    }
+
+    rs->num_rows++;
+  }
+
+  PQclear(res);
+  return rs;
 }
 
 static ResultSet *pg_query_page(DbConnection *conn, const char *table,
                                 size_t offset, size_t limit,
                                 const char *order_by, bool desc, char **err) {
-    if (!conn || !table) {
-        if (err) *err = str_dup("Invalid parameters");
-        return NULL;
+  if (!conn || !table) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return NULL;
+  }
+
+  /* Escape identifiers to prevent SQL injection */
+  char *escaped_table = str_escape_identifier_dquote(table);
+  if (!escaped_table) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
+
+  /* Build query */
+  char *sql;
+  if (order_by) {
+    char *escaped_order = str_escape_identifier_dquote(order_by);
+    if (!escaped_order) {
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return NULL;
     }
+    sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
+                     escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
+                     offset);
+    free(escaped_order);
+  } else {
+    sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table,
+                     limit, offset);
+  }
+  free(escaped_table);
 
-    /* Escape identifiers to prevent SQL injection */
-    char *escaped_table = str_escape_identifier_dquote(table);
-    if (!escaped_table) {
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
+  if (!sql) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return NULL;
+  }
 
-    /* Build query */
-    char *sql;
-    if (order_by) {
-        char *escaped_order = str_escape_identifier_dquote(order_by);
-        if (!escaped_order) {
-            free(escaped_table);
-            if (err) *err = str_dup("Memory allocation failed");
-            return NULL;
-        }
-        sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                         escaped_table, escaped_order, desc ? "DESC" : "ASC", limit, offset);
-        free(escaped_order);
-    } else {
-        sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table, limit, offset);
-    }
-    free(escaped_table);
+  ResultSet *rs = pg_query(conn, sql, err);
+  free(sql);
 
-    if (!sql) {
-        if (err) *err = str_dup("Memory allocation failed");
-        return NULL;
-    }
-
-    ResultSet *rs = pg_query(conn, sql, err);
-    free(sql);
-
-    return rs;
+  return rs;
 }
 
-static void pg_free_result(ResultSet *rs) {
-    db_result_free(rs);
-}
+static void pg_free_result(ResultSet *rs) { db_result_free(rs); }
 
-static void pg_free_schema(TableSchema *schema) {
-    db_schema_free(schema);
-}
+static void pg_free_schema(TableSchema *schema) { db_schema_free(schema); }
 
 static void pg_free_string_list(char **list, size_t count) {
-    if (!list) return;
-    for (size_t i = 0; i < count; i++) {
-        free(list[i]);
-    }
-    free(list);
+  if (!list)
+    return;
+  for (size_t i = 0; i < count; i++) {
+    free(list[i]);
+  }
+  free(list);
 }

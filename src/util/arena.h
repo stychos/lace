@@ -6,24 +6,24 @@
 #ifndef LACE_ARENA_H
 #define LACE_ARENA_H
 
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 /* Arena block */
 typedef struct ArenaBlock {
-    struct ArenaBlock *next;
-    size_t             size;
-    size_t             used;
-    char               data[];
+  struct ArenaBlock *next;
+  size_t size;
+  size_t used;
+  char data[];
 } ArenaBlock;
 
 /* Arena allocator */
 typedef struct {
-    ArenaBlock *first;
-    ArenaBlock *current;
-    size_t      block_size;
-    size_t      total_allocated;
-    size_t      total_used;
+  ArenaBlock *first;
+  ArenaBlock *current;
+  size_t block_size;
+  size_t total_allocated;
+  size_t total_used;
 } Arena;
 
 /* Create a new arena with specified block size */
@@ -59,9 +59,9 @@ size_t arena_total_used(Arena *arena);
 
 /* Temporary arena scope (for nested allocations that can be freed together) */
 typedef struct {
-    Arena      *arena;
-    ArenaBlock *saved_block;
-    size_t      saved_used;
+  Arena *arena;
+  ArenaBlock *saved_block;
+  size_t saved_used;
 } ArenaScope;
 
 ArenaScope arena_scope_begin(Arena *arena);

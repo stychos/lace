@@ -6,16 +6,16 @@
 #ifndef LACE_BUFFER_H
 #define LACE_BUFFER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 /* Dynamic byte buffer */
 typedef struct {
-    uint8_t    *data;
-    size_t      len;        /* Current data length */
-    size_t      cap;        /* Allocated capacity */
-    size_t      pos;        /* Read position */
+  uint8_t *data;
+  size_t len; /* Current data length */
+  size_t cap; /* Allocated capacity */
+  size_t pos; /* Read position */
 } Buffer;
 
 /* Buffer lifecycle */
@@ -48,7 +48,7 @@ bool buf_write_i64_le(Buffer *buf, int64_t val);
 bool buf_write_bytes(Buffer *buf, const uint8_t *data, size_t len);
 bool buf_write_str(Buffer *buf, const char *str);
 bool buf_write_str_len(Buffer *buf, const char *str, size_t len);
-bool buf_write_cstr(Buffer *buf, const char *str);  /* With null terminator */
+bool buf_write_cstr(Buffer *buf, const char *str); /* With null terminator */
 bool buf_write_zeros(Buffer *buf, size_t count);
 
 /* Reading - from current position */
@@ -67,8 +67,8 @@ bool buf_read_i32_le(Buffer *buf, int32_t *val);
 bool buf_read_i64_be(Buffer *buf, int64_t *val);
 bool buf_read_i64_le(Buffer *buf, int64_t *val);
 bool buf_read_bytes(Buffer *buf, uint8_t *out, size_t len);
-char *buf_read_str(Buffer *buf, size_t len);          /* Returns allocated string */
-char *buf_read_cstr(Buffer *buf);                     /* Read null-terminated string */
+char *buf_read_str(Buffer *buf, size_t len); /* Returns allocated string */
+char *buf_read_cstr(Buffer *buf);            /* Read null-terminated string */
 bool buf_skip(Buffer *buf, size_t count);
 
 /* Peeking - read without advancing position */
@@ -81,12 +81,12 @@ size_t buf_remaining(const Buffer *buf);
 size_t buf_tell(const Buffer *buf);
 bool buf_seek(Buffer *buf, size_t pos);
 bool buf_rewind(Buffer *buf);
-const uint8_t *buf_ptr(const Buffer *buf);      /* Pointer to current position */
-const uint8_t *buf_data(const Buffer *buf);     /* Pointer to start */
+const uint8_t *buf_ptr(const Buffer *buf);  /* Pointer to current position */
+const uint8_t *buf_data(const Buffer *buf); /* Pointer to start */
 
 /* Utility */
-void buf_compact(Buffer *buf);                   /* Remove read data */
-Buffer *buf_slice(Buffer *buf, size_t len);      /* Extract a slice as new buffer */
+void buf_compact(Buffer *buf);              /* Remove read data */
+Buffer *buf_slice(Buffer *buf, size_t len); /* Extract a slice as new buffer */
 
 /* Debug */
 void buf_dump(Buffer *buf, const char *label);
