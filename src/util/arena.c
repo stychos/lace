@@ -122,6 +122,10 @@ void *arena_alloc(Arena *arena, size_t size) {
 }
 
 void *arena_calloc(Arena *arena, size_t count, size_t size) {
+    /* Check for multiplication overflow */
+    if (count != 0 && size > SIZE_MAX / count) {
+        return NULL;
+    }
     size_t total = count * size;
     void *ptr = arena_alloc(arena, total);
     if (ptr) {
