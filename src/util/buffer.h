@@ -72,17 +72,17 @@ char *buf_read_cstr(Buffer *buf);                     /* Read null-terminated st
 bool buf_skip(Buffer *buf, size_t count);
 
 /* Peeking - read without advancing position */
-bool buf_peek_u8(Buffer *buf, uint8_t *val);
-bool buf_peek_u16_be(Buffer *buf, uint16_t *val);
-bool buf_peek_u32_be(Buffer *buf, uint32_t *val);
+bool buf_peek_u8(const Buffer *buf, uint8_t *val);
+bool buf_peek_u16_be(const Buffer *buf, uint16_t *val);
+bool buf_peek_u32_be(const Buffer *buf, uint32_t *val);
 
 /* Position management */
-size_t buf_remaining(Buffer *buf);
-size_t buf_tell(Buffer *buf);
+size_t buf_remaining(const Buffer *buf);
+size_t buf_tell(const Buffer *buf);
 bool buf_seek(Buffer *buf, size_t pos);
 bool buf_rewind(Buffer *buf);
-const uint8_t *buf_ptr(Buffer *buf);            /* Pointer to current position */
-const uint8_t *buf_data(Buffer *buf);           /* Pointer to start */
+const uint8_t *buf_ptr(const Buffer *buf);      /* Pointer to current position */
+const uint8_t *buf_data(const Buffer *buf);     /* Pointer to start */
 
 /* Utility */
 void buf_compact(Buffer *buf);                   /* Remove read data */

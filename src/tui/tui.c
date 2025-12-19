@@ -707,6 +707,18 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     /* Calculate column widths */
     tui_calculate_column_widths(state);
 
+    /* Update current workspace's pointers to prevent dangling references */
+    if (state->num_workspaces > 0 && state->current_workspace < state->num_workspaces) {
+        Workspace *ws = &state->workspaces[state->current_workspace];
+        ws->data = state->data;
+        ws->schema = state->schema;
+        ws->col_widths = state->col_widths;
+        ws->num_col_widths = state->num_col_widths;
+        ws->total_rows = state->total_rows;
+        ws->loaded_offset = state->loaded_offset;
+        ws->loaded_count = state->loaded_count;
+    }
+
     /* Clear any previous status message so column info is shown */
     free(state->status_msg);
     state->status_msg = NULL;
@@ -736,6 +748,13 @@ static bool tui_load_more_rows(TuiState *state) {
     /* Extend existing rows array */
     size_t old_count = state->data->num_rows;
     size_t new_count = old_count + more->num_rows;
+
+    /* Check for overflow */
+    if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row)) {
+        db_result_free(more);
+        return false;
+    }
+
     Row *new_rows = realloc(state->data->rows, new_count * sizeof(Row));
     if (!new_rows) {
         db_result_free(more);
@@ -807,9 +826,17 @@ static bool tui_load_rows_at(TuiState *state, size_t offset) {
         }
     }
 
-    tui_calculate_column_widths(state);
-    tui_set_status(state, "Rows %zu-%zu of %zu", offset + 1,
-                   offset + state->loaded_count, state->total_rows);
+    /* Update current workspace's pointers to prevent dangling references */
+    if (state->num_workspaces > 0 && state->current_workspace < state->num_workspaces) {
+        Workspace *ws = &state->workspaces[state->current_workspace];
+        ws->data = state->data;
+        ws->col_widths = state->col_widths;
+        ws->num_col_widths = state->num_col_widths;
+        ws->total_rows = state->total_rows;
+        ws->loaded_offset = state->loaded_offset;
+        ws->loaded_count = state->loaded_count;
+    }
+
     return true;
 }
 
@@ -937,6 +964,13 @@ static bool tui_load_prev_rows(TuiState *state) {
     /* Prepend rows to existing data */
     size_t old_count = state->data->num_rows;
     size_t new_count = old_count + more->num_rows;
+
+    /* Check for overflow */
+    if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row)) {
+        db_result_free(more);
+        return false;
+    }
+
     Row *new_rows = malloc(new_count * sizeof(Row));
     if (!new_rows) {
         db_result_free(more);
@@ -1224,6 +1258,11 @@ void tui_draw_table(TuiState *state) {
     y++;
 
     /* Draw data rows */
+    if (!state->data->rows) {
+        wrefresh(state->main_win);
+        return;
+    }
+
     for (size_t row = state->scroll_row;
          row < state->data->num_rows && y < win_rows;
          row++) {
@@ -1820,11 +1859,20 @@ void tui_show_schema(TuiState *state) {
             for (size_t i = 0; i < state->schema->num_indexes; i++) {
                 IndexDef *idx = &state->schema->indexes[i];
                 if (line >= scroll_offset && y < height - 2) {
-                    /* Build column list string */
+                    /* Build column list string safely */
                     char cols[256] = "";
-                    for (size_t j = 0; j < idx->num_columns && strlen(cols) < 200; j++) {
-                        if (j > 0) strcat(cols, ", ");
-                        strncat(cols, idx->columns[j], 200 - strlen(cols));
+                    size_t pos = 0;
+                    for (size_t j = 0; j < idx->num_columns && pos < sizeof(cols) - 1; j++) {
+                        int written;
+                        if (j > 0) {
+                            written = snprintf(cols + pos, sizeof(cols) - pos, ", %s",
+                                              idx->columns[j] ? idx->columns[j] : "");
+                        } else {
+                            written = snprintf(cols + pos, sizeof(cols) - pos, "%s",
+                                              idx->columns[j] ? idx->columns[j] : "");
+                        }
+                        if (written > 0) pos += written;
+                        if (pos >= sizeof(cols) - 1) break;
                     }
                     mvwprintw(schema_win, y++, 4, "%s%-20s %s(%s)",
                               idx->unique ? "[U] " : "    ",
@@ -1848,16 +1896,34 @@ void tui_show_schema(TuiState *state) {
             for (size_t i = 0; i < state->schema->num_foreign_keys; i++) {
                 ForeignKeyDef *fk = &state->schema->foreign_keys[i];
                 if (line >= scroll_offset && y < height - 2) {
-                    /* Build column lists */
+                    /* Build column lists safely */
                     char src_cols[128] = "";
-                    for (size_t j = 0; j < fk->num_columns && strlen(src_cols) < 100; j++) {
-                        if (j > 0) strcat(src_cols, ", ");
-                        strncat(src_cols, fk->columns[j], 100 - strlen(src_cols));
+                    size_t pos = 0;
+                    for (size_t j = 0; j < fk->num_columns && pos < sizeof(src_cols) - 1; j++) {
+                        int written;
+                        if (j > 0) {
+                            written = snprintf(src_cols + pos, sizeof(src_cols) - pos, ", %s",
+                                              fk->columns[j] ? fk->columns[j] : "");
+                        } else {
+                            written = snprintf(src_cols + pos, sizeof(src_cols) - pos, "%s",
+                                              fk->columns[j] ? fk->columns[j] : "");
+                        }
+                        if (written > 0) pos += written;
+                        if (pos >= sizeof(src_cols) - 1) break;
                     }
                     char ref_cols[128] = "";
-                    for (size_t j = 0; j < fk->num_ref_columns && strlen(ref_cols) < 100; j++) {
-                        if (j > 0) strcat(ref_cols, ", ");
-                        strncat(ref_cols, fk->ref_columns[j], 100 - strlen(ref_cols));
+                    pos = 0;
+                    for (size_t j = 0; j < fk->num_ref_columns && pos < sizeof(ref_cols) - 1; j++) {
+                        int written;
+                        if (j > 0) {
+                            written = snprintf(ref_cols + pos, sizeof(ref_cols) - pos, ", %s",
+                                              fk->ref_columns[j] ? fk->ref_columns[j] : "");
+                        } else {
+                            written = snprintf(ref_cols + pos, sizeof(ref_cols) - pos, "%s",
+                                              fk->ref_columns[j] ? fk->ref_columns[j] : "");
+                        }
+                        if (written > 0) pos += written;
+                        if (pos >= sizeof(ref_cols) - 1) break;
                     }
                     mvwprintw(schema_win, y++, 4, "(%s) -> %s(%s)",
                               src_cols,
@@ -1986,16 +2052,17 @@ static size_t get_sidebar_highlight_for_table(TuiState *state, size_t table_idx)
     return 0;  /* Table not in filtered list, default to first */
 }
 
-/* Find primary key column index (returns -1 if not found) */
-static int find_pk_column(TuiState *state) {
-    if (!state || !state->schema) return -1;
+/* Find all primary key column indices and their count */
+static size_t find_pk_columns(TuiState *state, size_t *pk_indices, size_t max_pks) {
+    if (!state || !state->schema || !pk_indices || max_pks == 0) return 0;
 
-    for (size_t i = 0; i < state->schema->num_columns; i++) {
+    size_t count = 0;
+    for (size_t i = 0; i < state->schema->num_columns && count < max_pks; i++) {
         if (state->schema->columns[i].primary_key) {
-            return (int)i;
+            pk_indices[count++] = i;
         }
     }
-    return -1;
+    return count;
 }
 
 /* Start editing the current cell - uses modal for truncated content */
@@ -2108,9 +2175,10 @@ static void tui_set_cell_direct(TuiState *state, bool set_null) {
     if (state->cursor_row >= state->data->num_rows) return;
     if (state->cursor_col >= state->data->num_columns) return;
 
-    /* Find primary key column */
-    int pk_col = find_pk_column(state);
-    if (pk_col < 0) {
+    /* Find all primary key columns */
+    size_t pk_indices[16];  /* Support up to 16 PK columns */
+    size_t num_pk = find_pk_columns(state, pk_indices, 16);
+    if (num_pk == 0) {
         tui_set_error(state, "Cannot update: no primary key found");
         return;
     }
@@ -2118,9 +2186,30 @@ static void tui_set_cell_direct(TuiState *state, bool set_null) {
     /* Get the current table name */
     const char *table = state->tables[state->current_table];
 
-    /* Get primary key column name and value */
-    const char *pk_col_name = state->data->columns[pk_col].name;
-    DbValue *pk_val = &state->data->rows[state->cursor_row].cells[pk_col];
+    /* Verify all PK indices are within data bounds */
+    for (size_t i = 0; i < num_pk; i++) {
+        if (pk_indices[i] >= state->data->num_columns ||
+            pk_indices[i] >= state->data->rows[state->cursor_row].num_cells) {
+            tui_set_error(state, "Primary key column index out of bounds");
+            return;
+        }
+    }
+
+    /* Build arrays of primary key column names and values */
+    const char **pk_col_names = malloc(sizeof(char *) * num_pk);
+    DbValue *pk_vals = malloc(sizeof(DbValue) * num_pk);
+    if (!pk_col_names || !pk_vals) {
+        free(pk_col_names);
+        free(pk_vals);
+        tui_set_error(state, "Memory allocation failed");
+        return;
+    }
+
+    for (size_t i = 0; i < num_pk; i++) {
+        pk_col_names[i] = state->data->columns[pk_indices[i]].name;
+        /* Deep copy the value to avoid issues with shared pointers */
+        pk_vals[i] = db_value_copy(&state->data->rows[state->cursor_row].cells[pk_indices[i]]);
+    }
 
     /* Get the column being edited */
     const char *col_name = state->data->columns[state->cursor_col].name;
@@ -2135,8 +2224,14 @@ static void tui_set_cell_direct(TuiState *state, bool set_null) {
 
     /* Attempt to update */
     char *err = NULL;
-    bool success = db_update_cell(state->conn, table, pk_col_name, pk_val,
+    bool success = db_update_cell(state->conn, table, pk_col_names, pk_vals, num_pk,
                                    col_name, &new_val, &err);
+
+    free(pk_col_names);
+    for (size_t i = 0; i < num_pk; i++) {
+        db_value_free(&pk_vals[i]);
+    }
+    free(pk_vals);
 
     if (success) {
         /* Update the local data */
@@ -2156,19 +2251,41 @@ static void tui_delete_row(TuiState *state) {
     if (!state || !state->data || !state->conn) return;
     if (state->cursor_row >= state->data->num_rows) return;
 
-    /* Find primary key column */
-    int pk_col = find_pk_column(state);
-    if (pk_col < 0) {
+    /* Find all primary key columns */
+    size_t pk_indices[16];  /* Support up to 16 PK columns */
+    size_t num_pk = find_pk_columns(state, pk_indices, 16);
+    if (num_pk == 0) {
         tui_set_error(state, "Cannot delete: no primary key found");
         return;
+    }
+
+    /* Verify all PK indices are within data bounds */
+    for (size_t i = 0; i < num_pk; i++) {
+        if (pk_indices[i] >= state->data->num_columns ||
+            pk_indices[i] >= state->data->rows[state->cursor_row].num_cells) {
+            tui_set_error(state, "Primary key column index out of bounds");
+            return;
+        }
     }
 
     /* Get the current table name */
     const char *table = state->tables[state->current_table];
 
-    /* Get primary key column name and value */
-    const char *pk_col_name = state->data->columns[pk_col].name;
-    DbValue *pk_val = &state->data->rows[state->cursor_row].cells[pk_col];
+    /* Build arrays of primary key column names and values */
+    const char **pk_col_names = malloc(sizeof(char *) * num_pk);
+    DbValue *pk_vals = malloc(sizeof(DbValue) * num_pk);
+    if (!pk_col_names || !pk_vals) {
+        free(pk_col_names);
+        free(pk_vals);
+        tui_set_error(state, "Memory allocation failed");
+        return;
+    }
+
+    for (size_t i = 0; i < num_pk; i++) {
+        pk_col_names[i] = state->data->columns[pk_indices[i]].name;
+        /* Deep copy the value to avoid issues with shared pointers */
+        pk_vals[i] = db_value_copy(&state->data->rows[state->cursor_row].cells[pk_indices[i]]);
+    }
 
     /* Highlight the row being deleted with danger background */
     int win_rows, win_cols;
@@ -2179,13 +2296,14 @@ static void tui_delete_row(TuiState *state) {
     int row_y = 3 + (int)(state->cursor_row - state->scroll_row);
 
     /* Draw the entire row with danger background */
+    Row *del_row = &state->data->rows[state->cursor_row];
     wattron(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
     int x = 1;
-    for (size_t col = state->scroll_col; col < state->data->num_columns; col++) {
+    for (size_t col = state->scroll_col; col < state->data->num_columns && col < del_row->num_cells; col++) {
         int col_width = tui_get_column_width(state, col);
         if (x + col_width + 3 > win_cols) break;
 
-        DbValue *val = &state->data->rows[state->cursor_row].cells[col];
+        DbValue *val = &del_row->cells[col];
         if (val->is_null) {
             mvwprintw(state->main_win, row_y, x, "%-*s", col_width, "NULL");
         } else {
@@ -2229,6 +2347,11 @@ static void tui_delete_row(TuiState *state) {
 
     if (ch != 'y' && ch != 'Y' && ch != '\n' && ch != KEY_ENTER) {
         tui_set_status(state, "Delete cancelled");
+        free(pk_col_names);
+        for (size_t i = 0; i < num_pk; i++) {
+            db_value_free(&pk_vals[i]);
+        }
+        free(pk_vals);
         return;
     }
 
@@ -2242,7 +2365,13 @@ static void tui_delete_row(TuiState *state) {
 
     /* Perform the delete */
     char *err = NULL;
-    bool success = db_delete_row(state->conn, table, pk_col_name, pk_val, &err);
+    bool success = db_delete_row(state->conn, table, pk_col_names, pk_vals, num_pk, &err);
+
+    free(pk_col_names);
+    for (size_t i = 0; i < num_pk; i++) {
+        db_value_free(&pk_vals[i]);
+    }
+    free(pk_vals);
 
     if (success) {
         tui_set_status(state, "Row deleted");
@@ -2292,20 +2421,44 @@ static void tui_confirm_edit(TuiState *state) {
         return;
     }
 
-    /* Find primary key column */
-    int pk_col = find_pk_column(state);
-    if (pk_col < 0) {
+    /* Find all primary key columns */
+    size_t pk_indices[16];  /* Support up to 16 PK columns */
+    size_t num_pk = find_pk_columns(state, pk_indices, 16);
+    if (num_pk == 0) {
         tui_set_error(state, "Cannot update: no primary key found");
         tui_cancel_edit(state);
         return;
     }
 
+    /* Verify all PK indices are within data bounds */
+    for (size_t i = 0; i < num_pk; i++) {
+        if (pk_indices[i] >= state->data->num_columns ||
+            pk_indices[i] >= state->data->rows[state->cursor_row].num_cells) {
+            tui_set_error(state, "Primary key column index out of bounds");
+            tui_cancel_edit(state);
+            return;
+        }
+    }
+
     /* Get the current table name */
     const char *table = state->tables[state->current_table];
 
-    /* Get primary key column name and value */
-    const char *pk_col_name = state->data->columns[pk_col].name;
-    DbValue *pk_val = &state->data->rows[state->cursor_row].cells[pk_col];
+    /* Build arrays of primary key column names and values */
+    const char **pk_col_names = malloc(sizeof(char *) * num_pk);
+    DbValue *pk_vals = malloc(sizeof(DbValue) * num_pk);
+    if (!pk_col_names || !pk_vals) {
+        free(pk_col_names);
+        free(pk_vals);
+        tui_set_error(state, "Memory allocation failed");
+        tui_cancel_edit(state);
+        return;
+    }
+
+    for (size_t i = 0; i < num_pk; i++) {
+        pk_col_names[i] = state->data->columns[pk_indices[i]].name;
+        /* Deep copy the value to avoid issues with shared pointers */
+        pk_vals[i] = db_value_copy(&state->data->rows[state->cursor_row].cells[pk_indices[i]]);
+    }
 
     /* Get the column being edited */
     const char *col_name = state->data->columns[state->cursor_col].name;
@@ -2321,8 +2474,14 @@ static void tui_confirm_edit(TuiState *state) {
 
     /* Attempt to update */
     char *err = NULL;
-    bool success = db_update_cell(state->conn, table, pk_col_name, pk_val,
+    bool success = db_update_cell(state->conn, table, pk_col_names, pk_vals, num_pk,
                                    col_name, &new_val, &err);
+
+    free(pk_col_names);
+    for (size_t i = 0; i < num_pk; i++) {
+        db_value_free(&pk_vals[i]);
+    }
+    free(pk_vals);
 
     if (success) {
         /* Update the local data */

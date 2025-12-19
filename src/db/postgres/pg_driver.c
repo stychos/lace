@@ -10,7 +10,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <limits.h>
 #include <libpq-fe.h>
+
+/* Helper to safely cast size_t to int for libpq paramLengths */
+static inline int safe_size_to_int(size_t sz) {
+    return (sz > INT_MAX) ? INT_MAX : (int)sz;
+}
 
 /* PostgreSQL connection data */
 typedef struct {
@@ -32,12 +38,13 @@ static ResultSet *pg_query_page(DbConnection *conn, const char *table,
                                 size_t offset, size_t limit,
                                 const char *order_by, bool desc, char **err);
 static bool pg_update_cell(DbConnection *conn, const char *table,
-                           const char *pk_col, const DbValue *pk_val,
+                           const char **pk_cols, const DbValue *pk_vals,
+                           size_t num_pk_cols,
                            const char *col, const DbValue *new_val,
                            char **err);
 static bool pg_delete_row(DbConnection *conn, const char *table,
-                          const char *pk_col, const DbValue *pk_val,
-                          char **err);
+                          const char **pk_cols, const DbValue *pk_vals,
+                          size_t num_pk_cols, char **err);
 static void pg_free_result(ResultSet *rs);
 static void pg_free_schema(TableSchema *schema);
 static void pg_free_string_list(char **list, size_t count);
@@ -101,7 +108,8 @@ static DbValueType pg_oid_to_db_type(Oid oid) {
 
 /* Get DbValue from PGresult */
 static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
-    DbValue val = {0};
+    DbValue val;
+    memset(&val, 0, sizeof(val));
 
     if (PQgetisnull(res, row, col)) {
         val.type = DB_TYPE_NULL;
@@ -131,39 +139,74 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
             break;
 
         case DB_TYPE_BLOB:
-            val.type = DB_TYPE_BLOB;
             /* PostgreSQL bytea in text format needs unescaping */
             if (len >= 2 && value[0] == '\\' && value[1] == 'x') {
-                /* Hex format: \xDEADBEEF */
-                size_t hex_len = (len - 2) / 2;
+                /* Hex format: \xDEADBEEF - must have even number of hex digits */
+                size_t hex_chars = len - 2;
+                if (hex_chars % 2 != 0) {
+                    /* Odd number of hex digits - malformed, treat as raw */
+                    val.blob.data = malloc(len);
+                    if (val.blob.data) {
+                        val.type = DB_TYPE_BLOB;
+                        memcpy(val.blob.data, value, len);
+                        val.blob.len = len;
+                    } else {
+                        val.type = DB_TYPE_NULL;
+                        val.is_null = true;
+                    }
+                    break;
+                }
+                size_t hex_len = hex_chars / 2;
+                if (hex_len == 0) {
+                    /* Empty blob \x */
+                    val.type = DB_TYPE_BLOB;
+                    val.blob.data = NULL;
+                    val.blob.len = 0;
+                    break;
+                }
                 val.blob.data = malloc(hex_len);
                 if (val.blob.data) {
+                    val.type = DB_TYPE_BLOB;
                     val.blob.len = hex_len;
                     for (size_t i = 0; i < hex_len; i++) {
-                        unsigned int byte;
-                        sscanf(value + 2 + i * 2, "%2x", &byte);
+                        unsigned int byte = 0;
+                        if (sscanf(value + 2 + i * 2, "%2x", &byte) != 1) {
+                            /* Invalid hex - treat rest as zero */
+                            byte = 0;
+                        }
                         val.blob.data[i] = (uint8_t)byte;
                     }
+                } else {
+                    /* Malloc failed - mark as null */
+                    val.type = DB_TYPE_NULL;
+                    val.is_null = true;
                 }
             } else {
                 /* Escape format or raw */
                 val.blob.data = malloc(len);
                 if (val.blob.data) {
+                    val.type = DB_TYPE_BLOB;
                     memcpy(val.blob.data, value, len);
                     val.blob.len = len;
+                } else {
+                    /* Malloc failed - mark as null */
+                    val.type = DB_TYPE_NULL;
+                    val.is_null = true;
                 }
             }
             break;
 
         default:
-            val.type = DB_TYPE_TEXT;
-            val.text.len = len;
             val.text.data = malloc(len + 1);
             if (val.text.data) {
+                val.type = DB_TYPE_TEXT;
+                val.text.len = len;
                 memcpy(val.text.data, value, len);
                 val.text.data[len] = '\0';
             } else {
-                val.text.len = 0;
+                /* Malloc failed - mark as null */
+                val.type = DB_TYPE_NULL;
+                val.is_null = true;
             }
             break;
     }
@@ -206,7 +249,7 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
     }
 
     PGconn *pgconn = PQconnectdb(pq_connstr);
-    free(pq_connstr);
+    str_secure_free(pq_connstr);  /* Securely clear password from memory */
 
     if (PQstatus(pgconn) != CONNECTION_OK) {
         if (err) *err = str_printf("Connection failed: %s", PQerrorMessage(pgconn));
@@ -228,6 +271,13 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
 
     data->conn = pgconn;
     data->database = str_dup(database);
+    if (!data->database) {
+        PQfinish(pgconn);
+        free(data);
+        connstr_free(cs);
+        if (err) *err = str_dup("Memory allocation failed");
+        return NULL;
+    }
 
     DbConnection *conn = calloc(1, sizeof(DbConnection));
     if (!conn) {
@@ -245,6 +295,22 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
     conn->host = str_dup(host);
     conn->port = port;
     conn->user = str_dup(user);
+
+    /* Check all allocations succeeded */
+    if (!conn->connstr || !conn->database || !conn->host || !conn->user) {
+        PQfinish(pgconn);
+        free(data->database);
+        free(data);
+        free(conn->connstr);
+        free(conn->database);
+        free(conn->host);
+        free(conn->user);
+        free(conn);
+        connstr_free(cs);
+        if (err) *err = str_dup("Memory allocation failed");
+        return NULL;
+    }
+
     conn->status = CONN_STATUS_CONNECTED;
     conn->driver_data = data;
 
@@ -324,10 +390,11 @@ static int64_t pg_exec(DbConnection *conn, const char *sql, char **err) {
 }
 
 static bool pg_update_cell(DbConnection *conn, const char *table,
-                           const char *pk_col, const DbValue *pk_val,
+                           const char **pk_cols, const DbValue *pk_vals,
+                           size_t num_pk_cols,
                            const char *col, const DbValue *new_val,
                            char **err) {
-    if (!conn || !table || !pk_col || !pk_val || !col || !new_val) {
+    if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0 || !col || !new_val) {
         if (err) *err = str_dup("Invalid parameters");
         return false;
     }
@@ -338,21 +405,77 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
         return false;
     }
 
+    /* Escape identifiers to prevent SQL injection */
+    char *escaped_table = str_escape_identifier_dquote(table);
+    char *escaped_col = str_escape_identifier_dquote(col);
+    if (!escaped_table || !escaped_col) {
+        free(escaped_table);
+        free(escaped_col);
+        if (err) *err = str_dup("Memory allocation failed");
+        return false;
+    }
+
+    /* Build WHERE clause for composite primary key */
+    char *where_clause = str_dup("");
+    for (size_t i = 0; i < num_pk_cols; i++) {
+        char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
+        if (!escaped_pk || !where_clause) {
+            free(escaped_pk);
+            free(where_clause);
+            free(escaped_table);
+            free(escaped_col);
+            if (err) *err = str_dup("Memory allocation failed");
+            return false;
+        }
+        char *new_where;
+        if (i == 0) {
+            new_where = str_printf("%s = $%zu", escaped_pk, i + 2);
+        } else {
+            new_where = str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 2);
+        }
+        free(escaped_pk);
+        free(where_clause);
+        where_clause = new_where;
+        if (!where_clause) {
+            free(escaped_table);
+            free(escaped_col);
+            if (err) *err = str_dup("Memory allocation failed");
+            return false;
+        }
+    }
+
     /* Build parameterized UPDATE statement */
-    char *sql = str_printf("UPDATE \"%s\" SET \"%s\" = $1 WHERE \"%s\" = $2", table, col, pk_col);
+    char *sql = str_printf("UPDATE %s SET %s = $1 WHERE %s",
+                           escaped_table, escaped_col, where_clause);
+    free(escaped_table);
+    free(escaped_col);
+    free(where_clause);
+
     if (!sql) {
         if (err) *err = str_dup("Memory allocation failed");
         return false;
     }
 
-    /* Prepare parameter values */
-    const char *paramValues[2];
-    int paramLengths[2];
-    int paramFormats[2] = {0, 0};  /* Text format */
-    char new_buf[64], pk_buf[64];
-    char *new_str = NULL, *pk_str = NULL;
+    /* Prepare parameter values: 1 new value + N pk values */
+    size_t num_params = 1 + num_pk_cols;
+    const char **paramValues = malloc(sizeof(char *) * num_params);
+    int *paramLengths = malloc(sizeof(int) * num_params);
+    int *paramFormats = calloc(num_params, sizeof(int));  /* All text format (0) */
+    char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
+    char *new_str = NULL;
+
+    if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
+        free(paramValues);
+        free(paramLengths);
+        free(paramFormats);
+        free(pk_bufs);
+        free(sql);
+        if (err) *err = str_dup("Memory allocation failed");
+        return false;
+    }
 
     /* Parameter 1: new value */
+    char new_buf[64];
     if (new_val->is_null) {
         paramValues[0] = NULL;
         paramLengths[0] = 0;
@@ -361,58 +484,64 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
             case DB_TYPE_INT:
                 snprintf(new_buf, sizeof(new_buf), "%lld", (long long)new_val->int_val);
                 paramValues[0] = new_buf;
-                paramLengths[0] = strlen(new_buf);
+                paramLengths[0] = safe_size_to_int(strlen(new_buf));
                 break;
             case DB_TYPE_FLOAT:
                 snprintf(new_buf, sizeof(new_buf), "%g", new_val->float_val);
                 paramValues[0] = new_buf;
-                paramLengths[0] = strlen(new_buf);
+                paramLengths[0] = safe_size_to_int(strlen(new_buf));
                 break;
             case DB_TYPE_BOOL:
                 paramValues[0] = new_val->bool_val ? "t" : "f";
                 paramLengths[0] = 1;
                 break;
             case DB_TYPE_BLOB:
-                /* For blob, we'd need binary format - skip for now */
                 new_str = str_dup("\\x");
                 paramValues[0] = new_str;
-                paramLengths[0] = strlen(new_str);
+                paramLengths[0] = new_str ? safe_size_to_int(strlen(new_str)) : 0;
                 break;
             default:
                 paramValues[0] = new_val->text.data;
-                paramLengths[0] = new_val->text.len;
+                paramLengths[0] = safe_size_to_int(new_val->text.len);
                 break;
         }
     }
 
-    /* Parameter 2: primary key value */
-    if (pk_val->is_null) {
-        paramValues[1] = NULL;
-        paramLengths[1] = 0;
-    } else {
-        switch (pk_val->type) {
-            case DB_TYPE_INT:
-                snprintf(pk_buf, sizeof(pk_buf), "%lld", (long long)pk_val->int_val);
-                paramValues[1] = pk_buf;
-                paramLengths[1] = strlen(pk_buf);
-                break;
-            case DB_TYPE_FLOAT:
-                snprintf(pk_buf, sizeof(pk_buf), "%g", pk_val->float_val);
-                paramValues[1] = pk_buf;
-                paramLengths[1] = strlen(pk_buf);
-                break;
-            default:
-                paramValues[1] = pk_val->text.data;
-                paramLengths[1] = pk_val->text.len;
-                break;
+    /* Parameters 2..N+1: primary key values */
+    for (size_t i = 0; i < num_pk_cols; i++) {
+        const DbValue *pk_val = &pk_vals[i];
+        if (pk_val->is_null) {
+            paramValues[i + 1] = NULL;
+            paramLengths[i + 1] = 0;
+        } else {
+            switch (pk_val->type) {
+                case DB_TYPE_INT:
+                    pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
+                    paramValues[i + 1] = pk_bufs[i];
+                    paramLengths[i + 1] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+                    break;
+                case DB_TYPE_FLOAT:
+                    pk_bufs[i] = str_printf("%g", pk_val->float_val);
+                    paramValues[i + 1] = pk_bufs[i];
+                    paramLengths[i + 1] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+                    break;
+                default:
+                    paramValues[i + 1] = pk_val->text.data;
+                    paramLengths[i + 1] = safe_size_to_int(pk_val->text.len);
+                    break;
+            }
         }
     }
 
-    PGresult *res = PQexecParams(data->conn, sql, 2, NULL,
+    PGresult *res = PQexecParams(data->conn, sql, safe_size_to_int(num_params), NULL,
                                   paramValues, paramLengths, paramFormats, 0);
     free(sql);
     free(new_str);
-    free(pk_str);
+    for (size_t i = 0; i < num_pk_cols; i++) free(pk_bufs[i]);
+    free(pk_bufs);
+    free(paramValues);
+    free(paramLengths);
+    free(paramFormats);
 
     ExecStatusType status = PQresultStatus(res);
     if (status != PGRES_COMMAND_OK) {
@@ -426,9 +555,9 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
 }
 
 static bool pg_delete_row(DbConnection *conn, const char *table,
-                          const char *pk_col, const DbValue *pk_val,
-                          char **err) {
-    if (!conn || !table || !pk_col || !pk_val) {
+                          const char **pk_cols, const DbValue *pk_vals,
+                          size_t num_pk_cols, char **err) {
+    if (!conn || !table || !pk_cols || !pk_vals || num_pk_cols == 0) {
         if (err) *err = str_dup("Invalid parameters");
         return false;
     }
@@ -439,45 +568,100 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
         return false;
     }
 
+    /* Escape identifiers to prevent SQL injection */
+    char *escaped_table = str_escape_identifier_dquote(table);
+    if (!escaped_table) {
+        if (err) *err = str_dup("Memory allocation failed");
+        return false;
+    }
+
+    /* Build WHERE clause for composite primary key */
+    char *where_clause = str_dup("");
+    for (size_t i = 0; i < num_pk_cols; i++) {
+        char *escaped_pk = str_escape_identifier_dquote(pk_cols[i]);
+        if (!escaped_pk || !where_clause) {
+            free(escaped_pk);
+            free(where_clause);
+            free(escaped_table);
+            if (err) *err = str_dup("Memory allocation failed");
+            return false;
+        }
+        char *new_where;
+        if (i == 0) {
+            new_where = str_printf("%s = $%zu", escaped_pk, i + 1);
+        } else {
+            new_where = str_printf("%s AND %s = $%zu", where_clause, escaped_pk, i + 1);
+        }
+        free(escaped_pk);
+        free(where_clause);
+        where_clause = new_where;
+        if (!where_clause) {
+            free(escaped_table);
+            if (err) *err = str_dup("Memory allocation failed");
+            return false;
+        }
+    }
+
     /* Build parameterized DELETE statement */
-    char *sql = str_printf("DELETE FROM \"%s\" WHERE \"%s\" = $1", table, pk_col);
+    char *sql = str_printf("DELETE FROM %s WHERE %s", escaped_table, where_clause);
+    free(escaped_table);
+    free(where_clause);
+
     if (!sql) {
         if (err) *err = str_dup("Memory allocation failed");
         return false;
     }
 
-    /* Prepare parameter value */
-    const char *paramValues[1];
-    int paramLengths[1];
-    int paramFormats[1] = {0};  /* Text format */
-    char pk_buf[64];
+    /* Prepare parameter values */
+    const char **paramValues = malloc(sizeof(char *) * num_pk_cols);
+    int *paramLengths = malloc(sizeof(int) * num_pk_cols);
+    int *paramFormats = calloc(num_pk_cols, sizeof(int));  /* All text format (0) */
+    char **pk_bufs = calloc(num_pk_cols, sizeof(char *));
 
-    /* Parameter 1: primary key value */
-    if (pk_val->is_null) {
-        paramValues[0] = NULL;
-        paramLengths[0] = 0;
-    } else {
-        switch (pk_val->type) {
-            case DB_TYPE_INT:
-                snprintf(pk_buf, sizeof(pk_buf), "%lld", (long long)pk_val->int_val);
-                paramValues[0] = pk_buf;
-                paramLengths[0] = strlen(pk_buf);
-                break;
-            case DB_TYPE_FLOAT:
-                snprintf(pk_buf, sizeof(pk_buf), "%g", pk_val->float_val);
-                paramValues[0] = pk_buf;
-                paramLengths[0] = strlen(pk_buf);
-                break;
-            default:
-                paramValues[0] = pk_val->text.data;
-                paramLengths[0] = pk_val->text.len;
-                break;
+    if (!paramValues || !paramLengths || !paramFormats || !pk_bufs) {
+        free(paramValues);
+        free(paramLengths);
+        free(paramFormats);
+        free(pk_bufs);
+        free(sql);
+        if (err) *err = str_dup("Memory allocation failed");
+        return false;
+    }
+
+    /* Fill in primary key values */
+    for (size_t i = 0; i < num_pk_cols; i++) {
+        const DbValue *pk_val = &pk_vals[i];
+        if (pk_val->is_null) {
+            paramValues[i] = NULL;
+            paramLengths[i] = 0;
+        } else {
+            switch (pk_val->type) {
+                case DB_TYPE_INT:
+                    pk_bufs[i] = str_printf("%lld", (long long)pk_val->int_val);
+                    paramValues[i] = pk_bufs[i];
+                    paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+                    break;
+                case DB_TYPE_FLOAT:
+                    pk_bufs[i] = str_printf("%g", pk_val->float_val);
+                    paramValues[i] = pk_bufs[i];
+                    paramLengths[i] = pk_bufs[i] ? safe_size_to_int(strlen(pk_bufs[i])) : 0;
+                    break;
+                default:
+                    paramValues[i] = pk_val->text.data;
+                    paramLengths[i] = safe_size_to_int(pk_val->text.len);
+                    break;
+            }
         }
     }
 
-    PGresult *res = PQexecParams(data->conn, sql, 1, NULL,
+    PGresult *res = PQexecParams(data->conn, sql, safe_size_to_int(num_pk_cols), NULL,
                                   paramValues, paramLengths, paramFormats, 0);
     free(sql);
+    for (size_t i = 0; i < num_pk_cols; i++) free(pk_bufs[i]);
+    free(pk_bufs);
+    free(paramValues);
+    free(paramLengths);
+    free(paramFormats);
 
     ExecStatusType status = PQresultStatus(res);
     if (status != PGRES_COMMAND_OK) {
@@ -523,6 +707,16 @@ static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
 
     for (int i = 0; i < num_rows; i++) {
         tables[i] = str_dup(PQgetvalue(res, i, 0));
+        if (!tables[i]) {
+            /* Free already allocated strings on failure */
+            for (int j = 0; j < i; j++) {
+                free(tables[j]);
+            }
+            free(tables);
+            PQclear(res);
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
         (*count)++;
     }
 
@@ -565,6 +759,12 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table, c
     }
 
     schema->name = str_dup(table);
+    if (!schema->name) {
+        PQclear(res);
+        free(schema);
+        if (err) *err = str_dup("Memory allocation failed");
+        return NULL;
+    }
     int num_rows = PQntuples(res);
     schema->columns = calloc(num_rows, sizeof(ColumnDef));
     if (!schema->columns) {
@@ -580,26 +780,38 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table, c
 
         col->name = str_dup(PQgetvalue(res, i, 0));
         col->type_name = str_dup(PQgetvalue(res, i, 1));
+        if (!col->name || !col->type_name) {
+            /* Free partially allocated column before cleanup */
+            free(col->name);
+            free(col->type_name);
+            PQclear(res);
+            db_schema_free(schema);
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
         col->nullable = str_eq_nocase(PQgetvalue(res, i, 2), "YES");
 
         char *default_val = PQgetvalue(res, i, 3);
         col->default_val = (default_val && *default_val) ? str_dup(default_val) : NULL;
 
-        /* Map type */
+        /* Map type - guard against NULL type_name */
         char *type = col->type_name;
-        if (strstr(type, "int") || strstr(type, "serial"))
-            col->type = DB_TYPE_INT;
-        else if (strstr(type, "float") || strstr(type, "double") ||
-                 strstr(type, "numeric") || strstr(type, "decimal"))
-            col->type = DB_TYPE_FLOAT;
-        else if (strstr(type, "bool"))
-            col->type = DB_TYPE_BOOL;
-        else if (strstr(type, "bytea"))
-            col->type = DB_TYPE_BLOB;
-        else if (strstr(type, "timestamp") || strstr(type, "date") || strstr(type, "time"))
-            col->type = DB_TYPE_TIMESTAMP;
-        else
+        if (!type) {
             col->type = DB_TYPE_TEXT;
+        } else if (strstr(type, "int") || strstr(type, "serial")) {
+            col->type = DB_TYPE_INT;
+        } else if (strstr(type, "float") || strstr(type, "double") ||
+                   strstr(type, "numeric") || strstr(type, "decimal")) {
+            col->type = DB_TYPE_FLOAT;
+        } else if (strstr(type, "bool")) {
+            col->type = DB_TYPE_BOOL;
+        } else if (strstr(type, "bytea")) {
+            col->type = DB_TYPE_BLOB;
+        } else if (strstr(type, "timestamp") || strstr(type, "date") || strstr(type, "time")) {
+            col->type = DB_TYPE_TIMESTAMP;
+        } else {
+            col->type = DB_TYPE_TEXT;
+        }
 
         schema->num_columns++;
     }
@@ -677,7 +889,14 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
     }
 
     for (int i = 0; i < num_fields; i++) {
-        rs->columns[i].name = str_dup(PQfname(res, i));
+        const char *fname = PQfname(res, i);
+        rs->columns[i].name = fname ? str_dup(fname) : str_dup("?");
+        if (!rs->columns[i].name) {
+            PQclear(res);
+            db_result_free(rs);
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
         rs->columns[i].type = pg_oid_to_db_type(PQftype(res, i));
     }
 
@@ -724,14 +943,29 @@ static ResultSet *pg_query_page(DbConnection *conn, const char *table,
         return NULL;
     }
 
+    /* Escape identifiers to prevent SQL injection */
+    char *escaped_table = str_escape_identifier_dquote(table);
+    if (!escaped_table) {
+        if (err) *err = str_dup("Memory allocation failed");
+        return NULL;
+    }
+
     /* Build query */
     char *sql;
     if (order_by) {
-        sql = str_printf("SELECT * FROM \"%s\" ORDER BY \"%s\" %s LIMIT %zu OFFSET %zu",
-                         table, order_by, desc ? "DESC" : "ASC", limit, offset);
+        char *escaped_order = str_escape_identifier_dquote(order_by);
+        if (!escaped_order) {
+            free(escaped_table);
+            if (err) *err = str_dup("Memory allocation failed");
+            return NULL;
+        }
+        sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
+                         escaped_table, escaped_order, desc ? "DESC" : "ASC", limit, offset);
+        free(escaped_order);
     } else {
-        sql = str_printf("SELECT * FROM \"%s\" LIMIT %zu OFFSET %zu", table, limit, offset);
+        sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table, limit, offset);
     }
+    free(escaped_table);
 
     if (!sql) {
         if (err) *err = str_dup("Memory allocation failed");

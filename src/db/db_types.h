@@ -142,6 +142,7 @@ DbValue db_value_text(const char *str);
 DbValue db_value_text_len(const char *str, size_t len);
 DbValue db_value_blob(const uint8_t *data, size_t len);
 DbValue db_value_bool(bool val);
+DbValue db_value_copy(const DbValue *src);
 
 /* Value conversion */
 char *db_value_to_string(const DbValue *val);

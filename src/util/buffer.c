@@ -57,6 +57,8 @@ void buf_clear(Buffer *buf) {
 }
 
 bool buf_reserve(Buffer *buf, size_t additional) {
+    /* Check for overflow */
+    if (additional > SIZE_MAX - buf->len) return false;
     size_t needed = buf->len + additional;
     if (needed <= buf->cap) return true;
     return buf_grow(buf, needed);
@@ -65,6 +67,12 @@ bool buf_reserve(Buffer *buf, size_t additional) {
 bool buf_grow(Buffer *buf, size_t min_cap) {
     size_t new_cap = buf->cap;
     while (new_cap < min_cap) {
+        /* Check for overflow before multiplying */
+        if (new_cap > SIZE_MAX / GROWTH_FACTOR) {
+            /* Would overflow, try exact allocation */
+            new_cap = min_cap;
+            break;
+        }
         new_cap *= GROWTH_FACTOR;
     }
 
@@ -355,20 +363,20 @@ bool buf_skip(Buffer *buf, size_t count) {
 
 /* Peeking functions */
 
-bool buf_peek_u8(Buffer *buf, uint8_t *val) {
+bool buf_peek_u8(const Buffer *buf, uint8_t *val) {
     if (buf_remaining(buf) < 1) return false;
     *val = buf->data[buf->pos];
     return true;
 }
 
-bool buf_peek_u16_be(Buffer *buf, uint16_t *val) {
+bool buf_peek_u16_be(const Buffer *buf, uint16_t *val) {
     if (buf_remaining(buf) < 2) return false;
     *val = ((uint16_t)buf->data[buf->pos] << 8) |
            ((uint16_t)buf->data[buf->pos + 1]);
     return true;
 }
 
-bool buf_peek_u32_be(Buffer *buf, uint32_t *val) {
+bool buf_peek_u32_be(const Buffer *buf, uint32_t *val) {
     if (buf_remaining(buf) < 4) return false;
     *val = ((uint32_t)buf->data[buf->pos] << 24) |
            ((uint32_t)buf->data[buf->pos + 1] << 16) |
@@ -379,11 +387,11 @@ bool buf_peek_u32_be(Buffer *buf, uint32_t *val) {
 
 /* Position management */
 
-size_t buf_remaining(Buffer *buf) {
+size_t buf_remaining(const Buffer *buf) {
     return buf->len - buf->pos;
 }
 
-size_t buf_tell(Buffer *buf) {
+size_t buf_tell(const Buffer *buf) {
     return buf->pos;
 }
 
@@ -398,11 +406,11 @@ bool buf_rewind(Buffer *buf) {
     return true;
 }
 
-const uint8_t *buf_ptr(Buffer *buf) {
+const uint8_t *buf_ptr(const Buffer *buf) {
     return buf->data + buf->pos;
 }
 
-const uint8_t *buf_data(Buffer *buf) {
+const uint8_t *buf_data(const Buffer *buf) {
     return buf->data;
 }
 

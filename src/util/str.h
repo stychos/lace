@@ -48,6 +48,8 @@ char *str_url_decode(const char *s);
 char *str_escape(const char *s);            /* Escape special chars */
 char *str_unescape(const char *s);          /* Unescape special chars */
 char *str_escape_sql(const char *s);        /* SQL string escaping */
+char *str_escape_identifier_dquote(const char *s);   /* SQL identifier escaping (PostgreSQL/SQLite) */
+char *str_escape_identifier_backtick(const char *s); /* SQL identifier escaping (MySQL/MariaDB) */
 
 /* Conversion */
 bool str_to_int(const char *s, int *out);
@@ -55,6 +57,9 @@ bool str_to_long(const char *s, long *out);
 bool str_to_int64(const char *s, int64_t *out);
 bool str_to_double(const char *s, double *out);
 bool str_to_bool(const char *s, bool *out);
+
+/* Secure memory handling */
+void str_secure_free(char *s);   /* Zero memory before freeing (for passwords) */
 
 /* String builder */
 typedef struct {

@@ -176,7 +176,9 @@ char *str_replace(const char *s, const char *old, const char *new_str) {
         p += old_len;
         prev = p;
     }
-    strcpy(dst, prev);
+    /* Copy remaining part including null terminator using bounded copy */
+    size_t remaining = strlen(prev);
+    memcpy(dst, prev, remaining + 1);
 
     return result;
 }
@@ -444,6 +446,19 @@ bool str_to_bool(const char *s, bool *out) {
     return false;
 }
 
+/* Secure memory handling */
+
+void str_secure_free(char *s) {
+    if (!s) return;
+    /* Use volatile to prevent compiler from optimizing away the memset */
+    volatile char *p = s;
+    size_t len = strlen(s);
+    while (len--) {
+        *p++ = 0;
+    }
+    free(s);
+}
+
 /* StringBuilder implementation */
 
 StringBuilder *sb_new(size_t initial_cap) {
@@ -474,6 +489,12 @@ void sb_free(StringBuilder *sb) {
 static bool sb_grow(StringBuilder *sb, size_t min_cap) {
     size_t new_cap = sb->cap;
     while (new_cap < min_cap) {
+        /* Check for overflow before multiplying */
+        if (new_cap > SIZE_MAX / SB_GROWTH_FACTOR) {
+            /* Would overflow, try exact allocation */
+            new_cap = min_cap;
+            break;
+        }
         new_cap *= SB_GROWTH_FACTOR;
     }
 
@@ -566,4 +587,49 @@ void sb_clear(StringBuilder *sb) {
         sb->len = 0;
         sb->data[0] = '\0';
     }
+}
+
+/*
+ * SQL Identifier escaping functions
+ * These escape identifiers (table/column names) to prevent SQL injection
+ */
+
+char *str_escape_identifier_dquote(const char *s) {
+    /* Escape for PostgreSQL/SQLite: double quotes, escape by doubling */
+    if (!s) return NULL;
+
+    StringBuilder *sb = sb_new(strlen(s) * 2 + 3);
+    if (!sb) return NULL;
+
+    sb_append_char(sb, '"');
+    for (const char *p = s; *p; p++) {
+        if (*p == '"') {
+            sb_append(sb, "\"\"");  /* Double the quote */
+        } else {
+            sb_append_char(sb, *p);
+        }
+    }
+    sb_append_char(sb, '"');
+
+    return sb_to_string(sb);
+}
+
+char *str_escape_identifier_backtick(const char *s) {
+    /* Escape for MySQL/MariaDB: backticks, escape by doubling */
+    if (!s) return NULL;
+
+    StringBuilder *sb = sb_new(strlen(s) * 2 + 3);
+    if (!sb) return NULL;
+
+    sb_append_char(sb, '`');
+    for (const char *p = s; *p; p++) {
+        if (*p == '`') {
+            sb_append(sb, "``");  /* Double the backtick */
+        } else {
+            sb_append_char(sb, *p);
+        }
+    }
+    sb_append_char(sb, '`');
+
+    return sb_to_string(sb);
 }

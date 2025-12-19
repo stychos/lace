@@ -27,9 +27,19 @@ static char *decode_component(const char *s, size_t len) {
     return decoded;
 }
 
+/* Maximum connection string length (4KB is more than sufficient) */
+#define MAX_CONNSTR_LEN 4096
+
 ConnString *connstr_parse(const char *str, char **err) {
     if (!str || *str == '\0') {
         set_error(err, "Connection string is empty");
+        return NULL;
+    }
+
+    /* Prevent processing extremely long connection strings */
+    size_t len = strlen(str);
+    if (len > MAX_CONNSTR_LEN) {
+        set_error(err, "Connection string too long (max %d characters)", MAX_CONNSTR_LEN);
         return NULL;
     }
 
@@ -152,7 +162,14 @@ ConnString *connstr_parse(const char *str, char **err) {
             if (port_start && port_start < host_end) {
                 char *port_str = str_ndup(port_start, host_end - port_start);
                 if (port_str) {
-                    cs->port = atoi(port_str);
+                    char *endptr;
+                    long port_val = strtol(port_str, &endptr, 10);
+                    /* Validate: all chars consumed, in valid range */
+                    if (*endptr == '\0' && port_val > 0 && port_val <= 65535) {
+                        cs->port = (int)port_val;
+                    } else {
+                        cs->port = 0;  /* Invalid port, use default */
+                    }
                     free(port_str);
                 }
             }
@@ -220,11 +237,11 @@ void connstr_free(ConnString *cs) {
 
     free(cs->driver);
     free(cs->user);
-    free(cs->password);
+    str_secure_free(cs->password);  /* Securely clear password from memory */
     free(cs->host);
     free(cs->database);
     free(cs->schema);
-    free(cs->raw);
+    str_secure_free(cs->raw);  /* Raw string may contain password */
 
     for (size_t i = 0; i < cs->num_options; i++) {
         free(cs->option_keys[i]);
@@ -285,12 +302,20 @@ char *connstr_build(const char *driver, const char *user, const char *password,
 
     if (user) {
         char *encoded_user = str_url_encode(user);
+        if (!encoded_user) {
+            sb_free(sb);
+            return NULL;
+        }
         sb_append(sb, encoded_user);
         free(encoded_user);
 
         if (password) {
             sb_append_char(sb, ':');
             char *encoded_pass = str_url_encode(password);
+            if (!encoded_pass) {
+                sb_free(sb);
+                return NULL;
+            }
             sb_append(sb, encoded_pass);
             free(encoded_pass);
         }
@@ -318,6 +343,10 @@ char *connstr_build(const char *driver, const char *user, const char *password,
             sb_append(sb, database);
         } else {
             char *encoded_db = str_url_encode(database);
+            if (!encoded_db) {
+                sb_free(sb);
+                return NULL;
+            }
             sb_append(sb, encoded_db);
             free(encoded_db);
         }

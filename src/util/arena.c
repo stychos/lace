@@ -90,8 +90,9 @@ void *arena_alloc_aligned(Arena *arena, size_t size, size_t alignment) {
 
     if (needed <= block->size) {
         void *ptr = block->data + aligned_offset;
+        /* Calculate used bytes BEFORE updating block->used */
+        arena->total_used += needed - block->used;
         block->used = needed;
-        arena->total_used += size + (aligned_offset - block->used + size);
         return ptr;
     }
 

@@ -45,7 +45,18 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
 
     /* Get connection string from remaining argument */
     if (optind < argc) {
-        config->connstr = str_dup(argv[optind]);
+        const char *connstr = argv[optind];
+        /* Basic validation: must contain :// scheme separator */
+        if (!strstr(connstr, "://")) {
+            fprintf(stderr, "Invalid connection string format. Expected: driver://...\n");
+            fprintf(stderr, "Examples: sqlite:///path.db, postgres://localhost/db\n");
+            return false;
+        }
+        config->connstr = str_dup(connstr);
+        if (!config->connstr) {
+            fprintf(stderr, "Memory allocation failed\n");
+            return false;
+        }
     }
 
     return true;

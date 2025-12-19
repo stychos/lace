@@ -117,6 +117,61 @@ DbValue db_value_bool(bool val) {
     return v;
 }
 
+DbValue db_value_copy(const DbValue *src) {
+    DbValue v = {0};
+    if (!src) {
+        v.is_null = true;
+        v.type = DB_TYPE_NULL;
+        return v;
+    }
+
+    v.type = src->type;
+    v.is_null = src->is_null;
+
+    if (src->is_null) {
+        return v;
+    }
+
+    switch (src->type) {
+        case DB_TYPE_TEXT:
+            if (src->text.data) {
+                v.text.data = malloc(src->text.len + 1);
+                if (v.text.data) {
+                    memcpy(v.text.data, src->text.data, src->text.len);
+                    v.text.data[src->text.len] = '\0';
+                    v.text.len = src->text.len;
+                } else {
+                    v.is_null = true;
+                }
+            }
+            break;
+        case DB_TYPE_BLOB:
+            if (src->blob.data && src->blob.len > 0) {
+                v.blob.data = malloc(src->blob.len);
+                if (v.blob.data) {
+                    memcpy(v.blob.data, src->blob.data, src->blob.len);
+                    v.blob.len = src->blob.len;
+                } else {
+                    v.is_null = true;
+                }
+            }
+            break;
+        case DB_TYPE_INT:
+            v.int_val = src->int_val;
+            break;
+        case DB_TYPE_FLOAT:
+            v.float_val = src->float_val;
+            break;
+        case DB_TYPE_BOOL:
+            v.bool_val = src->bool_val;
+            break;
+        default:
+            break;
+    }
+
+    return v;
+}
+
 /* Memory management */
 
 void db_value_free(DbValue *val) {
@@ -278,20 +333,24 @@ char *db_value_to_string(const DbValue *val) {
                 }
             }
 
-            /* Convert to hex for binary data */
-            size_t hex_len = val->blob.len * 2 + 3;  /* "x'" + hex + "'" */
-            char *hex = malloc(hex_len + 1);
+            /* Convert to hex for binary data (show max 32 bytes) */
+            size_t display_len = val->blob.len > 32 ? 32 : val->blob.len;
+            /* Format: x'HEXHEX...' + optional "..." = 2 + display_len*2 + 1 + 3 + 1 */
+            size_t hex_len = 2 + display_len * 2 + 1 + (val->blob.len > 32 ? 3 : 0) + 1;
+            char *hex = malloc(hex_len);
             if (!hex) return NULL;
 
-            hex[0] = 'x';
-            hex[1] = '\'';
-            for (size_t i = 0; i < val->blob.len && i < 32; i++) {
-                sprintf(hex + 2 + i * 2, "%02x", val->blob.data[i]);
+            size_t pos = 0;
+            hex[pos++] = 'x';
+            hex[pos++] = '\'';
+            for (size_t i = 0; i < display_len; i++) {
+                pos += snprintf(hex + pos, hex_len - pos, "%02x", val->blob.data[i]);
             }
             if (val->blob.len > 32) {
-                strcat(hex, "...");
+                pos += snprintf(hex + pos, hex_len - pos, "...");
             }
-            strcat(hex, "'");
+            hex[pos++] = '\'';
+            hex[pos] = '\0';
             return hex;
         }
 

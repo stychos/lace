@@ -13,6 +13,14 @@
 
 #define MAX_DRIVERS 16
 
+/* Helper to safely set error message (frees existing message first) */
+#define SET_ERROR(err, msg) do { \
+    if (err) { \
+        free(*err); \
+        *err = str_dup(msg); \
+    } \
+} while(0)
+
 /* Global driver registry */
 static DbDriver *g_drivers[MAX_DRIVERS];
 static size_t g_num_drivers = 0;
@@ -162,7 +170,7 @@ bool db_ping(DbConnection *conn) {
 
 char **db_list_databases(DbConnection *conn, size_t *count, char **err) {
     if (!conn || !conn->driver || !conn->driver->list_databases) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return NULL;
     }
     return conn->driver->list_databases(conn, count, err);
@@ -170,7 +178,7 @@ char **db_list_databases(DbConnection *conn, size_t *count, char **err) {
 
 char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
     if (!conn || !conn->driver || !conn->driver->list_tables) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return NULL;
     }
     return conn->driver->list_tables(conn, count, err);
@@ -178,7 +186,7 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
 
 TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **err) {
     if (!conn || !conn->driver || !conn->driver->get_table_schema) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return NULL;
     }
     return conn->driver->get_table_schema(conn, table, err);
@@ -186,7 +194,7 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **e
 
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
     if (!conn || !conn->driver || !conn->driver->query) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return NULL;
     }
     return conn->driver->query(conn, sql, err);
@@ -194,7 +202,7 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
 
 int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
     if (!conn || !conn->driver || !conn->driver->exec) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return -1;
     }
     return conn->driver->exec(conn, sql, err);
@@ -205,7 +213,7 @@ ResultSet *db_query_page(DbConnection *conn, const char *table,
                          const char *order_by, bool desc,
                          char **err) {
     if (!conn || !conn->driver) {
-        if (err) *err = str_dup("Not connected");
+        SET_ERROR(err, "Not connected");
         return NULL;
     }
 
@@ -213,18 +221,32 @@ ResultSet *db_query_page(DbConnection *conn, const char *table,
         return conn->driver->query_page(conn, table, offset, limit, order_by, desc, err);
     }
 
-    /* Fallback: build SQL query */
-    char *sql;
-    if (order_by && *order_by) {
-        sql = str_printf("SELECT * FROM \"%s\" ORDER BY \"%s\" %s LIMIT %zu OFFSET %zu",
-                         table, order_by, desc ? "DESC" : "ASC", limit, offset);
-    } else {
-        sql = str_printf("SELECT * FROM \"%s\" LIMIT %zu OFFSET %zu",
-                         table, limit, offset);
+    /* Fallback: build SQL query with proper identifier escaping */
+    char *escaped_table = str_escape_identifier_dquote(table);
+    if (!escaped_table) {
+        SET_ERROR(err, "Out of memory");
+        return NULL;
     }
 
+    char *sql;
+    if (order_by && *order_by) {
+        char *escaped_order = str_escape_identifier_dquote(order_by);
+        if (!escaped_order) {
+            free(escaped_table);
+            SET_ERROR(err, "Out of memory");
+            return NULL;
+        }
+        sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
+                         escaped_table, escaped_order, desc ? "DESC" : "ASC", limit, offset);
+        free(escaped_order);
+    } else {
+        sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu",
+                         escaped_table, limit, offset);
+    }
+    free(escaped_table);
+
     if (!sql) {
-        if (err) *err = str_dup("Out of memory");
+        SET_ERROR(err, "Out of memory");
         return NULL;
     }
 
@@ -235,19 +257,27 @@ ResultSet *db_query_page(DbConnection *conn, const char *table,
 
 int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
     if (!conn || !conn->driver || !table) {
-        if (err) *err = str_dup("Invalid parameters");
+        SET_ERROR(err, "Invalid parameters");
         return -1;
     }
 
-    /* Build COUNT query - use backticks for MySQL/MariaDB, double quotes for others */
-    char *sql;
+    /* Build COUNT query with proper identifier escaping */
+    char *escaped_table;
     if (str_eq(conn->driver->name, "mysql") || str_eq(conn->driver->name, "mariadb")) {
-        sql = str_printf("SELECT COUNT(*) FROM `%s`", table);
+        escaped_table = str_escape_identifier_backtick(table);
     } else {
-        sql = str_printf("SELECT COUNT(*) FROM \"%s\"", table);
+        escaped_table = str_escape_identifier_dquote(table);
     }
+    if (!escaped_table) {
+        SET_ERROR(err, "Out of memory");
+        return -1;
+    }
+
+    char *sql = str_printf("SELECT COUNT(*) FROM %s", escaped_table);
+    free(escaped_table);
+
     if (!sql) {
-        if (err) *err = str_dup("Out of memory");
+        SET_ERROR(err, "Out of memory");
         return -1;
     }
 
@@ -274,39 +304,40 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
 }
 
 bool db_update_cell(DbConnection *conn, const char *table,
-                    const char *pk_col, const DbValue *pk_val,
+                    const char **pk_cols, const DbValue *pk_vals,
+                    size_t num_pk_cols,
                     const char *col, const DbValue *new_val,
                     char **err) {
     if (!conn || !conn->driver || !conn->driver->update_cell) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return false;
     }
-    return conn->driver->update_cell(conn, table, pk_col, pk_val, col, new_val, err);
+    return conn->driver->update_cell(conn, table, pk_cols, pk_vals, num_pk_cols, col, new_val, err);
 }
 
 bool db_insert_row(DbConnection *conn, const char *table,
                    const ColumnDef *cols, const DbValue *vals,
                    size_t num_cols, char **err) {
     if (!conn || !conn->driver || !conn->driver->insert_row) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return false;
     }
     return conn->driver->insert_row(conn, table, cols, vals, num_cols, err);
 }
 
 bool db_delete_row(DbConnection *conn, const char *table,
-                   const char *pk_col, const DbValue *pk_val,
-                   char **err) {
+                   const char **pk_cols, const DbValue *pk_vals,
+                   size_t num_pk_cols, char **err) {
     if (!conn || !conn->driver || !conn->driver->delete_row) {
-        if (err) *err = str_dup("Not supported");
+        SET_ERROR(err, "Not supported");
         return false;
     }
-    return conn->driver->delete_row(conn, table, pk_col, pk_val, err);
+    return conn->driver->delete_row(conn, table, pk_cols, pk_vals, num_pk_cols, err);
 }
 
 bool db_begin_transaction(DbConnection *conn, char **err) {
     if (!conn || !conn->driver) {
-        if (err) *err = str_dup("Not connected");
+        SET_ERROR(err, "Not connected");
         return false;
     }
 
@@ -320,7 +351,7 @@ bool db_begin_transaction(DbConnection *conn, char **err) {
 
 bool db_commit(DbConnection *conn, char **err) {
     if (!conn || !conn->driver) {
-        if (err) *err = str_dup("Not connected");
+        SET_ERROR(err, "Not connected");
         return false;
     }
 
@@ -334,7 +365,7 @@ bool db_commit(DbConnection *conn, char **err) {
 
 bool db_rollback(DbConnection *conn, char **err) {
     if (!conn || !conn->driver) {
-        if (err) *err = str_dup("Not connected");
+        SET_ERROR(err, "Not connected");
         return false;
     }
 

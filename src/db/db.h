@@ -40,15 +40,16 @@ typedef struct DbDriver {
 
     /* Data manipulation */
     bool (*update_cell)(DbConnection *conn, const char *table,
-                        const char *pk_col, const DbValue *pk_val,
+                        const char **pk_cols, const DbValue *pk_vals,
+                        size_t num_pk_cols,
                         const char *col, const DbValue *new_val,
                         char **err);
     bool (*insert_row)(DbConnection *conn, const char *table,
                        const ColumnDef *cols, const DbValue *vals,
                        size_t num_cols, char **err);
     bool (*delete_row)(DbConnection *conn, const char *table,
-                       const char *pk_col, const DbValue *pk_val,
-                       char **err);
+                       const char **pk_cols, const DbValue *pk_vals,
+                       size_t num_pk_cols, char **err);
 
     /* Transaction support */
     bool (*begin_transaction)(DbConnection *conn, char **err);
@@ -108,15 +109,16 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err);
 
 /* Data manipulation */
 bool db_update_cell(DbConnection *conn, const char *table,
-                    const char *pk_col, const DbValue *pk_val,
+                    const char **pk_cols, const DbValue *pk_vals,
+                    size_t num_pk_cols,
                     const char *col, const DbValue *new_val,
                     char **err);
 bool db_insert_row(DbConnection *conn, const char *table,
                    const ColumnDef *cols, const DbValue *vals,
                    size_t num_cols, char **err);
 bool db_delete_row(DbConnection *conn, const char *table,
-                   const char *pk_col, const DbValue *pk_val,
-                   char **err);
+                   const char **pk_cols, const DbValue *pk_vals,
+                   size_t num_pk_cols, char **err);
 
 /* Transaction support */
 bool db_begin_transaction(DbConnection *conn, char **err);
