@@ -3,8 +3,6 @@
  *
  * A TUI database viewer/manager for Linux
  * Supports: SQLite, PostgreSQL, MySQL
- *
- * Compiled with Fil-C
  */
 
 #include "app.h"
