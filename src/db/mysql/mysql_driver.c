@@ -1098,6 +1098,8 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   }
 
   rs->num_columns = num_fields;
+  /* Note: calloc handles overflow checking internally, and num_fields (unsigned int)
+     cannot exceed SIZE_MAX/sizeof(ColumnDef) on any realistic platform */
   rs->columns = calloc(num_fields, sizeof(ColumnDef));
   if (!rs->columns) {
     mysql_free_result(result);

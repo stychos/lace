@@ -31,9 +31,15 @@ void tui_start_edit(TuiState *state) {
     return;
   if (state->cursor_col >= state->data->num_columns)
     return;
+  if (!state->data->rows)
+    return;
+
+  Row *row = &state->data->rows[state->cursor_row];
+  if (!row->cells || state->cursor_col >= row->num_cells)
+    return;
 
   /* Get current cell value */
-  DbValue *val = &state->data->rows[state->cursor_row].cells[state->cursor_col];
+  DbValue *val = &row->cells[state->cursor_col];
 
   /* Convert value to string */
   char *content = NULL;
@@ -91,9 +97,15 @@ void tui_start_modal_edit(TuiState *state) {
     return;
   if (state->cursor_col >= state->data->num_columns)
     return;
+  if (!state->data->rows)
+    return;
+
+  Row *row = &state->data->rows[state->cursor_row];
+  if (!row->cells || state->cursor_col >= row->num_cells)
+    return;
 
   /* Get current cell value */
-  DbValue *val = &state->data->rows[state->cursor_row].cells[state->cursor_col];
+  DbValue *val = &row->cells[state->cursor_col];
 
   /* Convert value to string */
   char *content = NULL;
@@ -539,7 +551,7 @@ bool tui_handle_edit_input(TuiState *state, int ch) {
   case KEY_BACKSPACE:
   case 127:
   case 8:
-    if (state->edit_pos > 0 && state->edit_buffer) {
+    if (state->edit_pos > 0 && state->edit_pos <= len && state->edit_buffer) {
       memmove(state->edit_buffer + state->edit_pos - 1,
               state->edit_buffer + state->edit_pos, len - state->edit_pos + 1);
       state->edit_pos--;
@@ -576,23 +588,29 @@ bool tui_handle_edit_input(TuiState *state, int ch) {
 
   default:
     if (ch >= 32 && ch < 127) {
-      /* Insert character */
+      /* Insert character - check for overflow */
+      if (len > SIZE_MAX - 2) {
+        /* Buffer too large - ignore keystroke */
+        return true;
+      }
       size_t new_len = len + 2;
       char *new_buf = realloc(state->edit_buffer, new_len);
-      if (new_buf) {
-        state->edit_buffer = new_buf;
-        if (len == 0) {
-          /* Buffer was NULL or empty - initialize it */
-          state->edit_buffer[0] = (char)ch;
-          state->edit_buffer[1] = '\0';
-          state->edit_pos = 1;
-        } else {
-          memmove(state->edit_buffer + state->edit_pos + 1,
-                  state->edit_buffer + state->edit_pos,
-                  len - state->edit_pos + 1);
-          state->edit_buffer[state->edit_pos] = (char)ch;
-          state->edit_pos++;
-        }
+      if (!new_buf) {
+        /* Allocation failed - ignore keystroke */
+        return true;
+      }
+      state->edit_buffer = new_buf;
+      if (len == 0) {
+        /* Buffer was NULL or empty - initialize it */
+        state->edit_buffer[0] = (char)ch;
+        state->edit_buffer[1] = '\0';
+        state->edit_pos = 1;
+      } else {
+        memmove(state->edit_buffer + state->edit_pos + 1,
+                state->edit_buffer + state->edit_pos,
+                len - state->edit_pos + 1);
+        state->edit_buffer[state->edit_pos] = (char)ch;
+        state->edit_pos++;
       }
     }
     return true;

@@ -15,11 +15,11 @@
 #include <string.h>
 
 /* Helper to safely cast size_t to int for libpq paramLengths.
- * Returns INT_MAX on overflow - callers must validate inputs beforehand.
+ * Returns 0 on overflow (safe default for text format where length is ignored).
  * Note: paramLengths is only used for binary format; text format ignores it. */
 static inline int safe_size_to_int(size_t sz) {
   if (sz > (size_t)INT_MAX) {
-    return -1; /* Overflow indicator - caller should have validated */
+    return 0; /* Safe default - text format ignores paramLengths anyway */
   }
   return (int)sz;
 }
@@ -310,31 +310,38 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
     return NULL;
   }
 
-  /* Build libpq connection string */
+  /* Build libpq connection using PQconnectdbParams for proper escaping */
   const char *host = cs->host ? cs->host : "localhost";
   int port = cs->port > 0 ? cs->port : 5432;
   const char *user = cs->user ? cs->user : "postgres";
   const char *password = cs->password;
   const char *database = cs->database ? cs->database : "postgres";
 
-  char *pq_connstr;
+  /* Convert port to string */
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+
+  /* Use PQconnectdbParams which handles escaping of special characters */
+  const char *keywords[6];
+  const char *values[6];
+  int idx = 0;
+
+  keywords[idx] = "host";
+  values[idx++] = host;
+  keywords[idx] = "port";
+  values[idx++] = port_str;
+  keywords[idx] = "user";
+  values[idx++] = user;
+  keywords[idx] = "dbname";
+  values[idx++] = database;
   if (password) {
-    pq_connstr = str_printf("host=%s port=%d user=%s password=%s dbname=%s",
-                            host, port, user, password, database);
-  } else {
-    pq_connstr = str_printf("host=%s port=%d user=%s dbname=%s", host, port,
-                            user, database);
+    keywords[idx] = "password";
+    values[idx++] = password;
   }
+  keywords[idx] = NULL;
+  values[idx] = NULL;
 
-  if (!pq_connstr) {
-    connstr_free(cs);
-    if (err)
-      *err = str_dup("Memory allocation failed");
-    return NULL;
-  }
-
-  PGconn *pgconn = PQconnectdb(pq_connstr);
-  str_secure_free(pq_connstr); /* Securely clear password from memory */
+  PGconn *pgconn = PQconnectdbParams(keywords, values, 0);
 
   if (PQstatus(pgconn) != CONNECTION_OK) {
     if (err)
@@ -673,6 +680,12 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
   free(paramLengths);
   free(paramFormats);
 
+  if (!res) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
+    return false;
+  }
+
   ExecStatusType status = PQresultStatus(res);
   if (status != PGRES_COMMAND_OK) {
     if (err)
@@ -836,6 +849,12 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
   free(paramValues);
   free(paramLengths);
   free(paramFormats);
+
+  if (!res) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
+    return false;
+  }
 
   ExecStatusType status = PQresultStatus(res);
   if (status != PGRES_COMMAND_OK) {

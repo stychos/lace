@@ -6,6 +6,7 @@
 #include "str.h"
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,9 @@ char *str_dup(const char *s) {
   if (!s)
     return NULL;
   size_t len = strlen(s);
+  /* Check for overflow when adding 1 for null terminator */
+  if (len == SIZE_MAX)
+    return NULL;
   char *dup = malloc(len + 1);
   if (dup) {
     memcpy(dup, s, len + 1);
@@ -34,6 +38,9 @@ char *str_ndup(const char *s, size_t n) {
   while (len < n && s[len] != '\0') {
     len++;
   }
+  /* Check for overflow when adding 1 for null terminator */
+  if (len == SIZE_MAX)
+    return NULL;
   char *dup = malloc(len + 1);
   if (dup) {
     memcpy(dup, s, len);
@@ -60,7 +67,11 @@ char *str_vprintf(const char *fmt, va_list args) {
   if (len < 0)
     return NULL;
 
-  char *buf = malloc(len + 1);
+  /* Check for overflow when adding 1 for null terminator */
+  if (len > INT_MAX - 1)
+    return NULL;
+
+  char *buf = malloc((size_t)len + 1);
   if (!buf)
     return NULL;
 
@@ -196,6 +207,10 @@ char *str_replace(const char *s, const char *old, const char *new_str) {
     result_len = s_len + count * added;
   } else {
     size_t removed = old_len - new_len;
+    /* Check for overflow: count * removed must not overflow */
+    if (removed > 0 && count > SIZE_MAX / removed) {
+      return NULL; /* Would overflow */
+    }
     size_t total_removed = count * removed;
     /* This subtraction is safe since we found 'count' occurrences */
     result_len = s_len - total_removed;
@@ -232,9 +247,16 @@ char **str_split(const char *s, char delim, size_t *count) {
   /* Count parts */
   size_t n = 1;
   for (const char *p = s; *p; p++) {
-    if (*p == delim)
+    if (*p == delim) {
+      if (n == SIZE_MAX)
+        return NULL; /* Overflow protection */
       n++;
+    }
   }
+
+  /* Check for overflow in allocation size */
+  if (n > SIZE_MAX / sizeof(char *) - 1)
+    return NULL;
 
   char **parts = malloc((n + 1) * sizeof(char *));
   if (!parts)
@@ -320,7 +342,12 @@ char *str_url_encode(const char *s) {
   if (!s)
     return NULL;
 
-  StringBuilder *sb = sb_new(strlen(s) * 3);
+  /* Check for overflow in capacity calculation */
+  size_t slen = strlen(s);
+  if (slen > SIZE_MAX / 3)
+    return NULL;
+
+  StringBuilder *sb = sb_new(slen * 3);
   if (!sb)
     return NULL;
 
@@ -552,12 +579,10 @@ bool str_to_bool(const char *s, bool *out) {
 void str_secure_free(char *s) {
   if (!s)
     return;
-  /* Use volatile to prevent compiler from optimizing away the memset */
-  volatile char *p = s;
   size_t len = strlen(s);
-  while (len--) {
-    *p++ = 0;
-  }
+  /* Use volatile function pointer to prevent compiler from optimizing away */
+  static void *(*const volatile memset_ptr)(void *, int, size_t) = memset;
+  memset_ptr(s, 0, len);
   free(s);
 }
 
@@ -621,6 +646,10 @@ bool sb_append_len(StringBuilder *sb, const char *s, size_t len) {
   if (!sb || !s)
     return false;
 
+  /* Check for overflow before calculating needed size */
+  if (len > SIZE_MAX - sb->len - 1)
+    return false;
+
   size_t needed = sb->len + len + 1;
   if (needed > sb->cap && !sb_grow(sb, needed)) {
     return false;
@@ -634,6 +663,10 @@ bool sb_append_len(StringBuilder *sb, const char *s, size_t len) {
 
 bool sb_append_char(StringBuilder *sb, char c) {
   if (!sb)
+    return false;
+
+  /* Check for overflow (extremely unlikely but possible) */
+  if (sb->len > SIZE_MAX - 2)
     return false;
 
   size_t needed = sb->len + 2;
@@ -663,7 +696,13 @@ bool sb_printf(StringBuilder *sb, const char *fmt, ...) {
     return false;
   }
 
-  size_t needed = sb->len + len + 1;
+  /* Check for overflow before calculating needed size */
+  if ((size_t)len > SIZE_MAX - sb->len - 1) {
+    va_end(args);
+    return false;
+  }
+
+  size_t needed = sb->len + (size_t)len + 1;
   if (needed > sb->cap && !sb_grow(sb, needed)) {
     va_end(args);
     return false;
@@ -705,7 +744,12 @@ char *str_escape_identifier_dquote(const char *s) {
   if (!s)
     return NULL;
 
-  StringBuilder *sb = sb_new(strlen(s) * 2 + 3);
+  /* Check for overflow in capacity calculation */
+  size_t slen = strlen(s);
+  if (slen > (SIZE_MAX - 3) / 2)
+    return NULL;
+
+  StringBuilder *sb = sb_new(slen * 2 + 3);
   if (!sb)
     return NULL;
 
@@ -727,7 +771,12 @@ char *str_escape_identifier_backtick(const char *s) {
   if (!s)
     return NULL;
 
-  StringBuilder *sb = sb_new(strlen(s) * 2 + 3);
+  /* Check for overflow in capacity calculation */
+  size_t slen = strlen(s);
+  if (slen > (SIZE_MAX - 3) / 2)
+    return NULL;
+
+  StringBuilder *sb = sb_new(slen * 2 + 3);
   if (!sb)
     return NULL;
 

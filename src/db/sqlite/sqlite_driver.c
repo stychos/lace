@@ -525,7 +525,15 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
         size_t idx = 0;
         while (sqlite3_step(stmt) == SQLITE_ROW && idx < num_indexes) {
           IndexDef *index = &schema->indexes[idx];
-          index->name = str_dup((const char *)sqlite3_column_text(stmt, 1));
+          /* Initialize to NULL/0 for safe cleanup on failure */
+          memset(index, 0, sizeof(IndexDef));
+
+          const char *idx_name = (const char *)sqlite3_column_text(stmt, 1);
+          index->name = str_dup(idx_name ? idx_name : "");
+          if (!index->name) {
+            /* Allocation failed - skip this index */
+            continue;
+          }
           index->unique = sqlite3_column_int(stmt, 2) != 0;
 
           /* Get index columns */
@@ -596,9 +604,16 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
         size_t fk_idx = 0;
         while (sqlite3_step(stmt) == SQLITE_ROW && fk_idx < num_fks) {
           ForeignKeyDef *fk = &schema->foreign_keys[fk_idx];
+          /* Initialize to zero for safe cleanup on allocation failure */
+          memset(fk, 0, sizeof(ForeignKeyDef));
+
           /* id, seq, table, from, to, on_update, on_delete, match */
           const char *ref_table = (const char *)sqlite3_column_text(stmt, 2);
           fk->ref_table = str_dup(ref_table ? ref_table : "");
+          if (!fk->ref_table) {
+            /* Allocation failed - skip this FK */
+            continue;
+          }
 
           const char *from_col = (const char *)sqlite3_column_text(stmt, 3);
           const char *to_col = (const char *)sqlite3_column_text(stmt, 4);
@@ -606,19 +621,30 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
           fk->columns = calloc(1, sizeof(char *));
           if (fk->columns) {
             fk->columns[0] = str_dup(from_col ? from_col : "");
-            fk->num_columns = 1;
+            if (fk->columns[0]) {
+              fk->num_columns = 1;
+            } else {
+              free(fk->columns);
+              fk->columns = NULL;
+            }
           }
 
           fk->ref_columns = calloc(1, sizeof(char *));
           if (fk->ref_columns) {
             fk->ref_columns[0] = str_dup(to_col ? to_col : "");
-            fk->num_ref_columns = 1;
+            if (fk->ref_columns[0]) {
+              fk->num_ref_columns = 1;
+            } else {
+              free(fk->ref_columns);
+              fk->ref_columns = NULL;
+            }
           }
 
           const char *on_update = (const char *)sqlite3_column_text(stmt, 5);
           const char *on_delete = (const char *)sqlite3_column_text(stmt, 6);
           fk->on_update = str_dup(on_update ? on_update : "");
           fk->on_delete = str_dup(on_delete ? on_delete : "");
+          /* on_update/on_delete can be NULL on failure - acceptable for display */
 
           fk_idx++;
         }
@@ -686,12 +712,12 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
   bool oom = false;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     if (rs->num_rows >= row_cap) {
-      /* Check for overflow before doubling */
-      size_t new_cap = row_cap * 2;
-      if (new_cap < row_cap || new_cap > SIZE_MAX / sizeof(Row)) {
+      /* Check for overflow BEFORE doubling */
+      if (row_cap > SIZE_MAX / 2 || row_cap > SIZE_MAX / sizeof(Row) / 2) {
         oom = true;
         break;
       }
+      size_t new_cap = row_cap * 2;
       Row *new_rows = realloc(rs->rows, new_cap * sizeof(Row));
       if (!new_rows) {
         oom = true;

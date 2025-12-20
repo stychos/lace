@@ -30,6 +30,10 @@
 /* Tab bar height */
 #define TAB_BAR_HEIGHT 1
 
+/* Minimum terminal dimensions */
+#define MIN_TERM_ROWS 10
+#define MIN_TERM_COLS 40
+
 /* Workspace type */
 typedef enum {
   WORKSPACE_TYPE_TABLE, /* Table data view */

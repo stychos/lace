@@ -12,7 +12,8 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   /* Update row */
   if (row_delta < 0 && state->cursor_row > 0) {
     state->cursor_row--;
-  } else if (row_delta > 0 && state->cursor_row < state->data->num_rows - 1) {
+  } else if (row_delta > 0 && state->data->num_rows > 0 &&
+             state->cursor_row < state->data->num_rows - 1) {
     state->cursor_row++;
   }
 
@@ -24,10 +25,13 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     state->cursor_col++;
   }
 
-  /* Adjust scroll */
-  /* Visible rows = main window height - 3 header rows (border + headers +
-   * separator) */
-  int visible_rows = state->term_rows - 6;
+  /* Get actual main window dimensions */
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+
+  /* Visible rows = main window height - 3 header rows (table header + column
+   * names + separator) */
+  int visible_rows = win_rows - 3;
   if (visible_rows < 1)
     visible_rows = 1;
 
@@ -37,14 +41,14 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     state->scroll_row = state->cursor_row - visible_rows + 1;
   }
 
-  /* Calculate visible columns */
+  /* Calculate visible columns using actual window width */
   int x = 1;
   size_t first_visible_col = state->scroll_col;
   size_t last_visible_col = state->scroll_col;
 
   for (size_t col = state->scroll_col; col < state->data->num_columns; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > state->term_cols)
+    if (x + width + 3 > win_cols)
       break;
     x += width + 1;
     last_visible_col = col;
@@ -59,7 +63,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     x = 1;
     while (state->scroll_col > 0) {
       int width = tui_get_column_width(state, state->scroll_col);
-      if (x + width + 3 > state->term_cols)
+      if (x + width + 3 > win_cols)
         break;
       x += width + 1;
       if (state->scroll_col == state->cursor_col)
@@ -73,10 +77,15 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
 }
 
 void tui_page_up(TuiState *state) {
-  if (!state || !state->data)
+  if (!state || !state->data || !state->main_win)
     return;
 
-  int page_size = state->term_rows - 6;
+  /* Get actual main window height */
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_cols;
+
+  int page_size = win_rows - 3; /* Minus header rows in main window */
   if (page_size < 1)
     page_size = 1;
 
@@ -104,16 +113,22 @@ void tui_page_up(TuiState *state) {
 }
 
 void tui_page_down(TuiState *state) {
-  if (!state || !state->data)
+  if (!state || !state->data || !state->main_win)
     return;
 
-  int page_size = state->term_rows - 6;
+  /* Get actual main window height */
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_cols;
+
+  int page_size = win_rows - 3; /* Minus header rows in main window */
   if (page_size < 1)
     page_size = 1;
 
   state->cursor_row += page_size;
   if (state->cursor_row >= state->data->num_rows) {
-    state->cursor_row = state->data->num_rows - 1;
+    state->cursor_row =
+        state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
   }
 
   state->scroll_row += page_size;
@@ -151,7 +166,7 @@ void tui_home(TuiState *state) {
 }
 
 void tui_end(TuiState *state) {
-  if (!state || !state->data)
+  if (!state || !state->data || !state->main_win)
     return;
 
   /* If we haven't loaded all rows, load the last page */
@@ -167,7 +182,12 @@ void tui_end(TuiState *state) {
   state->cursor_col =
       state->data->num_columns > 0 ? state->data->num_columns - 1 : 0;
 
-  int visible_rows = state->term_rows - 6;
+  /* Get actual main window height */
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_cols;
+
+  int visible_rows = win_rows - 3; /* Minus header rows in main window */
   if (visible_rows < 1)
     visible_rows = 1;
 

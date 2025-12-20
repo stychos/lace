@@ -318,8 +318,9 @@ bool tui_load_prev_rows(TuiState *state) {
   size_t old_count = state->data->num_rows;
   size_t new_count = old_count + more->num_rows;
 
-  /* Check for overflow */
-  if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row)) {
+  /* Check for overflow and enforce maximum row limit (1M rows) */
+  if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row) ||
+      new_count > 1000000) {
     db_result_free(more);
     return false;
   }

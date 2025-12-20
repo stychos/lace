@@ -89,6 +89,9 @@ DbValue db_value_float(double val) {
 
 DbValue db_value_text(const char *str) {
   DbValue v = {.type = DB_TYPE_TEXT, .is_null = false};
+  /* Explicitly initialize text fields */
+  v.text.data = NULL;
+  v.text.len = 0;
   if (str) {
     v.text.len = strlen(str);
     v.text.data = str_dup(str);
@@ -100,6 +103,9 @@ DbValue db_value_text(const char *str) {
 
 DbValue db_value_text_len(const char *str, size_t len) {
   DbValue v = {.type = DB_TYPE_TEXT, .is_null = false};
+  /* Explicitly initialize text fields */
+  v.text.data = NULL;
+  v.text.len = 0;
   if (str) {
     v.text.len = len;
     v.text.data = str_ndup(str, len);
@@ -111,6 +117,9 @@ DbValue db_value_text_len(const char *str, size_t len) {
 
 DbValue db_value_blob(const uint8_t *data, size_t len) {
   DbValue v = {.type = DB_TYPE_BLOB, .is_null = false};
+  /* Explicitly initialize blob fields */
+  v.blob.data = NULL;
+  v.blob.len = 0;
   if (data && len > 0) {
     v.blob.data = malloc(len);
     if (v.blob.data) {
@@ -119,7 +128,6 @@ DbValue db_value_blob(const uint8_t *data, size_t len) {
     } else {
       /* Malloc failed - return null value */
       v.is_null = true;
-      v.blob.len = 0;
     }
   } else {
     v.is_null = true;

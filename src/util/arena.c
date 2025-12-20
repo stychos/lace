@@ -4,6 +4,7 @@
  */
 
 #include "arena.h"
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +15,10 @@
 #define MIN_BLOCK_SIZE 4096
 
 static ArenaBlock *arena_new_block(size_t size) {
+  /* Check for overflow before allocation */
+  if (size > SIZE_MAX - sizeof(ArenaBlock)) {
+    return NULL;
+  }
   ArenaBlock *block = malloc(sizeof(ArenaBlock) + size);
   if (!block)
     return NULL;
@@ -62,7 +67,7 @@ void arena_free(Arena *arena) {
 }
 
 void arena_reset(Arena *arena) {
-  if (!arena)
+  if (!arena || !arena->first)
     return;
 
   /* Free all blocks except first */
@@ -81,22 +86,27 @@ void arena_reset(Arena *arena) {
 }
 
 static size_t align_up(size_t size, size_t alignment) {
-  /* Check for overflow: size + alignment - 1 could wrap */
-  if (size > SIZE_MAX - alignment + 1)
+  /* Check for overflow: size + (alignment - 1) could wrap */
+  if (alignment == 0)
+    return size;
+  /* Alignment must be a power of 2 for bitwise AND to work correctly */
+  if ((alignment & (alignment - 1)) != 0)
+    return SIZE_MAX; /* Invalid alignment - signal error */
+  if (size > SIZE_MAX - (alignment - 1))
     return SIZE_MAX; /* Return max to signal overflow - caller should check */
   return (size + alignment - 1) & ~(alignment - 1);
 }
 
 void *arena_alloc_aligned(Arena *arena, size_t size, size_t alignment) {
-  if (!arena || size == 0)
+  if (!arena || !arena->current || size == 0)
     return NULL;
 
   /* Find space in current block */
   ArenaBlock *block = arena->current;
   size_t aligned_offset = align_up(block->used, alignment);
 
-  /* Check for overflow in needed calculation */
-  if (aligned_offset > SIZE_MAX - size)
+  /* Check for overflow from align_up or in needed calculation */
+  if (aligned_offset == SIZE_MAX || aligned_offset > SIZE_MAX - size)
     return NULL;
   size_t needed = aligned_offset + size;
 
@@ -115,6 +125,9 @@ void *arena_alloc_aligned(Arena *arena, size_t size, size_t alignment) {
     if (size > SIZE_MAX - MIN_BLOCK_SIZE + 1)
       return NULL;
     new_block_size = align_up(size, MIN_BLOCK_SIZE);
+    /* Check if align_up returned SIZE_MAX (overflow) */
+    if (new_block_size == SIZE_MAX)
+      return NULL;
   }
 
   ArenaBlock *new_block = arena_new_block(new_block_size);
@@ -164,9 +177,11 @@ char *arena_strdup(Arena *arena, const char *s) {
 char *arena_strndup(Arena *arena, const char *s, size_t n) {
   if (!s)
     return NULL;
-  size_t len = strlen(s);
-  if (n < len)
-    len = n;
+  /* Use bounded search for null terminator to avoid reading past n bytes */
+  size_t len = 0;
+  while (len < n && s[len] != '\0') {
+    len++;
+  }
   char *dup = arena_alloc(arena, len + 1);
   if (dup) {
     memcpy(dup, s, len);
@@ -189,7 +204,13 @@ char *arena_printf(Arena *arena, const char *fmt, ...) {
     return NULL;
   }
 
-  char *buf = arena_alloc(arena, len + 1);
+  /* Check for overflow when adding 1 for null terminator */
+  if (len > INT_MAX - 1) {
+    va_end(args);
+    return NULL;
+  }
+
+  char *buf = arena_alloc(arena, (size_t)len + 1);
   if (buf) {
     vsnprintf(buf, len + 1, fmt, args);
   }
@@ -205,6 +226,10 @@ size_t arena_total_allocated(Arena *arena) {
 size_t arena_total_used(Arena *arena) { return arena ? arena->total_used : 0; }
 
 ArenaScope arena_scope_begin(Arena *arena) {
+  if (!arena || !arena->current) {
+    ArenaScope scope = {.arena = NULL, .saved_block = NULL, .saved_used = 0};
+    return scope;
+  }
   ArenaScope scope = {.arena = arena,
                       .saved_block = arena->current,
                       .saved_used = arena->current->used};
@@ -212,7 +237,7 @@ ArenaScope arena_scope_begin(Arena *arena) {
 }
 
 void arena_scope_end(ArenaScope *scope) {
-  if (!scope || !scope->arena)
+  if (!scope || !scope->arena || !scope->saved_block)
     return;
 
   Arena *arena = scope->arena;
@@ -229,4 +254,10 @@ void arena_scope_end(ArenaScope *scope) {
   scope->saved_block->next = NULL;
   scope->saved_block->used = scope->saved_used;
   arena->current = scope->saved_block;
+
+  /* Recalculate total_used by summing all remaining blocks */
+  arena->total_used = 0;
+  for (ArenaBlock *b = arena->first; b != NULL; b = b->next) {
+    arena->total_used += b->used;
+  }
 }

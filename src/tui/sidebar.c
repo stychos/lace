@@ -103,6 +103,8 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
     return;
 
   int max_name_len = SIDEBAR_WIDTH - 4;
+  if (max_name_len < 1)
+    max_name_len = 1;
   int name_len = (int)strlen(name);
 
   /* Only animate if name is truncated */
@@ -401,7 +403,13 @@ void tui_draw_sidebar(TuiState *state) {
     return;
   }
 
-  int list_height = state->term_rows - 6; /* Content area height minus filter */
+  /* Get actual sidebar window height */
+  int win_height, win_width;
+  getmaxyx(state->sidebar_win, win_height, win_width);
+  (void)win_width;
+
+  /* Content area height: window height minus top border(1), filter(1), separator(1), bottom border(1) */
+  int list_height = win_height - 4;
 
   /* Count filtered tables */
   size_t filtered_count = 0;
@@ -429,7 +437,7 @@ void tui_draw_sidebar(TuiState *state) {
 
   /* Draw filtered tables */
   size_t filtered_idx = 0;
-  for (size_t i = 0; i < state->num_tables && y < state->term_rows - 3; i++) {
+  for (size_t i = 0; i < state->num_tables && y < win_height - 1; i++) {
     const char *name = state->tables[i];
     if (!name)
       continue;

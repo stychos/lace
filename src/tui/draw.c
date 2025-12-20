@@ -207,8 +207,11 @@ void tui_draw_header(TuiState *state) {
 
   /* Help hint */
   const char *help = "q:Quit t:Sidebar /:GoTo []:Tabs -:Close ?:Help";
-  mvwprintw(state->header_win, 0, state->term_cols - (int)strlen(help) - 1,
-            "%s", help);
+  int help_len = (int)strlen(help);
+  int help_x = state->term_cols - help_len - 1;
+  if (help_x > 0) {
+    mvwprintw(state->header_win, 0, help_x, "%s", help);
+  }
 
   wrefresh(state->header_win);
 }
@@ -282,7 +285,7 @@ void tui_draw_status(TuiState *state) {
       const char *name = state->tables[actual_idx];
       mvwprintw(state->status_win, 0, 1, "%s", name);
     }
-  } else if (query_results_active &&
+  } else if (query_results_active && ws->query_results->columns &&
              ws->query_result_col < ws->query_results->num_columns) {
     /* Query results column info */
     ColumnDef *col = &ws->query_results->columns[ws->query_result_col];
@@ -455,12 +458,16 @@ bool tui_handle_mouse_event(TuiState *state) {
           /* Scroll down - move cursor down */
           state->cursor_row += scroll_amount;
           if (state->cursor_row >= state->data->num_rows) {
-            state->cursor_row = state->data->num_rows - 1;
+            state->cursor_row =
+                state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
           }
         }
 
-        /* Adjust scroll to keep cursor visible */
-        int visible_rows = state->term_rows - 6;
+        /* Adjust scroll to keep cursor visible using actual main window height */
+        int main_rows, main_cols;
+        getmaxyx(state->main_win, main_rows, main_cols);
+        (void)main_cols;
+        int visible_rows = main_rows - 3; /* Minus header rows in main window */
         if (visible_rows < 1)
           visible_rows = 1;
         if (state->cursor_row < state->scroll_row) {
@@ -549,6 +556,11 @@ bool tui_handle_mouse_event(TuiState *state) {
        row 0 = border+title, row 1 = filter, row 2 = separator, row 3+ = table
        list */
     int sidebar_row = mouse_y - 2; /* Convert to sidebar_win coordinates */
+
+    /* Validate sidebar_row is non-negative before use */
+    if (sidebar_row < 0) {
+      return true;
+    }
 
     /* Click on filter field (row 1 in sidebar_win = screen row 2) */
     if (sidebar_row == 1) {
@@ -648,8 +660,12 @@ bool tui_handle_mouse_event(TuiState *state) {
         tui_query_confirm_result_edit(state);
       }
 
+      /* Get actual main window dimensions */
+      int main_win_rows, main_win_cols;
+      getmaxyx(state->main_win, main_win_rows, main_win_cols);
+
       /* Calculate query view layout */
-      int win_rows = state->term_rows - 4; /* Minus header, tab bar, status */
+      int win_rows = main_win_rows;
       int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
       if (editor_height < 3)
         editor_height = 3;
@@ -679,13 +695,17 @@ bool tui_handle_mouse_event(TuiState *state) {
 
           for (size_t col = ws->query_result_scroll_col;
                col < ws->query_results->num_columns; col++) {
-            int width = ws->query_result_col_widths[col];
+            int width = DEFAULT_COL_WIDTH;
+            if (ws->query_result_col_widths &&
+                col < ws->query_result_num_cols) {
+              width = ws->query_result_col_widths[col];
+            }
             if (rel_x >= x_pos && rel_x < x_pos + width) {
               target_col = col;
               break;
             }
             x_pos += width + 1;
-            if (x_pos > state->term_cols)
+            if (x_pos > main_win_cols)
               break;
             target_col = col + 1;
           }
@@ -722,6 +742,11 @@ bool tui_handle_mouse_event(TuiState *state) {
       return true; /* No data to select, but filter is deactivated */
     }
 
+    /* Get actual main window dimensions */
+    int table_win_rows, table_win_cols;
+    getmaxyx(state->main_win, table_win_rows, table_win_cols);
+    (void)table_win_rows;
+
     /* Adjust coordinates relative to main window (starts at screen y=2) */
     int rel_x = mouse_x - sidebar_width;
     int rel_y = mouse_y - 2;
@@ -748,7 +773,7 @@ bool tui_handle_mouse_event(TuiState *state) {
             break;
           }
           x_pos += width + 1; /* +1 for separator */
-          if (x_pos > state->term_cols)
+          if (x_pos > table_win_cols)
             break;
           target_col = col + 1;
         }

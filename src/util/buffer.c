@@ -33,11 +33,16 @@ Buffer *buf_new(size_t initial_cap) {
 }
 
 Buffer *buf_new_from(const uint8_t *data, size_t len) {
+  if (!data && len > 0)
+    return NULL;
+
   Buffer *buf = buf_new(len);
   if (!buf)
     return NULL;
 
-  memcpy(buf->data, data, len);
+  if (data && len > 0) {
+    memcpy(buf->data, data, len);
+  }
   buf->len = len;
   return buf;
 }
@@ -50,17 +55,25 @@ void buf_free(Buffer *buf) {
 }
 
 void buf_reset(Buffer *buf) {
+  if (!buf)
+    return;
   buf->len = 0;
   buf->pos = 0;
 }
 
 void buf_clear(Buffer *buf) {
+  if (!buf)
+    return;
   buf->len = 0;
   buf->pos = 0;
-  memset(buf->data, 0, buf->cap);
+  if (buf->data && buf->cap > 0) {
+    memset(buf->data, 0, buf->cap);
+  }
 }
 
 bool buf_reserve(Buffer *buf, size_t additional) {
+  if (!buf)
+    return false;
   /* Check for overflow */
   if (additional > SIZE_MAX - buf->len)
     return false;
@@ -71,6 +84,8 @@ bool buf_reserve(Buffer *buf, size_t additional) {
 }
 
 bool buf_grow(Buffer *buf, size_t min_cap) {
+  if (!buf)
+    return false;
   /* Enforce maximum capacity to prevent OOM */
   if (min_cap > MAX_BUFFER_CAP)
     return false;
@@ -104,6 +119,8 @@ bool buf_grow(Buffer *buf, size_t min_cap) {
 }
 
 void buf_shrink(Buffer *buf) {
+  if (!buf)
+    return;
   if (buf->len < buf->cap / 4 && buf->cap > INITIAL_CAP) {
     size_t new_cap = buf->cap / 2;
     if (new_cap < buf->len)
@@ -221,6 +238,10 @@ bool buf_write_i64_le(Buffer *buf, int64_t val) {
 }
 
 bool buf_write_bytes(Buffer *buf, const uint8_t *data, size_t len) {
+  if (len == 0)
+    return true; /* Nothing to write */
+  if (!data)
+    return false;
   if (!buf_reserve(buf, len))
     return false;
   memcpy(buf->data + buf->len, data, len);
@@ -229,19 +250,33 @@ bool buf_write_bytes(Buffer *buf, const uint8_t *data, size_t len) {
 }
 
 bool buf_write_str(Buffer *buf, const char *str) {
+  if (!buf || !str)
+    return false;
   return buf_write_bytes(buf, (const uint8_t *)str, strlen(str));
 }
 
 bool buf_write_str_len(Buffer *buf, const char *str, size_t len) {
+  if (!buf || (!str && len > 0))
+    return false;
   return buf_write_bytes(buf, (const uint8_t *)str, len);
 }
 
 bool buf_write_cstr(Buffer *buf, const char *str) {
-  size_t len = strlen(str) + 1;
-  return buf_write_bytes(buf, (const uint8_t *)str, len);
+  if (!buf || !str)
+    return false;
+  size_t slen = strlen(str);
+  /* Check for overflow before adding 1 for null terminator */
+  if (slen == SIZE_MAX) {
+    return false;
+  }
+  return buf_write_bytes(buf, (const uint8_t *)str, slen + 1);
 }
 
 bool buf_write_zeros(Buffer *buf, size_t count) {
+  if (!buf)
+    return false;
+  if (count == 0)
+    return true;
   if (!buf_reserve(buf, count))
     return false;
   memset(buf->data + buf->len, 0, count);
@@ -252,14 +287,14 @@ bool buf_write_zeros(Buffer *buf, size_t count) {
 /* Reading functions */
 
 bool buf_read_u8(Buffer *buf, uint8_t *val) {
-  if (buf_remaining(buf) < 1)
+  if (!buf || !val || buf_remaining(buf) < 1)
     return false;
   *val = buf->data[buf->pos++];
   return true;
 }
 
 bool buf_read_u16_be(Buffer *buf, uint16_t *val) {
-  if (buf_remaining(buf) < 2)
+  if (!buf || !val || buf_remaining(buf) < 2)
     return false;
   *val = ((uint16_t)buf->data[buf->pos] << 8) |
          ((uint16_t)buf->data[buf->pos + 1]);
@@ -268,7 +303,7 @@ bool buf_read_u16_be(Buffer *buf, uint16_t *val) {
 }
 
 bool buf_read_u16_le(Buffer *buf, uint16_t *val) {
-  if (buf_remaining(buf) < 2)
+  if (!buf || !val || buf_remaining(buf) < 2)
     return false;
   *val = ((uint16_t)buf->data[buf->pos + 1] << 8) |
          ((uint16_t)buf->data[buf->pos]);
@@ -277,7 +312,7 @@ bool buf_read_u16_le(Buffer *buf, uint16_t *val) {
 }
 
 bool buf_read_u32_be(Buffer *buf, uint32_t *val) {
-  if (buf_remaining(buf) < 4)
+  if (!buf || !val || buf_remaining(buf) < 4)
     return false;
   *val = ((uint32_t)buf->data[buf->pos] << 24) |
          ((uint32_t)buf->data[buf->pos + 1] << 16) |
@@ -288,7 +323,7 @@ bool buf_read_u32_be(Buffer *buf, uint32_t *val) {
 }
 
 bool buf_read_u32_le(Buffer *buf, uint32_t *val) {
-  if (buf_remaining(buf) < 4)
+  if (!buf || !val || buf_remaining(buf) < 4)
     return false;
   *val = ((uint32_t)buf->data[buf->pos + 3] << 24) |
          ((uint32_t)buf->data[buf->pos + 2] << 16) |
@@ -299,7 +334,7 @@ bool buf_read_u32_le(Buffer *buf, uint32_t *val) {
 }
 
 bool buf_read_u64_be(Buffer *buf, uint64_t *val) {
-  if (buf_remaining(buf) < 8)
+  if (!buf || !val || buf_remaining(buf) < 8)
     return false;
   *val = ((uint64_t)buf->data[buf->pos] << 56) |
          ((uint64_t)buf->data[buf->pos + 1] << 48) |
@@ -314,7 +349,7 @@ bool buf_read_u64_be(Buffer *buf, uint64_t *val) {
 }
 
 bool buf_read_u64_le(Buffer *buf, uint64_t *val) {
-  if (buf_remaining(buf) < 8)
+  if (!buf || !val || buf_remaining(buf) < 8)
     return false;
   *val = ((uint64_t)buf->data[buf->pos + 7] << 56) |
          ((uint64_t)buf->data[buf->pos + 6] << 48) |
@@ -357,26 +392,30 @@ bool buf_read_i64_le(Buffer *buf, int64_t *val) {
 }
 
 bool buf_read_bytes(Buffer *buf, uint8_t *out, size_t len) {
-  if (buf_remaining(buf) < len)
+  if (!buf || (!out && len > 0) || buf_remaining(buf) < len)
     return false;
-  memcpy(out, buf->data + buf->pos, len);
+  if (len > 0)
+    memcpy(out, buf->data + buf->pos, len);
   buf->pos += len;
   return true;
 }
 
 char *buf_read_str(Buffer *buf, size_t len) {
-  if (buf_remaining(buf) < len)
+  if (!buf || buf_remaining(buf) < len)
     return NULL;
   char *str = malloc(len + 1);
   if (!str)
     return NULL;
-  memcpy(str, buf->data + buf->pos, len);
+  if (len > 0)
+    memcpy(str, buf->data + buf->pos, len);
   str[len] = '\0';
   buf->pos += len;
   return str;
 }
 
 char *buf_read_cstr(Buffer *buf) {
+  if (!buf || !buf->data)
+    return NULL;
   size_t start = buf->pos;
   while (buf->pos < buf->len && buf->data[buf->pos] != '\0') {
     buf->pos++;
@@ -397,7 +436,7 @@ char *buf_read_cstr(Buffer *buf) {
 }
 
 bool buf_skip(Buffer *buf, size_t count) {
-  if (buf_remaining(buf) < count)
+  if (!buf || buf_remaining(buf) < count)
     return false;
   buf->pos += count;
   return true;
@@ -406,14 +445,14 @@ bool buf_skip(Buffer *buf, size_t count) {
 /* Peeking functions */
 
 bool buf_peek_u8(const Buffer *buf, uint8_t *val) {
-  if (buf_remaining(buf) < 1)
+  if (!buf || !val || buf_remaining(buf) < 1)
     return false;
   *val = buf->data[buf->pos];
   return true;
 }
 
 bool buf_peek_u16_be(const Buffer *buf, uint16_t *val) {
-  if (buf_remaining(buf) < 2)
+  if (!buf || !val || buf_remaining(buf) < 2)
     return false;
   *val = ((uint16_t)buf->data[buf->pos] << 8) |
          ((uint16_t)buf->data[buf->pos + 1]);
@@ -421,7 +460,7 @@ bool buf_peek_u16_be(const Buffer *buf, uint16_t *val) {
 }
 
 bool buf_peek_u32_be(const Buffer *buf, uint32_t *val) {
-  if (buf_remaining(buf) < 4)
+  if (!buf || !val || buf_remaining(buf) < 4)
     return false;
   *val = ((uint32_t)buf->data[buf->pos] << 24) |
          ((uint32_t)buf->data[buf->pos + 1] << 16) |
@@ -432,39 +471,62 @@ bool buf_peek_u32_be(const Buffer *buf, uint32_t *val) {
 
 /* Position management */
 
-size_t buf_remaining(const Buffer *buf) { return buf->len - buf->pos; }
+size_t buf_remaining(const Buffer *buf) {
+  if (!buf || buf->pos > buf->len)
+    return 0;
+  return buf->len - buf->pos;
+}
 
-size_t buf_tell(const Buffer *buf) { return buf->pos; }
+size_t buf_tell(const Buffer *buf) {
+  if (!buf)
+    return 0;
+  return buf->pos;
+}
 
 bool buf_seek(Buffer *buf, size_t pos) {
-  if (pos > buf->len)
+  if (!buf || pos > buf->len)
     return false;
   buf->pos = pos;
   return true;
 }
 
 bool buf_rewind(Buffer *buf) {
+  if (!buf)
+    return false;
   buf->pos = 0;
   return true;
 }
 
-const uint8_t *buf_ptr(const Buffer *buf) { return buf->data + buf->pos; }
+const uint8_t *buf_ptr(const Buffer *buf) {
+  if (!buf || !buf->data)
+    return NULL;
+  if (buf->pos > buf->len)
+    return NULL;
+  return buf->data + buf->pos;
+}
 
-const uint8_t *buf_data(const Buffer *buf) { return buf->data; }
+const uint8_t *buf_data(const Buffer *buf) {
+  if (!buf || !buf->data)
+    return NULL;
+  return buf->data;
+}
 
 /* Utility */
 
 void buf_compact(Buffer *buf) {
+  if (!buf || !buf->data)
+    return;
   if (buf->pos > 0) {
     size_t remaining = buf_remaining(buf);
-    memmove(buf->data, buf->data + buf->pos, remaining);
+    if (remaining > 0)
+      memmove(buf->data, buf->data + buf->pos, remaining);
     buf->len = remaining;
     buf->pos = 0;
   }
 }
 
 Buffer *buf_slice(Buffer *buf, size_t len) {
-  if (buf_remaining(buf) < len)
+  if (!buf || buf_remaining(buf) < len)
     return NULL;
   Buffer *slice = buf_new_from(buf->data + buf->pos, len);
   if (slice)
@@ -473,8 +535,16 @@ Buffer *buf_slice(Buffer *buf, size_t len) {
 }
 
 void buf_dump(Buffer *buf, const char *label) {
+  if (!buf) {
+    fprintf(stderr, "%s: (NULL buffer)\n", label ? label : "Buffer");
+    return;
+  }
   fprintf(stderr, "%s: len=%zu cap=%zu pos=%zu\n", label ? label : "Buffer",
           buf->len, buf->cap, buf->pos);
+  if (!buf->data) {
+    fprintf(stderr, "  (NULL data)\n");
+    return;
+  }
   fprintf(stderr, "  ");
   for (size_t i = 0; i < buf->len && i < 64; i++) {
     fprintf(stderr, "%02x ", buf->data[i]);

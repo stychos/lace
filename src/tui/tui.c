@@ -238,9 +238,9 @@ bool tui_init(TuiState *state) {
     use_default_colors();
 
     /* Define color pairs */
-    init_pair(COLOR_HEADER, COLOR_WHITE, COLOR_BLUE);
+    init_pair(COLOR_HEADER, COLOR_BLACK, COLOR_CYAN);
     init_pair(COLOR_SELECTED, COLOR_BLACK, COLOR_CYAN);
-    init_pair(COLOR_STATUS, COLOR_WHITE, COLOR_BLUE);
+    init_pair(COLOR_STATUS, COLOR_BLACK, COLOR_CYAN);
     init_pair(COLOR_ERROR, COLOR_WHITE, COLOR_RED);
     init_pair(COLOR_BORDER, COLOR_CYAN, -1);
     init_pair(COLOR_TITLE, COLOR_YELLOW, -1);
@@ -251,6 +251,12 @@ bool tui_init(TuiState *state) {
 
   /* Get terminal dimensions */
   getmaxyx(stdscr, state->term_rows, state->term_cols);
+
+  /* Clamp to minimum dimensions to prevent negative calculations */
+  if (state->term_rows < MIN_TERM_ROWS)
+    state->term_rows = MIN_TERM_ROWS;
+  if (state->term_cols < MIN_TERM_COLS)
+    state->term_cols = MIN_TERM_COLS;
 
   /* Create windows */
   state->header_win = newwin(1, state->term_cols, 0, 0);
@@ -265,6 +271,14 @@ bool tui_init(TuiState *state) {
 
   /* Main window (after header and tab bar) */
   state->main_win = newwin(state->content_rows, state->term_cols, 2, 0);
+
+  /* Validate all windows were created successfully */
+  if (!state->header_win || !state->status_win || !state->tab_win ||
+      !state->main_win) {
+    endwin();
+    return false;
+  }
+
   scrollok(state->main_win, FALSE);
   keypad(state->main_win, TRUE);
 
@@ -321,6 +335,12 @@ void tui_recreate_windows(TuiState *state) {
 
   /* Get current terminal size */
   getmaxyx(stdscr, state->term_rows, state->term_cols);
+
+  /* Clamp to minimum dimensions to prevent negative calculations */
+  if (state->term_rows < MIN_TERM_ROWS)
+    state->term_rows = MIN_TERM_ROWS;
+  if (state->term_cols < MIN_TERM_COLS)
+    state->term_cols = MIN_TERM_COLS;
 
   /* Resize header and status */
   wresize(state->header_win, 1, state->term_cols);
@@ -792,6 +812,11 @@ void tui_run(TuiState *state) {
     case KEY_RESIZE:
       /* Handle terminal resize */
       getmaxyx(stdscr, state->term_rows, state->term_cols);
+      /* Clamp to minimum dimensions */
+      if (state->term_rows < MIN_TERM_ROWS)
+        state->term_rows = MIN_TERM_ROWS;
+      if (state->term_cols < MIN_TERM_COLS)
+        state->term_cols = MIN_TERM_COLS;
       wresize(state->header_win, 1, state->term_cols);
       wresize(state->status_win, 1, state->term_cols);
       mvwin(state->status_win, state->term_rows - 1, 0);

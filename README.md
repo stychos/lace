@@ -6,7 +6,7 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 
 ## Features
 
-- Memory efficient, browse millions of rows with lazy loading
+- Memory efficient, as fast as possible
 - Classic & vim-like spatial navigation
 - Full mouse support (click, double-click, scroll wheel)
 - Multi-tab workspaces
@@ -88,8 +88,8 @@ Binary will be at `build/lace`.
 | `p` | Open query tab |
 | `Ctrl+R` | Execute query under cursor |
 | `Ctrl+A` | Execute all queries |
-| `Ctrl+M` | Execute all in transaction |
-| `Tab` / `Esc` | Switch focus (editor/results) |
+| `Ctrl+T` | Execute all in transaction |
+| `Ctrl+W` / `Esc` | Switch focus (editor/results) |
 | Arrows / `PgUp` / `PgDn` | Navigate editor or results |
 
 ### Other

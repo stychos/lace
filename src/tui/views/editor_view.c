@@ -85,12 +85,17 @@ static bool editor_buffer_set(EditorBuffer *buf, const char *content) {
 
 static bool editor_buffer_insert(EditorBuffer *buf, size_t pos, char ch) {
   if (buf->len + 2 > buf->cap) {
-    size_t new_cap = buf->cap * 2;
-    if (new_cap < buf->cap || new_cap == 0) {
-      /* Overflow or zero capacity - use safe fallback */
+    /* Check for overflow BEFORE multiplying */
+    size_t new_cap;
+    if (buf->cap > SIZE_MAX / 2) {
+      /* Would overflow on double, use safe fallback */
+      if (buf->cap > SIZE_MAX - 256)
+        return false; /* Cannot grow further */
       new_cap = buf->cap + 256;
-      if (new_cap < buf->cap)
-        return false; /* Still overflow, give up */
+    } else {
+      new_cap = buf->cap * 2;
+      if (new_cap == 0)
+        new_cap = 256; /* Handle zero capacity case */
     }
     char *new_data = realloc(buf->data, new_cap);
     if (!new_data)

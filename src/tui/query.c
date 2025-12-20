@@ -110,6 +110,11 @@ static void query_ensure_capacity(Workspace *ws, size_t needed) {
 
   size_t new_cap = ws->query_capacity;
   while (new_cap < needed) {
+    /* Check for overflow before multiplying */
+    if (new_cap > SIZE_MAX / QUERY_GROWTH_FACTOR) {
+      new_cap = needed; /* Fall back to exact size */
+      break;
+    }
     new_cap *= QUERY_GROWTH_FACTOR;
   }
 
@@ -490,7 +495,8 @@ static int64_t query_count_rows(TuiState *state, const char *base_sql) {
   ResultSet *result = db_query(state->conn, count_sql, &err);
   free(count_sql);
 
-  if (!result || result->num_rows == 0 || result->num_columns == 0) {
+  if (!result || result->num_rows == 0 || result->num_columns == 0 ||
+      !result->rows) {
     free(err);
     if (result)
       db_result_free(result);
@@ -1082,7 +1088,7 @@ void tui_draw_query(TuiState *state) {
   if (!ws->query_focus_results) {
     wattron(state->main_win, A_BOLD);
   }
-  mvwprintw(state->main_win, 0, 1, "SQL Query (^R: run, ^A: all, ^M: transaction)");
+  mvwprintw(state->main_win, 0, 1, "SQL Query (^R: run, ^A: all, ^T: transaction, ^W: switch)");
   if (!ws->query_focus_results) {
     wattroff(state->main_win, A_BOLD);
   }
@@ -1213,7 +1219,7 @@ static void query_result_start_edit(TuiState *state, Workspace *ws) {
     return;
 
   Row *row = &ws->query_results->rows[ws->query_result_row];
-  if (ws->query_result_col >= row->num_cells)
+  if (!row->cells || ws->query_result_col >= row->num_cells)
     return;
 
   DbValue *val = &row->cells[ws->query_result_col];
@@ -1278,7 +1284,7 @@ static void query_result_start_modal_edit(TuiState *state, Workspace *ws) {
     return;
 
   Row *row = &ws->query_results->rows[ws->query_result_row];
-  if (ws->query_result_col >= row->num_cells)
+  if (!row->cells || ws->query_result_col >= row->num_cells)
     return;
 
   DbValue *val = &row->cells[ws->query_result_col];
@@ -1344,8 +1350,11 @@ void tui_query_scroll_results(TuiState *state, int delta) {
   if (ws->query_results->num_rows == 0)
     return;
 
-  /* Calculate visible rows for scroll adjustment */
-  int win_rows = state->term_rows - 4;
+  /* Calculate visible rows for scroll adjustment using actual main window */
+  int main_rows, main_cols;
+  getmaxyx(state->main_win, main_rows, main_cols);
+  (void)main_cols;
+  int win_rows = main_rows;
   int editor_height = (win_rows - 1) * 3 / 10;
   if (editor_height < 3)
     editor_height = 3;
@@ -1365,7 +1374,9 @@ void tui_query_scroll_results(TuiState *state, int delta) {
     /* Scroll down */
     ws->query_result_row += (size_t)delta;
     if (ws->query_result_row >= ws->query_results->num_rows) {
-      ws->query_result_row = ws->query_results->num_rows - 1;
+      ws->query_result_row = ws->query_results->num_rows > 0
+                                 ? ws->query_results->num_rows - 1
+                                 : 0;
     }
   }
 
@@ -1829,8 +1840,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return query_result_handle_edit_input(state, ws, ch);
   }
 
-  /* Tab or Esc key switches focus (only when not editing) */
-  if (ch == '\t' || ch == KEY_BTAB || ch == 27) {
+  /* Ctrl+W or Esc switches focus (only when not editing) */
+  if (ch == 23 || ch == 27) { /* 23 = Ctrl+W */
     ws->query_focus_results = !ws->query_focus_results;
     return true;
   }
@@ -1885,14 +1896,17 @@ bool tui_handle_query_input(TuiState *state, int ch) {
 
     case KEY_DOWN:
     case 'j':
-      if (ws->query_result_row < ws->query_results->num_rows - 1) {
+      if (ws->query_results->num_rows > 0 &&
+          ws->query_result_row < ws->query_results->num_rows - 1) {
         ws->query_result_row++;
-        /* Adjust scroll based on actual visible rows */
-        int win_rows = state->term_rows - 4;
-        int editor_height = (win_rows - 1) * 3 / 10;
+        /* Adjust scroll based on actual main window height */
+        int down_rows, down_cols;
+        getmaxyx(state->main_win, down_rows, down_cols);
+        (void)down_cols;
+        int editor_height = (down_rows - 1) * 3 / 10;
         if (editor_height < 3)
           editor_height = 3;
-        int visible = win_rows - editor_height - 4;
+        int visible = down_rows - editor_height - 4;
         if (visible < 1)
           visible = 1;
         if (ws->query_result_row >=
@@ -1921,9 +1935,11 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     case 'l':
       if (ws->query_result_col < ws->query_results->num_columns - 1) {
         ws->query_result_col++;
-        /* Adjust horizontal scroll to keep cursor visible */
-        int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
-        int avail_width = state->term_cols - sidebar_width;
+        /* Adjust horizontal scroll to keep cursor visible using actual main window */
+        int right_rows, right_cols;
+        getmaxyx(state->main_win, right_rows, right_cols);
+        (void)right_rows;
+        int avail_width = right_cols;
         int x = 1;
         size_t last_visible = ws->query_result_scroll_col;
         for (size_t col = ws->query_result_scroll_col;
@@ -1963,9 +1979,11 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     case KEY_END:
       if (ws->query_results->num_columns > 0) {
         ws->query_result_col = ws->query_results->num_columns - 1;
-        /* Adjust horizontal scroll to show last column */
-        int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
-        int avail_width = state->term_cols - sidebar_width;
+        /* Adjust horizontal scroll to show last column using actual main window */
+        int end_rows, end_cols;
+        getmaxyx(state->main_win, end_rows, end_cols);
+        (void)end_rows;
+        int avail_width = end_cols;
         ws->query_result_scroll_col = ws->query_result_col;
         /* Adjust to show as many columns as possible */
         int x = 1;
@@ -1984,13 +2002,15 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       return true;
 
     case KEY_PPAGE: {
-      /* Calculate visible rows in results area */
-      int win_rows = state->term_rows - 4;
-      int editor_height = (win_rows - 1) * 3 / 10;
+      /* Calculate visible rows in results area using actual main window */
+      int ppage_rows, ppage_cols;
+      getmaxyx(state->main_win, ppage_rows, ppage_cols);
+      (void)ppage_cols;
+      int editor_height = (ppage_rows - 1) * 3 / 10;
       if (editor_height < 3)
         editor_height = 3;
       int visible =
-          win_rows - editor_height - 4; /* results area minus headers */
+          ppage_rows - editor_height - 4; /* results area minus headers */
       if (visible < 1)
         visible = 1;
 
@@ -2008,18 +2028,22 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     }
 
     case KEY_NPAGE: {
-      /* Calculate visible rows in results area */
-      int win_rows = state->term_rows - 4;
-      int editor_height = (win_rows - 1) * 3 / 10;
+      /* Calculate visible rows in results area using actual main window */
+      int npage_rows, npage_cols;
+      getmaxyx(state->main_win, npage_rows, npage_cols);
+      (void)npage_cols;
+      int editor_height = (npage_rows - 1) * 3 / 10;
       if (editor_height < 3)
         editor_height = 3;
-      int visible = win_rows - editor_height - 4;
+      int visible = npage_rows - editor_height - 4;
       if (visible < 1)
         visible = 1;
 
       ws->query_result_row += visible;
       if (ws->query_result_row >= ws->query_results->num_rows) {
-        ws->query_result_row = ws->query_results->num_rows - 1;
+        ws->query_result_row = ws->query_results->num_rows > 0
+                                   ? ws->query_results->num_rows - 1
+                                   : 0;
       }
       /* Adjust scroll to keep cursor visible */
       if (ws->query_result_row >=
@@ -2146,7 +2170,7 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case 13: /* Ctrl+M - run all queries in a transaction */
+  case 20: /* Ctrl+T - run all queries in a transaction */
   {
     if (!ws->query_text || !*ws->query_text) {
       tui_set_error(state, "No queries to execute");

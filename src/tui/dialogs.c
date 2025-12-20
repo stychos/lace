@@ -27,6 +27,12 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
   int start_y = (term_rows - height) / 2;
   int start_x = (term_cols - width) / 2;
 
+  /* Clamp coordinates to prevent negative values */
+  if (start_y < 0)
+    start_y = 0;
+  if (start_x < 0)
+    start_x = 0;
+
   WINDOW *dialog = newwin(height, width, start_y, start_x);
   if (!dialog)
     return false;
@@ -102,6 +108,10 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
         int mouse_y = event.y - start_y;
         int mouse_x = event.x - start_x;
 
+        /* Validate coordinates are within dialog bounds */
+        if (mouse_y < 0 || mouse_y >= height || mouse_x < 0 || mouse_x >= width)
+          break;
+
         /* Check if click is on button row */
         if (mouse_y == btn_y) {
           /* Yes button: position yes_x, width 5 (" Yes ") */
@@ -162,6 +172,12 @@ void tui_show_goto_dialog(TuiState *state) {
   int starty = (term_rows - height) / 2;
   int startx = (term_cols - width) / 2;
 
+  /* Clamp coordinates to prevent negative values */
+  if (starty < 0)
+    starty = 0;
+  if (startx < 0)
+    startx = 0;
+
   WINDOW *win = newwin(height, width, starty, startx);
   if (!win)
     return;
@@ -204,7 +220,12 @@ void tui_show_goto_dialog(TuiState *state) {
     case '\n':
     case KEY_ENTER:
       if (input_len > 0) {
-        size_t row_num = (size_t)strtoll(input, NULL, 10);
+        long long parsed = strtoll(input, NULL, 10);
+        if (parsed <= 0 || (unsigned long long)parsed > total_rows) {
+          flash();
+          break;
+        }
+        size_t row_num = (size_t)parsed;
         if (row_num > 0 && row_num <= total_rows) {
           size_t target_row = row_num - 1; /* 0-indexed */
 
@@ -316,6 +337,12 @@ void tui_show_schema(TuiState *state) {
   int width = state->term_cols - 10;
   int starty = 2;
   int startx = 5;
+
+  /* Ensure minimum dimensions */
+  if (height < 5)
+    height = 5;
+  if (width < 20)
+    width = 20;
 
   WINDOW *schema_win = newwin(height, width, starty, startx);
   if (!schema_win)
@@ -553,9 +580,18 @@ void tui_show_table_selector(TuiState *state) {
   if (height > state->term_rows - 4) {
     height = state->term_rows - 4;
   }
+  /* Ensure minimum dimensions */
+  if (height < 5)
+    height = 5;
   int width = 40;
   int starty = (state->term_rows - height) / 2;
   int startx = (state->term_cols - width) / 2;
+
+  /* Clamp coordinates to prevent negative values */
+  if (starty < 0)
+    starty = 0;
+  if (startx < 0)
+    startx = 0;
 
   WINDOW *menu_win = newwin(height, width, starty, startx);
   if (!menu_win)
@@ -668,8 +704,25 @@ void tui_show_table_selector(TuiState *state) {
 void tui_show_help(TuiState *state) {
   int height = 50;
   int width = 60;
+
+  /* Constrain to terminal size */
+  if (height > state->term_rows - 2)
+    height = state->term_rows - 2;
+  if (width > state->term_cols - 2)
+    width = state->term_cols - 2;
+  if (height < 10)
+    height = 10;
+  if (width < 30)
+    width = 30;
+
   int starty = (state->term_rows - height) / 2;
   int startx = (state->term_cols - width) / 2;
+
+  /* Clamp coordinates to prevent negative values */
+  if (starty < 0)
+    starty = 0;
+  if (startx < 0)
+    startx = 0;
 
   WINDOW *help_win = newwin(height, width, starty, startx);
   if (!help_win)
@@ -719,8 +772,8 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 4, "p                  Perform query");
   mvwprintw(help_win, y++, 4, "Ctrl+R             Execute query at cursor");
   mvwprintw(help_win, y++, 4, "Ctrl+A             Execute all queries");
-  mvwprintw(help_win, y++, 4, "Ctrl+M             Execute all in transaction");
-  mvwprintw(help_win, y++, 4, "Tab / Esc          Switch editor/results");
+  mvwprintw(help_win, y++, 4, "Ctrl+T             Execute all in transaction");
+  mvwprintw(help_win, y++, 4, "Ctrl+W / Esc       Switch editor/results");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));

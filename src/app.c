@@ -32,6 +32,10 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
       break;
     case 'q':
       config->query = str_dup(optarg);
+      if (!config->query) {
+        fprintf(stderr, "Memory allocation failed\n");
+        return false;
+      }
       config->tui_mode = false;
       break;
     case 'n':
@@ -45,6 +49,14 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
   /* Get connection string from remaining argument */
   if (optind < argc) {
     const char *connstr = argv[optind];
+
+    /* Enforce maximum connection string length to prevent issues */
+    size_t connstr_len = strlen(connstr);
+    if (connstr_len > 4096) {
+      fprintf(stderr, "Connection string too long (max 4096 characters)\n");
+      return false;
+    }
+
     /* Basic validation: must contain :// scheme separator */
     if (!strstr(connstr, "://")) {
       fprintf(stderr,
@@ -65,7 +77,8 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
 void app_config_free(AppConfig *config) {
   if (!config)
     return;
-  free(config->connstr);
+  /* Use secure free for connection string as it may contain passwords */
+  str_secure_free(config->connstr);
   free(config->query);
 }
 
@@ -106,6 +119,14 @@ static int run_query_mode(AppConfig *config) {
   if (!rs) {
     fprintf(stderr, "Query failed: %s\n", err ? err : "Unknown error");
     free(err);
+    db_disconnect(conn);
+    return 1;
+  }
+
+  /* Validate result set structure */
+  if (!rs->columns || (rs->num_rows > 0 && !rs->rows)) {
+    fprintf(stderr, "Invalid result set structure\n");
+    db_result_free(rs);
     db_disconnect(conn);
     return 1;
   }
@@ -180,7 +201,7 @@ static int run_list_tables(AppConfig *config) {
 }
 
 static int run_tui_mode(AppConfig *config) {
-  TuiState state;
+  TuiState state = {0}; /* Zero-initialize to prevent use of uninitialized fields */
 
   if (!tui_init(&state)) {
     fprintf(stderr, "Failed to initialize TUI\n");

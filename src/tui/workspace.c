@@ -122,10 +122,9 @@ bool workspace_create(TuiState *state, size_t table_index) {
 
   /* Load the table data */
   if (!tui_load_table_data(state, state->tables[table_index])) {
-    /* Failed - remove the workspace */
-    ws->active = false;
+    /* Failed - remove the workspace and clear all its fields */
     free(ws->table_name);
-    ws->table_name = NULL;
+    memset(ws, 0, sizeof(Workspace)); /* Clear all pointers to prevent dangling refs */
     state->num_workspaces--;
 
     /* Restore previous workspace */
