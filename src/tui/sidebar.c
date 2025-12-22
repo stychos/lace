@@ -316,6 +316,8 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
   case 'Q':
   case 'p':
   case 'P':
+  case 'r':
+  case 'R':
   case '[':
   case ']':
   case '-':
@@ -324,6 +326,10 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
   case 'S':
   case 'c':
   case 'C':
+  case 'm':
+  case 'M':
+  case 'b':
+  case 'B':
   case 7:         /* Ctrl+G - Go to row */
   case KEY_F(2):  /* Connect */
   case KEY_F(3):  /* Schema */

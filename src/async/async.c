@@ -163,12 +163,19 @@ bool async_start(AsyncOperation *op) {
   op->cancel_requested = false;
   op->cancel_handle = NULL;
 
+  /* Use smaller stack size (256KB instead of default 8MB) to reduce VIRT */
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 256 * 1024);
+
   pthread_t thread;
-  if (pthread_create(&thread, NULL, async_worker_thread, op) != 0) {
+  if (pthread_create(&thread, &attr, async_worker_thread, op) != 0) {
+    pthread_attr_destroy(&attr);
     pthread_mutex_destroy(&op->mutex);
     pthread_cond_destroy(&op->cond);
     return false;
   }
+  pthread_attr_destroy(&attr);
   pthread_detach(thread); /* Thread cleans up itself */
   return true;
 }

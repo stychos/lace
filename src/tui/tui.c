@@ -103,6 +103,10 @@ void tui_sync_from_app(TuiState *state) {
     state->filters_cursor_col = ws->filters_cursor_col;
     state->filters_scroll = ws->filters_scroll;
 
+    /* Sync visibility toggles */
+    state->header_visible = ws->header_visible;
+    state->status_visible = ws->status_visible;
+
     /* Sync sidebar state */
     state->sidebar_visible = ws->sidebar_visible;
     state->sidebar_focused = ws->sidebar_focused;
@@ -128,6 +132,8 @@ void tui_sync_from_app(TuiState *state) {
     state->filters_cursor_row = 0;
     state->filters_cursor_col = 0;
     state->filters_scroll = 0;
+
+    /* Default visibility - keep current values */
 
     /* Default sidebar state */
     state->sidebar_visible = false;
@@ -161,6 +167,10 @@ void tui_sync_to_workspace(TuiState *state) {
   ws->filters_cursor_col = state->filters_cursor_col;
   ws->filters_scroll = state->filters_scroll;
 
+  /* Save visibility toggles */
+  ws->header_visible = state->header_visible;
+  ws->status_visible = state->status_visible;
+
   /* Save sidebar state back to workspace */
   ws->sidebar_visible = state->sidebar_visible;
   ws->sidebar_focused = state->sidebar_focused;
@@ -168,6 +178,114 @@ void tui_sync_to_workspace(TuiState *state) {
   ws->sidebar_scroll = state->sidebar_scroll;
   memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
   ws->sidebar_filter_len = state->sidebar_filter_len;
+}
+
+/* ============================================================================
+ * UICallbacks wrapper functions for core/actions dispatch
+ * ============================================================================
+ * These adapt TUI functions to the UICallbacks interface, allowing core
+ * actions.c to call TUI functions without direct dependency.
+ */
+
+static void ui_move_cursor(void *ctx, int row_delta, int col_delta) {
+  tui_move_cursor((TuiState *)ctx, row_delta, col_delta);
+}
+
+static void ui_page_up(void *ctx) {
+  tui_page_up((TuiState *)ctx);
+}
+
+static void ui_page_down(void *ctx) {
+  tui_page_down((TuiState *)ctx);
+}
+
+static void ui_home(void *ctx) {
+  tui_home((TuiState *)ctx);
+}
+
+static void ui_end(void *ctx) {
+  tui_end((TuiState *)ctx);
+}
+
+static void ui_start_edit(void *ctx) {
+  tui_start_edit((TuiState *)ctx);
+}
+
+static void ui_start_modal_edit(void *ctx) {
+  tui_start_modal_edit((TuiState *)ctx);
+}
+
+static void ui_cancel_edit(void *ctx) {
+  tui_cancel_edit((TuiState *)ctx);
+}
+
+static void ui_set_cell_null(void *ctx) {
+  tui_set_cell_direct((TuiState *)ctx, true);
+}
+
+static void ui_set_cell_empty(void *ctx) {
+  tui_set_cell_direct((TuiState *)ctx, false);
+}
+
+static void ui_delete_row(void *ctx) {
+  tui_delete_row((TuiState *)ctx);
+}
+
+static void ui_recreate_layout(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  /* Sync layout-related state from workspace before recreating windows */
+  Workspace *ws = app_current_workspace(state->app);
+  if (ws) {
+    state->sidebar_visible = ws->sidebar_visible;
+    state->sidebar_focused = ws->sidebar_focused;
+    state->header_visible = ws->header_visible;
+    state->status_visible = ws->status_visible;
+  }
+  tui_recreate_windows(state);
+}
+
+static void ui_recalculate_widths(void *ctx) {
+  tui_calculate_column_widths((TuiState *)ctx);
+}
+
+static bool ui_load_more_rows(void *ctx) {
+  return tui_load_more_rows((TuiState *)ctx);
+}
+
+static bool ui_load_prev_rows(void *ctx) {
+  return tui_load_prev_rows((TuiState *)ctx);
+}
+
+static void ui_disconnect(void *ctx) {
+  tui_disconnect((TuiState *)ctx);
+}
+
+static size_t ui_get_sidebar_highlight_for_table(void *ctx, size_t table_idx) {
+  return tui_get_sidebar_highlight_for_table((TuiState *)ctx, table_idx);
+}
+
+/* Build UICallbacks structure for dispatch */
+static UICallbacks tui_make_callbacks(TuiState *state) {
+  return (UICallbacks){
+    .ctx = state,
+    .move_cursor = ui_move_cursor,
+    .page_up = ui_page_up,
+    .page_down = ui_page_down,
+    .home = ui_home,
+    .end = ui_end,
+    .start_edit = ui_start_edit,
+    .start_modal_edit = ui_start_modal_edit,
+    .cancel_edit = ui_cancel_edit,
+    .set_cell_null = ui_set_cell_null,
+    .set_cell_empty = ui_set_cell_empty,
+    .delete_row = ui_delete_row,
+    .recreate_layout = ui_recreate_layout,
+    .recalculate_widths = ui_recalculate_widths,
+    .load_more_rows = ui_load_more_rows,
+    .load_prev_rows = ui_load_prev_rows,
+    .disconnect = ui_disconnect,
+    .get_sidebar_highlight_for_table = ui_get_sidebar_highlight_for_table,
+  };
 }
 
 bool tui_init(TuiState *state, AppState *app) {
@@ -250,6 +368,7 @@ bool tui_init(TuiState *state, AppState *app) {
   keypad(state->main_win, TRUE);
 
   state->running = true;
+  state->app->running = true;
   state->header_visible = true;
   state->sidebar_visible = false;
   state->sidebar_focused = false;
@@ -547,7 +666,7 @@ void tui_run(TuiState *state) {
     wtimeout(state->sidebar_win, 80);
   }
 
-  while (state->running) {
+  while (state->running && state->app->running) {
     /* Get input from appropriate window */
     WINDOW *input_win = state->sidebar_focused && state->sidebar_win
                             ? state->sidebar_win
@@ -734,7 +853,7 @@ void tui_run(TuiState *state) {
     /* ========== Workspaces ========== */
     case 'p':
     case 'P':
-      action = action_workspace_create_query();
+      workspace_create_query(state);
       break;
 
     case ']':
@@ -800,6 +919,19 @@ void tui_run(TuiState *state) {
       action = action_toggle_status();
       break;
 
+    /* ========== Table Operations ========== */
+    case 'r':
+    case 'R':
+      /* Refresh table (only for table workspaces, not query) */
+      if (state->num_workspaces > 0 &&
+          state->current_workspace < state->num_workspaces) {
+        Workspace *ws = &state->workspaces[state->current_workspace];
+        if (ws->type == WORKSPACE_TYPE_TABLE) {
+          tui_refresh_table(state);
+        }
+      }
+      break;
+
     /* ========== Dialogs (handled directly by TUI) ========== */
     case 's':
     case 'S':
@@ -838,7 +970,39 @@ void tui_run(TuiState *state) {
 
     /* Dispatch action if one was created */
     if (handled && action.type != ACTION_NONE) {
-      app_dispatch((struct TuiState *)state, &action);
+      /* Sync TuiState to workspace before dispatch so core sees current state */
+      tui_sync_to_workspace(state);
+      UICallbacks callbacks = tui_make_callbacks(state);
+      ChangeFlags changes = app_dispatch(state->app, &action, &callbacks);
+
+      /* Save cursor/scroll state modified by callbacks */
+      size_t saved_cursor_row = state->cursor_row;
+      size_t saved_cursor_col = state->cursor_col;
+      size_t saved_scroll_row = state->scroll_row;
+      size_t saved_scroll_col = state->scroll_col;
+
+      /* Sync core changes from workspace to TuiState */
+      if (changes & (CHANGED_SIDEBAR | CHANGED_FILTERS | CHANGED_FOCUS |
+                     CHANGED_WORKSPACE | CHANGED_CONNECTION | CHANGED_TABLES |
+                     CHANGED_LAYOUT)) {
+        tui_sync_from_app(state);
+      }
+
+      /* Restore cursor/scroll if they were modified by callbacks */
+      if (changes & (CHANGED_CURSOR | CHANGED_SCROLL)) {
+        state->cursor_row = saved_cursor_row;
+        state->cursor_col = saved_cursor_col;
+        state->scroll_row = saved_scroll_row;
+        state->scroll_col = saved_scroll_col;
+        /* Also save to workspace */
+        Workspace *ws = app_current_workspace(state->app);
+        if (ws) {
+          ws->cursor_row = saved_cursor_row;
+          ws->cursor_col = saved_cursor_col;
+          ws->scroll_row = saved_scroll_row;
+          ws->scroll_col = saved_scroll_col;
+        }
+      }
     }
 
     tui_refresh(state);

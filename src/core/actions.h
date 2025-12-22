@@ -17,9 +17,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Forward declarations - use struct keyword, not typedef, to avoid conflicts */
-struct AppState;
-struct TuiState;
+#include "app_state.h"
 
 /* ============================================================================
  * Change Flags - What was modified by an action
@@ -216,6 +214,43 @@ typedef struct {
 } Action;
 
 /* ============================================================================
+ * UI Callbacks - Platform-specific operations
+ * ============================================================================
+ * These callbacks allow core to request UI operations without depending on
+ * any specific UI implementation (TUI, GTK, Cocoa, etc.)
+ */
+typedef struct UICallbacks {
+  void *ctx; /* Opaque context pointer (e.g., TuiState*, GtkWindow*) */
+
+  /* Navigation - move cursor and adjust viewport */
+  void (*move_cursor)(void *ctx, int row_delta, int col_delta);
+  void (*page_up)(void *ctx);
+  void (*page_down)(void *ctx);
+  void (*home)(void *ctx);
+  void (*end)(void *ctx);
+
+  /* Editing - cell modification */
+  void (*start_edit)(void *ctx);
+  void (*start_modal_edit)(void *ctx);
+  void (*cancel_edit)(void *ctx);
+  void (*set_cell_null)(void *ctx);
+  void (*set_cell_empty)(void *ctx);
+  void (*delete_row)(void *ctx);
+
+  /* Layout - window/widget management */
+  void (*recreate_layout)(void *ctx);
+  void (*recalculate_widths)(void *ctx);
+
+  /* Data loading */
+  bool (*load_more_rows)(void *ctx);
+  bool (*load_prev_rows)(void *ctx);
+  void (*disconnect)(void *ctx);
+
+  /* Sidebar helpers */
+  size_t (*get_sidebar_highlight_for_table)(void *ctx, size_t table_idx);
+} UICallbacks;
+
+/* ============================================================================
  * Action Dispatch
  * ============================================================================
  */
@@ -228,8 +263,9 @@ typedef struct {
  * indicating what changed (for UI to know what to redraw).
  *
  * Parameters:
- *   state  - The TUI state (will access app state through state->app)
+ *   app    - The core application state
  *   action - The action to perform
+ *   ui     - UI callbacks for platform-specific operations (can be NULL)
  *
  * Returns:
  *   ChangeFlags indicating what was modified
@@ -237,7 +273,8 @@ typedef struct {
  * Note: Some actions may trigger async operations. The UI should continue
  * its event loop and poll for completion.
  */
-ChangeFlags app_dispatch(struct TuiState *state, const Action *action);
+ChangeFlags app_dispatch(AppState *app, const Action *action,
+                         const UICallbacks *ui);
 
 /* ============================================================================
  * Action Helpers - Convenient constructors

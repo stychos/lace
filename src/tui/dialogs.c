@@ -894,25 +894,89 @@ void tui_show_table_selector(TuiState *state) {
   tui_refresh(state);
 }
 
-/* Show help dialog */
-void tui_show_help(TuiState *state) {
-  int height = 60;
-  int width = 60;
+/* Help content line */
+typedef struct {
+  const char *text;
+  bool is_header;
+} HelpLine;
 
-  /* Constrain to terminal size */
-  if (height > state->term_rows - 2)
-    height = state->term_rows - 2;
-  if (width > state->term_cols - 2)
-    width = state->term_cols - 2;
+/* Show help dialog with scrolling support */
+void tui_show_help(TuiState *state) {
+  /* Define help content */
+  static const HelpLine help_lines[] = {
+    {"Navigation", true},
+    {"Arrow keys / hjkl  Move cursor", false},
+    {"PgUp / PgDown      Page up/down", false},
+    {"Home / End         First/last column", false},
+    {"a                  Go to first row", false},
+    {"z                  Go to last row", false},
+    {"g (or Ctrl+G, F5)  Go to row number", false},
+    {"", false},
+    {"Editing", true},
+    {"Enter              Edit cell (inline)", false},
+    {"e (or F4)          Edit cell (modal)", false},
+    {"n (or Ctrl+N)      Set cell to NULL", false},
+    {"d (or Ctrl+D)      Set cell to empty", false},
+    {"x (or Delete)      Delete row", false},
+    {"Escape             Cancel editing", false},
+    {"", false},
+    {"Tabs", true},
+    {"[ / ] (or F7/F6)   Previous/next tab", false},
+    {"- / _              Close current tab", false},
+    {"+                  Open table in new tab", false},
+    {"", false},
+    {"Query Tab", true},
+    {"p                  Open query tab", false},
+    {"Ctrl+R             Execute query at cursor", false},
+    {"Ctrl+A             Execute all queries", false},
+    {"Ctrl+T             Execute all in transaction", false},
+    {"Ctrl+W / Esc       Switch editor/results", false},
+    {"", false},
+    {"Sidebar", true},
+    {"t (or F9)          Toggle sidebar", false},
+    {"/                  Filter tables (sidebar)", false},
+    {"Enter              Select table", false},
+    {"Left/Right         Focus sidebar/table", false},
+    {"", false},
+    {"Table Filters", true},
+    {"/ (or f)           Toggle filters panel", false},
+    {"Arrow keys / hjkl  Navigate (spatial)", false},
+    {"Ctrl+W             Switch filters/table focus", false},
+    {"Enter              Edit field (auto-applies)", false},
+    {"+ / =              Add new filter", false},
+    {"- / x / Delete     Remove filter", false},
+    {"c                  Clear all filters", false},
+    {"Escape             Close panel", false},
+    {"", false},
+    {"Other", true},
+    {"r                  Refresh table", false},
+    {"s (or F3)          Show table schema", false},
+    {"c (or F2)          Connect dialog", false},
+    {"m                  Toggle menu bar", false},
+    {"b                  Toggle status bar", false},
+    {"? (or F1)          This help", false},
+    {"q (or Ctrl+X, F10) Quit", false},
+    {"", false},
+    {"Mouse", true},
+    {"Click              Select cell/table", false},
+    {"Double-click       Edit cell", false},
+    {"Scroll             Navigate rows", false},
+  };
+  const int num_lines = sizeof(help_lines) / sizeof(help_lines[0]);
+
+  int width = 60;
+  int height = state->term_rows - 4;
   if (height < 10)
     height = 10;
+  if (height > num_lines + 6)
+    height = num_lines + 6;
+  if (width > state->term_cols - 2)
+    width = state->term_cols - 2;
   if (width < 30)
     width = 30;
 
   int starty = (state->term_rows - height) / 2;
   int startx = (state->term_cols - width) / 2;
-
-  /* Clamp coordinates to prevent negative values */
   if (starty < 0)
     starty = 0;
   if (startx < 0)
@@ -923,102 +987,102 @@ void tui_show_help(TuiState *state) {
     return;
 
   keypad(help_win, TRUE);
-  box(help_win, 0, 0);
-  wattron(help_win, A_BOLD);
-  mvwprintw(help_win, 0, (width - 8) / 2, " Help ");
-  wattroff(help_win, A_BOLD);
 
-  int y = 2;
+  int content_height = height - 4; /* Account for border, title, footer */
+  int scroll = 0;
+  int max_scroll = num_lines - content_height;
+  if (max_scroll < 0)
+    max_scroll = 0;
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Navigation");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "Arrow keys / hjkl  Move cursor");
-  mvwprintw(help_win, y++, 4, "PgUp / PgDown      Page up/down");
-  mvwprintw(help_win, y++, 4, "Home / End         First/last column");
-  mvwprintw(help_win, y++, 4, "a                  Go to first row");
-  mvwprintw(help_win, y++, 4, "z                  Go to last row");
-  mvwprintw(help_win, y++, 4, "g (or Ctrl+G, F5)  Go to row number");
-  y++;
+  bool running = true;
+  while (running) {
+    werase(help_win);
+    box(help_win, 0, 0);
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Editing");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "Enter              Edit cell (inline)");
-  mvwprintw(help_win, y++, 4, "e (or F4)          Edit cell (modal)");
-  mvwprintw(help_win, y++, 4, "n (or Ctrl+N)      Set cell to NULL");
-  mvwprintw(help_win, y++, 4, "d (or Ctrl+D)      Set cell to empty");
-  mvwprintw(help_win, y++, 4, "x (or Delete)      Delete row");
-  mvwprintw(help_win, y++, 4, "Escape             Cancel editing");
-  y++;
+    /* Title */
+    wattron(help_win, A_BOLD);
+    mvwprintw(help_win, 0, (width - 8) / 2, " Help ");
+    wattroff(help_win, A_BOLD);
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Tabs");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "[ / ] (or F7/F6)   Previous/next tab");
-  mvwprintw(help_win, y++, 4, "- / _              Close current tab");
-  mvwprintw(help_win, y++, 4, "+                  Open table in new tab");
-  y++;
+    /* Draw content */
+    for (int i = 0; i < content_height && (scroll + i) < num_lines; i++) {
+      const HelpLine *line = &help_lines[scroll + i];
+      int y = i + 1;
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Query Tab");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "p                  Perform query");
-  mvwprintw(help_win, y++, 4, "Ctrl+R             Execute query at cursor");
-  mvwprintw(help_win, y++, 4, "Ctrl+A             Execute all queries");
-  mvwprintw(help_win, y++, 4, "Ctrl+T             Execute all in transaction");
-  mvwprintw(help_win, y++, 4, "Ctrl+W / Esc       Switch editor/results");
-  y++;
+      if (line->is_header) {
+        wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+        mvwprintw(help_win, y, 2, "%s", line->text);
+        wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+      } else {
+        mvwprintw(help_win, y, 4, "%s", line->text);
+      }
+    }
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Sidebar");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "t (or F9)          Toggle sidebar");
-  mvwprintw(help_win, y++, 4, "/                  Filter tables (sidebar)");
-  mvwprintw(help_win, y++, 4, "Enter              Select table");
-  mvwprintw(help_win, y++, 4, "Left/Right         Focus sidebar/table");
-  y++;
+    /* Scroll indicators */
+    if (scroll > 0) {
+      wattron(help_win, A_DIM);
+      mvwprintw(help_win, 1, width - 4, "^");
+      wattroff(help_win, A_DIM);
+    }
+    if (scroll < max_scroll) {
+      wattron(help_win, A_DIM);
+      mvwprintw(help_win, height - 3, width - 4, "v");
+      wattroff(help_win, A_DIM);
+    }
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Table Filters");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "/ (or f)           Toggle filters panel");
-  mvwprintw(help_win, y++, 4, "Arrow keys / hjkl  Navigate (spatial)");
-  mvwprintw(help_win, y++, 4, "Ctrl+W             Switch filters/table focus");
-  mvwprintw(help_win, y++, 4, "Enter              Edit field (auto-applies)");
-  mvwprintw(help_win, y++, 4, "+ / =              Add new filter");
-  mvwprintw(help_win, y++, 4, "- / x / Delete     Remove filter");
-  mvwprintw(help_win, y++, 4, "c                  Clear all filters");
-  mvwprintw(help_win, y++, 4, "Escape             Close panel");
-  y++;
+    /* Footer */
+    wattron(help_win, A_DIM);
+    if (max_scroll > 0) {
+      mvwprintw(help_win, height - 2, 2, "Arrows/PgUp/PgDn to scroll");
+    }
+    wattroff(help_win, A_DIM);
+    wattron(help_win, A_REVERSE);
+    mvwprintw(help_win, height - 2, (width - 9) / 2, "[ Close ]");
+    wattroff(help_win, A_REVERSE);
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Other");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "s (or F3)          Show table schema");
-  mvwprintw(help_win, y++, 4, "c (or F2)          Connect dialog");
-  mvwprintw(help_win, y++, 4, "m                  Toggle menu bar");
-  mvwprintw(help_win, y++, 4, "b                  Toggle status bar");
-  mvwprintw(help_win, y++, 4, "? (or F1)          This help");
-  mvwprintw(help_win, y++, 4, "q (or Ctrl+X, F10) Quit");
-  y++;
+    wrefresh(help_win);
 
-  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 2, "Mouse");
-  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-  mvwprintw(help_win, y++, 4, "Click              Select cell/table");
-  mvwprintw(help_win, y++, 4, "Double-click       Edit cell");
-  mvwprintw(help_win, y++, 4, "Scroll             Navigate rows");
+    int ch = wgetch(help_win);
+    switch (ch) {
+    case KEY_UP:
+    case 'k':
+      if (scroll > 0)
+        scroll--;
+      break;
+    case KEY_DOWN:
+    case 'j':
+      if (scroll < max_scroll)
+        scroll++;
+      break;
+    case KEY_PPAGE:
+      scroll -= content_height;
+      if (scroll < 0)
+        scroll = 0;
+      break;
+    case KEY_NPAGE:
+    case ' ':
+      scroll += content_height;
+      if (scroll > max_scroll)
+        scroll = max_scroll;
+      break;
+    case KEY_HOME:
+    case 'g':
+      scroll = 0;
+      break;
+    case KEY_END:
+    case 'G':
+      scroll = max_scroll;
+      break;
+    case 27: /* Escape */
+    case 'q':
+    case '\n':
+    case KEY_ENTER:
+      running = false;
+      break;
+    }
+  }
 
-  /* Close button */
-  wattron(help_win, A_REVERSE);
-  mvwprintw(help_win, height - 2, (width - 9) / 2, "[ Close ]");
-  wattroff(help_win, A_REVERSE);
-  wrefresh(help_win);
-
-  wgetch(help_win);
   delwin(help_win);
-
   touchwin(stdscr);
   tui_refresh(state);
 }

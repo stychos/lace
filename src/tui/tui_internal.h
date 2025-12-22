@@ -18,11 +18,12 @@
 #define MIN_COL_WIDTH 4
 #define MAX_COL_WIDTH 40
 #define DEFAULT_COL_WIDTH 15
-#define PAGE_SIZE 500
+#define PAGE_SIZE 1000
+#define PREFETCH_PAGES 2      /* Number of pages to load at once */
 #define LOAD_THRESHOLD 50     /* Load more when within this many rows of edge */
 #define MAX_LOADED_PAGES 5    /* Maximum pages to keep in memory */
 #define TRIM_DISTANCE_PAGES 2 /* Trim data farther than this from cursor */
-#define PREFETCH_THRESHOLD 150 /* Start prefetch when within this many rows of edge */
+#define PREFETCH_THRESHOLD PAGE_SIZE /* Start prefetch when within 1 page of edge */
 
 /* ============================================================================
  * Helper functions (tui.c)

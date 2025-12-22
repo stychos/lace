@@ -221,6 +221,7 @@ void tui_draw_tabs(TuiState *state);
 
 bool tui_load_tables(TuiState *state);
 bool tui_load_table_data(TuiState *state, const char *table);
+bool tui_refresh_table(TuiState *state);
 bool tui_load_schema(TuiState *state, const char *table);
 
 /* ============================================================================

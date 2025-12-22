@@ -47,9 +47,11 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   int win_rows, win_cols;
   getmaxyx(state->main_win, win_rows, win_cols);
 
-  /* Visible rows = main window height - 3 header rows (table header + column
-   * names + separator) */
-  int visible_rows = win_rows - 3;
+  /* Account for filters panel if visible */
+  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+
+  /* Visible rows = main window height - 3 header rows - filters panel */
+  int visible_rows = win_rows - 3 - filters_height;
   if (visible_rows < 1)
     visible_rows = 1;
 
@@ -103,7 +105,10 @@ void tui_page_up(TuiState *state) {
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_cols;
 
-  int page_size = win_rows - 3; /* Minus header rows in main window */
+  /* Account for filters panel if visible */
+  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+
+  int page_size = win_rows - 3 - filters_height;
   if (page_size < 1)
     page_size = 1;
 
@@ -146,7 +151,10 @@ void tui_page_down(TuiState *state) {
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_cols;
 
-  int page_size = win_rows - 3; /* Minus header rows in main window */
+  /* Account for filters panel if visible */
+  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+
+  int page_size = win_rows - 3 - filters_height;
   if (page_size < 1)
     page_size = 1;
 
@@ -223,7 +231,10 @@ void tui_end(TuiState *state) {
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_cols;
 
-  int visible_rows = win_rows - 3; /* Minus header rows in main window */
+  /* Account for filters panel if visible */
+  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+
+  int visible_rows = win_rows - 3 - filters_height;
   if (visible_rows < 1)
     visible_rows = 1;
 

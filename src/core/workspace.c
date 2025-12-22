@@ -19,6 +19,10 @@ void workspace_init(Workspace *ws) {
     return;
   memset(ws, 0, sizeof(Workspace));
   filters_init(&ws->filters);
+
+  /* Default visibility */
+  ws->header_visible = true;
+  ws->status_visible = true;
 }
 
 void workspace_free_data(Workspace *ws) {

@@ -108,6 +108,7 @@ Binary will be at `build/lace`.
 
 | Key | Action |
 |-----|--------|
+| `r` | Refresh table data |
 | `s` or `F3` | Show table schema |
 | `c` or `F2` | Connection dialog |
 | `m` | Toggle menu bar |

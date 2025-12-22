@@ -1220,22 +1220,10 @@ void tui_draw_query(TuiState *state) {
     mvwprintw(state->main_win, results_start, 1, "Error: %s", ws->query_error);
     wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR));
   } else if (ws->query_results && ws->query_results->num_columns > 0) {
-    /* Show results table header */
-    if (ws->query_focus_results && !ws->query_result_editing) {
-      wattron(state->main_win, A_BOLD);
-    }
-    size_t display_rows = ws->query_paginated ? ws->query_total_rows
-                                              : ws->query_results->num_rows;
-    mvwprintw(state->main_win, results_start, 1, "Results (%zu rows)",
-              display_rows);
-    if (ws->query_focus_results && !ws->query_result_editing) {
-      wattroff(state->main_win, A_BOLD);
-    }
-
     /* Use shared grid drawing function */
-    int results_height = win_rows - results_start - 1;
+    int results_height = win_rows - results_start;
     GridDrawParams params = {.win = state->main_win,
-                             .start_y = results_start + 1,
+                             .start_y = results_start,
                              .start_x = 0,
                              .height = results_height,
                              .width = win_cols,

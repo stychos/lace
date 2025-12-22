@@ -766,8 +766,33 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     break;
   }
 
+  /* Global keys - pass through to main loop */
+  case '[':
+  case ']':
+  case KEY_F(6):
+  case KEY_F(7):
+  case 't':
+  case 'T':
+  case KEY_F(9):
+  case 'm':
+  case 'M':
+  case 'b':
+  case 'B':
+  case 'p':
+  case 'P':
+  case 'r':
+  case 'R':
+  case 's':
+  case 'S':
+  case KEY_F(3):
+  case 'q':
+  case 'Q':
+  case KEY_F(10):
+  case 24: /* Ctrl+X */
+    return false; /* Let global keys work from filters */
+
   default:
-    /* Consume all keys when filters focused - don't pass to table */
+    /* Consume all other keys when filters focused */
     break;
   }
 

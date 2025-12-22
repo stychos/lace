@@ -54,6 +54,10 @@ void workspace_save(TuiState *state) {
   WS_COPY_TO_WS(sidebar_scroll);
   WS_COPY_TO_WS(sidebar_filter_len);
   memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
+
+  /* Layout visibility */
+  WS_COPY_TO_WS(header_visible);
+  WS_COPY_TO_WS(status_visible);
 }
 
 /* Restore TUI state from workspace */
@@ -62,7 +66,11 @@ void workspace_restore(TuiState *state) {
     return;
 
   Workspace *ws = &state->workspaces[state->current_workspace];
+
+  /* Track layout state changes for window recreation */
   bool sidebar_was_visible = state->sidebar_visible;
+  bool header_was_visible = state->header_visible;
+  bool status_was_visible = state->status_visible;
 
   /* Cursor and scroll */
   WS_COPY_TO_STATE(cursor_row);
@@ -99,8 +107,16 @@ void workspace_restore(TuiState *state) {
   memcpy(state->sidebar_filter, ws->sidebar_filter, sizeof(state->sidebar_filter));
   state->sidebar_filter_active = false;
 
-  if (sidebar_was_visible != state->sidebar_visible)
+  /* Layout visibility */
+  WS_COPY_TO_STATE(header_visible);
+  WS_COPY_TO_STATE(status_visible);
+
+  /* Recreate windows if layout changed */
+  if (sidebar_was_visible != state->sidebar_visible ||
+      header_was_visible != state->header_visible ||
+      status_was_visible != state->status_visible) {
     tui_recreate_windows(state);
+  }
 }
 
 /* Switch to a different workspace */

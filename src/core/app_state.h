@@ -89,6 +89,8 @@ typedef struct {
   /* Filter panel UI state */
   bool filters_visible;
   bool filters_focused;
+  bool filters_editing;
+  bool filters_was_focused;      /* Was filters focused before sidebar? */
   size_t filters_cursor_row;
   size_t filters_cursor_col;
   size_t filters_scroll;
@@ -98,8 +100,13 @@ typedef struct {
   bool sidebar_focused;
   size_t sidebar_highlight;
   size_t sidebar_scroll;
+  size_t sidebar_last_position;  /* Sidebar highlight before leaving */
   char sidebar_filter[64];
   size_t sidebar_filter_len;
+
+  /* UI visibility toggles */
+  bool header_visible;
+  bool status_visible;
 
   /* Query mode fields */
   char *query_text;
@@ -155,6 +162,9 @@ typedef struct {
 
   /* Page size for data loading */
   size_t page_size;
+
+  /* Application running flag (set false to exit main loop) */
+  bool running;
 } AppState;
 
 /* Initialize application state */

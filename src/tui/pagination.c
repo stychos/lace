@@ -181,7 +181,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   data_op.conn = state->conn;
   data_op.table_name = str_dup(table);
   data_op.offset = 0;
-  data_op.limit = PAGE_SIZE;
+  data_op.limit = PAGE_SIZE * PREFETCH_PAGES;
   data_op.order_by = NULL;
   data_op.desc = false;
 
@@ -266,6 +266,91 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   free(state->status_msg);
   state->status_msg = NULL;
   state->status_is_error = false;
+  return true;
+}
+
+/* Refresh table data while preserving position */
+bool tui_refresh_table(TuiState *state) {
+  if (!state || !state->conn || !state->tables)
+    return false;
+  if (state->current_table >= state->num_tables)
+    return false;
+  if (state->num_workspaces == 0 ||
+      state->current_workspace >= state->num_workspaces)
+    return false;
+
+  Workspace *ws = &state->workspaces[state->current_workspace];
+  if (ws->type != WORKSPACE_TYPE_TABLE || !ws->table_name)
+    return false;
+
+  /* Cancel any pending background load */
+  tui_cancel_background_load(state);
+
+  /* Save current position */
+  size_t saved_cursor_row = state->cursor_row;
+  size_t saved_cursor_col = state->cursor_col;
+  size_t saved_scroll_row = state->scroll_row;
+  size_t saved_scroll_col = state->scroll_col;
+  size_t saved_offset = state->loaded_offset;
+
+  /* Calculate absolute row position (offset + cursor) */
+  size_t abs_row = saved_offset + saved_cursor_row;
+
+  /* Reload table data */
+  if (!tui_load_table_data(state, ws->table_name)) {
+    return false;
+  }
+
+  /* Restore position, clamped to new bounds */
+  if (state->data && state->data->num_rows > 0) {
+    /* Try to load at the same offset if we were scrolled */
+    if (saved_offset > 0 && abs_row < state->total_rows) {
+      /* Load data at saved offset */
+      size_t target_offset = saved_offset;
+      if (target_offset >= state->total_rows) {
+        target_offset = state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
+      }
+
+      if (target_offset > 0) {
+        tui_load_rows_at_with_dialog(state, target_offset);
+      }
+    }
+
+    /* Restore cursor within bounds */
+    if (state->data->num_rows > 0) {
+      state->cursor_row = saved_cursor_row < state->data->num_rows
+                              ? saved_cursor_row
+                              : state->data->num_rows - 1;
+    } else {
+      state->cursor_row = 0;
+    }
+
+    state->cursor_col = saved_cursor_col < state->data->num_columns
+                            ? saved_cursor_col
+                            : (state->data->num_columns > 0 ? state->data->num_columns - 1 : 0);
+
+    /* Restore scroll within bounds */
+    size_t max_scroll = state->data->num_rows > (size_t)state->content_rows
+                            ? state->data->num_rows - state->content_rows
+                            : 0;
+    state->scroll_row = saved_scroll_row < max_scroll ? saved_scroll_row : max_scroll;
+    state->scroll_col = saved_scroll_col;
+
+    /* Ensure cursor is visible */
+    if (state->cursor_row < state->scroll_row) {
+      state->scroll_row = state->cursor_row;
+    } else if (state->cursor_row >= state->scroll_row + (size_t)state->content_rows) {
+      state->scroll_row = state->cursor_row - state->content_rows + 1;
+    }
+  }
+
+  /* Update workspace */
+  ws->cursor_row = state->cursor_row;
+  ws->cursor_col = state->cursor_col;
+  ws->scroll_row = state->scroll_row;
+  ws->scroll_col = state->scroll_col;
+
+  tui_set_status(state, "Table refreshed (%zu rows)", state->total_rows);
   return true;
 }
 
@@ -760,7 +845,7 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
   op.conn = state->conn;
   op.table_name = str_dup(table);
   op.offset = offset;
-  op.limit = PAGE_SIZE;
+  op.limit = PAGE_SIZE * PREFETCH_PAGES;
   op.order_by = NULL;
   op.desc = false;
 
@@ -889,8 +974,64 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     return false;
   if (state->current_table >= state->num_tables)
     return false;
+  if (state->num_workspaces == 0 ||
+      state->current_workspace >= state->num_workspaces)
+    return false;
 
-  /* Cancel any pending background load first - connection can't be shared */
+  Workspace *ws = &state->workspaces[state->current_workspace];
+
+  /* Check if a background load is already running in the same direction */
+  if (ws->bg_load_op != NULL && ws->bg_load_forward == forward) {
+    AsyncOperation *bg_op = (AsyncOperation *)ws->bg_load_op;
+
+    /* Show progress dialog and wait for existing operation */
+    bool completed = tui_show_processing_dialog(state, bg_op, "Loading data...");
+
+    bool success = false;
+    if (completed && bg_op->state == ASYNC_STATE_COMPLETED && bg_op->result) {
+      ResultSet *new_data = (ResultSet *)bg_op->result;
+
+      /* Apply schema column names */
+      if (state->schema && new_data) {
+        size_t min_cols = state->schema->num_columns;
+        if (new_data->num_columns < min_cols) {
+          min_cols = new_data->num_columns;
+        }
+        for (size_t i = 0; i < min_cols; i++) {
+          if (state->schema->columns[i].name) {
+            free(new_data->columns[i].name);
+            new_data->columns[i].name = str_dup(state->schema->columns[i].name);
+            new_data->columns[i].type = state->schema->columns[i].type;
+          }
+        }
+      }
+
+      /* Merge into existing data */
+      success = merge_page_result(state, new_data, forward);
+      if (success) {
+        tui_trim_loaded_data(state);
+        tui_set_status(state, "Loaded %zu/%zu rows", state->loaded_count,
+                       state->total_rows);
+      }
+
+      db_result_free(new_data);
+    } else if (bg_op->state == ASYNC_STATE_CANCELLED) {
+      tui_set_status(state, "Load cancelled");
+    } else if (bg_op->state == ASYNC_STATE_ERROR) {
+      tui_set_error(state, "Load failed: %s",
+                    bg_op->error ? bg_op->error : "Unknown error");
+    }
+
+    /* Clean up background operation */
+    async_free(bg_op);
+    free(bg_op);
+    ws->bg_load_op = NULL;
+    state->bg_loading_active = false;
+
+    return success;
+  }
+
+  /* No compatible background load - cancel any existing and start new */
   tui_cancel_background_load(state);
 
   const char *table = state->tables[state->current_table];
@@ -919,7 +1060,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   op.conn = state->conn;
   op.table_name = str_dup(table);
   op.offset = target_offset;
-  op.limit = PAGE_SIZE;
+  op.limit = PAGE_SIZE * PREFETCH_PAGES;
   op.order_by = NULL;
   op.desc = false;
 
@@ -1031,7 +1172,7 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   op->conn = state->conn;
   op->table_name = str_dup(table);
   op->offset = target_offset;
-  op->limit = PAGE_SIZE;
+  op->limit = PAGE_SIZE * PREFETCH_PAGES;
   op->order_by = NULL;
   op->desc = false;
 
