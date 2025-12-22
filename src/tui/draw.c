@@ -379,7 +379,19 @@ void tui_draw_status(TuiState *state) {
     mvwprintw(state->status_win, 0, center_x, "%s", state->status_msg);
   }
 
-  /* Right: row position */
+  /* Right: row position and loading indicator */
+  int right_pos = state->term_cols - 1;
+
+  /* Background loading indicator */
+  if (state->bg_loading_active) {
+    const char *loading = "[Loading...]";
+    int loading_len = (int)strlen(loading);
+    right_pos -= loading_len + 1;
+    wattron(state->status_win, A_BOLD);
+    mvwprintw(state->status_win, 0, right_pos + 1, "%s", loading);
+    wattroff(state->status_win, A_BOLD);
+  }
+
   if (query_results_active) {
     /* Query results row position */
     char pos[64];
@@ -393,8 +405,8 @@ void tui_draw_status(TuiState *state) {
       snprintf(pos, sizeof(pos), "Row %zu/%zu", ws->query_result_row + 1,
                ws->query_results->num_rows);
     }
-    mvwprintw(state->status_win, 0, state->term_cols - (int)strlen(pos) - 1,
-              "%s", pos);
+    int pos_len = (int)strlen(pos);
+    mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
   } else if (state->data) {
     char pos[64];
     size_t actual_row = state->loaded_offset + state->cursor_row + 1;
@@ -404,8 +416,8 @@ void tui_draw_status(TuiState *state) {
     bool approx = ws && ws->row_count_approximate;
     snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
              total);
-    mvwprintw(state->status_win, 0, state->term_cols - (int)strlen(pos) - 1,
-              "%s", pos);
+    int pos_len = (int)strlen(pos);
+    mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
   }
 
   wrefresh(state->status_win);

@@ -14,11 +14,29 @@
 /* Sentinel value for RAW filter (virtual column) */
 #define FILTER_COL_RAW SIZE_MAX
 
-/* Operator names for display */
-static const char *FILTER_OP_NAMES[] = {
-    "=",          "<>",           ">",      ">=",           "<",
-    "<=",         "in",           "contains", "regex",      "is empty",
-    "is not empty", "is null",    "is not null", "RAW"};
+/* Consolidated operator definitions */
+typedef struct {
+  const char *display_name; /* Name shown in UI */
+  const char *sql_symbol;   /* SQL operator (NULL if complex/special) */
+  bool needs_value;         /* Whether operator requires a value */
+} FilterOpDef;
+
+static const FilterOpDef FILTER_OPS[] = {
+    [FILTER_OP_EQ] = {"=", "=", true},
+    [FILTER_OP_NE] = {"<>", "<>", true},
+    [FILTER_OP_GT] = {">", ">", true},
+    [FILTER_OP_GE] = {">=", ">=", true},
+    [FILTER_OP_LT] = {"<", "<", true},
+    [FILTER_OP_LE] = {"<=", "<=", true},
+    [FILTER_OP_IN] = {"in", NULL, true},
+    [FILTER_OP_CONTAINS] = {"contains", NULL, true},
+    [FILTER_OP_REGEX] = {"regex", NULL, true},
+    [FILTER_OP_IS_EMPTY] = {"is empty", NULL, false},
+    [FILTER_OP_IS_NOT_EMPTY] = {"is not empty", NULL, false},
+    [FILTER_OP_IS_NULL] = {"is null", NULL, false},
+    [FILTER_OP_IS_NOT_NULL] = {"is not null", NULL, false},
+    [FILTER_OP_RAW] = {"RAW", NULL, true},
+};
 
 /* Initialize filters structure */
 void filters_init(TableFilters *f) {
@@ -91,40 +109,21 @@ void filters_remove(TableFilters *f, size_t index) {
 const char *filter_op_name(FilterOperator op) {
   if (op >= FILTER_OP_COUNT)
     return "?";
-  return FILTER_OP_NAMES[op];
+  return FILTER_OPS[op].display_name;
 }
 
 /* Get operator SQL symbol */
 const char *filter_op_sql(FilterOperator op) {
-  switch (op) {
-  case FILTER_OP_EQ:
+  if (op >= FILTER_OP_COUNT || !FILTER_OPS[op].sql_symbol)
     return "=";
-  case FILTER_OP_NE:
-    return "<>";
-  case FILTER_OP_GT:
-    return ">";
-  case FILTER_OP_GE:
-    return ">=";
-  case FILTER_OP_LT:
-    return "<";
-  case FILTER_OP_LE:
-    return "<=";
-  default:
-    return "=";
-  }
+  return FILTER_OPS[op].sql_symbol;
 }
 
 /* Check if operator needs a value */
 bool filter_op_needs_value(FilterOperator op) {
-  switch (op) {
-  case FILTER_OP_IS_EMPTY:
-  case FILTER_OP_IS_NOT_EMPTY:
-  case FILTER_OP_IS_NULL:
-  case FILTER_OP_IS_NOT_NULL:
-    return false;
-  default:
+  if (op >= FILTER_OP_COUNT)
     return true;
-  }
+  return FILTER_OPS[op].needs_value;
 }
 
 /* Parse IN values with smart quoting */
@@ -1152,6 +1151,9 @@ void tui_apply_filters(TuiState *state) {
   Workspace *ws = &state->workspaces[state->current_workspace];
   if (ws->type != WORKSPACE_TYPE_TABLE || !ws->table_name)
     return;
+
+  /* Cancel any pending background load before reload */
+  tui_cancel_background_load(state);
 
   /* Reload table data with filters applied */
   tui_load_table_data(state, ws->table_name);

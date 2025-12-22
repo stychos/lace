@@ -4,30 +4,8 @@
  */
 
 #include "tui_internal.h"
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Case-insensitive substring search (local copy for sidebar) */
-static const char *sidebar_str_istr(const char *haystack, const char *needle) {
-  if (!haystack || !needle)
-    return NULL;
-  if (!*needle)
-    return haystack;
-
-  for (; *haystack; haystack++) {
-    const char *h = haystack;
-    const char *n = needle;
-    while (*h && *n &&
-           tolower((unsigned char)*h) == tolower((unsigned char)*n)) {
-      h++;
-      n++;
-    }
-    if (!*n)
-      return haystack;
-  }
-  return NULL;
-}
 
 /* Count filtered tables */
 size_t tui_count_filtered_tables(TuiState *state) {
@@ -37,7 +15,7 @@ size_t tui_count_filtered_tables(TuiState *state) {
   size_t count = 0;
   for (size_t i = 0; i < state->num_tables; i++) {
     if (state->tables[i] &&
-        sidebar_str_istr(state->tables[i], state->sidebar_filter)) {
+        tui_str_istr(state->tables[i], state->sidebar_filter)) {
       count++;
     }
   }
@@ -52,7 +30,7 @@ size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx) {
   size_t count = 0;
   for (size_t i = 0; i < state->num_tables; i++) {
     if (state->tables[i] &&
-        sidebar_str_istr(state->tables[i], state->sidebar_filter)) {
+        tui_str_istr(state->tables[i], state->sidebar_filter)) {
       if (count == filtered_idx)
         return i;
       count++;
@@ -69,7 +47,7 @@ size_t tui_get_sidebar_highlight_for_table(TuiState *state, size_t table_idx) {
   size_t count = 0;
   for (size_t i = 0; i < state->num_tables; i++) {
     if (state->tables[i] &&
-        sidebar_str_istr(state->tables[i], state->sidebar_filter)) {
+        tui_str_istr(state->tables[i], state->sidebar_filter)) {
       if (i == table_idx)
         return count;
       count++;
@@ -423,7 +401,7 @@ void tui_draw_sidebar(TuiState *state) {
   for (size_t i = 0; i < state->num_tables; i++) {
     if (state->tables[i] &&
         (state->sidebar_filter_len == 0 ||
-         sidebar_str_istr(state->tables[i], state->sidebar_filter))) {
+         tui_str_istr(state->tables[i], state->sidebar_filter))) {
       filtered_count++;
     }
   }
@@ -451,7 +429,7 @@ void tui_draw_sidebar(TuiState *state) {
 
     /* Apply filter */
     if (state->sidebar_filter_len > 0 &&
-        !sidebar_str_istr(name, state->sidebar_filter)) {
+        !tui_str_istr(name, state->sidebar_filter)) {
       continue;
     }
 

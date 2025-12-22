@@ -15,6 +15,24 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   } else if (row_delta > 0 && state->data->num_rows > 0 &&
              state->cursor_row < state->data->num_rows - 1) {
     state->cursor_row++;
+  } else if (row_delta > 0 && state->data->num_rows > 0 &&
+             state->cursor_row == state->data->num_rows - 1) {
+    /* At last loaded row, check if more data exists */
+    size_t loaded_end = state->loaded_offset + state->loaded_count;
+    if (loaded_end < state->total_rows) {
+      /* Load more data with blocking dialog */
+      if (tui_load_page_with_dialog(state, true)) {
+        /* Data loaded, move cursor */
+        state->cursor_row++;
+      }
+    }
+  } else if (row_delta < 0 && state->cursor_row == 0 &&
+             state->loaded_offset > 0) {
+    /* At first loaded row but not at beginning of data */
+    if (tui_load_page_with_dialog(state, false)) {
+      /* Data prepended, cursor_row was adjusted by merge */
+      state->cursor_row--;
+    }
   }
 
   /* Update column */
@@ -89,6 +107,13 @@ void tui_page_up(TuiState *state) {
   if (page_size < 1)
     page_size = 1;
 
+  /* Check if we're at the beginning of loaded data but not at start of table */
+  if (state->cursor_row < (size_t)page_size && state->loaded_offset > 0) {
+    /* Need to load previous data - show blocking dialog */
+    tui_load_page_with_dialog(state, false);
+    /* After prepend, cursor_row was adjusted - recalculate target */
+  }
+
   if (state->cursor_row > (size_t)page_size) {
     state->cursor_row -= page_size;
   } else {
@@ -108,7 +133,7 @@ void tui_page_up(TuiState *state) {
     state->scroll_row = state->cursor_row - page_size + 1;
   }
 
-  /* Check if we need to load previous rows */
+  /* Check if we need to load previous rows (for speculative loading) */
   tui_check_load_more(state);
 }
 
@@ -125,11 +150,20 @@ void tui_page_down(TuiState *state) {
   if (page_size < 1)
     page_size = 1;
 
-  state->cursor_row += page_size;
-  if (state->cursor_row >= state->data->num_rows) {
-    state->cursor_row =
-        state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
+  size_t target_row = state->cursor_row + page_size;
+
+  /* Check if target row is beyond loaded data but more exists */
+  if (target_row >= state->data->num_rows) {
+    size_t loaded_end = state->loaded_offset + state->loaded_count;
+    if (loaded_end < state->total_rows) {
+      /* Need to load more data - show blocking dialog */
+      tui_load_page_with_dialog(state, true);
+    }
+    /* Clamp to available data */
+    target_row = state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
   }
+
+  state->cursor_row = target_row;
 
   state->scroll_row += page_size;
   size_t max_scroll = state->data->num_rows > (size_t)page_size
@@ -146,7 +180,7 @@ void tui_page_down(TuiState *state) {
     state->scroll_row = state->cursor_row - page_size + 1;
   }
 
-  /* Check if we need to load more rows */
+  /* Check if we need to load more rows (for speculative loading) */
   tui_check_load_more(state);
 }
 
@@ -154,9 +188,11 @@ void tui_home(TuiState *state) {
   if (!state)
     return;
 
-  /* If we're not at the beginning, load the first page */
+  /* If we're not at the beginning, load the first page with dialog */
   if (state->loaded_offset > 0) {
-    tui_load_rows_at(state, 0);
+    if (!tui_load_rows_at_with_dialog(state, 0)) {
+      return; /* Cancelled or failed */
+    }
   }
 
   state->cursor_row = 0;
@@ -169,13 +205,15 @@ void tui_end(TuiState *state) {
   if (!state || !state->data || !state->main_win)
     return;
 
-  /* If we haven't loaded all rows, load the last page */
+  /* If we haven't loaded all rows, load the last page with dialog */
   size_t loaded_end = state->loaded_offset + state->loaded_count;
   if (loaded_end < state->total_rows) {
     /* Load last page of data */
     size_t last_page_offset =
         state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
-    tui_load_rows_at(state, last_page_offset);
+    if (!tui_load_rows_at_with_dialog(state, last_page_offset)) {
+      return; /* Cancelled or failed */
+    }
   }
 
   state->cursor_row = state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;

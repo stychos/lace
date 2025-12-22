@@ -22,14 +22,12 @@
 #define LOAD_THRESHOLD 50     /* Load more when within this many rows of edge */
 #define MAX_LOADED_PAGES 5    /* Maximum pages to keep in memory */
 #define TRIM_DISTANCE_PAGES 2 /* Trim data farther than this from cursor */
+#define PREFETCH_THRESHOLD 150 /* Start prefetch when within this many rows of edge */
 
 /* ============================================================================
  * Helper functions (tui.c)
  * ============================================================================
  */
-
-/* Translate keyboard input from non-Latin layouts to Latin equivalents */
-int tui_translate_key(int ch);
 
 /* Sanitize string for single-line cell display */
 char *tui_sanitize_for_display(const char *str);
@@ -44,6 +42,9 @@ void tui_recreate_windows(TuiState *state);
  * Workspace functions (workspace.c)
  * ============================================================================
  */
+
+/* Initialize a workspace struct (zeroes and inits filters) */
+void workspace_init(Workspace *ws);
 
 /* Save current state to workspace */
 void workspace_save(TuiState *state);
@@ -99,6 +100,24 @@ void tui_trim_loaded_data(TuiState *state);
 
 /* Check if more rows need to be loaded based on cursor position */
 void tui_check_load_more(TuiState *state);
+
+/* Load a page with blocking dialog (for fast scrolling past loaded data) */
+bool tui_load_page_with_dialog(TuiState *state, bool forward);
+
+/* Load rows at specific offset with blocking dialog (for goto/home/end) */
+bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset);
+
+/* Start background load (non-blocking) - returns true if started */
+bool tui_start_background_load(TuiState *state, bool forward);
+
+/* Poll background load, merge if complete - call from main loop */
+bool tui_poll_background_load(TuiState *state);
+
+/* Cancel pending background load */
+void tui_cancel_background_load(TuiState *state);
+
+/* Check if speculative prefetch should start */
+void tui_check_speculative_prefetch(TuiState *state);
 
 /* ============================================================================
  * Edit functions (edit.c)

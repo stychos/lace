@@ -36,38 +36,26 @@ DbValueType db_value_type_from_name(const char *name) {
   if (!name)
     return DB_TYPE_NULL;
 
-  /* Convert to uppercase for comparison */
-  char *upper = str_dup(name);
-  if (!upper)
-    return DB_TYPE_NULL;
-  str_upper(upper);
-
-  DbValueType type = DB_TYPE_TEXT; /* Default */
-
-  if (strstr(upper, "INT")) {
-    type = DB_TYPE_INT;
-  } else if (strstr(upper, "SERIAL")) {
-    type = DB_TYPE_INT;
-  } else if (strstr(upper, "FLOAT") || strstr(upper, "DOUBLE") ||
-             strstr(upper, "REAL") || strstr(upper, "NUMERIC") ||
-             strstr(upper, "DECIMAL")) {
-    type = DB_TYPE_FLOAT;
-  } else if (strstr(upper, "BOOL")) {
-    type = DB_TYPE_BOOL;
-  } else if (strstr(upper, "BLOB") || strstr(upper, "BYTEA") ||
-             strstr(upper, "BINARY")) {
-    type = DB_TYPE_BLOB;
-  } else if (str_eq(upper, "DATE")) {
-    type = DB_TYPE_DATE;
-  } else if (strstr(upper, "TIMESTAMP") || strstr(upper, "DATETIME")) {
-    type = DB_TYPE_TIMESTAMP;
-  } else if (strstr(upper, "TEXT") || strstr(upper, "CHAR") ||
-             strstr(upper, "VARCHAR") || strstr(upper, "STRING")) {
-    type = DB_TYPE_TEXT;
+  /* Use case-insensitive matching (strcasestr is GNU extension) */
+  if (strcasestr(name, "INT")) {
+    return DB_TYPE_INT;
+  } else if (strcasestr(name, "SERIAL")) {
+    return DB_TYPE_INT;
+  } else if (strcasestr(name, "FLOAT") || strcasestr(name, "DOUBLE") ||
+             strcasestr(name, "REAL") || strcasestr(name, "NUMERIC") ||
+             strcasestr(name, "DECIMAL")) {
+    return DB_TYPE_FLOAT;
+  } else if (strcasestr(name, "BOOL")) {
+    return DB_TYPE_BOOL;
+  } else if (strcasestr(name, "BLOB") || strcasestr(name, "BYTEA") ||
+             strcasestr(name, "BINARY")) {
+    return DB_TYPE_BLOB;
+  } else if (strcasecmp(name, "DATE") == 0) {
+    return DB_TYPE_DATE;
+  } else if (strcasestr(name, "TIMESTAMP") || strcasestr(name, "DATETIME")) {
+    return DB_TYPE_TIMESTAMP;
   }
-
-  free(upper);
-  return type;
+  return DB_TYPE_TEXT; /* Default */
 }
 
 /* Value creation helpers */

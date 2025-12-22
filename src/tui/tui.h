@@ -97,6 +97,9 @@ typedef struct {
   /* Running flag */
   bool running;
 
+  /* Background loading indicator */
+  bool bg_loading_active;
+
   /* =========================================================================
    * COMPATIBILITY LAYER - View cache synced from AppState/Workspace
    * These will be removed in future refactoring phases.

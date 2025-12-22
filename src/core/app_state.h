@@ -131,6 +131,11 @@ typedef struct {
   size_t query_loaded_offset;
   size_t query_loaded_count;
   bool query_paginated;
+
+  /* Background pagination state */
+  void *bg_load_op;           /* AsyncOperation* - current background load (NULL if none) */
+  bool bg_load_forward;       /* Direction: true=forward, false=backward */
+  size_t bg_load_target_offset; /* Target offset being loaded */
 } Workspace;
 
 /* Core application state (platform-independent) */

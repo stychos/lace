@@ -74,15 +74,6 @@ char *str_lower(char *s) {
   return s;
 }
 
-char *str_upper(char *s) {
-  if (!s)
-    return NULL;
-  for (char *p = s; *p; p++) {
-    *p = toupper((unsigned char)*p);
-  }
-  return s;
-}
-
 char *str_url_encode(const char *s) {
   if (!s)
     return NULL;

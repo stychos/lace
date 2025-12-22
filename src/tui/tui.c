@@ -12,146 +12,6 @@
 #include <termios.h>
 #include <unistd.h>
 
-/*
- * Translate keyboard input from non-Latin layouts to Latin equivalents
- * based on physical key position. This allows hotkeys to work regardless
- * of the active keyboard layout (e.g., Russian, Ukrainian, etc.)
- */
-int tui_translate_key(int ch) {
-  /* Russian layout (ЙЦУКЕН) -> QWERTY mapping */
-  switch (ch) {
-  /* Lowercase Cyrillic */
-  case 0x0439:
-    return 'q'; /* й */
-  case 0x0446:
-    return 'w'; /* ц */
-  case 0x0443:
-    return 'e'; /* у */
-  case 0x043A:
-    return 'r'; /* к */
-  case 0x0435:
-    return 't'; /* е */
-  case 0x043D:
-    return 'y'; /* н */
-  case 0x0433:
-    return 'u'; /* г */
-  case 0x0448:
-    return 'i'; /* ш */
-  case 0x0449:
-    return 'o'; /* щ */
-  case 0x0437:
-    return 'p'; /* з */
-  case 0x0445:
-    return '['; /* х */
-  case 0x044A:
-    return ']'; /* ъ */
-  case 0x0444:
-    return 'a'; /* ф */
-  case 0x044B:
-    return 's'; /* ы */
-  case 0x0432:
-    return 'd'; /* в */
-  case 0x0430:
-    return 'f'; /* а */
-  case 0x043F:
-    return 'g'; /* п */
-  case 0x0440:
-    return 'h'; /* р */
-  case 0x043E:
-    return 'j'; /* о */
-  case 0x043B:
-    return 'k'; /* л */
-  case 0x0434:
-    return 'l'; /* д */
-  case 0x044F:
-    return 'z'; /* я */
-  case 0x0447:
-    return 'x'; /* ч */
-  case 0x0441:
-    return 'c'; /* с */
-  case 0x043C:
-    return 'v'; /* м */
-  case 0x0438:
-    return 'b'; /* и */
-  case 0x0442:
-    return 'n'; /* т */
-  case 0x044C:
-    return 'm'; /* ь */
-  case 0x0436:
-    return ';'; /* ж */
-  case 0x044D:
-    return '\''; /* э */
-  case 0x0451:
-    return '`'; /* ё */
-
-  /* Uppercase Cyrillic */
-  case 0x0419:
-    return 'Q'; /* Й */
-  case 0x0426:
-    return 'W'; /* Ц */
-  case 0x0423:
-    return 'E'; /* У */
-  case 0x041A:
-    return 'R'; /* К */
-  case 0x0415:
-    return 'T'; /* Е */
-  case 0x041D:
-    return 'Y'; /* Н */
-  case 0x0413:
-    return 'U'; /* Г */
-  case 0x0428:
-    return 'I'; /* Ш */
-  case 0x0429:
-    return 'O'; /* Щ */
-  case 0x0417:
-    return 'P'; /* З */
-  case 0x0425:
-    return '{'; /* Х */
-  case 0x042A:
-    return '}'; /* Ъ */
-  case 0x0424:
-    return 'A'; /* Ф */
-  case 0x042B:
-    return 'S'; /* Ы */
-  case 0x0412:
-    return 'D'; /* В */
-  case 0x0410:
-    return 'F'; /* А */
-  case 0x041F:
-    return 'G'; /* П */
-  case 0x0420:
-    return 'H'; /* Р */
-  case 0x041E:
-    return 'J'; /* О */
-  case 0x041B:
-    return 'K'; /* Л */
-  case 0x0414:
-    return 'L'; /* Д */
-  case 0x042F:
-    return 'Z'; /* Я */
-  case 0x0427:
-    return 'X'; /* Ч */
-  case 0x0421:
-    return 'C'; /* С */
-  case 0x041C:
-    return 'V'; /* М */
-  case 0x0418:
-    return 'B'; /* И */
-  case 0x0422:
-    return 'N'; /* Т */
-  case 0x042C:
-    return 'M'; /* Ь */
-  case 0x0416:
-    return ':'; /* Ж */
-  case 0x042D:
-    return '"'; /* Э */
-  case 0x0401:
-    return '~'; /* Ё */
-
-  default:
-    return ch;
-  }
-}
 
 /*
  * Sanitize string for single-line cell display.
@@ -693,10 +553,24 @@ void tui_run(TuiState *state) {
                             : state->main_win;
     int ch = wgetch(input_win);
 
-    /* Handle timeout - update animations */
+    /* Handle timeout - update animations and background operations */
     if (ch == ERR) {
+      /* Poll background pagination */
+      bool bg_activity = tui_poll_background_load(state);
+
+      /* Check if speculative prefetch should start */
+      if (!bg_activity) {
+        tui_check_speculative_prefetch(state);
+      }
+
       tui_update_sidebar_scroll_animation(state);
-      tui_draw_sidebar(state);
+
+      /* Redraw if background activity completed */
+      if (bg_activity) {
+        tui_refresh(state);
+      } else {
+        tui_draw_sidebar(state);
+      }
       continue;
     }
 
@@ -740,9 +614,6 @@ void tui_run(TuiState *state) {
         continue;
       }
     }
-
-    /* Translate non-Latin keyboard layouts for navigation hotkeys */
-    ch = tui_translate_key(ch);
 
     /* Handle sidebar navigation if focused */
     if (state->sidebar_focused && tui_handle_sidebar_input(state, ch)) {

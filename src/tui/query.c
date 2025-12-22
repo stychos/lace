@@ -74,7 +74,7 @@ bool workspace_create_query(TuiState *state) {
   /* Create new workspace in AppState */
   size_t new_idx = app->num_workspaces;
   Workspace *ws = &app->workspaces[new_idx];
-  memset(ws, 0, sizeof(Workspace));
+  workspace_init(ws);
 
   ws->type = WORKSPACE_TYPE_QUERY;
   ws->active = true;
@@ -1526,6 +1526,64 @@ static size_t query_find_pk_columns(Workspace *ws, size_t *pk_indices,
   return count;
 }
 
+/* Primary key info for query result database operations */
+typedef struct {
+  const char **col_names;
+  DbValue *values;
+  size_t count;
+} QueryPkInfo;
+
+/* Build PK info from query result row. Returns false on error. */
+static bool query_pk_info_build(QueryPkInfo *pk, Workspace *ws, size_t row_idx) {
+  if (!pk || !ws || !ws->query_results || row_idx >= ws->query_results->num_rows)
+    return false;
+
+  size_t pk_indices[16];
+  size_t num_pk = query_find_pk_columns(ws, pk_indices, 16);
+  if (num_pk == 0)
+    return false;
+
+  Row *row = &ws->query_results->rows[row_idx];
+  for (size_t i = 0; i < num_pk; i++) {
+    if (pk_indices[i] >= ws->query_results->num_columns ||
+        pk_indices[i] >= row->num_cells) {
+      return false;
+    }
+  }
+
+  pk->col_names = malloc(sizeof(char *) * num_pk);
+  pk->values = malloc(sizeof(DbValue) * num_pk);
+  if (!pk->col_names || !pk->values) {
+    free(pk->col_names);
+    free(pk->values);
+    pk->col_names = NULL;
+    pk->values = NULL;
+    return false;
+  }
+
+  for (size_t i = 0; i < num_pk; i++) {
+    pk->col_names[i] = ws->query_results->columns[pk_indices[i]].name;
+    pk->values[i] = db_value_copy(&row->cells[pk_indices[i]]);
+  }
+  pk->count = num_pk;
+  return true;
+}
+
+static void query_pk_info_free(QueryPkInfo *pk) {
+  if (!pk)
+    return;
+  free(pk->col_names);
+  if (pk->values) {
+    for (size_t i = 0; i < pk->count; i++) {
+      db_value_free(&pk->values[i]);
+    }
+    free(pk->values);
+  }
+  pk->col_names = NULL;
+  pk->values = NULL;
+  pk->count = 0;
+}
+
 /* Confirm edit and update database */
 static void query_result_confirm_edit(TuiState *state, Workspace *ws) {
   if (!ws || !ws->query_result_editing || !ws->query_results)
@@ -1555,48 +1613,25 @@ static void query_result_confirm_edit(TuiState *state, Workspace *ws) {
   bool can_update_db = false;
 
   if (state->conn && ws->query_source_table) {
-    /* Find primary key columns */
-    size_t pk_indices[16];
-    size_t num_pk = query_find_pk_columns(ws, pk_indices, 16);
-
-    if (num_pk > 0) {
+    QueryPkInfo pk = {0};
+    if (query_pk_info_build(&pk, ws, ws->query_result_row)) {
       can_update_db = true;
 
-      /* Build arrays of primary key column names and values */
-      const char **pk_col_names = malloc(sizeof(char *) * num_pk);
-      DbValue *pk_vals = malloc(sizeof(DbValue) * num_pk);
+      const char *col_name =
+          ws->query_results->columns[ws->query_result_col].name;
 
-      if (pk_col_names && pk_vals) {
-        for (size_t i = 0; i < num_pk; i++) {
-          pk_col_names[i] = ws->query_results->columns[pk_indices[i]].name;
-          pk_vals[i] = db_value_copy(&row->cells[pk_indices[i]]);
-        }
+      char *err = NULL;
+      db_updated =
+          db_update_cell(state->conn, ws->query_source_table, pk.col_names,
+                         pk.values, pk.count, col_name, &new_val, &err);
 
-        /* Get column name being edited */
-        const char *col_name =
-            ws->query_results->columns[ws->query_result_col].name;
-
-        /* Attempt database update */
-        char *err = NULL;
-        db_updated =
-            db_update_cell(state->conn, ws->query_source_table, pk_col_names,
-                           pk_vals, num_pk, col_name, &new_val, &err);
-
-        if (!db_updated) {
-          db_error = true;
-          tui_set_error(state, "Update failed: %s",
-                        err ? err : "unknown error");
-          free(err);
-        }
-
-        /* Free PK values */
-        for (size_t i = 0; i < num_pk; i++) {
-          db_value_free(&pk_vals[i]);
-        }
+      if (!db_updated) {
+        db_error = true;
+        tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
+        free(err);
       }
 
-      free(pk_col_names);
-      free(pk_vals);
+      query_pk_info_free(&pk);
     }
   }
 
@@ -1653,62 +1688,30 @@ static void query_result_delete_row(TuiState *state, Workspace *ws) {
   if (ws->query_result_row >= ws->query_results->num_rows)
     return;
 
-  /* Need source table and primary keys to delete from database */
   if (!ws->query_source_table) {
     tui_set_error(state, "Cannot delete: no source table");
     return;
   }
 
-  /* Find primary key columns */
-  size_t pk_indices[16];
-  size_t num_pk = query_find_pk_columns(ws, pk_indices, 16);
-  if (num_pk == 0) {
+  QueryPkInfo pk = {0};
+  if (!query_pk_info_build(&pk, ws, ws->query_result_row)) {
     tui_set_error(state, "Cannot delete: no primary key found");
     return;
   }
 
   Row *row = &ws->query_results->rows[ws->query_result_row];
 
-  /* Verify all PK indices are within bounds */
-  for (size_t i = 0; i < num_pk; i++) {
-    if (pk_indices[i] >= ws->query_results->num_columns ||
-        pk_indices[i] >= row->num_cells) {
-      tui_set_error(state, "Primary key column index out of bounds");
-      return;
-    }
-  }
-
-  /* Build arrays of primary key column names and values */
-  const char **pk_col_names = malloc(sizeof(char *) * num_pk);
-  DbValue *pk_vals = malloc(sizeof(DbValue) * num_pk);
-  if (!pk_col_names || !pk_vals) {
-    free(pk_col_names);
-    free(pk_vals);
-    tui_set_error(state, "Memory allocation failed");
-    return;
-  }
-
-  for (size_t i = 0; i < num_pk; i++) {
-    pk_col_names[i] = ws->query_results->columns[pk_indices[i]].name;
-    pk_vals[i] = db_value_copy(&row->cells[pk_indices[i]]);
-  }
-
   /* Highlight the row being deleted with danger background */
   int win_rows, win_cols;
   getmaxyx(state->main_win, win_rows, win_cols);
 
-  /* Calculate results area position */
   int editor_height = (win_rows - 1) * 3 / 10;
   if (editor_height < 3)
     editor_height = 3;
   int results_start = editor_height + 1;
-
-  /* Calculate screen Y position: results_start + 1 (label) + 1 (col headers) +
-   * 1 (first data row) */
   int row_y = results_start + 3 +
               (int)(ws->query_result_row - ws->query_result_scroll_row);
 
-  /* Draw the entire row with danger background */
   int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
   wattron(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   int x = 1;
@@ -1738,27 +1741,16 @@ static void query_result_delete_row(TuiState *state, Workspace *ws) {
   wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   wrefresh(state->main_win);
 
-  /* Show confirmation dialog */
   if (!tui_show_confirm_dialog(state, "Delete this row?")) {
     tui_set_status(state, "Delete cancelled");
-    for (size_t i = 0; i < num_pk; i++) {
-      db_value_free(&pk_vals[i]);
-    }
-    free(pk_col_names);
-    free(pk_vals);
+    query_pk_info_free(&pk);
     return;
   }
 
-  /* Perform the delete */
   char *err = NULL;
   bool success = db_delete_row(state->conn, ws->query_source_table,
-                               pk_col_names, pk_vals, num_pk, &err);
-
-  for (size_t i = 0; i < num_pk; i++) {
-    db_value_free(&pk_vals[i]);
-  }
-  free(pk_col_names);
-  free(pk_vals);
+                               pk.col_names, pk.values, pk.count, &err);
+  query_pk_info_free(&pk);
 
   if (success) {
     tui_set_status(state, "Row deleted");
@@ -1769,29 +1761,23 @@ static void query_result_delete_row(TuiState *state, Workspace *ws) {
     }
     free(row->cells);
 
-    /* Shift remaining rows */
     for (size_t i = ws->query_result_row; i < ws->query_results->num_rows - 1;
          i++) {
       ws->query_results->rows[i] = ws->query_results->rows[i + 1];
     }
     ws->query_results->num_rows--;
     ws->query_loaded_count--;
-    if (ws->query_total_rows > 0) {
+    if (ws->query_total_rows > 0)
       ws->query_total_rows--;
-    }
 
-    /* Adjust cursor if needed */
     if (ws->query_result_row >= ws->query_results->num_rows &&
-        ws->query_results->num_rows > 0) {
+        ws->query_results->num_rows > 0)
       ws->query_result_row = ws->query_results->num_rows - 1;
-    }
 
-    /* Adjust scroll if needed */
     if (ws->query_result_scroll_row > 0 &&
-        ws->query_result_scroll_row >= ws->query_results->num_rows) {
+        ws->query_result_scroll_row >= ws->query_results->num_rows)
       ws->query_result_scroll_row =
           ws->query_results->num_rows > 0 ? ws->query_results->num_rows - 1 : 0;
-    }
   } else {
     tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");
     free(err);

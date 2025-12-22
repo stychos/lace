@@ -25,7 +25,6 @@ bool str_eq_nocase(const char *a, const char *b);
 
 /* String manipulation */
 char *str_lower(char *s); /* In-place lowercase */
-char *str_upper(char *s); /* In-place uppercase */
 
 /* URL encoding */
 char *str_url_encode(const char *s);

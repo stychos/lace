@@ -7,6 +7,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Initialize a workspace struct */
+void workspace_init(Workspace *ws) {
+  if (!ws)
+    return;
+  memset(ws, 0, sizeof(Workspace));
+  filters_init(&ws->filters);
+}
+
+/* Workspace state field mappings - used by save/restore */
+#define WS_COPY_TO_WS(field) ws->field = state->field
+#define WS_COPY_TO_STATE(field) state->field = ws->field
+
 /* Save current TUI state to workspace */
 void workspace_save(TuiState *state) {
   if (!state || state->num_workspaces == 0)
@@ -14,39 +26,37 @@ void workspace_save(TuiState *state) {
 
   Workspace *ws = &state->workspaces[state->current_workspace];
 
-  /* Save cursor and scroll positions */
-  ws->cursor_row = state->cursor_row;
-  ws->cursor_col = state->cursor_col;
-  ws->scroll_row = state->scroll_row;
-  ws->scroll_col = state->scroll_col;
+  /* Cursor and scroll */
+  WS_COPY_TO_WS(cursor_row);
+  WS_COPY_TO_WS(cursor_col);
+  WS_COPY_TO_WS(scroll_row);
+  WS_COPY_TO_WS(scroll_col);
 
-  /* Save pagination state */
-  ws->total_rows = state->total_rows;
-  ws->loaded_offset = state->loaded_offset;
-  ws->loaded_count = state->loaded_count;
+  /* Pagination */
+  WS_COPY_TO_WS(total_rows);
+  WS_COPY_TO_WS(loaded_offset);
+  WS_COPY_TO_WS(loaded_count);
 
-  /* Data and schema pointers are already stored in workspace */
-  ws->data = state->data;
-  ws->schema = state->schema;
+  /* Data pointers */
+  WS_COPY_TO_WS(data);
+  WS_COPY_TO_WS(schema);
+  WS_COPY_TO_WS(col_widths);
+  WS_COPY_TO_WS(num_col_widths);
 
-  /* Save column widths */
-  ws->col_widths = state->col_widths;
-  ws->num_col_widths = state->num_col_widths;
+  /* Filters panel */
+  WS_COPY_TO_WS(filters_visible);
+  WS_COPY_TO_WS(filters_focused);
+  WS_COPY_TO_WS(filters_cursor_row);
+  WS_COPY_TO_WS(filters_cursor_col);
+  WS_COPY_TO_WS(filters_scroll);
 
-  /* Save filters panel state */
-  ws->filters_visible = state->filters_visible;
-  ws->filters_focused = state->filters_focused;
-  ws->filters_cursor_row = state->filters_cursor_row;
-  ws->filters_cursor_col = state->filters_cursor_col;
-  ws->filters_scroll = state->filters_scroll;
-
-  /* Save sidebar state */
-  ws->sidebar_visible = state->sidebar_visible;
-  ws->sidebar_focused = state->sidebar_focused;
-  ws->sidebar_highlight = state->sidebar_highlight;
-  ws->sidebar_scroll = state->sidebar_scroll;
+  /* Sidebar */
+  WS_COPY_TO_WS(sidebar_visible);
+  WS_COPY_TO_WS(sidebar_focused);
+  WS_COPY_TO_WS(sidebar_highlight);
+  WS_COPY_TO_WS(sidebar_scroll);
+  WS_COPY_TO_WS(sidebar_filter_len);
   memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
-  ws->sidebar_filter_len = state->sidebar_filter_len;
 }
 
 /* Restore TUI state from workspace */
@@ -55,49 +65,45 @@ void workspace_restore(TuiState *state) {
     return;
 
   Workspace *ws = &state->workspaces[state->current_workspace];
+  bool sidebar_was_visible = state->sidebar_visible;
 
-  /* Restore cursor and scroll positions */
-  state->cursor_row = ws->cursor_row;
-  state->cursor_col = ws->cursor_col;
-  state->scroll_row = ws->scroll_row;
-  state->scroll_col = ws->scroll_col;
+  /* Cursor and scroll */
+  WS_COPY_TO_STATE(cursor_row);
+  WS_COPY_TO_STATE(cursor_col);
+  WS_COPY_TO_STATE(scroll_row);
+  WS_COPY_TO_STATE(scroll_col);
 
-  /* Restore pagination state */
-  state->total_rows = ws->total_rows;
-  state->loaded_offset = ws->loaded_offset;
-  state->loaded_count = ws->loaded_count;
+  /* Pagination */
+  WS_COPY_TO_STATE(total_rows);
+  WS_COPY_TO_STATE(loaded_offset);
+  WS_COPY_TO_STATE(loaded_count);
 
-  /* Restore data and schema */
-  state->data = ws->data;
-  state->schema = ws->schema;
+  /* Data pointers */
+  WS_COPY_TO_STATE(data);
+  WS_COPY_TO_STATE(schema);
+  WS_COPY_TO_STATE(col_widths);
+  WS_COPY_TO_STATE(num_col_widths);
   state->current_table = ws->table_index;
 
-  /* Restore column widths */
-  state->col_widths = ws->col_widths;
-  state->num_col_widths = ws->num_col_widths;
+  /* Filters panel */
+  WS_COPY_TO_STATE(filters_visible);
+  WS_COPY_TO_STATE(filters_focused);
+  WS_COPY_TO_STATE(filters_cursor_row);
+  WS_COPY_TO_STATE(filters_cursor_col);
+  WS_COPY_TO_STATE(filters_scroll);
+  state->filters_editing = false;
 
-  /* Restore filters panel state */
-  state->filters_visible = ws->filters_visible;
-  state->filters_focused = ws->filters_focused;
-  state->filters_cursor_row = ws->filters_cursor_row;
-  state->filters_cursor_col = ws->filters_cursor_col;
-  state->filters_scroll = ws->filters_scroll;
-  state->filters_editing = false; /* Always reset editing state */
-
-  /* Restore sidebar state */
-  bool sidebar_was_visible = state->sidebar_visible;
-  state->sidebar_visible = ws->sidebar_visible;
-  state->sidebar_focused = ws->sidebar_focused;
-  state->sidebar_highlight = ws->sidebar_highlight;
-  state->sidebar_scroll = ws->sidebar_scroll;
+  /* Sidebar */
+  WS_COPY_TO_STATE(sidebar_visible);
+  WS_COPY_TO_STATE(sidebar_focused);
+  WS_COPY_TO_STATE(sidebar_highlight);
+  WS_COPY_TO_STATE(sidebar_scroll);
+  WS_COPY_TO_STATE(sidebar_filter_len);
   memcpy(state->sidebar_filter, ws->sidebar_filter, sizeof(state->sidebar_filter));
-  state->sidebar_filter_len = ws->sidebar_filter_len;
-  state->sidebar_filter_active = false; /* Always reset filter input mode */
+  state->sidebar_filter_active = false;
 
-  /* Recreate windows if sidebar visibility changed */
-  if (sidebar_was_visible != state->sidebar_visible) {
+  if (sidebar_was_visible != state->sidebar_visible)
     tui_recreate_windows(state);
-  }
 }
 
 /* Switch to a different workspace */
@@ -108,6 +114,9 @@ void workspace_switch(TuiState *state, size_t index) {
     return;
 
   AppState *app = state->app;
+
+  /* Cancel any pending background load */
+  tui_cancel_background_load(state);
 
   /* Save current workspace state */
   workspace_save(state);
@@ -145,12 +154,11 @@ bool workspace_create(TuiState *state, size_t table_index) {
   /* Create new workspace in AppState */
   size_t new_idx = app->num_workspaces;
   Workspace *ws = &app->workspaces[new_idx];
-  memset(ws, 0, sizeof(Workspace));
+  workspace_init(ws);
 
   ws->active = true;
   ws->table_index = table_index;
   ws->table_name = str_dup(state->tables[table_index]);
-  filters_init(&ws->filters);
 
   /* Initialize sidebar state - inherit current state including scroll position */
   ws->sidebar_visible = state->sidebar_visible;
@@ -277,6 +285,9 @@ void workspace_close(TuiState *state) {
     return;
 
   AppState *app = state->app;
+
+  /* Cancel any pending background load */
+  tui_cancel_background_load(state);
 
   /* Validate current_workspace is within bounds */
   if (app->current_workspace >= app->num_workspaces)

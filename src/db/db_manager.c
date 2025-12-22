@@ -28,6 +28,19 @@ static DbDriver *g_drivers[MAX_DRIVERS];
 static size_t g_num_drivers = 0;
 static bool g_initialized = false;
 
+/* Escape a simple identifier (column name, etc.) for SQL.
+ * MySQL/MariaDB use backticks, PostgreSQL/SQLite use double quotes. */
+static char *escape_identifier(DbConnection *conn, const char *name) {
+  if (!conn || !conn->driver || !name)
+    return NULL;
+
+  if (str_eq(conn->driver->name, "mysql") ||
+      str_eq(conn->driver->name, "mariadb")) {
+    return str_escape_identifier_backtick(name);
+  }
+  return str_escape_identifier_dquote(name);
+}
+
 /* Escape table name for SQL, handling schema-qualified names for PostgreSQL.
  * MySQL/MariaDB use backticks, PostgreSQL/SQLite use double quotes.
  * For PostgreSQL, schema.table becomes "schema"."table". */
@@ -35,14 +48,7 @@ static char *escape_table_name(DbConnection *conn, const char *table) {
   if (!conn || !conn->driver || !table)
     return NULL;
 
-  bool use_backticks = str_eq(conn->driver->name, "mysql") ||
-                       str_eq(conn->driver->name, "mariadb");
-
-  if (use_backticks) {
-    return str_escape_identifier_backtick(table);
-  }
-
-  /* For PostgreSQL/SQLite, handle schema.table format */
+  /* For PostgreSQL, handle schema.table format */
   const char *dot = strchr(table, '.');
   if (dot && str_eq(conn->driver->name, "postgres")) {
     /* Schema-qualified: escape each part separately */
@@ -72,8 +78,8 @@ static char *escape_table_name(DbConnection *conn, const char *table) {
     return result;
   }
 
-  /* Simple case: just escape the whole name */
-  return str_escape_identifier_dquote(table);
+  /* Simple case: use generic identifier escaping */
+  return escape_identifier(conn, table);
 }
 
 /* Forward declarations for built-in drivers */
@@ -277,44 +283,35 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
     return NULL;
   }
 
+  /* Use driver-specific implementation if available */
   if (conn->driver->query_page) {
     return conn->driver->query_page(conn, table, offset, limit, order_by, desc,
                                     err);
   }
 
-  /* Fallback: build SQL query with proper identifier escaping */
-  char *escaped_table = str_escape_identifier_dquote(table);
-  if (!escaped_table) {
-    SET_ERROR(err, "Out of memory");
-    return NULL;
-  }
+  /* Fall back to generic implementation */
+  return db_query_page_where(conn, table, offset, limit, NULL, order_by, desc,
+                             err);
+}
 
-  char *sql;
-  if (order_by && *order_by) {
-    char *escaped_order = str_escape_identifier_dquote(order_by);
-    if (!escaped_order) {
-      free(escaped_table);
-      SET_ERROR(err, "Out of memory");
-      return NULL;
-    }
-    sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                     escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
-                     offset);
-    free(escaped_order);
-  } else {
-    sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table,
-                     limit, offset);
-  }
-  free(escaped_table);
+/* Extract count from a single-cell result set */
+static int64_t extract_count_from_result(ResultSet *rs) {
+  if (!rs || rs->num_rows == 0 || rs->num_columns == 0 || !rs->rows ||
+      !rs->rows[0].cells || rs->rows[0].num_cells == 0)
+    return -1;
 
-  if (!sql) {
-    SET_ERROR(err, "Out of memory");
-    return NULL;
-  }
+  DbValue *val = &rs->rows[0].cells[0];
+  if (val->type == DB_TYPE_INT)
+    return val->int_val;
 
-  ResultSet *rs = db_query(conn, sql, err);
-  free(sql);
-  return rs;
+  if (val->type == DB_TYPE_TEXT && val->text.data) {
+    char *endptr;
+    errno = 0;
+    long long parsed = strtoll(val->text.data, &endptr, 10);
+    if (errno == 0 && endptr != val->text.data && *endptr == '\0')
+      return parsed;
+  }
+  return -1;
 }
 
 int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
@@ -323,7 +320,6 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
     return -1;
   }
 
-  /* Build COUNT query with proper identifier escaping */
   char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
     SET_ERROR(err, "Out of memory");
@@ -341,27 +337,10 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   ResultSet *rs = db_query(conn, sql, err);
   free(sql);
 
-  if (!rs) {
+  if (!rs)
     return -1;
-  }
 
-  int64_t count = -1;
-  if (rs->num_rows > 0 && rs->num_columns > 0 && rs->rows &&
-      rs->rows[0].cells && rs->rows[0].num_cells > 0) {
-    DbValue *val = &rs->rows[0].cells[0];
-    if (val->type == DB_TYPE_INT) {
-      count = val->int_val;
-    } else if (val->type == DB_TYPE_TEXT && val->text.data) {
-      char *endptr;
-      errno = 0;
-      long long parsed = strtoll(val->text.data, &endptr, 10);
-      if (errno == 0 && endptr != val->text.data && *endptr == '\0') {
-        count = parsed;
-      }
-      /* On parse error, count remains -1 */
-    }
-  }
-
+  int64_t count = extract_count_from_result(rs);
   db_result_free(rs);
   return count;
 }
@@ -373,7 +352,6 @@ int64_t db_count_rows_where(DbConnection *conn, const char *table,
     return -1;
   }
 
-  /* Build COUNT query with proper identifier escaping */
   char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
     SET_ERROR(err, "Out of memory");
@@ -397,26 +375,10 @@ int64_t db_count_rows_where(DbConnection *conn, const char *table,
   ResultSet *rs = db_query(conn, sql, err);
   free(sql);
 
-  if (!rs) {
+  if (!rs)
     return -1;
-  }
 
-  int64_t count = -1;
-  if (rs->num_rows > 0 && rs->num_columns > 0 && rs->rows &&
-      rs->rows[0].cells && rs->rows[0].num_cells > 0) {
-    DbValue *val = &rs->rows[0].cells[0];
-    if (val->type == DB_TYPE_INT) {
-      count = val->int_val;
-    } else if (val->type == DB_TYPE_TEXT && val->text.data) {
-      char *endptr;
-      errno = 0;
-      long long parsed = strtoll(val->text.data, &endptr, 10);
-      if (errno == 0 && endptr != val->text.data && *endptr == '\0') {
-        count = parsed;
-      }
-    }
-  }
-
+  int64_t count = extract_count_from_result(rs);
   db_result_free(rs);
   return count;
 }
@@ -478,7 +440,7 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
   }
 
   if (order_by && *order_by) {
-    char *escaped_order = escape_table_name(conn, order_by);
+    char *escaped_order = escape_identifier(conn, order_by);
     if (escaped_order) {
       sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
       free(escaped_order);

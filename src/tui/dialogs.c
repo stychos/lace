@@ -334,11 +334,87 @@ void tui_show_goto_dialog(TuiState *state) {
 
                 if (completed && op.state == ASYNC_STATE_COMPLETED &&
                     op.result) {
+                  ResultSet *new_data = (ResultSet *)op.result;
+
+                  /* Check if we got 0 rows with approximate count */
+                  bool was_approximate = false;
+                  if (state->num_workspaces > 0 &&
+                      state->current_workspace < state->num_workspaces) {
+                    was_approximate = state->workspaces[state->current_workspace]
+                                          .row_count_approximate;
+                  }
+
+                  if (new_data->num_rows == 0 && was_approximate &&
+                      load_offset > 0) {
+                    /* Approximate count was wrong - get exact count */
+                    db_result_free(new_data);
+                    async_free(&op);
+
+                    AsyncOperation count_op;
+                    async_init(&count_op);
+                    count_op.op_type = ASYNC_OP_COUNT_ROWS;
+                    count_op.conn = state->conn;
+                    count_op.table_name = str_dup(table);
+                    count_op.use_approximate = false; /* Force exact */
+
+                    if (count_op.table_name && async_start(&count_op)) {
+                      bool count_done = tui_show_processing_dialog(
+                          state, &count_op, "Counting rows (exact)...");
+                      if (count_done &&
+                          count_op.state == ASYNC_STATE_COMPLETED &&
+                          count_op.count > 0) {
+                        /* Update total rows with exact count */
+                        state->total_rows = (size_t)count_op.count;
+                        if (state->num_workspaces > 0 &&
+                            state->current_workspace < state->num_workspaces) {
+                          Workspace *curr_ws =
+                              &state->workspaces[state->current_workspace];
+                          curr_ws->total_rows = state->total_rows;
+                          curr_ws->row_count_approximate = false;
+                        }
+
+                        /* Clamp target row to actual data */
+                        if (target_row >= state->total_rows) {
+                          target_row =
+                              state->total_rows > 0 ? state->total_rows - 1 : 0;
+                        }
+
+                        /* Recalculate load offset and reload */
+                        load_offset = target_row > PAGE_SIZE / 2
+                                          ? target_row - PAGE_SIZE / 2
+                                          : 0;
+
+                        /* Clean up count dialog and refresh before next dialog */
+                        async_free(&count_op);
+                        touchwin(stdscr);
+                        tui_refresh(state);
+
+                        /* Use tui_load_rows_at_with_dialog which handles edge cases */
+                        if (tui_load_rows_at_with_dialog(state, load_offset)) {
+                          state->cursor_row = target_row - state->loaded_offset;
+                          if (state->cursor_row < state->scroll_row) {
+                            state->scroll_row = state->cursor_row;
+                          } else if (state->cursor_row >=
+                                     state->scroll_row +
+                                         (size_t)state->content_rows) {
+                            state->scroll_row =
+                                state->cursor_row - state->content_rows + 1;
+                          }
+                        }
+                        tui_refresh(state);
+                        return;
+                      }
+                    }
+                    async_free(&count_op);
+                    tui_refresh(state);
+                    return;
+                  }
+
                   /* Free old data but keep schema */
                   if (state->data) {
                     db_result_free(state->data);
                   }
-                  state->data = (ResultSet *)op.result;
+                  state->data = new_data;
                   state->loaded_offset = load_offset;
                   state->loaded_count = state->data->num_rows;
 
@@ -376,7 +452,13 @@ void tui_show_goto_dialog(TuiState *state) {
 
               /* Only update cursor if load succeeded */
               if (load_succeeded) {
-                state->cursor_row = target_row - state->loaded_offset;
+                /* Clamp cursor to actual loaded data if target was beyond */
+                size_t actual_target = target_row - state->loaded_offset;
+                if (actual_target >= state->data->num_rows) {
+                  actual_target =
+                      state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
+                }
+                state->cursor_row = actual_target;
 
                 /* Adjust scroll */
                 if (state->cursor_row < state->scroll_row) {
@@ -967,7 +1049,7 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
   WINDOW *dialog = NULL;
   int spinner_frame = 0;
   int iterations = 0;
-  int width = 0, height = 5;
+  int width = 0, height = 7;
 
   while (1) {
     /* Check operation state */
@@ -1028,10 +1110,12 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
       char spinner = SPINNER_CHARS[spinner_frame];
       mvwprintw(dialog, 2, 2, "%c %s", spinner, message);
 
-      /* Cancel hint */
-      wattron(dialog, A_DIM);
-      mvwprintw(dialog, height - 2, 2, "[ESC] Cancel");
-      wattroff(dialog, A_DIM);
+      /* Cancel button - centered, 1 line gap before it */
+      const char *btn_text = "[ Cancel ]";
+      int btn_len = (int)strlen(btn_text);
+      wattron(dialog, A_REVERSE);
+      mvwprintw(dialog, height - 2, (width - btn_len) / 2, "%s", btn_text);
+      wattroff(dialog, A_REVERSE);
 
       wrefresh(dialog);
 
@@ -1040,7 +1124,7 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
 
       /* Check for input */
       int ch = wgetch(dialog);
-      if (ch == 27) { /* ESC to cancel */
+      if (ch == 27 || ch == '\n' || ch == KEY_ENTER) {
         async_cancel(op);
         /* Continue looping until state changes to CANCELLED */
       }
