@@ -95,14 +95,26 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     state->schema = NULL;
   }
 
-  /* Load schema */
-  char *err = NULL;
-  state->schema = db_get_table_schema(state->conn, table, &err);
-  if (err) {
-    tui_set_error(state, "Schema: %s", err);
-    free(err);
-    /* Continue anyway - we can still show data */
+  /* Load schema with progress dialog */
+  AsyncOperation schema_op;
+  async_init(&schema_op);
+  schema_op.op_type = ASYNC_OP_GET_SCHEMA;
+  schema_op.conn = state->conn;
+  schema_op.table_name = str_dup(table);
+
+  if (schema_op.table_name && async_start(&schema_op)) {
+    bool completed =
+        tui_show_processing_dialog(state, &schema_op, "Loading schema...");
+    if (completed && schema_op.state == ASYNC_STATE_COMPLETED) {
+      state->schema = (TableSchema *)schema_op.result;
+    } else if (schema_op.state == ASYNC_STATE_CANCELLED) {
+      async_free(&schema_op);
+      tui_set_status(state, "Operation cancelled");
+      return false;
+    }
+    /* Errors are non-fatal for schema - we can continue */
   }
+  async_free(&schema_op);
 
   /* Update workspace schema pointer for filter building */
   if (state->num_workspaces > 0 &&
@@ -113,36 +125,95 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
 
-  /* Get total row count (with filter if applicable) */
-  int64_t count;
+  /* Get total row count with progress dialog (uses approximate if available) */
+  AsyncOperation count_op;
+  async_init(&count_op);
+  count_op.conn = state->conn;
+  count_op.table_name = str_dup(table);
+  bool is_approximate = false;
+
+  int64_t count = 0;
   if (where_clause) {
-    count = db_count_rows_where(state->conn, table, where_clause, &err);
+    /* Filtered count - must be exact */
+    count_op.op_type = ASYNC_OP_COUNT_ROWS_WHERE;
+    count_op.where_clause = str_dup(where_clause);
   } else {
-    count = db_count_rows(state->conn, table, &err);
+    /* Unfiltered - can use approximate count */
+    count_op.op_type = ASYNC_OP_COUNT_ROWS;
+    count_op.use_approximate = true;
   }
-  if (count < 0) {
-    /* Fallback if COUNT fails */
-    count = 0;
-    free(err);
-    err = NULL;
+
+  if (count_op.table_name && async_start(&count_op)) {
+    bool completed =
+        tui_show_processing_dialog(state, &count_op, "Counting rows...");
+    if (completed && count_op.state == ASYNC_STATE_COMPLETED) {
+      count = count_op.count;
+      is_approximate = count_op.is_approximate;
+    } else if (count_op.state == ASYNC_STATE_CANCELLED) {
+      async_free(&count_op);
+      free(where_clause);
+      tui_set_status(state, "Operation cancelled");
+      return false;
+    }
   }
-  state->total_rows = (size_t)count;
+  async_free(&count_op);
+
+  state->total_rows = count >= 0 ? (size_t)count : 0;
   state->page_size = PAGE_SIZE;
   state->loaded_offset = 0;
 
-  /* Load first page of data (with filter if applicable) */
+  /* Store approximate flag in workspace if available */
+  if (state->num_workspaces > 0 &&
+      state->current_workspace < state->num_workspaces) {
+    state->workspaces[state->current_workspace].row_count_approximate =
+        is_approximate;
+  }
+
+  /* Load first page of data with progress dialog */
+  AsyncOperation data_op;
+  async_init(&data_op);
+  data_op.conn = state->conn;
+  data_op.table_name = str_dup(table);
+  data_op.offset = 0;
+  data_op.limit = PAGE_SIZE;
+  data_op.order_by = NULL;
+  data_op.desc = false;
+
   if (where_clause) {
-    state->data = db_query_page_where(state->conn, table, 0, PAGE_SIZE,
-                                      where_clause, NULL, false, &err);
+    data_op.op_type = ASYNC_OP_QUERY_PAGE_WHERE;
+    data_op.where_clause = str_dup(where_clause);
   } else {
-    state->data =
-        db_query_page(state->conn, table, 0, PAGE_SIZE, NULL, false, &err);
+    data_op.op_type = ASYNC_OP_QUERY_PAGE;
   }
   free(where_clause);
 
+  if (!data_op.table_name || !async_start(&data_op)) {
+    async_free(&data_op);
+    tui_set_error(state, "Failed to start data load");
+    return false;
+  }
+
+  bool completed =
+      tui_show_processing_dialog(state, &data_op, "Loading data...");
+
+  if (!completed || data_op.state == ASYNC_STATE_CANCELLED) {
+    async_free(&data_op);
+    tui_set_status(state, "Operation cancelled");
+    return false;
+  }
+
+  if (data_op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Query failed: %s",
+                  data_op.error ? data_op.error : "Unknown error");
+    async_free(&data_op);
+    return false;
+  }
+
+  state->data = (ResultSet *)data_op.result;
+  async_free(&data_op);
+
   if (!state->data) {
-    tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
-    free(err);
+    tui_set_error(state, "No data returned");
     return false;
   }
 

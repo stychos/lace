@@ -3,6 +3,8 @@
  * Database manager - driver registry and high-level API
  */
 
+#define _GNU_SOURCE
+
 #include "../util/str.h"
 #include "connstr.h"
 #include "db.h"
@@ -27,6 +29,54 @@
 static DbDriver *g_drivers[MAX_DRIVERS];
 static size_t g_num_drivers = 0;
 static bool g_initialized = false;
+
+/* Escape table name for SQL, handling schema-qualified names for PostgreSQL.
+ * MySQL/MariaDB use backticks, PostgreSQL/SQLite use double quotes.
+ * For PostgreSQL, schema.table becomes "schema"."table". */
+static char *escape_table_name(DbConnection *conn, const char *table) {
+  if (!conn || !conn->driver || !table)
+    return NULL;
+
+  bool use_backticks = str_eq(conn->driver->name, "mysql") ||
+                       str_eq(conn->driver->name, "mariadb");
+
+  if (use_backticks) {
+    return str_escape_identifier_backtick(table);
+  }
+
+  /* For PostgreSQL/SQLite, handle schema.table format */
+  const char *dot = strchr(table, '.');
+  if (dot && str_eq(conn->driver->name, "postgres")) {
+    /* Schema-qualified: escape each part separately */
+    size_t schema_len = (size_t)(dot - table);
+    char *schema = strndup(table, schema_len);
+    char *tbl = strdup(dot + 1);
+    if (!schema || !tbl) {
+      free(schema);
+      free(tbl);
+      return NULL;
+    }
+
+    char *escaped_schema = str_escape_identifier_dquote(schema);
+    char *escaped_table = str_escape_identifier_dquote(tbl);
+    free(schema);
+    free(tbl);
+
+    if (!escaped_schema || !escaped_table) {
+      free(escaped_schema);
+      free(escaped_table);
+      return NULL;
+    }
+
+    char *result = str_printf("%s.%s", escaped_schema, escaped_table);
+    free(escaped_schema);
+    free(escaped_table);
+    return result;
+  }
+
+  /* Simple case: just escape the whole name */
+  return str_escape_identifier_dquote(table);
+}
 
 /* Forward declarations for built-in drivers */
 extern DbDriver sqlite_driver;
@@ -276,13 +326,7 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   }
 
   /* Build COUNT query with proper identifier escaping */
-  char *escaped_table;
-  if (str_eq(conn->driver->name, "mysql") ||
-      str_eq(conn->driver->name, "mariadb")) {
-    escaped_table = str_escape_identifier_backtick(table);
-  } else {
-    escaped_table = str_escape_identifier_dquote(table);
-  }
+  char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
     SET_ERROR(err, "Out of memory");
     return -1;
@@ -332,13 +376,7 @@ int64_t db_count_rows_where(DbConnection *conn, const char *table,
   }
 
   /* Build COUNT query with proper identifier escaping */
-  char *escaped_table;
-  if (str_eq(conn->driver->name, "mysql") ||
-      str_eq(conn->driver->name, "mariadb")) {
-    escaped_table = str_escape_identifier_backtick(table);
-  } else {
-    escaped_table = str_escape_identifier_dquote(table);
-  }
+  char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
     SET_ERROR(err, "Out of memory");
     return -1;
@@ -383,6 +421,33 @@ int64_t db_count_rows_where(DbConnection *conn, const char *table,
 
   db_result_free(rs);
   return count;
+}
+
+int64_t db_count_rows_fast(DbConnection *conn, const char *table,
+                           bool allow_approximate, bool *is_approximate,
+                           char **err) {
+  if (!conn || !conn->driver || !table) {
+    SET_ERROR(err, "Invalid parameters");
+    if (is_approximate)
+      *is_approximate = false;
+    return -1;
+  }
+
+  /* Try approximate count first if allowed and driver supports it */
+  if (allow_approximate && conn->driver->estimate_row_count) {
+    int64_t estimate = conn->driver->estimate_row_count(conn, table, NULL);
+    if (estimate >= 0) {
+      if (is_approximate)
+        *is_approximate = true;
+      return estimate;
+    }
+    /* Fall through to exact count if estimate failed */
+  }
+
+  /* Fall back to exact COUNT(*) */
+  if (is_approximate)
+    *is_approximate = false;
+  return db_count_rows(conn, table, err);
 }
 
 ResultSet *db_query_page_where(DbConnection *conn, const char *table,

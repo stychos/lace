@@ -3,10 +3,13 @@
  * Modal dialogs
  */
 
+#define _GNU_SOURCE
 #include "tui_internal.h"
+#include "../async/async.h"
 #include "views/connect_view.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Show confirmation dialog - returns true if user confirms */
 bool tui_show_confirm_dialog(TuiState *state, const char *message) {
@@ -222,6 +225,13 @@ void tui_show_goto_dialog(TuiState *state) {
         if (row_num > 0 && row_num <= total_rows) {
           size_t target_row = row_num - 1; /* 0-indexed */
 
+          /* Close dialog immediately before loading data */
+          curs_set(0);
+          delwin(win);
+          win = NULL;
+          touchwin(stdscr);
+          tui_refresh(state);
+
           if (is_query) {
             /* Handle query results navigation */
             if (ws->query_paginated) {
@@ -232,7 +242,7 @@ void tui_show_goto_dialog(TuiState *state) {
                 /* Already loaded, just move cursor */
                 ws->query_result_row = target_row - ws->query_loaded_offset;
               } else {
-                /* Need to load new data */
+                /* Need to load new data - use async with progress */
                 size_t load_offset =
                     target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
                 query_load_rows_at(state, ws, load_offset);
@@ -269,22 +279,122 @@ void tui_show_goto_dialog(TuiState *state) {
                 target_row < state->loaded_offset + state->loaded_count) {
               /* Already loaded, just move cursor */
               state->cursor_row = target_row - state->loaded_offset;
+
+              /* Adjust scroll */
+              if (state->cursor_row < state->scroll_row) {
+                state->scroll_row = state->cursor_row;
+              } else if (state->cursor_row >=
+                         state->scroll_row + (size_t)state->content_rows) {
+                state->scroll_row = state->cursor_row - state->content_rows + 1;
+              }
             } else {
-              /* Need to load new data */
+              /* Need to load new data - use async with progress */
               size_t load_offset =
                   target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
-              tui_load_rows_at(state, load_offset);
-              state->cursor_row = target_row - state->loaded_offset;
-            }
 
-            /* Adjust scroll */
-            if (state->cursor_row < state->scroll_row) {
-              state->scroll_row = state->cursor_row;
-            } else if (state->cursor_row >=
-                       state->scroll_row + (size_t)state->content_rows) {
-              state->scroll_row = state->cursor_row - state->content_rows + 1;
+              /* Get table name */
+              const char *table = state->tables[state->current_table];
+              char *where_clause = NULL;
+
+              /* Build WHERE clause from filters if applicable */
+              if (state->num_workspaces > 0 &&
+                  state->current_workspace < state->num_workspaces) {
+                Workspace *curr_ws =
+                    &state->workspaces[state->current_workspace];
+                if (curr_ws->filters.num_filters > 0 && state->schema &&
+                    state->conn) {
+                  char *err = NULL;
+                  where_clause = filters_build_where(
+                      &curr_ws->filters, state->schema,
+                      state->conn->driver->name, &err);
+                  free(err);
+                }
+              }
+
+              /* Use async operation with progress dialog */
+              AsyncOperation op;
+              async_init(&op);
+              op.conn = state->conn;
+              op.table_name = str_dup(table);
+              op.offset = load_offset;
+              op.limit = PAGE_SIZE;
+              op.order_by = NULL;
+              op.desc = false;
+
+              if (where_clause) {
+                op.op_type = ASYNC_OP_QUERY_PAGE_WHERE;
+                op.where_clause = where_clause;
+              } else {
+                op.op_type = ASYNC_OP_QUERY_PAGE;
+              }
+
+              bool load_succeeded = false;
+              if (op.table_name && async_start(&op)) {
+                bool completed =
+                    tui_show_processing_dialog(state, &op, "Loading data...");
+
+                if (completed && op.state == ASYNC_STATE_COMPLETED &&
+                    op.result) {
+                  /* Free old data but keep schema */
+                  if (state->data) {
+                    db_result_free(state->data);
+                  }
+                  state->data = (ResultSet *)op.result;
+                  state->loaded_offset = load_offset;
+                  state->loaded_count = state->data->num_rows;
+
+                  /* Apply schema column names */
+                  if (state->schema && state->data) {
+                    size_t min_cols = state->schema->num_columns;
+                    if (state->data->num_columns < min_cols) {
+                      min_cols = state->data->num_columns;
+                    }
+                    for (size_t i = 0; i < min_cols; i++) {
+                      if (state->schema->columns[i].name) {
+                        free(state->data->columns[i].name);
+                        state->data->columns[i].name =
+                            str_dup(state->schema->columns[i].name);
+                        state->data->columns[i].type =
+                            state->schema->columns[i].type;
+                      }
+                    }
+                  }
+
+                  /* Update workspace pointers */
+                  if (state->num_workspaces > 0 &&
+                      state->current_workspace < state->num_workspaces) {
+                    Workspace *curr_ws =
+                        &state->workspaces[state->current_workspace];
+                    curr_ws->data = state->data;
+                    curr_ws->loaded_offset = state->loaded_offset;
+                    curr_ws->loaded_count = state->loaded_count;
+                  }
+
+                  load_succeeded = true;
+                }
+              }
+              async_free(&op);
+
+              /* Only update cursor if load succeeded */
+              if (load_succeeded) {
+                state->cursor_row = target_row - state->loaded_offset;
+
+                /* Adjust scroll */
+                if (state->cursor_row < state->scroll_row) {
+                  state->scroll_row = state->cursor_row;
+                } else if (state->cursor_row >=
+                           state->scroll_row + (size_t)state->content_rows) {
+                  state->scroll_row =
+                      state->cursor_row - state->content_rows + 1;
+                }
+              }
+              /* If cancelled/failed, keep current view unchanged */
             }
           }
+
+          /* Dialog already closed, exit loop */
+          tui_refresh(state);
+          return;
         } else {
           /* Invalid row number - flash or beep */
           flash();
@@ -311,11 +421,13 @@ void tui_show_goto_dialog(TuiState *state) {
     }
   }
 
-  curs_set(0);
-  delwin(win);
-
-  touchwin(stdscr);
-  tui_refresh(state);
+  /* Clean up if dialog wasn't already closed */
+  if (win) {
+    curs_set(0);
+    delwin(win);
+    touchwin(stdscr);
+    tui_refresh(state);
+  }
 }
 
 /* Show schema dialog */
@@ -820,4 +932,352 @@ void tui_show_help(TuiState *state) {
 
   touchwin(stdscr);
   tui_refresh(state);
+}
+
+/* Spinner characters for processing dialog */
+static const char SPINNER_CHARS[] = {'|', '/', '-', '\\'};
+#define SPINNER_COUNT 4
+
+/*
+ * Show a processing dialog while an async operation runs.
+ * Returns true if operation completed, false if cancelled.
+ *
+ * The dialog:
+ * - Only appears if operation takes longer than delay_ms (0 = show immediately)
+ * - Shows a message with spinner animation
+ * - Polls operation state every 50ms
+ * - Allows ESC to cancel
+ * - Auto-closes when operation completes
+ */
+bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
+                                   const char *message, int delay_ms) {
+  if (!state || !op)
+    return false;
+
+  #define POLL_INTERVAL_MS 50
+  int delay_iterations = delay_ms / POLL_INTERVAL_MS;
+
+  WINDOW *dialog = NULL;
+  int spinner_frame = 0;
+  int iterations = 0;
+  int width = 0, height = 5;
+
+  while (1) {
+    /* Check operation state */
+    AsyncState op_state = async_poll(op);
+    if (op_state == ASYNC_STATE_COMPLETED || op_state == ASYNC_STATE_ERROR) {
+      if (dialog) {
+        delwin(dialog);
+        touchwin(stdscr);
+      }
+      return true; /* Completed (check op->error for errors) */
+    }
+    if (op_state == ASYNC_STATE_CANCELLED) {
+      if (dialog) {
+        delwin(dialog);
+        touchwin(stdscr);
+      }
+      return false; /* Cancelled */
+    }
+
+    /* Create dialog after delay threshold */
+    if (!dialog && iterations >= delay_iterations) {
+      int term_rows, term_cols;
+      getmaxyx(stdscr, term_rows, term_cols);
+
+      int msg_len = (int)strlen(message);
+      width = msg_len + 10; /* Room for spinner and padding */
+      if (width < 30)
+        width = 30;
+      if (width > term_cols - 4)
+        width = term_cols - 4;
+
+      int start_y = (term_rows - height) / 2;
+      int start_x = (term_cols - width) / 2;
+
+      if (start_y < 0)
+        start_y = 0;
+      if (start_x < 0)
+        start_x = 0;
+
+      dialog = newwin(height, width, start_y, start_x);
+      if (dialog) {
+        keypad(dialog, TRUE);
+        wtimeout(dialog, POLL_INTERVAL_MS);
+      }
+    }
+
+    if (dialog) {
+      /* Draw dialog */
+      werase(dialog);
+      box(dialog, 0, 0);
+
+      /* Title */
+      wattron(dialog, A_BOLD);
+      mvwprintw(dialog, 0, (width - 14) / 2, " Processing ");
+      wattroff(dialog, A_BOLD);
+
+      /* Spinner and message */
+      char spinner = SPINNER_CHARS[spinner_frame];
+      mvwprintw(dialog, 2, 2, "%c %s", spinner, message);
+
+      /* Cancel hint */
+      wattron(dialog, A_DIM);
+      mvwprintw(dialog, height - 2, 2, "[ESC] Cancel");
+      wattroff(dialog, A_DIM);
+
+      wrefresh(dialog);
+
+      /* Advance spinner */
+      spinner_frame = (spinner_frame + 1) % SPINNER_COUNT;
+
+      /* Check for input */
+      int ch = wgetch(dialog);
+      if (ch == 27) { /* ESC to cancel */
+        async_cancel(op);
+        /* Continue looping until state changes to CANCELLED */
+      }
+    } else {
+      /* No dialog yet - just sleep and poll */
+      struct timespec ts = {0, POLL_INTERVAL_MS * 1000000L};
+      nanosleep(&ts, NULL);
+      iterations++;
+    }
+  }
+
+  #undef POLL_INTERVAL_MS
+}
+
+/*
+ * Convenience wrapper with default 250ms delay.
+ */
+bool tui_show_processing_dialog(TuiState *state, AsyncOperation *op,
+                                const char *message) {
+  return tui_show_processing_dialog_ex(state, op, message, 250);
+}
+
+/*
+ * Connect to database with progress dialog.
+ * Returns connection on success, NULL on failure/cancel.
+ */
+DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr) {
+  if (!state || !connstr)
+    return NULL;
+
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_CONNECT;
+  op.connstr = str_dup(connstr);
+
+  if (!op.connstr) {
+    tui_set_error(state, "Memory allocation failed");
+    return NULL;
+  }
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start connection");
+    free(op.connstr);
+    return NULL;
+  }
+
+  /* Connection dialog shows immediately (no delay) */
+  bool completed = tui_show_processing_dialog_ex(state, &op, "Connecting...", 0);
+
+  DbConnection *result = NULL;
+  if (completed && op.state == ASYNC_STATE_COMPLETED) {
+    result = (DbConnection *)op.result;
+  } else if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Connection failed: %s",
+                  op.error ? op.error : "Unknown error");
+  } else if (op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Connection cancelled");
+  }
+
+  async_free(&op);
+  return result;
+}
+
+/*
+ * Load table list with progress dialog.
+ * Returns true on success.
+ */
+bool tui_load_tables_with_progress(TuiState *state) {
+  if (!state || !state->conn)
+    return false;
+
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_LIST_TABLES;
+  op.conn = state->conn;
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start operation");
+    return false;
+  }
+
+  bool completed = tui_show_processing_dialog(state, &op, "Loading tables...");
+
+  if (completed && op.state == ASYNC_STATE_COMPLETED) {
+    /* Free old table list if exists */
+    if (state->tables) {
+      for (size_t i = 0; i < state->num_tables; i++) {
+        free(state->tables[i]);
+      }
+      free(state->tables);
+    }
+
+    state->tables = (char **)op.result;
+    state->num_tables = op.result_count;
+
+    /* Also update app state if available */
+    if (state->app) {
+      state->app->tables = state->tables;
+      state->app->num_tables = state->num_tables;
+    }
+
+    async_free(&op);
+    return true;
+  } else if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Failed to load tables: %s",
+                  op.error ? op.error : "Unknown error");
+  } else if (op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Operation cancelled");
+  }
+
+  async_free(&op);
+  return false;
+}
+
+/*
+ * Count rows with progress dialog (uses approximate count if available).
+ * Returns row count on success, -1 on failure.
+ */
+int64_t tui_count_rows_with_progress(TuiState *state, const char *table,
+                                     bool *is_approximate) {
+  if (!state || !state->conn || !table)
+    return -1;
+
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_COUNT_ROWS;
+  op.conn = state->conn;
+  op.table_name = str_dup(table);
+  op.use_approximate = true; /* Try fast estimate first */
+
+  if (!op.table_name) {
+    tui_set_error(state, "Memory allocation failed");
+    return -1;
+  }
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start operation");
+    free(op.table_name);
+    return -1;
+  }
+
+  bool completed = tui_show_processing_dialog(state, &op, "Counting rows...");
+
+  int64_t result = -1;
+  if (completed && op.state == ASYNC_STATE_COMPLETED) {
+    result = op.count;
+    if (is_approximate)
+      *is_approximate = op.is_approximate;
+  } else if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Failed to count rows: %s",
+                  op.error ? op.error : "Unknown error");
+  } else if (op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Operation cancelled");
+  }
+
+  async_free(&op);
+  return result;
+}
+
+/*
+ * Load table schema with progress dialog.
+ * Returns schema on success, NULL on failure.
+ */
+TableSchema *tui_get_schema_with_progress(TuiState *state, const char *table) {
+  if (!state || !state->conn || !table)
+    return NULL;
+
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_GET_SCHEMA;
+  op.conn = state->conn;
+  op.table_name = str_dup(table);
+
+  if (!op.table_name) {
+    tui_set_error(state, "Memory allocation failed");
+    return NULL;
+  }
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start operation");
+    free(op.table_name);
+    return NULL;
+  }
+
+  bool completed =
+      tui_show_processing_dialog(state, &op, "Loading schema...");
+
+  TableSchema *result = NULL;
+  if (completed && op.state == ASYNC_STATE_COMPLETED) {
+    result = (TableSchema *)op.result;
+  } else if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Failed to load schema: %s",
+                  op.error ? op.error : "Unknown error");
+  } else if (op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Operation cancelled");
+  }
+
+  async_free(&op);
+  return result;
+}
+
+/*
+ * Query page with progress dialog.
+ * Returns result set on success, NULL on failure.
+ */
+ResultSet *tui_query_page_with_progress(TuiState *state, const char *table,
+                                        size_t offset, size_t limit,
+                                        const char *order_by, bool desc) {
+  if (!state || !state->conn || !table)
+    return NULL;
+
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_QUERY_PAGE;
+  op.conn = state->conn;
+  op.table_name = str_dup(table);
+  op.offset = offset;
+  op.limit = limit;
+  op.order_by = order_by ? str_dup(order_by) : NULL;
+  op.desc = desc;
+
+  if (!op.table_name) {
+    tui_set_error(state, "Memory allocation failed");
+    return NULL;
+  }
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start operation");
+    async_free(&op);
+    return NULL;
+  }
+
+  bool completed = tui_show_processing_dialog(state, &op, "Loading data...");
+
+  ResultSet *result = NULL;
+  if (completed && op.state == ASYNC_STATE_COMPLETED) {
+    result = (ResultSet *)op.result;
+  } else if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Query failed: %s",
+                  op.error ? op.error : "Unknown error");
+  } else if (op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Query cancelled");
+  }
+
+  async_free(&op);
+  return result;
 }

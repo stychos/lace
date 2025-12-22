@@ -76,6 +76,7 @@ typedef struct {
   size_t total_rows;
   size_t loaded_offset;
   size_t loaded_count;
+  bool row_count_approximate; /* True if total_rows is approximate */
 
   /* Column widths (computed for display) */
   int *col_widths;

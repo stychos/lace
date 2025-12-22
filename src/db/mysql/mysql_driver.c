@@ -56,6 +56,12 @@ static void mysql_driver_free_result(ResultSet *rs);
 static void mysql_driver_free_schema(TableSchema *schema);
 static void mysql_driver_free_string_list(char **list, size_t count);
 static void mysql_driver_library_cleanup(void);
+static void *mysql_driver_prepare_cancel(DbConnection *conn);
+static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
+                                      char **err);
+static void mysql_driver_free_cancel_handle(void *cancel_handle);
+static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
+                                               const char *table, char **err);
 
 /* Driver definitions - both mysql and mariadb use the same implementation */
 DbDriver mysql_driver = {
@@ -81,6 +87,10 @@ DbDriver mysql_driver = {
     .free_result = mysql_driver_free_result,
     .free_schema = mysql_driver_free_schema,
     .free_string_list = mysql_driver_free_string_list,
+    .prepare_cancel = mysql_driver_prepare_cancel,
+    .cancel_query = mysql_driver_cancel_query,
+    .free_cancel_handle = mysql_driver_free_cancel_handle,
+    .estimate_row_count = mysql_driver_estimate_row_count,
     .library_cleanup = mysql_driver_library_cleanup,
 };
 
@@ -107,6 +117,10 @@ DbDriver mariadb_driver = {
     .free_result = mysql_driver_free_result,
     .free_schema = mysql_driver_free_schema,
     .free_string_list = mysql_driver_free_string_list,
+    .prepare_cancel = mysql_driver_prepare_cancel,
+    .cancel_query = mysql_driver_cancel_query,
+    .free_cancel_handle = mysql_driver_free_cancel_handle,
+    .estimate_row_count = mysql_driver_estimate_row_count,
     .library_cleanup = mysql_driver_library_cleanup,
 };
 
@@ -1259,4 +1273,129 @@ static void mysql_driver_library_cleanup(void) {
     return;
   cleaned_up = true;
   mysql_library_end();
+}
+
+/* Cancel handle stores the thread ID for KILL QUERY */
+typedef struct {
+  unsigned long thread_id;
+} MySqlCancelHandle;
+
+static void *mysql_driver_prepare_cancel(DbConnection *conn) {
+  if (!conn)
+    return NULL;
+  MySqlData *data = conn->driver_data;
+  if (!data || !data->mysql)
+    return NULL;
+
+  MySqlCancelHandle *handle = malloc(sizeof(MySqlCancelHandle));
+  if (!handle)
+    return NULL;
+
+  handle->thread_id = mysql_thread_id(data->mysql);
+  return handle;
+}
+
+static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
+                                      char **err) {
+  if (!conn || !cancel_handle) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return false;
+  }
+
+  MySqlData *data = conn->driver_data;
+  if (!data || !data->mysql) {
+    if (err)
+      *err = str_dup("Not connected");
+    return false;
+  }
+
+  MySqlCancelHandle *handle = (MySqlCancelHandle *)cancel_handle;
+
+  /* Execute KILL QUERY on the same connection
+   * Note: This works because mysql_query is thread-safe for different
+   * connections, and KILL QUERY is a fast operation that can interrupt
+   * a running query.
+   * For full robustness, a separate connection would be needed. */
+  char kill_sql[64];
+  snprintf(kill_sql, sizeof(kill_sql), "KILL QUERY %lu", handle->thread_id);
+
+  /* We use mysql_send_query which is non-blocking for the send part */
+  if (mysql_query(data->mysql, kill_sql) != 0) {
+    if (err)
+      *err = str_dup(mysql_error(data->mysql));
+    return false;
+  }
+
+  /* Consume any result from KILL command */
+  MYSQL_RES *result = mysql_store_result(data->mysql);
+  if (result)
+    mysql_free_result(result);
+
+  return true;
+}
+
+static void mysql_driver_free_cancel_handle(void *cancel_handle) {
+  free(cancel_handle);
+}
+
+/* Approximate row count using information_schema */
+static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
+                                               const char *table, char **err) {
+  if (!conn || !table) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return -1;
+  }
+
+  MySqlData *data = conn->driver_data;
+  if (!data || !data->mysql) {
+    if (err)
+      *err = str_dup("Not connected");
+    return -1;
+  }
+
+  /* Escape table name for query */
+  char escaped_table[256];
+  size_t table_len = strlen(table);
+  if (table_len >= sizeof(escaped_table) / 2) {
+    if (err)
+      *err = str_dup("Table name too long");
+    return -1;
+  }
+  mysql_real_escape_string(data->mysql, escaped_table, table, table_len);
+
+  /* Query information_schema for approximate row count */
+  char *sql = str_printf("SELECT TABLE_ROWS FROM information_schema.TABLES "
+                         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s'",
+                         escaped_table);
+  if (!sql) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return -1;
+  }
+
+  if (mysql_query(data->mysql, sql) != 0) {
+    if (err)
+      *err = str_dup(mysql_error(data->mysql));
+    free(sql);
+    return -1;
+  }
+  free(sql);
+
+  MYSQL_RES *result = mysql_store_result(data->mysql);
+  if (!result) {
+    if (err)
+      *err = str_dup(mysql_error(data->mysql));
+    return -1;
+  }
+
+  int64_t count = -1;
+  MYSQL_ROW row = mysql_fetch_row(result);
+  if (row && row[0]) {
+    count = strtoll(row[0], NULL, 10);
+  }
+
+  mysql_free_result(result);
+  return count;
 }

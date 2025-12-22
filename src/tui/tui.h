@@ -6,6 +6,7 @@
 #ifndef LACE_TUI_H
 #define LACE_TUI_H
 
+#include "../async/async.h"
 #include "../core/app_state.h"
 #include "../db/db.h"
 #include <ncurses.h>
@@ -280,5 +281,36 @@ void tui_draw_filters_panel(TuiState *state);
 bool tui_handle_filters_input(TuiState *state, int ch);
 void tui_apply_filters(TuiState *state);
 int tui_get_filters_panel_height(TuiState *state);
+
+/* ============================================================================
+ * Async operations with progress dialog
+ * ============================================================================
+ */
+
+/* Show processing dialog with spinner and cancel support */
+bool tui_show_processing_dialog(TuiState *state, AsyncOperation *op,
+                                const char *message);
+
+/* Extended version with custom delay (0 = show immediately) */
+bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
+                                   const char *message, int delay_ms);
+
+/* Connect to database with progress dialog */
+DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr);
+
+/* Load table list with progress dialog */
+bool tui_load_tables_with_progress(TuiState *state);
+
+/* Count rows with progress dialog (uses approximate count if available) */
+int64_t tui_count_rows_with_progress(TuiState *state, const char *table,
+                                     bool *is_approximate);
+
+/* Load table schema with progress dialog */
+TableSchema *tui_get_schema_with_progress(TuiState *state, const char *table);
+
+/* Query page with progress dialog */
+ResultSet *tui_query_page_with_progress(TuiState *state, const char *table,
+                                        size_t offset, size_t limit,
+                                        const char *order_by, bool desc);
 
 #endif /* LACE_TUI_H */

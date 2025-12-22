@@ -43,22 +43,25 @@ static void query_check_load_more(TuiState *state, Workspace *ws);
 
 /* Create a new query workspace */
 bool workspace_create_query(TuiState *state) {
-  if (!state)
+  if (!state || !state->app)
     return false;
-  if (state->num_workspaces >= MAX_WORKSPACES) {
+
+  AppState *app = state->app;
+
+  if (app->num_workspaces >= MAX_WORKSPACES) {
     tui_set_error(state, "Maximum %d tabs reached", MAX_WORKSPACES);
     return false;
   }
 
   /* Save current workspace first */
-  if (state->num_workspaces > 0) {
+  if (app->num_workspaces > 0) {
     workspace_save(state);
   }
 
   /* Find next query number by scanning existing workspaces */
   int max_query_num = 0;
-  for (size_t i = 0; i < state->num_workspaces; i++) {
-    Workspace *w = &state->workspaces[i];
+  for (size_t i = 0; i < app->num_workspaces; i++) {
+    Workspace *w = &app->workspaces[i];
     if (w->type == WORKSPACE_TYPE_QUERY && w->table_name) {
       int num = 0;
       if (sscanf(w->table_name, "Query %d", &num) == 1) {
@@ -68,9 +71,9 @@ bool workspace_create_query(TuiState *state) {
     }
   }
 
-  /* Create new workspace */
-  size_t new_idx = state->num_workspaces;
-  Workspace *ws = &state->workspaces[new_idx];
+  /* Create new workspace in AppState */
+  size_t new_idx = app->num_workspaces;
+  Workspace *ws = &app->workspaces[new_idx];
   memset(ws, 0, sizeof(Workspace));
 
   ws->type = WORKSPACE_TYPE_QUERY;
@@ -90,7 +93,18 @@ bool workspace_create_query(TuiState *state) {
   ws->query_scroll_col = 0;
   ws->query_focus_results = false;
 
-  state->num_workspaces++;
+  /* Copy sidebar state from current TUI state */
+  ws->sidebar_visible = state->sidebar_visible;
+  ws->sidebar_focused = false; /* Query tab focuses on SQL editor */
+  ws->sidebar_highlight = state->sidebar_highlight;
+  ws->sidebar_scroll = state->sidebar_scroll;
+  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
+  ws->sidebar_filter_len = state->sidebar_filter_len;
+
+  /* Update AppState and sync to TuiState cache */
+  app->num_workspaces++;
+  app->current_workspace = new_idx;
+  state->num_workspaces = app->num_workspaces;
   state->current_workspace = new_idx;
 
   /* Clear convenience pointers (query mode doesn't use them) */
@@ -98,6 +112,9 @@ bool workspace_create_query(TuiState *state) {
   state->schema = NULL;
   state->col_widths = NULL;
   state->num_col_widths = 0;
+
+  /* Focus on SQL editor, not sidebar */
+  state->sidebar_focused = false;
 
   tui_set_status(state, "Query tab opened. Ctrl+R to run, Ctrl+A to run all");
   return true;
@@ -595,20 +612,55 @@ static void query_execute(TuiState *state, const char *sql) {
         ws->query_total_rows = 0;
       }
 
-      /* Execute with LIMIT/OFFSET for first page */
+      /* Execute with LIMIT/OFFSET for first page using async operation */
       char *paginated_sql = str_printf("%s LIMIT %d OFFSET 0", sql, PAGE_SIZE);
       if (paginated_sql) {
-        ws->query_results = db_query(state->conn, paginated_sql, &err);
-        free(paginated_sql);
-        if (!err && ws->query_results) {
-          ws->query_paginated = true;
-          ws->query_loaded_offset = 0;
-          ws->query_loaded_count = ws->query_results->num_rows;
+        AsyncOperation op;
+        async_init(&op);
+        op.op_type = ASYNC_OP_QUERY;
+        op.conn = state->conn;
+        op.sql = paginated_sql; /* ownership transferred */
+
+        if (async_start(&op)) {
+          bool completed =
+              tui_show_processing_dialog(state, &op, "Executing query...");
+          if (completed && op.state == ASYNC_STATE_COMPLETED) {
+            ws->query_results = (ResultSet *)op.result;
+            if (ws->query_results) {
+              ws->query_paginated = true;
+              ws->query_loaded_offset = 0;
+              ws->query_loaded_count = ws->query_results->num_rows;
+            }
+          } else if (op.state == ASYNC_STATE_ERROR) {
+            err = op.error ? str_dup(op.error) : str_dup("Query failed");
+          } else if (op.state == ASYNC_STATE_CANCELLED) {
+            tui_set_status(state, "Query cancelled");
+          }
         }
+        op.sql = NULL; /* Prevent double free */
+        async_free(&op);
+        free(paginated_sql);
       }
     } else {
-      /* Execute as-is (has LIMIT/OFFSET or not a SELECT) */
-      ws->query_results = db_query(state->conn, sql, &err);
+      /* Execute as-is (has LIMIT/OFFSET or not a SELECT) using async */
+      AsyncOperation op;
+      async_init(&op);
+      op.op_type = ASYNC_OP_QUERY;
+      op.conn = state->conn;
+      op.sql = str_dup(sql);
+
+      if (op.sql && async_start(&op)) {
+        bool completed =
+            tui_show_processing_dialog(state, &op, "Executing query...");
+        if (completed && op.state == ASYNC_STATE_COMPLETED) {
+          ws->query_results = (ResultSet *)op.result;
+        } else if (op.state == ASYNC_STATE_ERROR) {
+          err = op.error ? str_dup(op.error) : str_dup("Query failed");
+        } else if (op.state == ASYNC_STATE_CANCELLED) {
+          tui_set_status(state, "Query cancelled");
+        }
+      }
+      async_free(&op);
     }
 
     if (err) {
@@ -633,17 +685,31 @@ static void query_execute(TuiState *state, const char *sql) {
       }
     }
   } else {
-    int64_t affected = db_exec(state->conn, sql, &err);
-    if (err) {
-      ws->query_error = err;
-    } else {
-      ws->query_affected = affected;
-      tui_set_status(state, "%lld rows affected", (long long)affected);
+    /* Execute non-SELECT query using async operation */
+    AsyncOperation op;
+    async_init(&op);
+    op.op_type = ASYNC_OP_EXEC;
+    op.conn = state->conn;
+    op.sql = str_dup(sql);
+
+    if (op.sql && async_start(&op)) {
+      bool completed =
+          tui_show_processing_dialog(state, &op, "Executing statement...");
+      if (completed && op.state == ASYNC_STATE_COMPLETED) {
+        ws->query_affected = op.count;
+        tui_set_status(state, "%lld rows affected", (long long)op.count);
+      } else if (op.state == ASYNC_STATE_ERROR) {
+        err = op.error ? str_dup(op.error) : str_dup("Statement failed");
+        ws->query_error = err;
+      } else if (op.state == ASYNC_STATE_CANCELLED) {
+        tui_set_status(state, "Statement cancelled");
+      }
     }
+    async_free(&op);
   }
 
-  /* Focus results pane after execution */
-  if (!ws->query_error) {
+  /* Focus results pane after execution (only if there are results) */
+  if (!ws->query_error && ws->query_results && ws->query_results->num_rows > 0) {
     ws->query_focus_results = true;
   }
 }
@@ -1846,7 +1912,15 @@ bool tui_handle_query_input(TuiState *state, int ch) {
 
   /* Ctrl+W or Esc switches focus (only when not editing) */
   if (ch == 23 || ch == 27) { /* 23 = Ctrl+W */
-    ws->query_focus_results = !ws->query_focus_results;
+    if (ws->query_focus_results) {
+      /* Always allow switching from results to editor */
+      ws->query_focus_results = false;
+    } else {
+      /* Only switch to results if there are results to show */
+      if (ws->query_results && ws->query_results->num_rows > 0) {
+        ws->query_focus_results = true;
+      }
+    }
     return true;
   }
 

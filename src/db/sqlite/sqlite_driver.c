@@ -42,6 +42,12 @@ static bool sqlite_delete_row(DbConnection *conn, const char *table,
 static void sqlite_free_result(ResultSet *rs);
 static void sqlite_free_schema(TableSchema *schema);
 static void sqlite_free_string_list(char **list, size_t count);
+static void *sqlite_prepare_cancel(DbConnection *conn);
+static bool sqlite_cancel_query(DbConnection *conn, void *cancel_handle,
+                                char **err);
+static void sqlite_free_cancel_handle(void *cancel_handle);
+static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
+                                         char **err);
 
 /* Driver definition */
 DbDriver sqlite_driver = {
@@ -67,6 +73,11 @@ DbDriver sqlite_driver = {
     .free_result = sqlite_free_result,
     .free_schema = sqlite_free_schema,
     .free_string_list = sqlite_free_string_list,
+    .prepare_cancel = sqlite_prepare_cancel,
+    .cancel_query = sqlite_cancel_query,
+    .free_cancel_handle = sqlite_free_cancel_handle,
+    .estimate_row_count = sqlite_estimate_row_count,
+    .library_cleanup = NULL,
 };
 
 /* Get DbValue from SQLite column */
@@ -1093,4 +1104,83 @@ static void sqlite_free_string_list(char **list, size_t count) {
     free(list[i]);
   }
   free(list);
+}
+
+/* Query cancellation support - SQLite uses sqlite3_interrupt */
+static void *sqlite_prepare_cancel(DbConnection *conn) {
+  if (!conn)
+    return NULL;
+  SqliteData *data = conn->driver_data;
+  if (!data || !data->db)
+    return NULL;
+  /* Return the db handle itself - we don't need a separate handle */
+  return data->db;
+}
+
+static bool sqlite_cancel_query(DbConnection *conn, void *cancel_handle,
+                                char **err) {
+  (void)conn; /* Not needed */
+  if (!cancel_handle) {
+    if (err)
+      *err = str_dup("Invalid cancel handle");
+    return false;
+  }
+
+  sqlite3 *db = (sqlite3 *)cancel_handle;
+  sqlite3_interrupt(db);
+  return true;
+}
+
+static void sqlite_free_cancel_handle(void *cancel_handle) {
+  /* No-op: we don't own the db handle, just borrowed the pointer */
+  (void)cancel_handle;
+}
+
+/* Approximate row count using sqlite_stat1 (populated by ANALYZE) */
+static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
+                                         char **err) {
+  if (!conn || !table) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return -1;
+  }
+
+  SqliteData *data = conn->driver_data;
+  if (!data || !data->db) {
+    if (err)
+      *err = str_dup("Not connected");
+    return -1;
+  }
+
+  /* Try sqlite_stat1 first (populated by ANALYZE command) */
+  /* First try table-level stats (idx IS NULL), then any index stats */
+  const char *sql =
+      "SELECT stat FROM sqlite_stat1 WHERE tbl = ? ORDER BY idx IS NULL DESC LIMIT 1";
+
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
+
+  if (rc != SQLITE_OK) {
+    /* sqlite_stat1 might not exist - return -1 to fall back to COUNT(*) */
+    return -1;
+  }
+
+  sqlite3_bind_text(stmt, 1, table, -1, SQLITE_STATIC);
+
+  if (sqlite3_step(stmt) == SQLITE_ROW) {
+    const char *stat = (const char *)sqlite3_column_text(stmt, 0);
+    if (stat && *stat) {
+      /* First number in stat string is the row count estimate */
+      int64_t count = strtoll(stat, NULL, 10);
+      sqlite3_finalize(stmt);
+      if (count >= 0) {
+        return count;
+      }
+    }
+  }
+
+  sqlite3_finalize(stmt);
+
+  /* sqlite_stat1 not available or no data - return -1 to indicate fallback needed */
+  return -1;
 }

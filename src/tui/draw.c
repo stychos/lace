@@ -400,7 +400,10 @@ void tui_draw_status(TuiState *state) {
     size_t actual_row = state->loaded_offset + state->cursor_row + 1;
     size_t total =
         state->total_rows > 0 ? state->total_rows : state->data->num_rows;
-    snprintf(pos, sizeof(pos), "Row %zu/%zu", actual_row, total);
+    /* Show ~ prefix for approximate counts */
+    bool approx = ws && ws->row_count_approximate;
+    snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
+             total);
     mvwprintw(state->status_win, 0, state->term_cols - (int)strlen(pos) - 1,
               "%s", pos);
   }

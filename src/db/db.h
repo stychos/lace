@@ -60,6 +60,15 @@ typedef struct DbDriver {
   void (*free_schema)(TableSchema *schema);
   void (*free_string_list)(char **list, size_t count);
 
+  /* Query cancellation support */
+  void *(*prepare_cancel)(DbConnection *conn);
+  bool (*cancel_query)(DbConnection *conn, void *cancel_handle, char **err);
+  void (*free_cancel_handle)(void *cancel_handle);
+
+  /* Approximate row count (fast estimate from system tables) */
+  int64_t (*estimate_row_count)(DbConnection *conn, const char *table,
+                                char **err);
+
   /* Library cleanup (called once at program exit) */
   void (*library_cleanup)(void);
 
@@ -105,6 +114,11 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
                          size_t limit, const char *order_by, bool desc,
                          char **err);
 int64_t db_count_rows(DbConnection *conn, const char *table, char **err);
+
+/* Fast row count (uses approximate estimate if available) */
+int64_t db_count_rows_fast(DbConnection *conn, const char *table,
+                           bool allow_approximate, bool *is_approximate,
+                           char **err);
 
 /* Filtered queries (with WHERE clause) */
 ResultSet *db_query_page_where(DbConnection *conn, const char *table,

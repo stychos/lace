@@ -3,7 +3,7 @@
 
 CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -Isrc -g
-LDFLAGS = -lncursesw -lssl -lcrypto -lpanel -lform -lmenu -lsqlite3 -lmariadb -lpq
+LDFLAGS = -lncursesw -lssl -lcrypto -lpanel -lform -lmenu -lsqlite3 -lmariadb -lpq -lpthread
 
 # Build directory
 BUILD_DIR = build
@@ -35,7 +35,7 @@ endif
 
 # Source directories
 SRC_DIRS = src src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
-           src/tui src/tui/views src/tui/widgets src/net src/util
+           src/tui src/tui/views src/tui/widgets src/net src/util src/async
 
 # Find all C source files
 SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))

@@ -3,6 +3,8 @@
  * PostgreSQL driver - uses libpq C API
  */
 
+#define _GNU_SOURCE
+
 #include "../../util/str.h"
 #include "../connstr.h"
 #include "../db.h"
@@ -22,6 +24,60 @@ static inline int safe_size_to_int(size_t sz) {
     return 0; /* Safe default - text format ignores paramLengths anyway */
   }
   return (int)sz;
+}
+
+/* Parse schema-qualified table name (schema.table or just table).
+ * Returns schema (or "public" if unqualified) and table name.
+ * Caller must free both returned strings. */
+static bool pg_parse_table_name(const char *full_name, char **schema_out,
+                                char **table_out) {
+  if (!full_name || !schema_out || !table_out)
+    return false;
+
+  const char *dot = strchr(full_name, '.');
+  if (dot) {
+    /* Schema-qualified: schema.table */
+    size_t schema_len = (size_t)(dot - full_name);
+    *schema_out = strndup(full_name, schema_len);
+    *table_out = strdup(dot + 1);
+  } else {
+    /* Unqualified: assume public schema */
+    *schema_out = strdup("public");
+    *table_out = strdup(full_name);
+  }
+
+  if (!*schema_out || !*table_out) {
+    free(*schema_out);
+    free(*table_out);
+    *schema_out = NULL;
+    *table_out = NULL;
+    return false;
+  }
+  return true;
+}
+
+/* Escape schema-qualified table name for SQL.
+ * Returns "schema"."table" format. Caller must free. */
+static char *pg_escape_table_name(const char *full_name) {
+  char *schema = NULL, *table = NULL;
+  if (!pg_parse_table_name(full_name, &schema, &table))
+    return NULL;
+
+  char *escaped_schema = str_escape_identifier_dquote(schema);
+  char *escaped_table = str_escape_identifier_dquote(table);
+  free(schema);
+  free(table);
+
+  if (!escaped_schema || !escaped_table) {
+    free(escaped_schema);
+    free(escaped_table);
+    return NULL;
+  }
+
+  char *result = str_printf("%s.%s", escaped_schema, escaped_table);
+  free(escaped_schema);
+  free(escaped_table);
+  return result;
 }
 
 /* PostgreSQL connection data */
@@ -54,6 +110,11 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
 static void pg_free_result(ResultSet *rs);
 static void pg_free_schema(TableSchema *schema);
 static void pg_free_string_list(char **list, size_t count);
+static void *pg_prepare_cancel(DbConnection *conn);
+static bool pg_cancel_query(DbConnection *conn, void *cancel_handle, char **err);
+static void pg_free_cancel_handle(void *cancel_handle);
+static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
+                                     char **err);
 
 /* Driver definition */
 DbDriver postgres_driver = {
@@ -79,6 +140,11 @@ DbDriver postgres_driver = {
     .free_result = pg_free_result,
     .free_schema = pg_free_schema,
     .free_string_list = pg_free_string_list,
+    .prepare_cancel = pg_prepare_cancel,
+    .cancel_query = pg_cancel_query,
+    .free_cancel_handle = pg_free_cancel_handle,
+    .estimate_row_count = pg_estimate_row_count,
+    .library_cleanup = NULL,
 };
 
 /* Map PostgreSQL OID to DbValueType */
@@ -527,7 +593,7 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
   }
 
   /* Escape identifiers to prevent SQL injection */
-  char *escaped_table = str_escape_identifier_dquote(table);
+  char *escaped_table = pg_escape_table_name(table);
   char *escaped_col = str_escape_identifier_dquote(col);
   if (!escaped_table || !escaped_col) {
     free(escaped_table);
@@ -722,8 +788,8 @@ static bool pg_delete_row(DbConnection *conn, const char *table,
     return false;
   }
 
-  /* Escape identifiers to prevent SQL injection */
-  char *escaped_table = str_escape_identifier_dquote(table);
+  /* Escape schema-qualified table name */
+  char *escaped_table = pg_escape_table_name(table);
   if (!escaped_table) {
     if (err)
       *err = str_dup("Memory allocation failed");
@@ -885,8 +951,14 @@ static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
     return NULL;
   }
 
-  const char *sql = "SELECT tablename FROM pg_tables WHERE schemaname = "
-                    "'public' ORDER BY tablename";
+  /* List tables from all user schemas, prefixing with schema name when not
+   * 'public' */
+  const char *sql =
+      "SELECT CASE WHEN schemaname = 'public' THEN tablename "
+      "ELSE schemaname || '.' || tablename END AS full_name "
+      "FROM pg_tables "
+      "WHERE schemaname NOT IN ('pg_catalog', 'information_schema') "
+      "ORDER BY schemaname, tablename";
   PGresult *res = PQexec(data->conn, sql);
 
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -962,16 +1034,27 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
     return NULL;
   }
 
+  /* Parse schema-qualified table name */
+  char *schema_name = NULL, *table_name = NULL;
+  if (!pg_parse_table_name(table, &schema_name, &table_name)) {
+    if (err)
+      *err = str_dup("Failed to parse table name");
+    return NULL;
+  }
+
   /* Query column information */
   const char *sql =
       "SELECT column_name, data_type, is_nullable, column_default "
       "FROM information_schema.columns "
-      "WHERE table_schema = 'public' AND table_name = $1 "
+      "WHERE table_schema = $1 AND table_name = $2 "
       "ORDER BY ordinal_position";
 
-  const char *paramValues[1] = {table};
+  const char *paramValues[2] = {schema_name, table_name};
   PGresult *res =
-      PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
+      PQexecParams(data->conn, sql, 2, NULL, paramValues, NULL, NULL, 0);
+
+  free(schema_name);
+  free(table_name);
 
   if (PQresultStatus(res) != PGRES_TUPLES_OK) {
     if (err)
@@ -1212,8 +1295,8 @@ static ResultSet *pg_query_page(DbConnection *conn, const char *table,
     return NULL;
   }
 
-  /* Escape identifiers to prevent SQL injection */
-  char *escaped_table = str_escape_identifier_dquote(table);
+  /* Escape schema-qualified table name */
+  char *escaped_table = pg_escape_table_name(table);
   if (!escaped_table) {
     if (err)
       *err = str_dup("Memory allocation failed");
@@ -1263,4 +1346,98 @@ static void pg_free_string_list(char **list, size_t count) {
     free(list[i]);
   }
   free(list);
+}
+
+/* Query cancellation support */
+static void *pg_prepare_cancel(DbConnection *conn) {
+  if (!conn)
+    return NULL;
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn)
+    return NULL;
+  return PQgetCancel(data->conn);
+}
+
+static bool pg_cancel_query(DbConnection *conn, void *cancel_handle,
+                            char **err) {
+  (void)conn; /* Not needed for PostgreSQL cancel */
+  if (!cancel_handle) {
+    if (err)
+      *err = str_dup("Invalid cancel handle");
+    return false;
+  }
+
+  PGcancel *cancel = (PGcancel *)cancel_handle;
+  char errbuf[256];
+
+  if (PQcancel(cancel, errbuf, sizeof(errbuf)) == 0) {
+    if (err)
+      *err = str_dup(errbuf);
+    return false;
+  }
+  return true;
+}
+
+static void pg_free_cancel_handle(void *cancel_handle) {
+  if (cancel_handle) {
+    PQfreeCancel((PGcancel *)cancel_handle);
+  }
+}
+
+/* Approximate row count using pg_class.reltuples */
+static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
+                                     char **err) {
+  if (!conn || !table) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return -1;
+  }
+
+  PgData *data = conn->driver_data;
+  if (!data || !data->conn) {
+    if (err)
+      *err = str_dup("Not connected");
+    return -1;
+  }
+
+  /* Parse schema-qualified table name */
+  char *schema_name = NULL, *table_name = NULL;
+  if (!pg_parse_table_name(table, &schema_name, &table_name)) {
+    if (err)
+      *err = str_dup("Failed to parse table name");
+    return -1;
+  }
+
+  /* Query pg_class for approximate row count */
+  const char *sql = "SELECT reltuples::bigint FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = $1 AND c.relname = $2";
+
+  const char *params[2] = {schema_name, table_name};
+  PGresult *res =
+      PQexecParams(data->conn, sql, 2, NULL, params, NULL, NULL, 0);
+
+  free(schema_name);
+  free(table_name);
+
+  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+    if (err)
+      *err = str_dup(PQerrorMessage(data->conn));
+    PQclear(res);
+    return -1;
+  }
+
+  int64_t count = -1;
+  if (PQntuples(res) > 0 && !PQgetisnull(res, 0, 0)) {
+    const char *val = PQgetvalue(res, 0, 0);
+    if (val && *val) {
+      count = strtoll(val, NULL, 10);
+      /* reltuples can be -1 if never analyzed, treat as unavailable */
+      if (count < 0)
+        count = -1;
+    }
+  }
+
+  PQclear(res);
+  return count;
 }

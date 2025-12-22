@@ -152,13 +152,13 @@ bool workspace_create(TuiState *state, size_t table_index) {
   ws->table_name = str_dup(state->tables[table_index]);
   filters_init(&ws->filters);
 
-  /* Initialize sidebar state - inherit current visibility, start with highlight on this table */
+  /* Initialize sidebar state - inherit current state including scroll position */
   ws->sidebar_visible = state->sidebar_visible;
   ws->sidebar_focused = false; /* New workspace starts with table focused */
-  ws->sidebar_highlight = table_index;
-  ws->sidebar_scroll = 0;
-  ws->sidebar_filter[0] = '\0';
-  ws->sidebar_filter_len = 0;
+  ws->sidebar_highlight = state->sidebar_highlight; /* Keep current highlight position */
+  ws->sidebar_scroll = state->sidebar_scroll; /* Keep current scroll position */
+  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
+  ws->sidebar_filter_len = state->sidebar_filter_len;
 
   /* Initialize sidebar last position for navigation restoration */
   state->sidebar_last_position = table_index;

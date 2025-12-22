@@ -504,14 +504,15 @@ bool tui_connect(TuiState *state, const char *connstr) {
   if (!state || !state->app || !connstr)
     return false;
 
-  char *err = NULL;
-  state->app->conn = db_connect(connstr, &err);
+  /* Use async connection with progress dialog */
+  DbConnection *conn = tui_connect_with_progress(state, connstr);
 
-  if (!state->app->conn) {
-    tui_set_error(state, "Connection failed: %s", err ? err : "Unknown error");
-    free(err);
+  if (!conn) {
+    /* Error already set by tui_connect_with_progress */
     return false;
   }
+
+  state->app->conn = conn;
 
   /* Show sidebar on successful connection */
   if (!state->sidebar_visible) {
@@ -559,22 +560,46 @@ bool tui_load_tables(TuiState *state) {
       free(app->tables[i]);
     }
     free(app->tables);
+    app->tables = NULL;
+    app->num_tables = 0;
   }
 
-  char *err = NULL;
-  app->tables = db_list_tables(app->conn, &app->num_tables, &err);
+  /* Sync conn for async operation */
+  state->conn = app->conn;
 
-  if (!app->tables) {
-    tui_set_error(state, "Failed to list tables: %s",
-                  err ? err : "Unknown error");
-    free(err);
+  /* Use async operation with progress dialog */
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_LIST_TABLES;
+  op.conn = app->conn;
+
+  if (!async_start(&op)) {
+    tui_set_error(state, "Failed to start operation");
     return false;
   }
+
+  bool completed = tui_show_processing_dialog(state, &op, "Loading tables...");
+
+  if (!completed || op.state == ASYNC_STATE_CANCELLED) {
+    tui_set_status(state, "Operation cancelled");
+    async_free(&op);
+    return false;
+  }
+
+  if (op.state == ASYNC_STATE_ERROR) {
+    tui_set_error(state, "Failed to list tables: %s",
+                  op.error ? op.error : "Unknown error");
+    async_free(&op);
+    return false;
+  }
+
+  app->tables = (char **)op.result;
+  app->num_tables = op.result_count;
+  async_free(&op);
 
   /* Sync tables to TUI state so workspace_create can access them */
   state->tables = app->tables;
   state->num_tables = app->num_tables;
-  state->conn = app->conn;
 
   state->sidebar_highlight = 0;
 
