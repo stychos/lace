@@ -1,19 +1,16 @@
 /*
  * lace - Database Viewer and Manager
- * Workspace/Tab management
+ * TUI Workspace/Tab management
+ *
+ * Core workspace lifecycle (workspace_init, workspace_free_data) is in
+ * core/workspace.c. This file contains TUI-specific workspace operations
+ * that need to sync UI state or call TUI functions.
  */
 
 #include "tui_internal.h"
+#include "../core/workspace.h"
 #include <stdlib.h>
 #include <string.h>
-
-/* Initialize a workspace struct */
-void workspace_init(Workspace *ws) {
-  if (!ws)
-    return;
-  memset(ws, 0, sizeof(Workspace));
-  filters_init(&ws->filters);
-}
 
 /* Workspace state field mappings - used by save/restore */
 #define WS_COPY_TO_WS(field) ws->field = state->field
@@ -192,9 +189,8 @@ bool workspace_create(TuiState *state, size_t table_index) {
 
   /* Load the table data */
   if (!tui_load_table_data(state, state->tables[table_index])) {
-    /* Failed - remove the workspace and clear all its fields */
-    free(ws->table_name);
-    filters_free(&ws->filters);
+    /* Failed - remove the workspace using core function */
+    workspace_free_data(ws);
     memset(ws, 0, sizeof(Workspace)); /* Clear all pointers to prevent dangling refs */
 
     /* Update AppState */
@@ -295,23 +291,8 @@ void workspace_close(TuiState *state) {
 
   Workspace *ws = &app->workspaces[app->current_workspace];
 
-  /* Free workspace data */
-  free(ws->table_name);
-  db_result_free(ws->data);
-  db_schema_free(ws->schema);
-  free(ws->col_widths);
-  filters_free(&ws->filters);
-
-  /* Free query-specific data */
-  free(ws->query_text);
-  db_result_free(ws->query_results);
-  free(ws->query_error);
-  free(ws->query_result_col_widths);
-  free(ws->query_result_edit_buf);
-  free(ws->query_source_table);
-  db_schema_free(ws->query_source_schema);
-  free(ws->query_base_sql);
-
+  /* Free workspace data using core function */
+  workspace_free_data(ws);
   memset(ws, 0, sizeof(Workspace));
 
   /* Shift remaining workspaces down */

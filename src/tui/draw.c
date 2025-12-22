@@ -4,8 +4,24 @@
  */
 
 #include "tui_internal.h"
+#include "../core/app_state.h"
 #include <stdlib.h>
 #include <string.h>
+
+/* Check if workspace has active filters (filters that affect the query) */
+static bool has_active_filters(Workspace *ws) {
+  if (!ws || ws->filters.num_filters == 0)
+    return false;
+
+  for (size_t i = 0; i < ws->filters.num_filters; i++) {
+    ColumnFilter *cf = &ws->filters.filters[i];
+    /* Filter is active if it has a value OR doesn't need one (IS NULL, etc.) */
+    if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /* Helper to get column width from params */
 static int grid_get_col_width(GridDrawParams *params, size_t col) {
@@ -408,14 +424,20 @@ void tui_draw_status(TuiState *state) {
     int pos_len = (int)strlen(pos);
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
   } else if (state->data) {
-    char pos[64];
+    char pos[96];
     size_t actual_row = state->loaded_offset + state->cursor_row + 1;
     size_t total =
         state->total_rows > 0 ? state->total_rows : state->data->num_rows;
     /* Show ~ prefix for approximate counts */
     bool approx = ws && ws->row_count_approximate;
-    snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
-             total);
+    bool filtered = has_active_filters(ws);
+    if (filtered && ws && ws->unfiltered_total_rows > 0) {
+      snprintf(pos, sizeof(pos), "Row %zu/%s%zu [%zu]", actual_row,
+               approx ? "~" : "", total, ws->unfiltered_total_rows);
+    } else {
+      snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
+               total);
+    }
     int pos_len = (int)strlen(pos);
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
   }

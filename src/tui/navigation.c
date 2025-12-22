@@ -217,8 +217,6 @@ void tui_end(TuiState *state) {
   }
 
   state->cursor_row = state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
-  state->cursor_col =
-      state->data->num_columns > 0 ? state->data->num_columns - 1 : 0;
 
   /* Get actual main window height */
   int win_rows, win_cols;

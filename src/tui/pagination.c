@@ -164,11 +164,15 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   state->page_size = PAGE_SIZE;
   state->loaded_offset = 0;
 
-  /* Store approximate flag in workspace if available */
+  /* Store approximate flag and unfiltered count in workspace if available */
   if (state->num_workspaces > 0 &&
       state->current_workspace < state->num_workspaces) {
-    state->workspaces[state->current_workspace].row_count_approximate =
-        is_approximate;
+    Workspace *ws = &state->workspaces[state->current_workspace];
+    ws->row_count_approximate = is_approximate;
+    /* Store unfiltered total only when loading without filters */
+    if (!where_clause) {
+      ws->unfiltered_total_rows = state->total_rows;
+    }
   }
 
   /* Load first page of data with progress dialog */

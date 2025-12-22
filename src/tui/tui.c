@@ -4,6 +4,7 @@
  */
 
 #include "tui_internal.h"
+#include "../core/actions.h"
 #include <ctype.h>
 #include <locale.h>
 #include <stdarg.h>
@@ -627,236 +628,196 @@ void tui_run(TuiState *state) {
       continue;
     }
 
+    /* Dispatch actions based on key input */
+    Action action = {0};
+    bool handled = true;
+
     switch (ch) {
+    /* ========== Application ========== */
     case 'q':
     case 'Q':
-    case 24:        /* Ctrl+X - quit */
-    case KEY_F(10): /* F10 - universal quit */
-      /* Skip confirmation if no connection open */
+    case 24:        /* Ctrl+X */
+    case KEY_F(10):
+      /* Quit with confirmation if connected */
       if (!state->conn || tui_show_confirm_dialog(state, "Quit application?")) {
-        state->running = false;
+        action = action_quit_force();
       }
       break;
 
-    case 'p':
-    case 'P':
-      /* Open query tab */
-      workspace_create_query(state);
-      break;
-
-    case 23: /* Ctrl+W - switch focus to filters if visible */
-      if (state->filters_visible) {
-        state->filters_focused = true;
-      }
-      break;
-
-    case '\n':
-    case KEY_ENTER:
-      /* Start editing current cell */
-      if (!state->sidebar_focused && state->data && state->data->num_rows > 0) {
-        tui_start_edit(state);
-      }
-      break;
-
-    case 'e':      /* 'e' - always open modal editor */
-    case KEY_F(4): /* F4 - universal modal edit */
-      if (!state->sidebar_focused && state->data && state->data->num_rows > 0) {
-        tui_start_modal_edit(state);
-      }
-      break;
-
-    case 14: /* Ctrl+N - set selected cell to NULL */
-    case 'n':
-      if (!state->sidebar_focused && state->data && state->data->num_rows > 0) {
-        tui_set_cell_direct(state, true);
-      }
-      break;
-
-    case 4: /* Ctrl+D - set selected cell to empty string */
-    case 'd':
-      if (!state->sidebar_focused && state->data && state->data->num_rows > 0) {
-        tui_set_cell_direct(state, false);
-      }
-      break;
-
-    case 'x':    /* Delete row */
-    case KEY_DC: /* Delete key */
-      if (!state->sidebar_focused && state->data && state->data->num_rows > 0) {
-        tui_delete_row(state);
-      }
-      break;
-
+    /* ========== Navigation ========== */
     case KEY_UP:
     case 'k':
       /* At first row with filters visible - focus filters */
       if (state->cursor_row == 0 && state->filters_visible) {
-        state->filters_focused = true;
-        state->filters_cursor_row = state->workspaces[state->current_workspace].filters.num_filters - 1;
+        action = action_filters_focus();
+        state->filters_cursor_row =
+            state->workspaces[state->current_workspace].filters.num_filters - 1;
         if (state->filters_cursor_row == (size_t)-1)
           state->filters_cursor_row = 0;
       } else {
-        tui_move_cursor(state, -1, 0);
+        action = action_cursor_move(-1, 0);
       }
       break;
 
     case KEY_DOWN:
     case 'j':
-      tui_move_cursor(state, 1, 0);
+      action = action_cursor_move(1, 0);
       break;
 
     case KEY_LEFT:
     case 'h':
-      /* If at leftmost column and sidebar is visible, focus sidebar */
+      /* At leftmost column with sidebar visible - focus sidebar */
       if (state->cursor_col == 0 && state->sidebar_visible) {
-        state->filters_was_focused = false; /* Remember table was focused */
-        state->sidebar_focused = true;
-        /* Restore last sidebar position instead of jumping to current table */
-        state->sidebar_highlight = state->sidebar_last_position;
+        action = action_sidebar_focus();
       } else {
-        tui_move_cursor(state, 0, -1);
+        action = action_cursor_move(0, -1);
       }
       break;
 
     case KEY_RIGHT:
     case 'l':
-      tui_move_cursor(state, 0, 1);
+      action = action_cursor_move(0, 1);
       break;
 
     case KEY_PPAGE:
-      tui_page_up(state);
+      action = action_page_up();
       break;
 
     case KEY_NPAGE:
-      tui_page_down(state);
+      action = action_page_down();
       break;
 
     case KEY_HOME:
-      /* Move to first column */
-      state->cursor_col = 0;
-      state->scroll_col = 0;
+      action = action_column_first();
       break;
 
     case KEY_END:
-      /* Move to last column */
-      if (state->schema) {
-        state->cursor_col =
-            state->schema->num_columns > 0 ? state->schema->num_columns - 1 : 0;
-      }
+      action = action_column_last();
       break;
 
     case KEY_F(61): /* Ctrl+Home */
     case 'a':
-      tui_home(state);
+      action = action_home();
       break;
 
     case KEY_F(62): /* Ctrl+End */
     case 'z':
-      tui_end(state);
+      action = action_end();
+      break;
+
+    /* ========== Editing ========== */
+    case '\n':
+    case KEY_ENTER:
+      action = action_edit_start();
+      break;
+
+    case 'e':
+    case KEY_F(4):
+      action = action_edit_start_modal();
+      break;
+
+    case 14: /* Ctrl+N */
+    case 'n':
+      action = action_cell_set_null();
+      break;
+
+    case 4: /* Ctrl+D */
+    case 'd':
+      action = action_cell_set_empty();
+      break;
+
+    case 'x':
+    case KEY_DC:
+      action = action_row_delete();
+      break;
+
+    /* ========== Workspaces ========== */
+    case 'p':
+    case 'P':
+      action = action_workspace_create_query();
       break;
 
     case ']':
-    case KEY_F(6): /* F6 - next tab */
-      if (state->num_workspaces > 1) {
-        size_t next = (state->current_workspace + 1) % state->num_workspaces;
-        workspace_switch(state, next);
-      }
+    case KEY_F(6):
+      action = action_workspace_next();
       break;
 
     case '[':
-    case KEY_F(7): /* F7 - previous tab */
-      if (state->num_workspaces > 1) {
-        size_t prev = state->current_workspace > 0
-                          ? state->current_workspace - 1
-                          : state->num_workspaces - 1;
-        workspace_switch(state, prev);
-      }
+    case KEY_F(7):
+      action = action_workspace_prev();
       break;
 
     case '-':
     case '_':
-      /* Close current tab */
+      /* Close with confirmation for query tabs with content */
       if (state->num_workspaces > 0) {
         Workspace *ws = &state->workspaces[state->current_workspace];
-        /* Check if query tab has content */
         if (ws->type == WORKSPACE_TYPE_QUERY &&
             ((ws->query_text && ws->query_len > 0) || ws->query_results)) {
-          /* Ask for confirmation */
           if (!tui_show_confirm_dialog(
                   state, "Close query tab with unsaved content?")) {
-            break; /* User cancelled */
+            handled = false;
+            break;
           }
         }
-        workspace_close(state);
+        action = action_workspace_close();
       }
       break;
 
+    /* ========== Sidebar ========== */
+    case 't':
+    case 'T':
+    case KEY_F(9):
+      action = action_sidebar_toggle();
+      break;
+
+    /* ========== Filters ========== */
+    case '/':
+    case 'f':
+    case 'F':
+      /* If filters visible but not focused, focus them; otherwise toggle */
+      if (state->filters_visible && !state->filters_focused) {
+        action = action_filters_focus();
+      } else {
+        action = action_filters_toggle();
+      }
+      break;
+
+    case 23: /* Ctrl+W */
+      if (state->filters_visible) {
+        action = action_filters_focus();
+      }
+      break;
+
+    /* ========== UI Toggles ========== */
+    case 'm':
+    case 'M':
+      action = action_toggle_header();
+      break;
+
+    case 'b':
+    case 'B':
+      action = action_toggle_status();
+      break;
+
+    /* ========== Dialogs (handled directly by TUI) ========== */
     case 's':
     case 'S':
-    case KEY_F(3): /* F3 - universal schema */
+    case KEY_F(3):
       tui_show_schema(state);
       break;
 
     case 'g':
     case 'G':
-    case 7:        /* Ctrl+G - universal go to line */
-    case KEY_F(5): /* F5 - universal go to row */
+    case 7: /* Ctrl+G */
+    case KEY_F(5):
       tui_show_goto_dialog(state);
       break;
 
     case 'c':
     case 'C':
-    case KEY_F(2): /* F2 - universal connect */
+    case KEY_F(2):
       tui_show_connect_dialog(state);
-      break;
-
-    case 't':
-    case 'T':
-    case KEY_F(9): /* F9 - universal toggle sidebar */
-      /* Toggle sidebar */
-      if (state->sidebar_visible) {
-        /* Hide sidebar */
-        state->sidebar_visible = false;
-        state->sidebar_focused = false;
-      } else {
-        /* Show and focus sidebar */
-        state->sidebar_visible = true;
-        state->sidebar_focused = true;
-        state->sidebar_highlight =
-            tui_get_sidebar_highlight_for_table(state, state->current_table);
-        state->sidebar_scroll = 0;
-      }
-      tui_recreate_windows(state);
-      tui_calculate_column_widths(state);
-      break;
-
-    case 'm':
-    case 'M':
-      /* Toggle header/menu bar */
-      state->header_visible = !state->header_visible;
-      tui_recreate_windows(state);
-      break;
-
-    case 'b':
-    case 'B':
-      /* Toggle status bar */
-      state->status_visible = !state->status_visible;
-      tui_recreate_windows(state);
-      break;
-
-    case '/':
-    case 'f':
-    case 'F':
-      /* Toggle filters panel (table view only) */
-      if (!state->sidebar_focused && state->num_workspaces > 0) {
-        Workspace *ws = &state->workspaces[state->current_workspace];
-        if (ws->type == WORKSPACE_TYPE_TABLE && state->schema) {
-          state->filters_visible = !state->filters_visible;
-          state->filters_focused = state->filters_visible;
-          state->filters_cursor_row = 0;
-          state->filters_cursor_col = 0;
-          state->filters_editing = false;
-        }
-      }
       break;
 
     case '?':
@@ -864,14 +825,20 @@ void tui_run(TuiState *state) {
       tui_show_help(state);
       break;
 
+    /* ========== Terminal Events ========== */
     case KEY_RESIZE:
-      /* Handle terminal resize - delegate to tui_recreate_windows */
       tui_recreate_windows(state);
       tui_calculate_column_widths(state);
       break;
 
     default:
+      handled = false;
       break;
+    }
+
+    /* Dispatch action if one was created */
+    if (handled && action.type != ACTION_NONE) {
+      app_dispatch((struct TuiState *)state, &action);
     }
 
     tui_refresh(state);
