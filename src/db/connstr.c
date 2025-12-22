@@ -12,6 +12,11 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/* Fallback for systems without PATH_MAX */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 static void set_error(char **err, const char *fmt, ...) {
   if (!err)
     return;

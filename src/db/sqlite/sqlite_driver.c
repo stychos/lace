@@ -202,7 +202,7 @@ static DbConnection *sqlite_connect(const char *connstr, char **err) {
   }
 
   /* Enable foreign keys */
-  sqlite3_exec(db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
+  (void)sqlite3_exec(db, "PRAGMA foreign_keys = ON", NULL, NULL, NULL);
 
   SqliteData *data = calloc(1, sizeof(SqliteData));
   if (!data) {

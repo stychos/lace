@@ -89,7 +89,7 @@ void filters_remove(TableFilters *f, size_t index) {
 
 /* Get operator display name */
 const char *filter_op_name(FilterOperator op) {
-  if (op < 0 || op >= FILTER_OP_COUNT)
+  if (op >= FILTER_OP_COUNT)
     return "?";
   return FILTER_OP_NAMES[op];
 }

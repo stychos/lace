@@ -38,7 +38,8 @@ static void input_draw(InputField *input, WINDOW *win, int y, int x,
   mvwhline(win, y, x, ' ', input->width);
 
   /* Draw text */
-  size_t draw_len = input->len - visible_start;
+  size_t draw_len =
+      (visible_start <= input->len) ? input->len - visible_start : 0;
   if (draw_len > visible_len)
     draw_len = visible_len;
 
