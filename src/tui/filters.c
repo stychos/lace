@@ -3,6 +3,8 @@
  * Table filters implementation
  */
 
+#define _GNU_SOURCE
+
 #include "tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>

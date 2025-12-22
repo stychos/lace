@@ -3,6 +3,8 @@
  * Connection string parser implementation
  */
 
+#define _GNU_SOURCE
+
 #include "connstr.h"
 #include "../util/str.h"
 #include <ctype.h>
