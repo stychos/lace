@@ -3,8 +3,6 @@
  * Database manager - driver registry and high-level API
  */
 
-#define _GNU_SOURCE
-
 #include "../util/str.h"
 #include "connstr.h"
 #include "db.h"
@@ -459,14 +457,8 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
     return NULL;
   }
 
-  /* Build SQL query with proper identifier escaping */
-  char *escaped_table;
-  if (str_eq(conn->driver->name, "mysql") ||
-      str_eq(conn->driver->name, "mariadb")) {
-    escaped_table = str_escape_identifier_backtick(table);
-  } else {
-    escaped_table = str_escape_identifier_dquote(table);
-  }
+  /* Build SQL query with proper identifier escaping (handles schema.table) */
+  char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
     SET_ERROR(err, "Out of memory");
     return NULL;
@@ -486,13 +478,7 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
   }
 
   if (order_by && *order_by) {
-    char *escaped_order;
-    if (str_eq(conn->driver->name, "mysql") ||
-        str_eq(conn->driver->name, "mariadb")) {
-      escaped_order = str_escape_identifier_backtick(order_by);
-    } else {
-      escaped_order = str_escape_identifier_dquote(order_by);
-    }
+    char *escaped_order = escape_table_name(conn, order_by);
     if (escaped_order) {
       sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
       free(escaped_order);

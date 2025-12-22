@@ -2,7 +2,7 @@
 # Built with clang
 
 CC = clang
-CFLAGS = -Wall -Wextra -std=c11 -Isrc -g
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -g
 LDFLAGS = -lncursesw -lssl -lcrypto -lpanel -lform -lmenu -lsqlite3 -lmariadb -lpq -lpthread
 
 # Build directory

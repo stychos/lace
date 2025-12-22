@@ -3,8 +3,6 @@
  * Table filters implementation
  */
 
-#define _GNU_SOURCE
-
 #include "tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
@@ -1015,7 +1013,10 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
                                          state->filters_cursor_row);
       if (sel >= 0 || sel == (ssize_t)FILTER_COL_RAW) {
         cf->column_index = (size_t)sel;
-        tui_apply_filters(state); /* Auto-apply */
+        /* Only apply if filter has a value or operator doesn't need one */
+        if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
+          tui_apply_filters(state);
+        }
       }
       break;
     }
@@ -1024,8 +1025,14 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         int sel = show_operator_dropdown(state, cf->op,
                                          state->filters_cursor_row);
         if (sel >= 0) {
-          cf->op = (FilterOperator)sel;
-          tui_apply_filters(state); /* Auto-apply */
+          FilterOperator new_op = (FilterOperator)sel;
+          bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+          bool will_have_effect = cf->value[0] != '\0' || !filter_op_needs_value(new_op);
+          cf->op = new_op;
+          /* Only apply if filter had or will have effect */
+          if (had_effect || will_have_effect) {
+            tui_apply_filters(state);
+          }
         }
       }
       break;
@@ -1039,7 +1046,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         state->filters_edit_len = strlen(state->filters_edit_buffer);
       }
       break;
-    case 3: /* Delete/Reset */
+    case 3: /* Delete/Reset */ {
+      /* Check if filter had an effect before deleting */
+      bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
       if (f->num_filters > 1) {
         filters_remove(f, filter_idx);
         if (state->filters_cursor_row >= f->num_filters)
@@ -1049,8 +1058,12 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         cf->op = FILTER_OP_EQ;
         cf->value[0] = '\0';
       }
-      tui_apply_filters(state); /* Auto-apply */
+      /* Only apply if deleted filter had effect */
+      if (had_effect) {
+        tui_apply_filters(state);
+      }
       break;
+    }
     }
     break;
   }
@@ -1070,21 +1083,37 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     break;
 
   case 'c':
-  case 'C':
+  case 'C': {
     /* Clear all - reset to single empty filter */
+    /* Check if any filters had effect before clearing */
+    bool had_effect = false;
+    for (size_t i = 0; i < f->num_filters; i++) {
+      ColumnFilter *cf = &f->filters[i];
+      if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
+        had_effect = true;
+        break;
+      }
+    }
     filters_clear(f);
     filters_add(f, 0, FILTER_OP_EQ, "");
     state->filters_cursor_row = 0;
     state->filters_cursor_col = 0;
     state->filters_scroll = 0;
-    tui_apply_filters(state);
+    /* Only apply if there were active filters */
+    if (had_effect) {
+      tui_apply_filters(state);
+    }
     break;
+  }
 
   case '-':
   case 'x':
   case KEY_DC: {
     /* Delete/Reset current filter */
     size_t filter_idx = state->filters_cursor_row;
+    ColumnFilter *cf = &f->filters[filter_idx];
+    /* Check if filter had an effect before deleting */
+    bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
     if (f->num_filters > 1) {
       filters_remove(f, filter_idx);
       if (state->filters_cursor_row >= f->num_filters)
@@ -1096,12 +1125,14 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
                                 ? f->num_filters - MAX_VISIBLE_FILTERS : 0;
       }
     } else {
-      ColumnFilter *cf = &f->filters[filter_idx];
       cf->column_index = 0;
       cf->op = FILTER_OP_EQ;
       cf->value[0] = '\0';
     }
-    tui_apply_filters(state); /* Auto-apply */
+    /* Only apply if deleted filter had effect */
+    if (had_effect) {
+      tui_apply_filters(state);
+    }
     break;
   }
 

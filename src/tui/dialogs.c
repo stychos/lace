@@ -3,7 +3,6 @@
  * Modal dialogs
  */
 
-#define _GNU_SOURCE
 #include "tui_internal.h"
 #include "../async/async.h"
 #include "views/connect_view.h"
@@ -777,6 +776,14 @@ void tui_show_table_selector(TuiState *state) {
         int idx = item_index(cur);
         if (idx >= 0 && (size_t)idx < state->num_tables) {
           state->current_table = idx;
+          /* Clear filters when switching tables */
+          if (state->num_workspaces > 0 &&
+              state->current_workspace < state->num_workspaces) {
+            Workspace *ws = &state->workspaces[state->current_workspace];
+            if (ws->type == WORKSPACE_TYPE_TABLE) {
+              filters_clear(&ws->filters);
+            }
+          }
           tui_load_table_data(state, state->tables[idx]);
         }
       }

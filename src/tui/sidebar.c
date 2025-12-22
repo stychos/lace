@@ -257,6 +257,9 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
           ws->table_index = actual_idx;
           ws->table_name = str_dup(state->tables[actual_idx]);
 
+          /* Clear filters when switching to a different table */
+          filters_clear(&ws->filters);
+
           /* Clear state and load new table */
           state->data = NULL;
           state->schema = NULL;

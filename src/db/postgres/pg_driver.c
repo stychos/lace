@@ -3,8 +3,6 @@
  * PostgreSQL driver - uses libpq C API
  */
 
-#define _GNU_SOURCE
-
 #include "../../util/str.h"
 #include "../connstr.h"
 #include "../db.h"

@@ -632,6 +632,8 @@ bool tui_handle_mouse_event(TuiState *state) {
                 free(ws->table_name);
                 ws->table_name = str_dup(state->tables[actual_idx]);
                 ws->table_index = actual_idx;
+                /* Clear filters when switching tables */
+                filters_clear(&ws->filters);
                 /* Load new table data */
                 tui_load_table_data(state, state->tables[actual_idx]);
                 /* Update workspace with new data */

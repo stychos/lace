@@ -3,8 +3,6 @@
  * Async operation implementation
  */
 
-#define _GNU_SOURCE
-
 #include "async.h"
 #include "../util/str.h"
 #include <errno.h>
