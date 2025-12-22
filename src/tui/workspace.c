@@ -39,6 +39,14 @@ void workspace_save(TuiState *state) {
   ws->filters_cursor_row = state->filters_cursor_row;
   ws->filters_cursor_col = state->filters_cursor_col;
   ws->filters_scroll = state->filters_scroll;
+
+  /* Save sidebar state */
+  ws->sidebar_visible = state->sidebar_visible;
+  ws->sidebar_focused = state->sidebar_focused;
+  ws->sidebar_highlight = state->sidebar_highlight;
+  ws->sidebar_scroll = state->sidebar_scroll;
+  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
+  ws->sidebar_filter_len = state->sidebar_filter_len;
 }
 
 /* Restore TUI state from workspace */
@@ -75,19 +83,37 @@ void workspace_restore(TuiState *state) {
   state->filters_cursor_col = ws->filters_cursor_col;
   state->filters_scroll = ws->filters_scroll;
   state->filters_editing = false; /* Always reset editing state */
+
+  /* Restore sidebar state */
+  bool sidebar_was_visible = state->sidebar_visible;
+  state->sidebar_visible = ws->sidebar_visible;
+  state->sidebar_focused = ws->sidebar_focused;
+  state->sidebar_highlight = ws->sidebar_highlight;
+  state->sidebar_scroll = ws->sidebar_scroll;
+  memcpy(state->sidebar_filter, ws->sidebar_filter, sizeof(state->sidebar_filter));
+  state->sidebar_filter_len = ws->sidebar_filter_len;
+  state->sidebar_filter_active = false; /* Always reset filter input mode */
+
+  /* Recreate windows if sidebar visibility changed */
+  if (sidebar_was_visible != state->sidebar_visible) {
+    tui_recreate_windows(state);
+  }
 }
 
 /* Switch to a different workspace */
 void workspace_switch(TuiState *state, size_t index) {
-  if (!state || index >= state->num_workspaces)
+  if (!state || !state->app || index >= state->app->num_workspaces)
     return;
-  if (index == state->current_workspace)
+  if (index == state->app->current_workspace)
     return;
+
+  AppState *app = state->app;
 
   /* Save current workspace state */
   workspace_save(state);
 
-  /* Switch to new workspace */
+  /* Switch to new workspace in AppState */
+  app->current_workspace = index;
   state->current_workspace = index;
 
   /* Restore new workspace state */
@@ -101,21 +127,24 @@ void workspace_switch(TuiState *state, size_t index) {
 
 /* Create a new workspace for a table */
 bool workspace_create(TuiState *state, size_t table_index) {
-  if (!state || table_index >= state->num_tables)
+  if (!state || !state->app || table_index >= state->num_tables)
     return false;
-  if (state->num_workspaces >= MAX_WORKSPACES) {
+
+  AppState *app = state->app;
+
+  if (app->num_workspaces >= MAX_WORKSPACES) {
     tui_set_error(state, "Maximum %d tabs reached", MAX_WORKSPACES);
     return false;
   }
 
   /* Save current workspace first */
-  if (state->num_workspaces > 0) {
+  if (app->num_workspaces > 0) {
     workspace_save(state);
   }
 
-  /* Create new workspace */
-  size_t new_idx = state->num_workspaces;
-  Workspace *ws = &state->workspaces[new_idx];
+  /* Create new workspace in AppState */
+  size_t new_idx = app->num_workspaces;
+  Workspace *ws = &app->workspaces[new_idx];
   memset(ws, 0, sizeof(Workspace));
 
   ws->active = true;
@@ -123,8 +152,25 @@ bool workspace_create(TuiState *state, size_t table_index) {
   ws->table_name = str_dup(state->tables[table_index]);
   filters_init(&ws->filters);
 
-  state->num_workspaces++;
-  state->current_workspace = new_idx;
+  /* Initialize sidebar state - inherit current visibility, start with highlight on this table */
+  ws->sidebar_visible = state->sidebar_visible;
+  ws->sidebar_focused = false; /* New workspace starts with table focused */
+  ws->sidebar_highlight = table_index;
+  ws->sidebar_scroll = 0;
+  ws->sidebar_filter[0] = '\0';
+  ws->sidebar_filter_len = 0;
+
+  /* Initialize sidebar last position for navigation restoration */
+  state->sidebar_last_position = table_index;
+
+  /* Update AppState */
+  app->num_workspaces++;
+  app->current_workspace = new_idx;
+
+  /* Sync to TuiState cache */
+  state->workspaces = app->workspaces;
+  state->num_workspaces = app->num_workspaces;
+  state->current_workspace = app->current_workspace;
 
   /* Clear TUI state for new workspace */
   state->data = NULL;
@@ -140,12 +186,19 @@ bool workspace_create(TuiState *state, size_t table_index) {
   if (!tui_load_table_data(state, state->tables[table_index])) {
     /* Failed - remove the workspace and clear all its fields */
     free(ws->table_name);
+    filters_free(&ws->filters);
     memset(ws, 0, sizeof(Workspace)); /* Clear all pointers to prevent dangling refs */
-    state->num_workspaces--;
+
+    /* Update AppState */
+    app->num_workspaces--;
+
+    /* Sync to TuiState cache */
+    state->num_workspaces = app->num_workspaces;
 
     /* Restore previous workspace */
-    if (state->num_workspaces > 0) {
-      state->current_workspace = state->num_workspaces - 1;
+    if (app->num_workspaces > 0) {
+      app->current_workspace = app->num_workspaces - 1;
+      state->current_workspace = app->current_workspace;
       workspace_restore(state);
     }
     return false;
@@ -220,14 +273,16 @@ void tui_draw_tabs(TuiState *state) {
 
 /* Close current workspace */
 void workspace_close(TuiState *state) {
-  if (!state || state->num_workspaces == 0)
+  if (!state || !state->app || state->app->num_workspaces == 0)
     return;
+
+  AppState *app = state->app;
 
   /* Validate current_workspace is within bounds */
-  if (state->current_workspace >= state->num_workspaces)
+  if (app->current_workspace >= app->num_workspaces)
     return;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
+  Workspace *ws = &app->workspaces[app->current_workspace];
 
   /* Free workspace data */
   free(ws->table_name);
@@ -249,16 +304,20 @@ void workspace_close(TuiState *state) {
   memset(ws, 0, sizeof(Workspace));
 
   /* Shift remaining workspaces down */
-  for (size_t i = state->current_workspace; i < state->num_workspaces - 1;
-       i++) {
-    state->workspaces[i] = state->workspaces[i + 1];
+  for (size_t i = app->current_workspace; i < app->num_workspaces - 1; i++) {
+    app->workspaces[i] = app->workspaces[i + 1];
   }
-  memset(&state->workspaces[state->num_workspaces - 1], 0, sizeof(Workspace));
+  memset(&app->workspaces[app->num_workspaces - 1], 0, sizeof(Workspace));
 
-  state->num_workspaces--;
+  app->num_workspaces--;
 
-  if (state->num_workspaces == 0) {
+  /* Sync to TuiState cache */
+  state->workspaces = app->workspaces;
+  state->num_workspaces = app->num_workspaces;
+
+  if (app->num_workspaces == 0) {
     /* Last tab closed - clear state and focus sidebar */
+    app->current_workspace = 0;
     state->current_workspace = 0;
     state->data = NULL;
     state->schema = NULL;
@@ -271,13 +330,20 @@ void workspace_close(TuiState *state) {
     state->total_rows = 0;
     state->loaded_offset = 0;
     state->loaded_count = 0;
+
+    /* Reset sidebar state and focus it */
     state->sidebar_focused = true;
     state->sidebar_highlight = 0;
+    state->sidebar_scroll = 0;
+    state->sidebar_filter[0] = '\0';
+    state->sidebar_filter_len = 0;
+    state->sidebar_filter_active = false;
   } else {
     /* Adjust current workspace index */
-    if (state->current_workspace >= state->num_workspaces) {
-      state->current_workspace = state->num_workspaces - 1;
+    if (app->current_workspace >= app->num_workspaces) {
+      app->current_workspace = app->num_workspaces - 1;
     }
+    state->current_workspace = app->current_workspace;
 
     /* Restore the now-current workspace */
     workspace_restore(state);

@@ -34,7 +34,7 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 # Source directories
-SRC_DIRS = src src/db src/db/sqlite src/db/postgres src/db/mysql \
+SRC_DIRS = src src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
            src/tui src/tui/views src/tui/widgets src/net src/util
 
 # Find all C source files

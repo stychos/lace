@@ -4,6 +4,7 @@
  */
 
 #include "app.h"
+#include "core/app_state.h"
 #include "db/connstr.h"
 #include "db/db.h"
 #include "tui/tui.h"
@@ -216,9 +217,12 @@ static int run_list_tables(AppConfig *config) {
 }
 
 static int run_tui_mode(AppConfig *config) {
+  AppState app;
   TuiState state = {0}; /* Zero-initialize to prevent use of uninitialized fields */
 
-  if (!tui_init(&state)) {
+  app_state_init(&app);
+
+  if (!tui_init(&state, &app)) {
     fprintf(stderr, "Failed to initialize TUI\n");
     return 1;
   }

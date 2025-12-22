@@ -274,13 +274,12 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
   for (size_t i = 0; i < f->num_filters; i++) {
     ColumnFilter *cf = &f->filters[i];
 
-    /* Skip empty filters:
-     * - Empty = filters should not be applied
-     * - Empty RAW filters should not be applied */
-    if (cf->value[0] == '\0') {
-      if (cf->column_index == SIZE_MAX || cf->op == FILTER_OP_EQ) {
-        continue;
-      }
+    /* Skip filters with empty values if the operator requires a value.
+     * Operators like IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY don't need values.
+     * RAW filters also need a value (the SQL expression). */
+    bool is_raw = (cf->column_index == SIZE_MAX);
+    if (cf->value[0] == '\0' && (is_raw || filter_op_needs_value(cf->op))) {
+      continue;
     }
 
     if (!first)
@@ -949,15 +948,24 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   case KEY_LEFT:
   case 'h': {
     size_t idx = state->filters_cursor_row;
-    bool is_raw = (f->filters[idx].column_index == FILTER_COL_RAW);
+    ColumnFilter *cf = &f->filters[idx];
+    bool is_raw = (cf->column_index == FILTER_COL_RAW);
+    bool needs_value = filter_op_needs_value(cf->op);
     if (state->filters_cursor_col > 0) {
       state->filters_cursor_col--;
+      /* Skip operator column for RAW filters */
       if (is_raw && state->filters_cursor_col == 1)
         state->filters_cursor_col = 0;
+      /* Skip value column for is* operators that don't need a value */
+      if (!is_raw && !needs_value && state->filters_cursor_col == 2)
+        state->filters_cursor_col = 1;
     } else if (state->sidebar_visible) {
       /* At leftmost column - move focus to sidebar */
+      state->filters_was_focused = true; /* Remember filters were focused */
       state->sidebar_focused = true;
       state->filters_focused = false;
+      /* Restore last sidebar position */
+      state->sidebar_highlight = state->sidebar_last_position;
     }
     break;
   }
@@ -965,11 +973,17 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   case KEY_RIGHT:
   case 'l': {
     size_t idx = state->filters_cursor_row;
-    bool is_raw = (f->filters[idx].column_index == FILTER_COL_RAW);
+    ColumnFilter *cf = &f->filters[idx];
+    bool is_raw = (cf->column_index == FILTER_COL_RAW);
+    bool needs_value = filter_op_needs_value(cf->op);
     if (state->filters_cursor_col < 3) {
       state->filters_cursor_col++;
+      /* Skip operator column for RAW filters */
       if (is_raw && state->filters_cursor_col == 1)
         state->filters_cursor_col = 2;
+      /* Skip value column for is* operators that don't need a value */
+      if (!is_raw && !needs_value && state->filters_cursor_col == 2)
+        state->filters_cursor_col = 3;
     }
     break;
   }

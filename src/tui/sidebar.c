@@ -208,8 +208,12 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
 
   case KEY_RIGHT:
   case 'l':
-    /* Move focus to table view */
+    /* Save sidebar position and move focus back to filters or table view */
+    state->sidebar_last_position = state->sidebar_highlight;
     state->sidebar_focused = false;
+    if (state->filters_visible && state->filters_was_focused) {
+      state->filters_focused = true;
+    }
     break;
 
   case '\n':
