@@ -83,7 +83,8 @@ DbDriver *db_get_driver(const char *name) {
       return g_drivers[i];
     }
     /* Handle aliases */
-    if (str_eq(name, "postgresql") && str_eq(g_drivers[i]->name, "postgres")) {
+    if ((str_eq(name, "postgresql") || str_eq(name, "pg")) &&
+        str_eq(g_drivers[i]->name, "postgres")) {
       return g_drivers[i];
     }
     if (str_eq(name, "mariadb") && str_eq(g_drivers[i]->name, "mysql")) {

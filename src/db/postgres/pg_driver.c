@@ -303,7 +303,8 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
     return NULL;
   }
 
-  if (!str_eq(cs->driver, "postgres") && !str_eq(cs->driver, "postgresql")) {
+  if (!str_eq(cs->driver, "postgres") && !str_eq(cs->driver, "postgresql") &&
+      !str_eq(cs->driver, "pg")) {
     connstr_free(cs);
     if (err)
       *err = str_dup("Not a PostgreSQL connection string");
@@ -397,7 +398,7 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
     PQfinish(pgconn);
     free(data->database);
     free(data);
-    free(conn->connstr);
+    str_secure_free(conn->connstr);
     free(conn->database);
     free(conn->host);
     free(conn->user);
@@ -428,7 +429,7 @@ static void pg_disconnect(DbConnection *conn) {
     free(data);
   }
 
-  free(conn->connstr);
+  str_secure_free(conn->connstr);
   free(conn->database);
   free(conn->host);
   free(conn->user);

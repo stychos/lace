@@ -4,6 +4,7 @@
  */
 
 #include "app.h"
+#include "db/connstr.h"
 #include "db/db.h"
 #include "tui/tui.h"
 #include "util/str.h"
@@ -54,19 +55,29 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
     size_t connstr_len = strlen(connstr);
     if (connstr_len > 4096) {
       fprintf(stderr, "Connection string too long (max 4096 characters)\n");
+      str_secure_free(config->query);
       return false;
     }
 
-    /* Basic validation: must contain :// scheme separator */
+    /* Check if it's a connection string (has ://) or a file path */
     if (!strstr(connstr, "://")) {
-      fprintf(stderr,
-              "Invalid connection string format. Expected: driver://...\n");
-      fprintf(stderr, "Examples: sqlite:///path.db, postgres://localhost/db\n");
-      return false;
+      /* No scheme - try to detect if it's a SQLite file */
+      char *path_err = NULL;
+      char *sqlite_connstr = connstr_from_path(connstr, &path_err);
+      if (sqlite_connstr) {
+        config->connstr = sqlite_connstr;
+      } else {
+        fprintf(stderr, "%s\n", path_err ? path_err : "Invalid file path");
+        free(path_err);
+        str_secure_free(config->query);
+        return false;
+      }
+    } else {
+      config->connstr = str_dup(connstr);
     }
-    config->connstr = str_dup(connstr);
     if (!config->connstr) {
       fprintf(stderr, "Memory allocation failed\n");
+      str_secure_free(config->query);
       return false;
     }
   }
@@ -77,13 +88,13 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
 void app_config_free(AppConfig *config) {
   if (!config)
     return;
-  /* Use secure free for connection string as it may contain passwords */
+  /* Use secure free for connection string and query as they may contain passwords */
   str_secure_free(config->connstr);
-  free(config->query);
+  str_secure_free(config->query);
 }
 
 void app_print_usage(const char *prog) {
-  printf("Usage: %s [OPTIONS] <connection-string>\n", prog);
+  printf("Usage: %s [OPTIONS] <connection-string | file.db>\n", prog);
   printf("\n");
   printf("%s - %s\n", LACE_NAME, LACE_DESCRIPTION);
   printf("\n");
@@ -92,12 +103,16 @@ void app_print_usage(const char *prog) {
   printf("  postgres://user:pass@host:5432/database\n");
   printf("  mysql://user:pass@host:3306/database\n");
   printf("\n");
+  printf("For SQLite, you can also pass a plain file path:\n");
+  printf("  ./database.db, /path/to/file.sqlite, etc.\n");
+  printf("\n");
   printf("Options:\n");
   printf("  -h, --help       Show this help message\n");
   printf("  -q, --query SQL  Execute query and exit\n");
   printf("  -n, --no-tui     Disable TUI mode\n");
   printf("\n");
   printf("Examples:\n");
+  printf("  %s ./data.db\n", prog);
   printf("  %s sqlite:///data.db\n", prog);
   printf("  %s postgres://localhost/mydb\n", prog);
   printf("  %s -q 'SELECT * FROM users' sqlite:///data.db\n", prog);

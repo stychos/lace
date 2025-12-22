@@ -38,35 +38,35 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
     return false;
 
   keypad(dialog, TRUE);
-  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-  box(dialog, 0, 0);
 
-  /* Title */
-  wattron(dialog, A_BOLD);
-  mvwprintw(dialog, 0, (width - 9) / 2, " Confirm ");
-  wattroff(dialog, A_BOLD);
-
-  /* Message */
-  mvwprintw(dialog, 2, (width - msg_len) / 2, "%s", message);
-
-  /* Buttons */
-  int btn_y = 4;
-  int yes_x = width / 2 - 10;
-  int no_x = width / 2 + 3;
-
-  bool selected = false; /* false = No (default), true = Yes */
+  int selected = 0; /* 0 = Yes, 1 = No */
 
   while (1) {
-    /* Draw buttons */
-    if (selected) {
+    werase(dialog);
+    box(dialog, 0, 0);
+
+    /* Title */
+    wattron(dialog, A_BOLD);
+    mvwprintw(dialog, 0, (width - 11) / 2, " Confirm ");
+    wattroff(dialog, A_BOLD);
+
+    /* Message */
+    mvwprintw(dialog, 2, (width - msg_len) / 2, "%s", message);
+
+    /* Buttons */
+    int btn_y = height - 2;
+    int yes_x = width / 2 - 10;
+    int no_x = width / 2 + 4;
+
+    if (selected == 0) {
       wattron(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, yes_x, " Yes ");
+      mvwprintw(dialog, btn_y, yes_x, "[ Yes ]");
       wattroff(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, no_x, " No ");
+      mvwprintw(dialog, btn_y, no_x, "[ No ]");
     } else {
-      mvwprintw(dialog, btn_y, yes_x, " Yes ");
+      mvwprintw(dialog, btn_y, yes_x, "[ Yes ]");
       wattron(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, no_x, " No ");
+      mvwprintw(dialog, btn_y, no_x, "[ No ]");
       wattroff(dialog, A_REVERSE);
     }
 
@@ -74,6 +74,14 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
 
     int ch = wgetch(dialog);
     switch (ch) {
+    case KEY_LEFT:
+    case KEY_RIGHT:
+    case '\t':
+    case 'h':
+    case 'l':
+      selected = 1 - selected;
+      break;
+
     case 'y':
     case 'Y':
       delwin(dialog);
@@ -91,45 +99,7 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
     case KEY_ENTER:
       delwin(dialog);
       touchwin(stdscr);
-      return selected;
-
-    case KEY_LEFT:
-    case KEY_RIGHT:
-    case '\t':
-    case 'h':
-    case 'l':
-      selected = !selected;
-      break;
-
-    case KEY_MOUSE: {
-      MEVENT event;
-      if (getmouse(&event) == OK && (event.bstate & BUTTON1_CLICKED)) {
-        /* Convert to window-relative coordinates */
-        int mouse_y = event.y - start_y;
-        int mouse_x = event.x - start_x;
-
-        /* Validate coordinates are within dialog bounds */
-        if (mouse_y < 0 || mouse_y >= height || mouse_x < 0 || mouse_x >= width)
-          break;
-
-        /* Check if click is on button row */
-        if (mouse_y == btn_y) {
-          /* Yes button: position yes_x, width 5 (" Yes ") */
-          if (mouse_x >= yes_x && mouse_x < yes_x + 5) {
-            delwin(dialog);
-            touchwin(stdscr);
-            return true;
-          }
-          /* No button: position no_x, width 4 (" No ") */
-          if (mouse_x >= no_x && mouse_x < no_x + 4) {
-            delwin(dialog);
-            touchwin(stdscr);
-            return false;
-          }
-        }
-      }
-      break;
-    }
+      return (selected == 0);
     }
   }
 }
@@ -187,6 +157,7 @@ void tui_show_goto_dialog(TuiState *state) {
 
   char input[32] = {0};
   size_t input_len = 0;
+  int selected = 0; /* 0 = Go, 1 = Cancel */
 
   bool running = true;
   while (running) {
@@ -200,25 +171,47 @@ void tui_show_goto_dialog(TuiState *state) {
     mvwprintw(win, 2, 2, "Enter row number (1-%zu):", total_rows);
 
     /* Draw input field */
-    wattron(win, A_REVERSE);
-    mvwhline(win, 3, 2, ' ', width - 4);
-    mvwprintw(win, 3, 3, "%s", input);
-    wattroff(win, A_REVERSE);
+    mvwprintw(win, 3, 2, "%s", input);
+    mvwhline(win, 3, 2 + (int)input_len, '_', width - 4 - (int)input_len);
 
-    mvwprintw(win, 5, 2, "[Enter] Go  [Esc] Cancel");
+    /* Buttons */
+    int btn_y = height - 2;
+    int go_x = width / 2 - 12;
+    int cancel_x = width / 2 + 2;
 
-    wmove(win, 3, 3 + (int)input_len);
+    if (selected == 0) {
+      wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, go_x, "[ Go ]");
+      wattroff(win, A_REVERSE);
+      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+    } else {
+      mvwprintw(win, btn_y, go_x, "[ Go ]");
+      wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+      wattroff(win, A_REVERSE);
+    }
+
+    wmove(win, 3, 2 + (int)input_len);
     wrefresh(win);
 
     int ch = wgetch(win);
 
     switch (ch) {
+    case '\t':
+      selected = 1 - selected;
+      break;
+
     case 27: /* Escape */
       running = false;
       break;
 
     case '\n':
     case KEY_ENTER:
+      if (selected == 1) {
+        /* Cancel button selected */
+        running = false;
+        break;
+      }
       if (input_len > 0) {
         long long parsed = strtoll(input, NULL, 10);
         if (parsed <= 0 || (unsigned long long)parsed > total_rows) {
@@ -702,7 +695,7 @@ void tui_show_table_selector(TuiState *state) {
 
 /* Show help dialog */
 void tui_show_help(TuiState *state) {
-  int height = 50;
+  int height = 52;
   int width = 60;
 
   /* Constrain to terminal size */
@@ -790,6 +783,8 @@ void tui_show_help(TuiState *state) {
   wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
   mvwprintw(help_win, y++, 4, "s (or F3)          Show table schema");
   mvwprintw(help_win, y++, 4, "c (or F2)          Connect dialog");
+  mvwprintw(help_win, y++, 4, "m                  Toggle menu bar");
+  mvwprintw(help_win, y++, 4, "b                  Toggle status bar");
   mvwprintw(help_win, y++, 4, "? (or F1)          This help");
   mvwprintw(help_win, y++, 4, "q (or Ctrl+X, F10) Quit");
   y++;
@@ -801,7 +796,10 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 4, "Double-click       Edit cell");
   mvwprintw(help_win, y++, 4, "Scroll             Navigate rows");
 
-  mvwprintw(help_win, height - 2, (width - 24) / 2, "Press any key to close");
+  /* Close button */
+  wattron(help_win, A_REVERSE);
+  mvwprintw(help_win, height - 2, (width - 9) / 2, "[ Close ]");
+  wattroff(help_win, A_REVERSE);
   wrefresh(help_win);
 
   wgetch(help_win);

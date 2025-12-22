@@ -6,9 +6,11 @@
 #include "connstr.h"
 #include "../util/str.h"
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static void set_error(char **err, const char *fmt, ...) {
   if (!err)
@@ -117,8 +119,18 @@ ConnString *connstr_parse(const char *str, char **err) {
         /* Has password */
         cs->user = decode_component(p, colon - p);
         cs->password = decode_component(colon + 1, at - colon - 1);
+        if (!cs->user || !cs->password) {
+          set_error(err, "Out of memory");
+          connstr_free(cs);
+          return NULL;
+        }
       } else {
         cs->user = decode_component(p, at - p);
+        if (!cs->user) {
+          set_error(err, "Out of memory");
+          connstr_free(cs);
+          return NULL;
+        }
       }
       p = at + 1;
     }
@@ -296,7 +308,8 @@ int connstr_get_port(const ConnString *cs) {
     return cs->port;
 
   /* Return default port for driver */
-  if (str_eq(cs->driver, "postgres") || str_eq(cs->driver, "postgresql")) {
+  if (str_eq(cs->driver, "postgres") || str_eq(cs->driver, "postgresql") ||
+      str_eq(cs->driver, "pg")) {
     return CONNSTR_PORT_POSTGRES;
   }
   if (str_eq(cs->driver, "mysql") || str_eq(cs->driver, "mariadb")) {
@@ -405,8 +418,8 @@ bool connstr_validate(const ConnString *cs, char **err) {
   /* Check known drivers */
   bool known_driver =
       str_eq(cs->driver, "sqlite") || str_eq(cs->driver, "postgres") ||
-      str_eq(cs->driver, "postgresql") || str_eq(cs->driver, "mysql") ||
-      str_eq(cs->driver, "mariadb");
+      str_eq(cs->driver, "postgresql") || str_eq(cs->driver, "pg") ||
+      str_eq(cs->driver, "mysql") || str_eq(cs->driver, "mariadb");
 
   if (!known_driver) {
     set_error(err, "Unknown driver: %s", cs->driver);
@@ -434,4 +447,63 @@ bool connstr_validate(const ConnString *cs, char **err) {
   }
 
   return true;
+}
+
+/* SQLite file header magic string (first 16 bytes) */
+static const char SQLITE_MAGIC[] = "SQLite format 3";
+
+bool connstr_is_sqlite_file(const char *path) {
+  if (!path)
+    return false;
+
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return false;
+
+  char header[16];
+  size_t read = fread(header, 1, sizeof(header), f);
+  fclose(f);
+
+  if (read < sizeof(header))
+    return false;
+
+  /* Compare with SQLite magic (first 15 chars + null terminator) */
+  return memcmp(header, SQLITE_MAGIC, 16) == 0;
+}
+
+char *connstr_from_path(const char *path, char **err) {
+  if (!path || *path == '\0') {
+    set_error(err, "Empty file path");
+    return NULL;
+  }
+
+  /* Check if file exists */
+  struct stat st;
+  if (stat(path, &st) != 0) {
+    set_error(err, "File not found: %s", path);
+    return NULL;
+  }
+
+  /* Check it's a regular file */
+  if (!S_ISREG(st.st_mode)) {
+    set_error(err, "Not a file: %s", path);
+    return NULL;
+  }
+
+  /* Validate it's a SQLite database */
+  if (!connstr_is_sqlite_file(path)) {
+    set_error(err, "Not a SQLite database: %s", path);
+    return NULL;
+  }
+
+  /* Resolve to absolute path */
+  char abs_path[PATH_MAX];
+  if (!realpath(path, abs_path)) {
+    /* realpath failed, use original path */
+    strncpy(abs_path, path, PATH_MAX - 1);
+    abs_path[PATH_MAX - 1] = '\0';
+  }
+
+  /* Build sqlite:// connection string */
+  return str_printf("sqlite://%s", abs_path);
 }

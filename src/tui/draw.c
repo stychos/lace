@@ -192,7 +192,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 }
 
 void tui_draw_header(TuiState *state) {
-  if (!state || !state->header_win)
+  if (!state || !state->header_win || !state->header_visible)
     return;
 
   werase(state->header_win);
@@ -256,7 +256,7 @@ void tui_draw_table(TuiState *state) {
 }
 
 void tui_draw_status(TuiState *state) {
-  if (!state || !state->status_win)
+  if (!state || !state->status_win || !state->status_visible)
     return;
 
   werase(state->status_win);

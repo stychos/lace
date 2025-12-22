@@ -242,7 +242,7 @@ static DbConnection *sqlite_connect(const char *connstr, char **err) {
     sqlite3_close(db);
     free(data->path);
     free(data);
-    free(conn->connstr);
+    str_secure_free(conn->connstr);
     free(conn->database);
     free(conn);
     connstr_free(cs);
@@ -269,7 +269,7 @@ static void sqlite_disconnect(DbConnection *conn) {
     free(data);
   }
 
-  free(conn->connstr);
+  str_secure_free(conn->connstr);
   free(conn->database);
   free(conn->host);
   free(conn->user);

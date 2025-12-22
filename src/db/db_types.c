@@ -161,6 +161,11 @@ DbValue db_value_copy(const DbValue *src) {
   case DB_TYPE_TIMESTAMP:
     /* DATE and TIMESTAMP are stored as text */
     if (src->text.data) {
+      /* Check for overflow before adding 1 for null terminator */
+      if (src->text.len == SIZE_MAX) {
+        v.is_null = true;
+        break;
+      }
       v.text.data = malloc(src->text.len + 1);
       if (v.text.data) {
         memcpy(v.text.data, src->text.data, src->text.len);

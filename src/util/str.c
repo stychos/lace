@@ -400,7 +400,12 @@ char *str_escape(const char *s) {
   if (!s)
     return NULL;
 
-  StringBuilder *sb = sb_new(strlen(s) * 2);
+  /* Check for overflow in capacity calculation */
+  size_t slen = strlen(s);
+  if (slen > SIZE_MAX / 2)
+    return NULL;
+
+  StringBuilder *sb = sb_new(slen * 2);
   if (!sb)
     return NULL;
 
@@ -493,7 +498,12 @@ char *str_escape_sql(const char *s) {
   if (!s)
     return NULL;
 
-  StringBuilder *sb = sb_new(strlen(s) * 2);
+  /* Check for overflow in capacity calculation */
+  size_t slen = strlen(s);
+  if (slen > SIZE_MAX / 2)
+    return NULL;
+
+  StringBuilder *sb = sb_new(slen * 2);
   if (!sb)
     return NULL;
 
@@ -746,22 +756,33 @@ char *str_escape_identifier_dquote(const char *s) {
 
   /* Check for overflow in capacity calculation */
   size_t slen = strlen(s);
-  if (slen > (SIZE_MAX - 3) / 2)
+  if (slen >= (SIZE_MAX - 3) / 2)
     return NULL;
 
   StringBuilder *sb = sb_new(slen * 2 + 3);
   if (!sb)
     return NULL;
 
-  sb_append_char(sb, '"');
+  if (!sb_append_char(sb, '"')) {
+    sb_free(sb);
+    return NULL;
+  }
   for (const char *p = s; *p; p++) {
+    bool ok;
     if (*p == '"') {
-      sb_append(sb, "\"\""); /* Double the quote */
+      ok = sb_append(sb, "\"\""); /* Double the quote */
     } else {
-      sb_append_char(sb, *p);
+      ok = sb_append_char(sb, *p);
+    }
+    if (!ok) {
+      sb_free(sb);
+      return NULL;
     }
   }
-  sb_append_char(sb, '"');
+  if (!sb_append_char(sb, '"')) {
+    sb_free(sb);
+    return NULL;
+  }
 
   return sb_to_string(sb);
 }
@@ -773,22 +794,33 @@ char *str_escape_identifier_backtick(const char *s) {
 
   /* Check for overflow in capacity calculation */
   size_t slen = strlen(s);
-  if (slen > (SIZE_MAX - 3) / 2)
+  if (slen >= (SIZE_MAX - 3) / 2)
     return NULL;
 
   StringBuilder *sb = sb_new(slen * 2 + 3);
   if (!sb)
     return NULL;
 
-  sb_append_char(sb, '`');
+  if (!sb_append_char(sb, '`')) {
+    sb_free(sb);
+    return NULL;
+  }
   for (const char *p = s; *p; p++) {
+    bool ok;
     if (*p == '`') {
-      sb_append(sb, "``"); /* Double the backtick */
+      ok = sb_append(sb, "``"); /* Double the backtick */
     } else {
-      sb_append_char(sb, *p);
+      ok = sb_append_char(sb, *p);
+    }
+    if (!ok) {
+      sb_free(sb);
+      return NULL;
     }
   }
-  sb_append_char(sb, '`');
+  if (!sb_append_char(sb, '`')) {
+    sb_free(sb);
+    return NULL;
+  }
 
   return sb_to_string(sb);
 }

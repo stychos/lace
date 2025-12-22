@@ -376,7 +376,7 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
     mysql_close(mysql);
     free(data->database);
     free(data);
-    free(conn->connstr);
+    str_secure_free(conn->connstr);
     free(conn->database);
     free(conn->host);
     free(conn->user);
@@ -407,7 +407,7 @@ static void mysql_driver_disconnect(DbConnection *conn) {
     free(data);
   }
 
-  free(conn->connstr);
+  str_secure_free(conn->connstr);
   free(conn->database);
   free(conn->host);
   free(conn->user);

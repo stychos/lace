@@ -4,6 +4,7 @@
  */
 
 #include "connect_view.h"
+#include "../../db/connstr.h"
 #include "../../util/str.h"
 #include <ctype.h>
 #include <form.h>
@@ -27,13 +28,13 @@ static void input_init(InputField *input, int width) {
   input->width = width < 3 ? 3 : width; /* Minimum 3 for borders + 1 char */
 }
 
-static void input_draw(InputField *input, WINDOW *win, int y, int x) {
+static void input_draw(InputField *input, WINDOW *win, int y, int x,
+                       int *cursor_y, int *cursor_x) {
   /* Calculate visible portion */
   size_t visible_start = input->scroll;
-  size_t visible_len = input->width - 2;
+  size_t visible_len = input->width;
 
-  /* Draw field background */
-  wattron(win, A_REVERSE);
+  /* Clear the input area */
   mvwhline(win, y, x, ' ', input->width);
 
   /* Draw text */
@@ -41,13 +42,16 @@ static void input_draw(InputField *input, WINDOW *win, int y, int x) {
   if (draw_len > visible_len)
     draw_len = visible_len;
 
-  mvwaddnstr(win, y, x + 1, input->buffer + visible_start, draw_len);
+  if (draw_len > 0) {
+    mvwaddnstr(win, y, x, input->buffer + visible_start, draw_len);
+  }
 
-  /* Position cursor */
-  size_t cursor_pos = input->cursor - input->scroll;
-  wmove(win, y, x + 1 + cursor_pos);
+  /* Draw underline below input */
+  mvwhline(win, y + 1, x, ACS_HLINE, input->width);
 
-  wattroff(win, A_REVERSE);
+  /* Return cursor position for later */
+  *cursor_y = y;
+  *cursor_x = x + (int)(input->cursor - input->scroll);
 }
 
 static void input_handle_key(InputField *input, int ch) {
@@ -151,54 +155,33 @@ static void input_handle_key(InputField *input, int ch) {
 }
 
 static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
-                        int selected_driver, const char *error_msg) {
+                        const char *error_msg, int selected) {
   werase(win);
   box(win, 0, 0);
 
   /* Title */
   wattron(win, A_BOLD);
-  mvwprintw(win, 0, (width - 14) / 2, " Connect to Database ");
+  mvwprintw(win, 0, (width - 22) / 2, " Connect to Database ");
   wattroff(win, A_BOLD);
 
   int y = 2;
 
-  /* Instructions */
-  mvwprintw(win, y++, 2, "Enter connection string or select a driver:");
-  y++;
-
-  /* Driver options */
-  const char *drivers[] = {"SQLite", "PostgreSQL", "MySQL"};
-  const char *examples[] = {"sqlite:///path/to/database.db",
-                            "postgres://user:pass@host:5432/db",
-                            "mysql://user:pass@host:3306/db"};
-
-  for (int i = 0; i < 3; i++) {
-    if (i == selected_driver) {
-      wattron(win, A_REVERSE);
-    }
-    mvwprintw(win, y, 4, "[%c] %s", i == selected_driver ? '*' : ' ',
-              drivers[i]);
-    if (i == selected_driver) {
-      wattroff(win, A_REVERSE);
-    }
-    y++;
-  }
-
-  y++;
-
-  /* Example */
+  /* Examples */
   wattron(win, COLOR_PAIR(COLOR_NULL));
-  mvwprintw(win, y++, 2, "Example: %s", examples[selected_driver]);
+  mvwprintw(win, y++, 2, "Examples:");
+  mvwprintw(win, y++, 4, "./database.db");
+  mvwprintw(win, y++, 4, "sqlite:///path/to/database.db");
+  mvwprintw(win, y++, 4, "pg://user:pass@host/db");
+  mvwprintw(win, y++, 4, "mysql://user:pass@host/db");
+  mvwprintw(win, y++, 4, "mariadb://user:pass@host/db");
   wattroff(win, COLOR_PAIR(COLOR_NULL));
 
   y++;
 
-  /* Connection string label */
-  mvwprintw(win, y++, 2, "Connection string:");
-
-  /* Input field */
-  input_draw(input, win, y, 2);
-  y += 2;
+  /* Input field - get cursor position */
+  int cursor_y, cursor_x;
+  input_draw(input, win, y, 2, &cursor_y, &cursor_x);
+  y += 3;
 
   /* Error message */
   if (error_msg && *error_msg) {
@@ -208,9 +191,24 @@ static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
   }
 
   /* Buttons */
-  y = height - 3;
-  mvwprintw(win, y, 2, "[Enter] Connect   [Tab] Switch driver   [Esc] Cancel");
+  int btn_y = height - 2;
+  int connect_x = width / 2 - 14;
+  int cancel_x = width / 2 + 4;
 
+  if (selected == 0) {
+    wattron(win, A_REVERSE);
+    mvwprintw(win, btn_y, connect_x, "[ Connect ]");
+    wattroff(win, A_REVERSE);
+    mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+  } else {
+    mvwprintw(win, btn_y, connect_x, "[ Connect ]");
+    wattron(win, A_REVERSE);
+    mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+    wattroff(win, A_REVERSE);
+  }
+
+  /* Position cursor in input field */
+  wmove(win, cursor_y, cursor_x);
   wrefresh(win);
 }
 
@@ -218,8 +216,8 @@ char *connect_view_show(TuiState *state) {
   int term_rows, term_cols;
   getmaxyx(stdscr, term_rows, term_cols);
 
-  int height = 18;
-  int width = 70;
+  int height = 15;
+  int width = 50;
   if (width > term_cols - 4)
     width = term_cols - 4;
   if (height > term_rows - 4)
@@ -238,13 +236,13 @@ char *connect_view_show(TuiState *state) {
   InputField input;
   input_init(&input, width - 6);
 
-  int selected_driver = 0;
   char *error_msg = NULL;
   char *result = NULL;
+  int selected = 0; /* 0 = Connect, 1 = Cancel */
 
   bool running = true;
   while (running) {
-    draw_dialog(dialog, height, width, &input, selected_driver, error_msg);
+    draw_dialog(dialog, height, width, &input, error_msg, selected);
 
     int ch = wgetch(dialog);
 
@@ -252,36 +250,50 @@ char *connect_view_show(TuiState *state) {
     error_msg = NULL;
 
     switch (ch) {
+    case '\t':
+      selected = 1 - selected;
+      break;
+
     case 27: /* Escape */
       running = false;
       break;
 
     case '\n':
     case KEY_ENTER:
+      if (selected == 1) {
+        /* Cancel button selected */
+        running = false;
+        break;
+      }
       if (input.len > 0) {
-        /* Try to connect */
+        /* Determine the connection string to use */
+        char *connstr_to_use = NULL;
         char *err = NULL;
-        DbConnection *conn = db_connect(input.buffer, &err);
+
+        if (!strstr(input.buffer, "://")) {
+          /* No scheme - try to detect SQLite file */
+          connstr_to_use = connstr_from_path(input.buffer, &err);
+          if (!connstr_to_use) {
+            error_msg = err ? err : str_dup("Invalid file path");
+            break;
+          }
+        } else {
+          connstr_to_use = str_dup(input.buffer);
+        }
+
+        /* Try to connect */
+        DbConnection *conn = db_connect(connstr_to_use, &err);
         if (conn) {
           db_disconnect(conn);
-          result = str_dup(input.buffer);
+          result = connstr_to_use;
           running = false;
         } else {
           error_msg = err ? err : str_dup("Connection failed");
+          free(connstr_to_use);
         }
       } else {
-        error_msg = str_dup("Please enter a connection string");
+        error_msg = str_dup("Please enter a connection string or file path");
       }
-      break;
-
-    case '\t':
-    case KEY_DOWN:
-      selected_driver = (selected_driver + 1) % 3;
-      break;
-
-    case KEY_BTAB:
-    case KEY_UP:
-      selected_driver = (selected_driver + 2) % 3;
       break;
 
     default:

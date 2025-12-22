@@ -167,6 +167,9 @@ char *arena_strdup(Arena *arena, const char *s) {
   if (!s)
     return NULL;
   size_t len = strlen(s);
+  /* Check for overflow before adding 1 for null terminator */
+  if (len == SIZE_MAX)
+    return NULL;
   char *dup = arena_alloc(arena, len + 1);
   if (dup) {
     memcpy(dup, s, len + 1);

@@ -74,4 +74,18 @@ bool connstr_validate(const ConnString *cs, char **err);
 #define CONNSTR_PORT_POSTGRES 5432
 #define CONNSTR_PORT_MYSQL 3306
 
+/*
+ * Check if a file is a SQLite database by reading magic bytes.
+ * Returns true if file exists and has valid SQLite header.
+ */
+bool connstr_is_sqlite_file(const char *path);
+
+/*
+ * Convert a file path to a sqlite:// connection string.
+ * Resolves relative paths to absolute, validates SQLite magic bytes.
+ * Returns allocated string like "sqlite:///path/to/file.db" or NULL on error.
+ * Caller must free() the returned string.
+ */
+char *connstr_from_path(const char *path, char **err);
+
 #endif /* LACE_CONNSTR_H */

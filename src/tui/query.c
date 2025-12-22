@@ -20,7 +20,7 @@ typedef struct {
 } QueryLineInfo;
 
 /* Forward declarations */
-static void query_ensure_capacity(Workspace *ws, size_t needed);
+static bool query_ensure_capacity(Workspace *ws, size_t needed);
 static void query_rebuild_line_cache(Workspace *ws, QueryLineInfo **lines,
                                      size_t *num_lines);
 static void query_cursor_to_line_col(Workspace *ws, size_t *line, size_t *col);
@@ -103,10 +103,10 @@ bool workspace_create_query(TuiState *state) {
   return true;
 }
 
-/* Ensure query buffer has enough capacity */
-static void query_ensure_capacity(Workspace *ws, size_t needed) {
+/* Ensure query buffer has enough capacity. Returns false on allocation failure. */
+static bool query_ensure_capacity(Workspace *ws, size_t needed) {
   if (needed <= ws->query_capacity)
-    return;
+    return true;
 
   size_t new_cap = ws->query_capacity;
   while (new_cap < needed) {
@@ -119,10 +119,12 @@ static void query_ensure_capacity(Workspace *ws, size_t needed) {
   }
 
   char *new_buf = realloc(ws->query_text, new_cap);
-  if (new_buf) {
-    ws->query_text = new_buf;
-    ws->query_capacity = new_cap;
+  if (!new_buf) {
+    return false; /* Allocation failed */
   }
+  ws->query_text = new_buf;
+  ws->query_capacity = new_cap;
+  return true;
 }
 
 /* Rebuild line cache from query text */
@@ -191,7 +193,9 @@ static size_t query_line_col_to_cursor(Workspace *ws __attribute__((unused)),
 
 /* Insert character at cursor */
 static void query_insert_char(Workspace *ws, char c) {
-  query_ensure_capacity(ws, ws->query_len + 2);
+  if (!query_ensure_capacity(ws, ws->query_len + 2)) {
+    return; /* Allocation failed, silently ignore insert */
+  }
 
   /* Shift text after cursor */
   memmove(ws->query_text + ws->query_cursor + 1,

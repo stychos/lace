@@ -19,3 +19,35 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+THIRD-PARTY LICENSES
+
+This software uses the following third-party libraries:
+
+1. SQLite (Public Domain)
+   https://sqlite.org/
+   SQLite is in the public domain and does not require a license.
+
+2. libpq - PostgreSQL Client Library (PostgreSQL License)
+   https://www.postgresql.org/
+   PostgreSQL is released under the PostgreSQL License, a liberal Open Source
+   license, similar to the BSD or MIT licenses.
+
+3. libmariadb - MariaDB Connector/C (LGPL 2.1)
+   https://mariadb.com/
+   This software dynamically links to libmariadb, which is licensed under the
+   GNU Lesser General Public License version 2.1. The LGPL allows this software
+   to remain under the MIT License while linking to the library. Users may
+   replace the libmariadb library with a compatible alternative. The source
+   code for libmariadb is available at https://github.com/mariadb-corporation/mariadb-connector-c
+
+4. ncurses (X11/MIT License)
+   https://invisible-island.net/ncurses/
+   ncurses is licensed under a permissive MIT-style license.
+
+5. OpenSSL (Apache License 2.0)
+   https://www.openssl.org/
+   OpenSSL 3.0+ is licensed under the Apache License 2.0.
+   Older versions use the OpenSSL License and SSLeay License.

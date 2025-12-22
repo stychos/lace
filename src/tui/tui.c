@@ -283,8 +283,10 @@ bool tui_init(TuiState *state) {
   keypad(state->main_win, TRUE);
 
   state->running = true;
+  state->header_visible = true;
   state->sidebar_visible = false;
   state->sidebar_focused = false;
+  state->status_visible = true;
 
   return true;
 }
@@ -342,17 +344,27 @@ void tui_recreate_windows(TuiState *state) {
   if (state->term_cols < MIN_TERM_COLS)
     state->term_cols = MIN_TERM_COLS;
 
+  /* Calculate how many rows are used by header/status */
+  int top_rows = (state->header_visible ? 1 : 0) + TAB_BAR_HEIGHT;
+  int bottom_rows = state->status_visible ? 1 : 0;
+
   /* Resize header and status */
-  wresize(state->header_win, 1, state->term_cols);
-  wresize(state->status_win, 1, state->term_cols);
-  mvwin(state->status_win, state->term_rows - 1, 0);
+  if (state->header_visible) {
+    wresize(state->header_win, 1, state->term_cols);
+    mvwin(state->header_win, 0, 0);
+  }
+  if (state->status_visible) {
+    wresize(state->status_win, 1, state->term_cols);
+    mvwin(state->status_win, state->term_rows - 1, 0);
+  }
 
   /* Create tab bar */
-  state->tab_win = newwin(TAB_BAR_HEIGHT, state->term_cols, 1, 0);
+  int tab_y = state->header_visible ? 1 : 0;
+  state->tab_win = newwin(TAB_BAR_HEIGHT, state->term_cols, tab_y, 0);
 
   /* Calculate main window dimensions */
-  int main_start_y = 2; /* After header + tab bar */
-  int main_height = state->term_rows - 3;
+  int main_start_y = top_rows;
+  int main_height = state->term_rows - top_rows - bottom_rows;
   int main_start_x = 0;
   int main_width = state->term_cols;
 
@@ -622,7 +634,8 @@ void tui_run(TuiState *state) {
     case 'Q':
     case 24:        /* Ctrl+X - quit */
     case KEY_F(10): /* F10 - universal quit */
-      if (tui_show_confirm_dialog(state, "Quit application?")) {
+      /* Skip confirmation if no connection open */
+      if (!state->conn || tui_show_confirm_dialog(state, "Quit application?")) {
         state->running = false;
       }
       break;
@@ -804,23 +817,27 @@ void tui_run(TuiState *state) {
       tui_calculate_column_widths(state);
       break;
 
+    case 'm':
+    case 'M':
+      /* Toggle header/menu bar */
+      state->header_visible = !state->header_visible;
+      tui_recreate_windows(state);
+      break;
+
+    case 'b':
+    case 'B':
+      /* Toggle status bar */
+      state->status_visible = !state->status_visible;
+      tui_recreate_windows(state);
+      break;
+
     case '?':
     case KEY_F(1):
       tui_show_help(state);
       break;
 
     case KEY_RESIZE:
-      /* Handle terminal resize */
-      getmaxyx(stdscr, state->term_rows, state->term_cols);
-      /* Clamp to minimum dimensions */
-      if (state->term_rows < MIN_TERM_ROWS)
-        state->term_rows = MIN_TERM_ROWS;
-      if (state->term_cols < MIN_TERM_COLS)
-        state->term_cols = MIN_TERM_COLS;
-      wresize(state->header_win, 1, state->term_cols);
-      wresize(state->status_win, 1, state->term_cols);
-      mvwin(state->status_win, state->term_rows - 1, 0);
-      state->content_rows = state->term_rows - 4;
+      /* Handle terminal resize - delegate to tui_recreate_windows */
       tui_recreate_windows(state);
       tui_calculate_column_widths(state);
       break;

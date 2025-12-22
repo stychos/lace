@@ -350,11 +350,16 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     mvwaddstr(win, 0, width - 12, " [modified] ");
   }
 
+  /* Calculate line number width based on total lines */
+  int lnum_width = 3;
+  if (state->num_lines >= 1000) lnum_width = 4;
+  if (state->num_lines >= 10000) lnum_width = 5;
+
   /* Content area */
   int content_y = 1;
-  int content_x = 1;
+  int content_x = 1 + lnum_width + 1; /* line numbers + separator space */
   int content_h = height - 4; /* Leave room for status bar */
-  int content_w = width - 2;
+  int content_w = width - 2 - lnum_width - 1;
 
   state->view_rows = content_h;
   state->view_cols = content_w;
@@ -362,6 +367,16 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
   /* Draw lines */
   for (int row = 0; row < content_h; row++) {
     size_t line_idx = state->scroll_line + row;
+
+    /* Draw line number */
+    if (line_idx < state->num_lines) {
+      wattron(win, A_DIM);
+      mvwprintw(win, content_y + row, 1, "%*zu", lnum_width, line_idx + 1);
+      wattroff(win, A_DIM);
+    } else {
+      /* Clear line number area for empty lines */
+      mvwhline(win, content_y + row, 1, ' ', lnum_width);
+    }
 
     wmove(win, content_y + row, content_x);
 
@@ -409,7 +424,7 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
 
   /* Position cursor - ensure no underflow from size_t subtraction */
   int cursor_y = content_y;
-  int cursor_x = content_x;
+  int cursor_x = content_x; /* Already includes line number offset */
   if (state->cursor_line >= state->scroll_line) {
     cursor_y += (int)(state->cursor_line - state->scroll_line);
   }

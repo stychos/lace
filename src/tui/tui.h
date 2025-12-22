@@ -150,6 +150,9 @@ typedef struct {
   char *edit_buffer;
   size_t edit_pos;
 
+  /* Visibility toggles */
+  bool header_visible;  /* Whether header/menu bar is shown */
+
   /* Sidebar */
   bool sidebar_visible;
   size_t sidebar_highlight;   /* Currently highlighted table in sidebar */
@@ -168,6 +171,7 @@ typedef struct {
   /* Status message */
   char *status_msg;
   bool status_is_error;
+  bool status_visible; /* Whether status bar is shown */
 
   /* Running */
   bool running;
