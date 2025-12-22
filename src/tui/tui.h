@@ -40,6 +40,40 @@ typedef enum {
   WORKSPACE_TYPE_QUERY  /* SQL query editor */
 } WorkspaceType;
 
+/* Filter operators */
+typedef enum {
+  FILTER_OP_EQ,           /* = */
+  FILTER_OP_NE,           /* <> */
+  FILTER_OP_GT,           /* > */
+  FILTER_OP_GE,           /* >= */
+  FILTER_OP_LT,           /* < */
+  FILTER_OP_LE,           /* <= */
+  FILTER_OP_IN,           /* IN (value list) */
+  FILTER_OP_CONTAINS,     /* LIKE '%value%' */
+  FILTER_OP_REGEX,        /* REGEXP/~ (driver-specific) */
+  FILTER_OP_IS_EMPTY,     /* = '' */
+  FILTER_OP_IS_NOT_EMPTY, /* <> '' */
+  FILTER_OP_IS_NULL,      /* IS NULL */
+  FILTER_OP_IS_NOT_NULL,  /* IS NOT NULL */
+  FILTER_OP_RAW,          /* Raw SQL condition */
+} FilterOperator;
+
+#define FILTER_OP_COUNT 14
+
+/* Single column filter */
+typedef struct {
+  size_t column_index;   /* Index into schema columns */
+  FilterOperator op;     /* Operator type */
+  char value[256];       /* Filter value (for ops that need it) */
+} ColumnFilter;
+
+/* Table filters collection */
+typedef struct {
+  ColumnFilter *filters; /* Array of column filters */
+  size_t num_filters;    /* Number of active filters */
+  size_t filters_cap;    /* Capacity */
+} TableFilters;
+
 /* Workspace - holds per-tab state */
 typedef struct {
   WorkspaceType type; /* Type of workspace content */
@@ -100,6 +134,14 @@ typedef struct {
 
   /* Is this workspace active/used */
   bool active;
+
+  /* Filters (per-table) */
+  TableFilters filters;
+  bool filters_visible;      /* Panel visibility for this workspace */
+  bool filters_focused;      /* Whether filters panel has keyboard focus */
+  size_t filters_cursor_row; /* Selected filter row */
+  size_t filters_cursor_col; /* Selected filter column */
+  size_t filters_scroll;     /* Scroll offset for filter list */
 } Workspace;
 
 /* TUI state */
@@ -167,6 +209,17 @@ typedef struct {
   int sidebar_name_scroll_dir; /* Scroll direction: 1=right, -1=left */
   int sidebar_name_scroll_delay; /* Pause counter at ends */
   size_t sidebar_last_highlight; /* Previous highlight to detect changes */
+
+  /* Filters panel */
+  bool filters_visible;           /* Panel visibility */
+  bool filters_focused;           /* Whether filters panel has keyboard focus */
+  size_t filters_cursor_row;      /* Selected row (0=add, 1+=filters, last=raw) */
+  size_t filters_cursor_col;      /* 0=column, 1=operator, 2=value, 3=delete */
+  bool filters_editing;           /* Currently editing a field */
+  char filters_edit_buffer[256];  /* Edit buffer */
+  size_t filters_edit_len;        /* Edit buffer length */
+  size_t filters_edit_pos;        /* Cursor position in buffer */
+  size_t filters_scroll;          /* Scroll offset for filter list */
 
   /* Status message */
   char *status_msg;
@@ -238,5 +291,23 @@ void tui_query_start_result_edit(TuiState *state);
 void tui_query_confirm_result_edit(TuiState *state);
 void tui_query_scroll_results(TuiState *state, int delta);
 bool query_load_rows_at(TuiState *state, Workspace *ws, size_t offset);
+
+/* Filters */
+void filters_init(TableFilters *f);
+void filters_free(TableFilters *f);
+void filters_clear(TableFilters *f);
+bool filters_add(TableFilters *f, size_t col_idx, FilterOperator op,
+                 const char *value);
+void filters_remove(TableFilters *f, size_t index);
+const char *filter_op_name(FilterOperator op);
+const char *filter_op_sql(FilterOperator op);
+bool filter_op_needs_value(FilterOperator op);
+char *filters_parse_in_values(const char *input, char **err);
+char *filters_build_where(TableFilters *f, TableSchema *schema,
+                          const char *driver_name, char **err);
+void tui_draw_filters_panel(TuiState *state);
+bool tui_handle_filters_input(TuiState *state, int ch);
+void tui_apply_filters(TuiState *state);
+int tui_get_filters_panel_height(TuiState *state);
 
 #endif /* LACE_TUI_H */

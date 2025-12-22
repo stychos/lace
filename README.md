@@ -11,6 +11,7 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 - Full mouse support (click, double-click, scroll wheel)
 - Multi-tab workspaces
 - SQL query editor
+- Column-based data filtering
 - Inline data editing with live updates
 - Linux & macOS compatible
 - Works over SSH
@@ -91,6 +92,17 @@ Binary will be at `build/lace`.
 | `Ctrl+T` | Execute all in transaction |
 | `Ctrl+W` / `Esc` | Switch focus (editor/results) |
 | Arrows / `PgUp` / `PgDn` | Navigate editor or results |
+
+### Table Filters
+
+| Key | Action |
+|-----|--------|
+| `f` or `/` | Toggle filters panel (in table view) |
+| `+` / `=` | Add new filter |
+| `-` / `x` / `Delete` | Remove filter |
+| `c` | Clear all filters |
+| `Ctrl+W` | Switch focus (filters/table) |
+| `Esc` | Close filters panel |
 
 ### Other
 

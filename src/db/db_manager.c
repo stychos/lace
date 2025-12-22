@@ -324,6 +324,131 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   return count;
 }
 
+int64_t db_count_rows_where(DbConnection *conn, const char *table,
+                            const char *where_clause, char **err) {
+  if (!conn || !conn->driver || !table) {
+    SET_ERROR(err, "Invalid parameters");
+    return -1;
+  }
+
+  /* Build COUNT query with proper identifier escaping */
+  char *escaped_table;
+  if (str_eq(conn->driver->name, "mysql") ||
+      str_eq(conn->driver->name, "mariadb")) {
+    escaped_table = str_escape_identifier_backtick(table);
+  } else {
+    escaped_table = str_escape_identifier_dquote(table);
+  }
+  if (!escaped_table) {
+    SET_ERROR(err, "Out of memory");
+    return -1;
+  }
+
+  char *sql;
+  if (where_clause && *where_clause) {
+    sql = str_printf("SELECT COUNT(*) FROM %s WHERE %s", escaped_table,
+                     where_clause);
+  } else {
+    sql = str_printf("SELECT COUNT(*) FROM %s", escaped_table);
+  }
+  free(escaped_table);
+
+  if (!sql) {
+    SET_ERROR(err, "Out of memory");
+    return -1;
+  }
+
+  ResultSet *rs = db_query(conn, sql, err);
+  free(sql);
+
+  if (!rs) {
+    return -1;
+  }
+
+  int64_t count = -1;
+  if (rs->num_rows > 0 && rs->num_columns > 0 && rs->rows &&
+      rs->rows[0].cells && rs->rows[0].num_cells > 0) {
+    DbValue *val = &rs->rows[0].cells[0];
+    if (val->type == DB_TYPE_INT) {
+      count = val->int_val;
+    } else if (val->type == DB_TYPE_TEXT && val->text.data) {
+      char *endptr;
+      errno = 0;
+      long long parsed = strtoll(val->text.data, &endptr, 10);
+      if (errno == 0 && endptr != val->text.data && *endptr == '\0') {
+        count = parsed;
+      }
+    }
+  }
+
+  db_result_free(rs);
+  return count;
+}
+
+ResultSet *db_query_page_where(DbConnection *conn, const char *table,
+                               size_t offset, size_t limit,
+                               const char *where_clause, const char *order_by,
+                               bool desc, char **err) {
+  if (!conn || !conn->driver) {
+    SET_ERROR(err, "Not connected");
+    return NULL;
+  }
+
+  /* Build SQL query with proper identifier escaping */
+  char *escaped_table;
+  if (str_eq(conn->driver->name, "mysql") ||
+      str_eq(conn->driver->name, "mariadb")) {
+    escaped_table = str_escape_identifier_backtick(table);
+  } else {
+    escaped_table = str_escape_identifier_dquote(table);
+  }
+  if (!escaped_table) {
+    SET_ERROR(err, "Out of memory");
+    return NULL;
+  }
+
+  StringBuilder *sb = sb_new(256);
+  if (!sb) {
+    free(escaped_table);
+    SET_ERROR(err, "Out of memory");
+    return NULL;
+  }
+
+  sb_printf(sb, "SELECT * FROM %s", escaped_table);
+
+  if (where_clause && *where_clause) {
+    sb_printf(sb, " WHERE %s", where_clause);
+  }
+
+  if (order_by && *order_by) {
+    char *escaped_order;
+    if (str_eq(conn->driver->name, "mysql") ||
+        str_eq(conn->driver->name, "mariadb")) {
+      escaped_order = str_escape_identifier_backtick(order_by);
+    } else {
+      escaped_order = str_escape_identifier_dquote(order_by);
+    }
+    if (escaped_order) {
+      sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
+      free(escaped_order);
+    }
+  }
+
+  sb_printf(sb, " LIMIT %zu OFFSET %zu", limit, offset);
+
+  char *sql = sb_to_string(sb);
+  free(escaped_table);
+
+  if (!sql) {
+    SET_ERROR(err, "Out of memory");
+    return NULL;
+  }
+
+  ResultSet *rs = db_query(conn, sql, err);
+  free(sql);
+  return rs;
+}
+
 bool db_update_cell(DbConnection *conn, const char *table, const char **pk_cols,
                     const DbValue *pk_vals, size_t num_pk_cols, const char *col,
                     const DbValue *new_val, char **err) {

@@ -226,17 +226,25 @@ void tui_draw_table(TuiState *state) {
   int win_rows, win_cols;
   getmaxyx(state->main_win, win_rows, win_cols);
 
+  /* Calculate filters panel height and draw if visible */
+  int filters_height = 0;
+  if (state->filters_visible) {
+    filters_height = tui_get_filters_panel_height(state);
+    tui_draw_filters_panel(state);
+  }
+
   if (!state->data || state->data->num_columns == 0) {
-    mvwprintw(state->main_win, win_rows / 2, (win_cols - 7) / 2, "No data");
+    int msg_y = filters_height + (win_rows - filters_height) / 2;
+    mvwprintw(state->main_win, msg_y, (win_cols - 7) / 2, "No data");
     wrefresh(state->main_win);
     return;
   }
 
   /* Use the shared grid drawing function */
   GridDrawParams params = {.win = state->main_win,
-                           .start_y = 0,
+                           .start_y = filters_height,
                            .start_x = 0,
-                           .height = win_rows,
+                           .height = win_rows - filters_height,
                            .width = win_cols,
                            .data = state->data,
                            .col_widths = state->col_widths,
@@ -245,7 +253,7 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = state->cursor_col,
                            .scroll_row = state->scroll_row,
                            .scroll_col = state->scroll_col,
-                           .is_focused = !state->sidebar_focused,
+                           .is_focused = !state->sidebar_focused && !state->filters_focused,
                            .is_editing = state->editing,
                            .edit_buffer = state->edit_buffer,
                            .edit_pos = state->edit_pos,

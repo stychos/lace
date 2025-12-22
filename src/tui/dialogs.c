@@ -695,7 +695,7 @@ void tui_show_table_selector(TuiState *state) {
 
 /* Show help dialog */
 void tui_show_help(TuiState *state) {
-  int height = 52;
+  int height = 60;
   int width = 60;
 
   /* Constrain to terminal size */
@@ -735,9 +735,9 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 4, "Arrow keys / hjkl  Move cursor");
   mvwprintw(help_win, y++, 4, "PgUp / PgDown      Page up/down");
   mvwprintw(help_win, y++, 4, "Home / End         First/last column");
-  mvwprintw(help_win, y++, 4, "g / a              Go to first row");
-  mvwprintw(help_win, y++, 4, "G / z              Go to last row");
-  mvwprintw(help_win, y++, 4, "/ (or Ctrl+G, F5)  Go to row number");
+  mvwprintw(help_win, y++, 4, "a                  Go to first row");
+  mvwprintw(help_win, y++, 4, "z                  Go to last row");
+  mvwprintw(help_win, y++, 4, "g (or Ctrl+G, F5)  Go to row number");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
@@ -773,9 +773,22 @@ void tui_show_help(TuiState *state) {
   mvwprintw(help_win, y++, 2, "Sidebar");
   wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
   mvwprintw(help_win, y++, 4, "t (or F9)          Toggle sidebar");
-  mvwprintw(help_win, y++, 4, "/ or f             Filter tables");
+  mvwprintw(help_win, y++, 4, "/                  Filter tables (sidebar)");
   mvwprintw(help_win, y++, 4, "Enter              Select table");
   mvwprintw(help_win, y++, 4, "Left/Right         Focus sidebar/table");
+  y++;
+
+  wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+  mvwprintw(help_win, y++, 2, "Table Filters");
+  wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
+  mvwprintw(help_win, y++, 4, "/ (or f)           Toggle filters panel");
+  mvwprintw(help_win, y++, 4, "Arrow keys / hjkl  Navigate (spatial)");
+  mvwprintw(help_win, y++, 4, "Ctrl+W             Switch filters/table focus");
+  mvwprintw(help_win, y++, 4, "Enter              Edit field (auto-applies)");
+  mvwprintw(help_win, y++, 4, "+ / =              Add new filter");
+  mvwprintw(help_win, y++, 4, "- / x / Delete     Remove filter");
+  mvwprintw(help_win, y++, 4, "c                  Clear all filters");
+  mvwprintw(help_win, y++, 4, "Escape             Close panel");
   y++;
 
   wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));

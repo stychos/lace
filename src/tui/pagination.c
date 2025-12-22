@@ -60,6 +60,25 @@ int tui_get_column_width(TuiState *state, size_t col) {
   return state->col_widths[col];
 }
 
+/* Build WHERE clause for current workspace filters */
+static char *build_filter_where(TuiState *state) {
+  if (!state || state->num_workspaces == 0)
+    return NULL;
+
+  Workspace *ws = &state->workspaces[state->current_workspace];
+  if (ws->filters.num_filters == 0)
+    return NULL;
+
+  if (!state->schema || !state->conn)
+    return NULL;
+
+  char *err = NULL;
+  char *where = filters_build_where(&ws->filters, state->schema,
+                                    state->conn->driver->name, &err);
+  free(err);
+  return where;
+}
+
 /* Load table data */
 bool tui_load_table_data(TuiState *state, const char *table) {
   if (!state || !state->conn || !table)
@@ -85,8 +104,22 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     /* Continue anyway - we can still show data */
   }
 
-  /* Get total row count */
-  int64_t count = db_count_rows(state->conn, table, &err);
+  /* Update workspace schema pointer for filter building */
+  if (state->num_workspaces > 0 &&
+      state->current_workspace < state->num_workspaces) {
+    state->workspaces[state->current_workspace].schema = state->schema;
+  }
+
+  /* Build WHERE clause from filters */
+  char *where_clause = build_filter_where(state);
+
+  /* Get total row count (with filter if applicable) */
+  int64_t count;
+  if (where_clause) {
+    count = db_count_rows_where(state->conn, table, where_clause, &err);
+  } else {
+    count = db_count_rows(state->conn, table, &err);
+  }
   if (count < 0) {
     /* Fallback if COUNT fails */
     count = 0;
@@ -97,9 +130,16 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   state->page_size = PAGE_SIZE;
   state->loaded_offset = 0;
 
-  /* Load first page of data */
-  state->data =
-      db_query_page(state->conn, table, 0, PAGE_SIZE, NULL, false, &err);
+  /* Load first page of data (with filter if applicable) */
+  if (where_clause) {
+    state->data = db_query_page_where(state->conn, table, 0, PAGE_SIZE,
+                                      where_clause, NULL, false, &err);
+  } else {
+    state->data =
+        db_query_page(state->conn, table, 0, PAGE_SIZE, NULL, false, &err);
+  }
+  free(where_clause);
+
   if (!state->data) {
     tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
     free(err);
@@ -166,9 +206,19 @@ bool tui_load_more_rows(TuiState *state) {
   if (new_offset >= state->total_rows)
     return false;
 
+  /* Build WHERE clause from filters */
+  char *where_clause = build_filter_where(state);
+
   char *err = NULL;
-  ResultSet *more = db_query_page(state->conn, table, new_offset, PAGE_SIZE,
-                                  NULL, false, &err);
+  ResultSet *more;
+  if (where_clause) {
+    more = db_query_page_where(state->conn, table, new_offset, PAGE_SIZE,
+                               where_clause, NULL, false, &err);
+  } else {
+    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE, NULL, false,
+                         &err);
+  }
+  free(where_clause);
   if (!more || more->num_rows == 0) {
     if (more)
       db_result_free(more);
@@ -236,9 +286,19 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     offset = state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
   }
 
+  /* Build WHERE clause from filters */
+  char *where_clause = build_filter_where(state);
+
   char *err = NULL;
-  ResultSet *data =
-      db_query_page(state->conn, table, offset, PAGE_SIZE, NULL, false, &err);
+  ResultSet *data;
+  if (where_clause) {
+    data = db_query_page_where(state->conn, table, offset, PAGE_SIZE,
+                               where_clause, NULL, false, &err);
+  } else {
+    data = db_query_page(state->conn, table, offset, PAGE_SIZE, NULL, false,
+                         &err);
+  }
+  free(where_clause);
   if (!data) {
     tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
     free(err);
@@ -304,9 +364,19 @@ bool tui_load_prev_rows(TuiState *state) {
     new_offset = 0;
   }
 
+  /* Build WHERE clause from filters */
+  char *where_clause = build_filter_where(state);
+
   char *err = NULL;
-  ResultSet *more = db_query_page(state->conn, table, new_offset, load_count,
-                                  NULL, false, &err);
+  ResultSet *more;
+  if (where_clause) {
+    more = db_query_page_where(state->conn, table, new_offset, load_count,
+                               where_clause, NULL, false, &err);
+  } else {
+    more = db_query_page(state->conn, table, new_offset, load_count, NULL,
+                         false, &err);
+  }
+  free(where_clause);
   if (!more || more->num_rows == 0) {
     if (more)
       db_result_free(more);

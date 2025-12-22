@@ -106,6 +106,14 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
                          char **err);
 int64_t db_count_rows(DbConnection *conn, const char *table, char **err);
 
+/* Filtered queries (with WHERE clause) */
+ResultSet *db_query_page_where(DbConnection *conn, const char *table,
+                               size_t offset, size_t limit,
+                               const char *where_clause, const char *order_by,
+                               bool desc, char **err);
+int64_t db_count_rows_where(DbConnection *conn, const char *table,
+                            const char *where_clause, char **err);
+
 /* Data manipulation */
 bool db_update_cell(DbConnection *conn, const char *table, const char **pk_cols,
                     const DbValue *pk_vals, size_t num_pk_cols, const char *col,

@@ -32,6 +32,13 @@ void workspace_save(TuiState *state) {
   /* Save column widths */
   ws->col_widths = state->col_widths;
   ws->num_col_widths = state->num_col_widths;
+
+  /* Save filters panel state */
+  ws->filters_visible = state->filters_visible;
+  ws->filters_focused = state->filters_focused;
+  ws->filters_cursor_row = state->filters_cursor_row;
+  ws->filters_cursor_col = state->filters_cursor_col;
+  ws->filters_scroll = state->filters_scroll;
 }
 
 /* Restore TUI state from workspace */
@@ -60,6 +67,14 @@ void workspace_restore(TuiState *state) {
   /* Restore column widths */
   state->col_widths = ws->col_widths;
   state->num_col_widths = ws->num_col_widths;
+
+  /* Restore filters panel state */
+  state->filters_visible = ws->filters_visible;
+  state->filters_focused = ws->filters_focused;
+  state->filters_cursor_row = ws->filters_cursor_row;
+  state->filters_cursor_col = ws->filters_cursor_col;
+  state->filters_scroll = ws->filters_scroll;
+  state->filters_editing = false; /* Always reset editing state */
 }
 
 /* Switch to a different workspace */
@@ -106,6 +121,7 @@ bool workspace_create(TuiState *state, size_t table_index) {
   ws->active = true;
   ws->table_index = table_index;
   ws->table_name = str_dup(state->tables[table_index]);
+  filters_init(&ws->filters);
 
   state->num_workspaces++;
   state->current_workspace = new_idx;
@@ -218,6 +234,7 @@ void workspace_close(TuiState *state) {
   db_result_free(ws->data);
   db_schema_free(ws->schema);
   free(ws->col_widths);
+  filters_free(&ws->filters);
 
   /* Free query-specific data */
   free(ws->query_text);

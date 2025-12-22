@@ -430,6 +430,7 @@ void tui_disconnect(TuiState *state) {
       db_result_free(ws->data);
       db_schema_free(ws->schema);
       free(ws->col_widths);
+      filters_free(&ws->filters);
       memset(ws, 0, sizeof(Workspace));
     }
   }
@@ -629,6 +630,12 @@ void tui_run(TuiState *state) {
       continue;
     }
 
+    /* Handle filters panel input if visible */
+    if (state->filters_visible && tui_handle_filters_input(state, ch)) {
+      tui_refresh(state);
+      continue;
+    }
+
     switch (ch) {
     case 'q':
     case 'Q':
@@ -644,6 +651,12 @@ void tui_run(TuiState *state) {
     case 'P':
       /* Open query tab */
       workspace_create_query(state);
+      break;
+
+    case 23: /* Ctrl+W - switch focus to filters if visible */
+      if (state->filters_visible) {
+        state->filters_focused = true;
+      }
       break;
 
     case '\n':
@@ -684,7 +697,15 @@ void tui_run(TuiState *state) {
 
     case KEY_UP:
     case 'k':
-      tui_move_cursor(state, -1, 0);
+      /* At first row with filters visible - focus filters */
+      if (state->cursor_row == 0 && state->filters_visible) {
+        state->filters_focused = true;
+        state->filters_cursor_row = state->workspaces[state->current_workspace].filters.num_filters - 1;
+        if (state->filters_cursor_row == (size_t)-1)
+          state->filters_cursor_row = 0;
+      } else {
+        tui_move_cursor(state, -1, 0);
+      }
       break;
 
     case KEY_DOWN:
@@ -732,13 +753,11 @@ void tui_run(TuiState *state) {
       break;
 
     case KEY_F(61): /* Ctrl+Home */
-    case 'g':
     case 'a':
       tui_home(state);
       break;
 
     case KEY_F(62): /* Ctrl+End */
-    case 'G':
     case 'z':
       tui_end(state);
       break;
@@ -785,7 +804,8 @@ void tui_run(TuiState *state) {
       tui_show_schema(state);
       break;
 
-    case '/':
+    case 'g':
+    case 'G':
     case 7:        /* Ctrl+G - universal go to line */
     case KEY_F(5): /* F5 - universal go to row */
       tui_show_goto_dialog(state);
@@ -829,6 +849,22 @@ void tui_run(TuiState *state) {
       /* Toggle status bar */
       state->status_visible = !state->status_visible;
       tui_recreate_windows(state);
+      break;
+
+    case '/':
+    case 'f':
+    case 'F':
+      /* Toggle filters panel (table view only) */
+      if (!state->sidebar_focused && state->num_workspaces > 0) {
+        Workspace *ws = &state->workspaces[state->current_workspace];
+        if (ws->type == WORKSPACE_TYPE_TABLE && state->schema) {
+          state->filters_visible = !state->filters_visible;
+          state->filters_focused = state->filters_visible;
+          state->filters_cursor_row = 0;
+          state->filters_cursor_col = 0;
+          state->filters_editing = false;
+        }
+      }
       break;
 
     case '?':
