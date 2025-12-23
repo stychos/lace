@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Modal cell editor view
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef LACE_EDITOR_VIEW_H

@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Cursor and page navigation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "tui_internal.h"
@@ -48,7 +51,8 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   getmaxyx(state->main_win, win_rows, win_cols);
 
   /* Account for filters panel if visible */
-  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+  int filters_height =
+      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
 
   /* Visible rows = main window height - 3 header rows - filters panel */
   int visible_rows = win_rows - 3 - filters_height;
@@ -106,7 +110,8 @@ void tui_page_up(TuiState *state) {
   (void)win_cols;
 
   /* Account for filters panel if visible */
-  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+  int filters_height =
+      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
 
   int page_size = win_rows - 3 - filters_height;
   if (page_size < 1)
@@ -152,7 +157,8 @@ void tui_page_down(TuiState *state) {
   (void)win_cols;
 
   /* Account for filters panel if visible */
-  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+  int filters_height =
+      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
 
   int page_size = win_rows - 3 - filters_height;
   if (page_size < 1)
@@ -232,7 +238,8 @@ void tui_end(TuiState *state) {
   (void)win_cols;
 
   /* Account for filters panel if visible */
-  int filters_height = state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+  int filters_height =
+      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
 
   int visible_rows = win_rows - 3 - filters_height;
   if (visible_rows < 1)

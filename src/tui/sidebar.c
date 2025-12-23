@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Sidebar rendering and input handling
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "tui_internal.h"
@@ -210,14 +213,16 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
       } else {
         Tab *tab = TUI_TAB(state);
         if (tab && tab->type == TAB_TYPE_QUERY) {
-          /* Query tab active - check if table tab already exists for same connection */
+          /* Query tab active - check if table tab already exists for same
+           * connection */
           bool found = false;
           size_t current_conn = tab->connection_index;
           for (size_t i = 0; i < ws->num_tabs; i++) {
             Tab *t = &ws->tabs[i];
             if (t->type == TAB_TYPE_TABLE && t->table_index == actual_idx &&
                 t->connection_index == current_conn) {
-              /* Found existing tab for same table and connection - switch to it */
+              /* Found existing tab for same table and connection - switch to it
+               */
               tab_switch(state, i);
               found = true;
               break;
@@ -385,7 +390,7 @@ void tui_draw_sidebar(TuiState *state) {
   if (state->sidebar_filter_active) {
     wattroff(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
-  int filter_y = y;  /* Remember filter line position for cursor */
+  int filter_y = y; /* Remember filter line position for cursor */
   y++;
 
   /* Separator */
@@ -408,7 +413,8 @@ void tui_draw_sidebar(TuiState *state) {
   getmaxyx(state->sidebar_win, win_height, win_width);
   (void)win_width;
 
-  /* Content area height: window height minus top border(1), filter(1), separator(1), bottom border(1) */
+  /* Content area height: window height minus top border(1), filter(1),
+   * separator(1), bottom border(1) */
   int list_height = win_height - 4;
 
   /* Count filtered tables */

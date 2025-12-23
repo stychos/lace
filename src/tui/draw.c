@@ -1,10 +1,13 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Drawing functions
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
-#include "tui_internal.h"
 #include "../core/app_state.h"
+#include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -252,7 +255,8 @@ void tui_draw_header(TuiState *state) {
   /* Workspace indicator centered (only if multiple workspaces) */
   if (state->app && state->app->num_workspaces > 1) {
     char ws_str[32];
-    snprintf(ws_str, sizeof(ws_str), "Workspace: %zu", state->app->current_workspace + 1);
+    snprintf(ws_str, sizeof(ws_str), "Workspace: %zu",
+             state->app->current_workspace + 1);
     int ws_len = (int)strlen(ws_str);
     int ws_x = (state->term_cols - ws_len) / 2;
     if (ws_x > 0) {
@@ -313,7 +317,8 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = state->cursor_col,
                            .scroll_row = state->scroll_row,
                            .scroll_col = state->scroll_col,
-                           .is_focused = !state->sidebar_focused && !state->filters_focused,
+                           .is_focused = !state->sidebar_focused &&
+                                         !state->filters_focused,
                            .is_editing = state->editing,
                            .edit_buffer = state->edit_buffer,
                            .edit_pos = state->edit_pos,
@@ -513,7 +518,8 @@ bool tui_handle_mouse_event(TuiState *state) {
       /* Check if we're in a query tab with results */
       Tab *scroll_tab = TUI_TAB(state);
       if (scroll_tab && scroll_tab->type == TAB_TYPE_QUERY &&
-          scroll_tab->query_results && scroll_tab->query_results->num_rows > 0) {
+          scroll_tab->query_results &&
+          scroll_tab->query_results->num_rows > 0) {
         /* Calculate results area position */
         int win_rows = state->term_rows - 4;
         int editor_height = (win_rows - 1) * 3 / 10;
@@ -549,7 +555,8 @@ bool tui_handle_mouse_event(TuiState *state) {
           }
         }
 
-        /* Adjust scroll to keep cursor visible using actual main window height */
+        /* Adjust scroll to keep cursor visible using actual main window height
+         */
         int main_rows, main_cols;
         getmaxyx(state->main_win, main_rows, main_cols);
         (void)main_cols;
@@ -763,8 +770,7 @@ bool tui_handle_mouse_event(TuiState *state) {
     if (editor_height < 3)
       editor_height = 3;
     int results_start_y = 2 + editor_height + 1; /* screen coords */
-    int results_header_y =
-        results_start_y + 1; /* "Results (N rows)" header */
+    int results_header_y = results_start_y + 1;  /* "Results (N rows)" header */
     int results_data_y =
         results_header_y + 3; /* After header + col names + separator */
 
@@ -778,47 +784,48 @@ bool tui_handle_mouse_event(TuiState *state) {
       query_click_tab->query_focus_results = true;
 
       /* Calculate which row was clicked */
-        int clicked_row = mouse_y - results_data_y;
-        size_t target_row = query_click_tab->query_result_scroll_row + (size_t)clicked_row;
+      int clicked_row = mouse_y - results_data_y;
+      size_t target_row =
+          query_click_tab->query_result_scroll_row + (size_t)clicked_row;
 
-        if (target_row < query_click_tab->query_results->num_rows) {
-          /* Calculate which column was clicked */
-          int rel_x = mouse_x - sidebar_width;
-          int x_pos = 1;
-          size_t target_col = query_click_tab->query_result_scroll_col;
+      if (target_row < query_click_tab->query_results->num_rows) {
+        /* Calculate which column was clicked */
+        int rel_x = mouse_x - sidebar_width;
+        int x_pos = 1;
+        size_t target_col = query_click_tab->query_result_scroll_col;
 
-          for (size_t col = query_click_tab->query_result_scroll_col;
-               col < query_click_tab->query_results->num_columns; col++) {
-            int width = DEFAULT_COL_WIDTH;
-            if (query_click_tab->query_result_col_widths &&
-                col < query_click_tab->query_result_num_cols) {
-              width = query_click_tab->query_result_col_widths[col];
-            }
-            if (rel_x >= x_pos && rel_x < x_pos + width) {
-              target_col = col;
-              break;
-            }
-            x_pos += width + 1;
-            if (x_pos > main_win_cols)
-              break;
-            target_col = col + 1;
+        for (size_t col = query_click_tab->query_result_scroll_col;
+             col < query_click_tab->query_results->num_columns; col++) {
+          int width = DEFAULT_COL_WIDTH;
+          if (query_click_tab->query_result_col_widths &&
+              col < query_click_tab->query_result_num_cols) {
+            width = query_click_tab->query_result_col_widths[col];
           }
+          if (rel_x >= x_pos && rel_x < x_pos + width) {
+            target_col = col;
+            break;
+          }
+          x_pos += width + 1;
+          if (x_pos > main_win_cols)
+            break;
+          target_col = col + 1;
+        }
 
-          if (target_col < query_click_tab->query_results->num_columns) {
-            query_click_tab->query_result_row = target_row;
-            query_click_tab->query_result_col = target_col;
+        if (target_col < query_click_tab->query_results->num_columns) {
+          query_click_tab->query_result_row = target_row;
+          query_click_tab->query_result_col = target_col;
 
-            /* Double-click: enter edit mode */
-            if (is_double && !query_click_tab->query_result_editing) {
-              tui_query_start_result_edit(state);
-            }
+          /* Double-click: enter edit mode */
+          if (is_double && !query_click_tab->query_result_editing) {
+            tui_query_start_result_edit(state);
           }
         }
-      } else {
-        /* Clicked in results header area */
-        query_click_tab->query_focus_results = true;
       }
-      return true;
+    } else {
+      /* Clicked in results header area */
+      query_click_tab->query_focus_results = true;
+    }
+    return true;
   }
 
   /* Check if click is in main table area */

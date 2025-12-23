@@ -1,5 +1,5 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core Actions Implementation
  *
  * This module implements the action dispatch system, translating UI-agnostic
@@ -7,6 +7,9 @@
  * callbacks provided by the frontend (TUI, GTK, Cocoa, etc.)
  *
  * Hierarchy: AppState → Connection → Workspace → Tab
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "actions.h"
@@ -184,8 +187,7 @@ static ChangeFlags handle_tab_prev(AppState *app) {
   if (!ws || ws->num_tabs <= 1)
     return CHANGED_NONE;
 
-  size_t prev =
-      ws->current_tab > 0 ? ws->current_tab - 1 : ws->num_tabs - 1;
+  size_t prev = ws->current_tab > 0 ? ws->current_tab - 1 : ws->num_tabs - 1;
   workspace_switch_tab(ws, prev);
   return CHANGED_WORKSPACE;
 }
@@ -255,14 +257,17 @@ static ChangeFlags handle_sidebar_focus(AppState *app, const UICallbacks *ui) {
   if (!tab || !UI_CALL_RET(ui, is_sidebar_visible, false))
     return CHANGED_NONE;
 
-  UI_CALL(ui, set_filters_was_focused, UI_CALL_RET(ui, is_filters_focused, false));
+  UI_CALL(ui, set_filters_was_focused,
+          UI_CALL_RET(ui, is_filters_focused, false));
   UI_CALL(ui, set_filters_focused, false);
   UI_CALL(ui, set_sidebar_focused, true);
-  UI_CALL(ui, set_sidebar_highlight, UI_CALL_RET(ui, get_sidebar_last_position, 0));
+  UI_CALL(ui, set_sidebar_highlight,
+          UI_CALL_RET(ui, get_sidebar_last_position, 0));
   return CHANGED_FOCUS | CHANGED_SIDEBAR;
 }
 
-static ChangeFlags handle_sidebar_unfocus(AppState *app, const UICallbacks *ui) {
+static ChangeFlags handle_sidebar_unfocus(AppState *app,
+                                          const UICallbacks *ui) {
   Tab *tab = app_current_tab(app);
   if (!tab)
     return CHANGED_NONE;
@@ -305,7 +310,8 @@ static ChangeFlags handle_filters_focus(AppState *app, const UICallbacks *ui) {
   return CHANGED_FOCUS;
 }
 
-static ChangeFlags handle_filters_unfocus(AppState *app, const UICallbacks *ui) {
+static ChangeFlags handle_filters_unfocus(AppState *app,
+                                          const UICallbacks *ui) {
   Tab *tab = app_current_tab(app);
   if (!tab)
     return CHANGED_NONE;

@@ -1,10 +1,13 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Modal dialogs
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
-#include "tui_internal.h"
 #include "../async/async.h"
+#include "tui_internal.h"
 #include "views/connect_view.h"
 #include <stdlib.h>
 #include <string.h>
@@ -299,9 +302,9 @@ void tui_show_goto_dialog(TuiState *state) {
               if (curr_tab && curr_tab->filters.num_filters > 0 &&
                   state->schema && state->conn) {
                 char *err = NULL;
-                where_clause = filters_build_where(
-                    &curr_tab->filters, state->schema,
-                    state->conn->driver->name, &err);
+                where_clause =
+                    filters_build_where(&curr_tab->filters, state->schema,
+                                        state->conn->driver->name, &err);
                 free(err);
               }
 
@@ -376,12 +379,14 @@ void tui_show_goto_dialog(TuiState *state) {
                                           ? target_row - PAGE_SIZE / 2
                                           : 0;
 
-                        /* Clean up count dialog and refresh before next dialog */
+                        /* Clean up count dialog and refresh before next dialog
+                         */
                         async_free(&count_op);
                         touchwin(stdscr);
                         tui_refresh(state);
 
-                        /* Use tui_load_rows_at_with_dialog which handles edge cases */
+                        /* Use tui_load_rows_at_with_dialog which handles edge
+                         * cases */
                         if (tui_load_rows_at_with_dialog(state, load_offset)) {
                           state->cursor_row = target_row - state->loaded_offset;
                           if (state->cursor_row < state->scroll_row) {
@@ -790,7 +795,8 @@ void tui_show_connect_dialog(TuiState *state) {
       /* Create a NEW workspace */
       ws = app_create_workspace(state->app);
       if (!ws) {
-        tui_set_error(state, "Failed to create workspace (max %d)", MAX_WORKSPACES);
+        tui_set_error(state, "Failed to create workspace (max %d)",
+                      MAX_WORKSPACES);
         free(result.connstr);
         tui_refresh(state);
         return;
@@ -868,7 +874,8 @@ void tui_show_connect_dialog(TuiState *state) {
     char *err = NULL;
     DbConnection *conn = db_connect(result.connstr, &err);
     if (!conn) {
-      tui_set_error(state, "Connection failed: %s", err ? err : "Unknown error");
+      tui_set_error(state, "Connection failed: %s",
+                    err ? err : "Unknown error");
       free(err);
       free(result.connstr);
       tui_refresh(state);
@@ -1132,64 +1139,64 @@ typedef struct {
 void tui_show_help(TuiState *state) {
   /* Define help content */
   static const HelpLine help_lines[] = {
-    {"Navigation", true},
-    {"Arrow keys / hjkl  Move cursor", false},
-    {"PgUp / PgDown      Page up/down", false},
-    {"Home / End         First/last column", false},
-    {"a                  Go to first row", false},
-    {"z                  Go to last row", false},
-    {"g (or Ctrl+G, F5)  Go to row number", false},
-    {"", false},
-    {"Editing", true},
-    {"Enter              Edit cell (inline)", false},
-    {"e (or F4)          Edit cell (modal)", false},
-    {"n (or Ctrl+N)      Set cell to NULL", false},
-    {"d (or Ctrl+D)      Set cell to empty", false},
-    {"x (or Delete)      Delete row", false},
-    {"Escape             Cancel editing", false},
-    {"", false},
-    {"Tabs & Workspaces", true},
-    {"[ / ] (or F7/F6)   Previous/next tab", false},
-    {"- / _              Close current tab", false},
-    {"+                  Open table in new tab", false},
-    {"{ / }              Previous/next workspace", false},
-    {"", false},
-    {"Query Tab", true},
-    {"p                  Open query tab", false},
-    {"Ctrl+R             Execute query at cursor", false},
-    {"Ctrl+A             Execute all queries", false},
-    {"Ctrl+T             Execute all in transaction", false},
-    {"Ctrl+W / Esc       Switch editor/results", false},
-    {"", false},
-    {"Sidebar", true},
-    {"t (or F9)          Toggle sidebar", false},
-    {"/                  Filter tables (sidebar)", false},
-    {"Enter              Select table", false},
-    {"Left/Right         Focus sidebar/table", false},
-    {"", false},
-    {"Table Filters", true},
-    {"/ (or f)           Toggle filters panel", false},
-    {"Arrow keys / hjkl  Navigate (spatial)", false},
-    {"Ctrl+W             Switch filters/table focus", false},
-    {"Enter              Edit field (auto-applies)", false},
-    {"+ / =              Add new filter", false},
-    {"- / x / Delete     Remove filter", false},
-    {"c                  Clear all filters", false},
-    {"Escape             Close panel", false},
-    {"", false},
-    {"Other", true},
-    {"r                  Refresh table", false},
-    {"s (or F3)          Show table schema", false},
-    {"c (or F2)          Connect dialog", false},
-    {"m                  Toggle menu bar", false},
-    {"b                  Toggle status bar", false},
-    {"? (or F1)          This help", false},
-    {"q (or Ctrl+X, F10) Quit", false},
-    {"", false},
-    {"Mouse", true},
-    {"Click              Select cell/table", false},
-    {"Double-click       Edit cell", false},
-    {"Scroll             Navigate rows", false},
+      {"Navigation", true},
+      {"Arrow keys / hjkl  Move cursor", false},
+      {"PgUp / PgDown      Page up/down", false},
+      {"Home / End         First/last column", false},
+      {"a                  Go to first row", false},
+      {"z                  Go to last row", false},
+      {"g (or Ctrl+G, F5)  Go to row number", false},
+      {"", false},
+      {"Editing", true},
+      {"Enter              Edit cell (inline)", false},
+      {"e (or F4)          Edit cell (modal)", false},
+      {"n (or Ctrl+N)      Set cell to NULL", false},
+      {"d (or Ctrl+D)      Set cell to empty", false},
+      {"x (or Delete)      Delete row", false},
+      {"Escape             Cancel editing", false},
+      {"", false},
+      {"Tabs & Workspaces", true},
+      {"[ / ] (or F7/F6)   Previous/next tab", false},
+      {"- / _              Close current tab", false},
+      {"+                  Open table in new tab", false},
+      {"{ / }              Previous/next workspace", false},
+      {"", false},
+      {"Query Tab", true},
+      {"p                  Open query tab", false},
+      {"Ctrl+R             Execute query at cursor", false},
+      {"Ctrl+A             Execute all queries", false},
+      {"Ctrl+T             Execute all in transaction", false},
+      {"Ctrl+W / Esc       Switch editor/results", false},
+      {"", false},
+      {"Sidebar", true},
+      {"t (or F9)          Toggle sidebar", false},
+      {"/                  Filter tables (sidebar)", false},
+      {"Enter              Select table", false},
+      {"Left/Right         Focus sidebar/table", false},
+      {"", false},
+      {"Table Filters", true},
+      {"/ (or f)           Toggle filters panel", false},
+      {"Arrow keys / hjkl  Navigate (spatial)", false},
+      {"Ctrl+W             Switch filters/table focus", false},
+      {"Enter              Edit field (auto-applies)", false},
+      {"+ / =              Add new filter", false},
+      {"- / x / Delete     Remove filter", false},
+      {"c                  Clear all filters", false},
+      {"Escape             Close panel", false},
+      {"", false},
+      {"Other", true},
+      {"r                  Refresh table", false},
+      {"s (or F3)          Show table schema", false},
+      {"c (or F2)          Connect dialog", false},
+      {"m                  Toggle menu bar", false},
+      {"b                  Toggle status bar", false},
+      {"? (or F1)          This help", false},
+      {"q (or Ctrl+X, F10) Quit", false},
+      {"", false},
+      {"Mouse", true},
+      {"Click              Select cell/table", false},
+      {"Double-click       Edit cell", false},
+      {"Scroll             Navigate rows", false},
   };
   const int num_lines = sizeof(help_lines) / sizeof(help_lines[0]);
 
@@ -1336,7 +1343,7 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
   if (!state || !op)
     return false;
 
-  #define POLL_INTERVAL_MS 50
+#define POLL_INTERVAL_MS 50
   int delay_iterations = delay_ms / POLL_INTERVAL_MS;
 
   WINDOW *dialog = NULL;
@@ -1429,7 +1436,7 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
     }
   }
 
-  #undef POLL_INTERVAL_MS
+#undef POLL_INTERVAL_MS
 }
 
 /*
@@ -1465,7 +1472,8 @@ DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr) {
   }
 
   /* Connection dialog shows immediately (no delay) */
-  bool completed = tui_show_processing_dialog_ex(state, &op, "Connecting...", 0);
+  bool completed =
+      tui_show_processing_dialog_ex(state, &op, "Connecting...", 0);
 
   DbConnection *result = NULL;
   if (completed && op.state == ASYNC_STATE_COMPLETED) {
@@ -1603,8 +1611,7 @@ TableSchema *tui_get_schema_with_progress(TuiState *state, const char *table) {
     return NULL;
   }
 
-  bool completed =
-      tui_show_processing_dialog(state, &op, "Loading schema...");
+  bool completed = tui_show_processing_dialog(state, &op, "Loading schema...");
 
   TableSchema *result = NULL;
   if (completed && op.state == ASYNC_STATE_COMPLETED) {

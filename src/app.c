@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Application implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "app.h"
@@ -89,7 +92,8 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
 void app_config_free(AppConfig *config) {
   if (!config)
     return;
-  /* Use secure free for connection string and query as they may contain passwords */
+  /* Use secure free for connection string and query as they may contain
+   * passwords */
   str_secure_free(config->connstr);
   str_secure_free(config->query);
 }
@@ -218,7 +222,8 @@ static int run_list_tables(AppConfig *config) {
 
 static int run_tui_mode(AppConfig *config) {
   AppState app;
-  TuiState state = {0}; /* Zero-initialize to prevent use of uninitialized fields */
+  TuiState state = {
+      0}; /* Zero-initialize to prevent use of uninitialized fields */
 
   app_state_init(&app);
 

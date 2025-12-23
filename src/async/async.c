@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Async operation implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "async.h"

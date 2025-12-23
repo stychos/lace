@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * TUI interface
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef LACE_TUI_H
@@ -48,7 +51,7 @@ typedef struct {
   bool filters_visible;
   bool filters_focused;
   bool filters_editing;
-  bool filters_was_focused;  /* Was filters focused before entering sidebar */
+  bool filters_was_focused; /* Was filters focused before entering sidebar */
   size_t filters_cursor_row;
   size_t filters_cursor_col;
   size_t filters_scroll;
@@ -112,7 +115,7 @@ typedef struct {
   size_t sidebar_last_highlight;
 
   /* Track state before sidebar focus for restoration */
-  bool filters_was_focused;    /* Was filters focused before sidebar? */
+  bool filters_was_focused;     /* Was filters focused before sidebar? */
   size_t sidebar_last_position; /* Sidebar highlight before leaving */
 
   /* Filters panel state (synced from current workspace) */
@@ -192,7 +195,8 @@ void tui_sync_to_workspace(TuiState *state);
  * New architecture:
  *   - Connections are a flat pool at AppState level
  *   - Workspaces are independent at AppState level
- *   - Each Tab has a connection_index field referencing which connection it uses
+ *   - Each Tab has a connection_index field referencing which connection it
+ * uses
  * ============================================================================
  */
 
@@ -212,15 +216,22 @@ void tui_sync_to_workspace(TuiState *state);
 #define TUI_SCHEMA(state) (TUI_TAB(state) ? TUI_TAB(state)->schema : NULL)
 
 /* Connection shortcuts for current tab (with null safety) */
-#define TUI_CONN(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->conn : NULL)
-#define TUI_TABLES(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->tables : NULL)
-#define TUI_NUM_TABLES(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->num_tables : 0)
+#define TUI_CONN(state)                                                        \
+  (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->conn : NULL)
+#define TUI_TABLES(state)                                                      \
+  (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->tables : NULL)
+#define TUI_NUM_TABLES(state)                                                  \
+  (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->num_tables : 0)
 
 /* Workspace/Tab count shortcuts */
-#define TUI_NUM_WORKSPACES(state) ((state)->app ? (state)->app->num_workspaces : 0)
-#define TUI_CURRENT_WS_IDX(state) ((state)->app ? (state)->app->current_workspace : 0)
-#define TUI_NUM_TABS(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->num_tabs : 0)
-#define TUI_CURRENT_TAB_IDX(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->current_tab : 0)
+#define TUI_NUM_WORKSPACES(state)                                              \
+  ((state)->app ? (state)->app->num_workspaces : 0)
+#define TUI_CURRENT_WS_IDX(state)                                              \
+  ((state)->app ? (state)->app->current_workspace : 0)
+#define TUI_NUM_TABS(state)                                                    \
+  (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->num_tabs : 0)
+#define TUI_CURRENT_TAB_IDX(state)                                             \
+  (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->current_tab : 0)
 
 /* Get current tab's UI state (with bounds checking) */
 static inline UITabState *tui_current_tab_ui(TuiState *state) {
@@ -237,7 +248,8 @@ static inline UITabState *tui_current_tab_ui(TuiState *state) {
 }
 
 /* Get UI state for a specific workspace/tab index */
-static inline UITabState *tui_get_tab_ui(TuiState *state, size_t ws_idx, size_t tab_idx) {
+static inline UITabState *tui_get_tab_ui(TuiState *state, size_t ws_idx,
+                                         size_t tab_idx) {
   if (!state || ws_idx >= MAX_WORKSPACES || tab_idx >= MAX_TABS)
     return NULL;
   return &state->tab_ui[ws_idx][tab_idx];

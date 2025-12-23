@@ -1,9 +1,12 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Table filters UI implementation
  *
  * Core filter logic (filters_init, filters_add, filters_build_where, etc.)
  * is in core/filters.c. This file contains only TUI-specific code.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "tui_internal.h"
@@ -80,7 +83,7 @@ void tui_draw_filters_panel(TuiState *state) {
   }
 
   /* Column positions */
-  int col_x = start_x + 1;  /* Align with title */
+  int col_x = start_x + 1; /* Align with title */
   int op_x = start_x + 17;
   int val_x = start_x + 31;
   int del_x = panel_width - 4;
@@ -94,7 +97,8 @@ void tui_draw_filters_panel(TuiState *state) {
   wattron(state->main_win, A_BOLD);
   if (active_count > 0) {
     mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%zu) (+/-:add/del, c:clear, ^W:switch, Esc)", active_count);
+              "Filters (%zu) (+/-:add/del, c:clear, ^W:switch, Esc)",
+              active_count);
   } else {
     mvwprintw(state->main_win, start_y, col_x,
               "Filters (+/-:add/del, c:clear, ^W:switch, Esc)");
@@ -120,12 +124,14 @@ void tui_draw_filters_panel(TuiState *state) {
   for (size_t i = 0; i < visible_count; i++) {
     size_t filter_idx = visible_start + i;
     ColumnFilter *cf = &f->filters[filter_idx];
-    bool row_selected = state->filters_focused && (state->filters_cursor_row == filter_idx);
+    bool row_selected =
+        state->filters_focused && (state->filters_cursor_row == filter_idx);
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
 
     /* Column name */
     const char *col_name = is_raw ? "(RAW)" : "???";
-    if (!is_raw && state->schema && cf->column_index < state->schema->num_columns) {
+    if (!is_raw && state->schema &&
+        cf->column_index < state->schema->num_columns) {
       col_name = state->schema->columns[cf->column_index].name;
     }
 
@@ -161,27 +167,31 @@ void tui_draw_filters_panel(TuiState *state) {
       if (row_selected && state->filters_cursor_col == 2) {
         if (state->filters_editing) {
           wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
-          mvwprintw(state->main_win, y, val_x, "%-*.*s",
-                    val_width, val_width, state->filters_edit_buffer);
+          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                    state->filters_edit_buffer);
           wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
         } else {
           wattron(state->main_win, A_REVERSE);
           if (show_placeholder) {
             wattron(state->main_win, A_DIM);
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width, "WHERE ...");
+            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                      "WHERE ...");
             wattroff(state->main_win, A_DIM);
           } else {
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width, display_val);
+            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                      display_val);
           }
           wattroff(state->main_win, A_REVERSE);
         }
       } else {
         if (show_placeholder) {
           wattron(state->main_win, A_DIM);
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width, "WHERE ...");
+          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                    "WHERE ...");
           wattroff(state->main_win, A_DIM);
         } else {
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width, display_val);
+          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                    display_val);
         }
       }
     }
@@ -515,8 +525,7 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         size_t filter_idx = state->filters_cursor_row;
         ColumnFilter *cf = &f->filters[filter_idx];
         if (state->filters_cursor_col == 2) {
-          strncpy(cf->value, state->filters_edit_buffer,
-                  sizeof(cf->value) - 1);
+          strncpy(cf->value, state->filters_edit_buffer, sizeof(cf->value) - 1);
           cf->value[sizeof(cf->value) - 1] = '\0';
         }
       }
@@ -577,8 +586,10 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     if (state->filters_cursor_row < f->num_filters - 1) {
       state->filters_cursor_row++;
       /* Adjust scroll if cursor moved below visible area */
-      if (state->filters_cursor_row >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
-        state->filters_scroll = state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
+      if (state->filters_cursor_row >=
+          state->filters_scroll + MAX_VISIBLE_FILTERS) {
+        state->filters_scroll =
+            state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
       }
     } else {
       /* At last filter row - move focus to table */
@@ -663,12 +674,14 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     }
     case 1: /* Operator - show dropdown (not for RAW) */
       if (!is_raw) {
-        int sel = show_operator_dropdown(state, cf->op,
-                                         state->filters_cursor_row);
+        int sel =
+            show_operator_dropdown(state, cf->op, state->filters_cursor_row);
         if (sel >= 0) {
           FilterOperator new_op = (FilterOperator)sel;
-          bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
-          bool will_have_effect = cf->value[0] != '\0' || !filter_op_needs_value(new_op);
+          bool had_effect =
+              cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+          bool will_have_effect =
+              cf->value[0] != '\0' || !filter_op_needs_value(new_op);
           cf->op = new_op;
           /* Only apply if filter had or will have effect */
           if (had_effect || will_have_effect) {
@@ -717,8 +730,10 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       state->filters_cursor_row = f->num_filters - 1;
       state->filters_cursor_col = 0;
       /* Scroll to show new filter */
-      if (state->filters_cursor_row >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
-        state->filters_scroll = state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
+      if (state->filters_cursor_row >=
+          state->filters_scroll + MAX_VISIBLE_FILTERS) {
+        state->filters_scroll =
+            state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
       }
     }
     break;
@@ -763,7 +778,8 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       if (state->filters_scroll > 0 &&
           f->num_filters <= state->filters_scroll + MAX_VISIBLE_FILTERS) {
         state->filters_scroll = f->num_filters > MAX_VISIBLE_FILTERS
-                                ? f->num_filters - MAX_VISIBLE_FILTERS : 0;
+                                    ? f->num_filters - MAX_VISIBLE_FILTERS
+                                    : 0;
       }
     } else {
       cf->column_index = 0;
@@ -801,7 +817,7 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   case 'q':
   case 'Q':
   case KEY_F(10):
-  case 24: /* Ctrl+X */
+  case 24:        /* Ctrl+X */
     return false; /* Let global keys work from filters */
 
   default:

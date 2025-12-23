@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Cell editing and row deletion
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "tui_internal.h"
@@ -410,8 +413,8 @@ void tui_delete_row(TuiState *state) {
 
   /* Perform the delete */
   char *err = NULL;
-  bool success =
-      db_delete_row(state->conn, table, pk.col_names, pk.values, pk.count, &err);
+  bool success = db_delete_row(state->conn, table, pk.col_names, pk.values,
+                               pk.count, &err);
   pk_info_free(&pk);
 
   if (success) {

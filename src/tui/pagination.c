@@ -1,10 +1,13 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Pagination and data loading
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
-#include "tui_internal.h"
 #include "../async/async.h"
+#include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -302,7 +305,8 @@ bool tui_refresh_table(TuiState *state) {
       /* Load data at saved offset */
       size_t target_offset = saved_offset;
       if (target_offset >= state->total_rows) {
-        target_offset = state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
+        target_offset =
+            state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
       }
 
       if (target_offset > 0) {
@@ -319,21 +323,24 @@ bool tui_refresh_table(TuiState *state) {
       state->cursor_row = 0;
     }
 
-    state->cursor_col = saved_cursor_col < state->data->num_columns
-                            ? saved_cursor_col
-                            : (state->data->num_columns > 0 ? state->data->num_columns - 1 : 0);
+    state->cursor_col =
+        saved_cursor_col < state->data->num_columns
+            ? saved_cursor_col
+            : (state->data->num_columns > 0 ? state->data->num_columns - 1 : 0);
 
     /* Restore scroll within bounds */
     size_t max_scroll = state->data->num_rows > (size_t)state->content_rows
                             ? state->data->num_rows - state->content_rows
                             : 0;
-    state->scroll_row = saved_scroll_row < max_scroll ? saved_scroll_row : max_scroll;
+    state->scroll_row =
+        saved_scroll_row < max_scroll ? saved_scroll_row : max_scroll;
     state->scroll_col = saved_scroll_col;
 
     /* Ensure cursor is visible */
     if (state->cursor_row < state->scroll_row) {
       state->scroll_row = state->cursor_row;
-    } else if (state->cursor_row >= state->scroll_row + (size_t)state->content_rows) {
+    } else if (state->cursor_row >=
+               state->scroll_row + (size_t)state->content_rows) {
       state->scroll_row = state->cursor_row - state->content_rows + 1;
     }
   }
@@ -451,8 +458,8 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     data = db_query_page_where(state->conn, table, offset, PAGE_SIZE,
                                where_clause, NULL, false, &err);
   } else {
-    data = db_query_page(state->conn, table, offset, PAGE_SIZE, NULL, false,
-                         &err);
+    data =
+        db_query_page(state->conn, table, offset, PAGE_SIZE, NULL, false, &err);
   }
   free(where_clause);
   if (!data) {
@@ -857,7 +864,8 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
   if (completed && op.state == ASYNC_STATE_COMPLETED && op.result) {
     ResultSet *new_data = (ResultSet *)op.result;
 
-    /* If we got 0 rows and were using approximate count, get exact count and retry */
+    /* If we got 0 rows and were using approximate count, get exact count and
+     * retry */
     if (new_data->num_rows == 0 && was_approximate && offset > 0) {
       db_result_free(new_data);
       async_free(&op);
@@ -876,8 +884,8 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
         return false;
       }
 
-      bool count_completed = tui_show_processing_dialog(state, &count_op,
-                                                        "Counting rows (exact)...");
+      bool count_completed = tui_show_processing_dialog(
+          state, &count_op, "Counting rows (exact)...");
       int64_t exact_count = -1;
       if (count_completed && count_op.state == ASYNC_STATE_COMPLETED) {
         exact_count = count_op.count;
@@ -898,7 +906,8 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
 
         /* Recalculate offset and retry */
         size_t new_offset = (size_t)exact_count > PAGE_SIZE
-                            ? (size_t)exact_count - PAGE_SIZE : 0;
+                                ? (size_t)exact_count - PAGE_SIZE
+                                : 0;
 
         /* Refresh screen before next dialog */
         touchwin(stdscr);
@@ -968,7 +977,8 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     AsyncOperation *bg_op = (AsyncOperation *)tab->bg_load_op;
 
     /* Show progress dialog and wait for existing operation */
-    bool completed = tui_show_processing_dialog(state, bg_op, "Loading data...");
+    bool completed =
+        tui_show_processing_dialog(state, bg_op, "Loading data...");
 
     bool success = false;
     if (completed && bg_op->state == ASYNC_STATE_COMPLETED && bg_op->result) {
@@ -1251,7 +1261,8 @@ void tui_cancel_background_load(TuiState *state) {
   /* Request cancellation */
   async_cancel(op);
 
-  /* Wait for operation to actually complete/cancel - important for connection safety */
+  /* Wait for operation to actually complete/cancel - important for connection
+   * safety */
   /* PostgreSQL connections can't be used concurrently, so we must wait */
   async_wait(op, 500); /* Wait up to 500ms for query to cancel */
 

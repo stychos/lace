@@ -1,13 +1,16 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core Filter Logic (platform-independent)
  *
  * This module implements filter operations and SQL WHERE clause building.
  * All functions here are UI-agnostic.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
-#include "app_state.h"
 #include "../util/str.h"
+#include "app_state.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>

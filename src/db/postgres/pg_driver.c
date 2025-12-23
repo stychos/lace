@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * PostgreSQL driver - uses libpq C API
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "../../util/str.h"
@@ -109,7 +112,8 @@ static void pg_free_result(ResultSet *rs);
 static void pg_free_schema(TableSchema *schema);
 static void pg_free_string_list(char **list, size_t count);
 static void *pg_prepare_cancel(DbConnection *conn);
-static bool pg_cancel_query(DbConnection *conn, void *cancel_handle, char **err);
+static bool pg_cancel_query(DbConnection *conn, void *cancel_handle,
+                            char **err);
 static void pg_free_cancel_handle(void *cancel_handle);
 static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
                                      char **err);
@@ -1412,8 +1416,7 @@ static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
                     "WHERE n.nspname = $1 AND c.relname = $2";
 
   const char *params[2] = {schema_name, table_name};
-  PGresult *res =
-      PQexecParams(data->conn, sql, 2, NULL, params, NULL, NULL, 0);
+  PGresult *res = PQexecParams(data->conn, sql, 2, NULL, params, NULL, NULL, 0);
 
   free(schema_name);
   free(table_name);

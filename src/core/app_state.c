@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core application state implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "app_state.h"
@@ -351,7 +354,8 @@ bool app_close_connection(AppState *app, size_t index) {
 
   app->num_connections--;
 
-  /* Update connection_index in all remaining tabs that reference connections after this one */
+  /* Update connection_index in all remaining tabs that reference connections
+   * after this one */
   for (size_t w = 0; w < app->num_workspaces; w++) {
     Workspace *ws = &app->workspaces[w];
     for (size_t t = 0; t < ws->num_tabs; t++) {

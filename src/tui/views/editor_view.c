@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Modal cell editor view implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "editor_view.h"
@@ -352,13 +355,15 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
 
   /* Calculate line number width based on total lines */
   int lnum_width = 3;
-  if (state->num_lines >= 1000) lnum_width = 4;
-  if (state->num_lines >= 10000) lnum_width = 5;
+  if (state->num_lines >= 1000)
+    lnum_width = 4;
+  if (state->num_lines >= 10000)
+    lnum_width = 5;
 
   /* Content area */
   int content_y = 1;
   int content_x = 1 + lnum_width + 1; /* line numbers + separator space */
-  int content_h = height - 4; /* Leave room for status bar */
+  int content_h = height - 4;         /* Leave room for status bar */
   int content_w = width - 2 - lnum_width - 1;
 
   state->view_rows = content_h;

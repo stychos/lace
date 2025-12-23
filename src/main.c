@@ -1,8 +1,10 @@
 /*
- * lace - Database Viewer and Manager
- *
+ * Lace
  * A TUI database viewer/manager for Linux
  * Supports: SQLite, PostgreSQL, MySQL
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "app.h"

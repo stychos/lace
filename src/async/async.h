@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Async operation infrastructure for cancellable database operations
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef ASYNC_H
@@ -52,9 +55,9 @@ typedef struct {
   bool use_approximate;
 
   /* Output results (set by worker thread) */
-  void *result;       /* ResultSet*, TableSchema*, DbConnection*, char** */
-  char *error;        /* Error message if failed */
-  int64_t count;      /* For count/exec operations */
+  void *result;        /* ResultSet*, TableSchema*, DbConnection*, char** */
+  char *error;         /* Error message if failed */
+  int64_t count;       /* For count/exec operations */
   size_t result_count; /* For list operations (e.g., table count) */
   bool is_approximate; /* True if count is an estimate */
 

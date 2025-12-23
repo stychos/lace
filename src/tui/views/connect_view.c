@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Connection dialog view implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "connect_view.h"
@@ -25,9 +28,9 @@ typedef struct {
 
 /* Dialog focus states */
 typedef enum {
-  FOCUS_INPUT,      /* Connection string input */
-  FOCUS_MODE,       /* Mode selection (after successful connection test) */
-  FOCUS_BUTTONS     /* Connect/Cancel buttons */
+  FOCUS_INPUT,  /* Connection string input */
+  FOCUS_MODE,   /* Mode selection (after successful connection test) */
+  FOCUS_BUTTONS /* Connect/Cancel buttons */
 } DialogFocus;
 
 static void input_init(InputField *input, int width) {
@@ -209,27 +212,33 @@ static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
 
     /* Connect (in tab) */
     if (selected_button == 0) {
-      if (btn_focused) wattron(win, A_REVERSE);
+      if (btn_focused)
+        wattron(win, A_REVERSE);
       mvwprintw(win, btn_y, start_x, "[ Connect ]");
-      if (btn_focused) wattroff(win, A_REVERSE);
+      if (btn_focused)
+        wattroff(win, A_REVERSE);
     } else {
       mvwprintw(win, btn_y, start_x, "[ Connect ]");
     }
 
     /* New Workspace */
     if (selected_button == 1) {
-      if (btn_focused) wattron(win, A_REVERSE);
+      if (btn_focused)
+        wattron(win, A_REVERSE);
       mvwprintw(win, btn_y, start_x + 13, "[ New Workspace ]");
-      if (btn_focused) wattroff(win, A_REVERSE);
+      if (btn_focused)
+        wattroff(win, A_REVERSE);
     } else {
       mvwprintw(win, btn_y, start_x + 13, "[ New Workspace ]");
     }
 
     /* Cancel */
     if (selected_button == 2) {
-      if (btn_focused) wattron(win, A_REVERSE);
+      if (btn_focused)
+        wattron(win, A_REVERSE);
       mvwprintw(win, btn_y, start_x + 32, "[ Cancel ]");
-      if (btn_focused) wattroff(win, A_REVERSE);
+      if (btn_focused)
+        wattroff(win, A_REVERSE);
     } else {
       mvwprintw(win, btn_y, start_x + 32, "[ Cancel ]");
     }
@@ -239,15 +248,19 @@ static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
     int cancel_x = width / 2 + 2;
 
     if (selected_button == 0) {
-      if (btn_focused) wattron(win, A_REVERSE);
+      if (btn_focused)
+        wattron(win, A_REVERSE);
       mvwprintw(win, btn_y, connect_x, "[ Connect ]");
-      if (btn_focused) wattroff(win, A_REVERSE);
+      if (btn_focused)
+        wattroff(win, A_REVERSE);
       mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
     } else {
       mvwprintw(win, btn_y, connect_x, "[ Connect ]");
-      if (btn_focused) wattron(win, A_REVERSE);
+      if (btn_focused)
+        wattron(win, A_REVERSE);
       mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
-      if (btn_focused) wattroff(win, A_REVERSE);
+      if (btn_focused)
+        wattroff(win, A_REVERSE);
     }
   }
 
@@ -294,7 +307,8 @@ ConnectResult connect_view_show(TuiState *state) {
   input_init(&input, width - 6);
 
   char *error_msg = NULL;
-  int selected_button = 0; /* 0 = Connect, 1 = New Workspace (if shown), last = Cancel */
+  int selected_button =
+      0; /* 0 = Connect, 1 = New Workspace (if shown), last = Cancel */
   int num_buttons = has_existing_workspace ? 3 : 2;
   int cancel_button = num_buttons - 1;
   DialogFocus focus = FOCUS_INPUT;
@@ -436,7 +450,8 @@ ConnectResult connect_view_show(TuiState *state) {
               focus = FOCUS_INPUT;
             }
           } else {
-            error_msg = str_dup("Please enter a connection string or file path");
+            error_msg =
+                str_dup("Please enter a connection string or file path");
             focus = FOCUS_INPUT;
           }
         }

@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * SQLite driver - uses libsqlite3 C API
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "../../util/str.h"
@@ -664,7 +667,8 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
           const char *on_delete = (const char *)sqlite3_column_text(stmt, 6);
           fk->on_update = str_dup(on_update ? on_update : "");
           fk->on_delete = str_dup(on_delete ? on_delete : "");
-          /* on_update/on_delete can be NULL on failure - acceptable for display */
+          /* on_update/on_delete can be NULL on failure - acceptable for display
+           */
 
           fk_idx++;
         }
@@ -1163,8 +1167,8 @@ static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
 
   /* Try sqlite_stat1 first (populated by ANALYZE command) */
   /* First try table-level stats (idx IS NULL), then any index stats */
-  const char *sql =
-      "SELECT stat FROM sqlite_stat1 WHERE tbl = ? ORDER BY idx IS NULL DESC LIMIT 1";
+  const char *sql = "SELECT stat FROM sqlite_stat1 WHERE tbl = ? ORDER BY idx "
+                    "IS NULL DESC LIMIT 1";
 
   sqlite3_stmt *stmt = NULL;
   int rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
@@ -1190,6 +1194,7 @@ static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
 
   sqlite3_finalize(stmt);
 
-  /* sqlite_stat1 not available or no data - return -1 to indicate fallback needed */
+  /* sqlite_stat1 not available or no data - return -1 to indicate fallback
+   * needed */
   return -1;
 }

@@ -1,9 +1,12 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core application state (platform-independent)
  *
- * Hierarchy: AppState contains both Connections (pool) and Workspaces (independent)
- * Each Tab references which Connection it uses.
+ * Hierarchy: AppState contains both Connections (pool) and Workspaces
+ * (independent) Each Tab references which Connection it uses.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef LACE_APP_STATE_H
@@ -64,9 +67,9 @@ typedef struct {
 
 /* Connection - a database connection in the pool */
 typedef struct {
-  bool active;          /* Is this connection slot used */
-  DbConnection *conn;   /* Database connection handle */
-  char *connstr;        /* Connection string (for display/reconnect) */
+  bool active;        /* Is this connection slot used */
+  DbConnection *conn; /* Database connection handle */
+  char *connstr;      /* Connection string (for display/reconnect) */
 
   /* Tables list (from this connection) */
   char **tables;
@@ -86,8 +89,8 @@ typedef enum {
 
 /* Tab - holds per-tab state (table data or query) */
 typedef struct {
-  TabType type;   /* Type of tab content */
-  bool active;    /* Is this tab active/used */
+  TabType type; /* Type of tab content */
+  bool active;  /* Is this tab active/used */
 
   /* Connection reference - which connection this tab uses */
   size_t connection_index; /* Index into app->connections[] */
@@ -130,7 +133,7 @@ typedef struct {
   ResultSet *query_results;
   int64_t query_affected;
   char *query_error;
-  bool query_focus_results;  /* TODO: Move to UITabState */
+  bool query_focus_results; /* TODO: Move to UITabState */
   size_t query_result_row;
   size_t query_result_col;
   size_t query_result_scroll_row;
@@ -139,9 +142,9 @@ typedef struct {
   size_t query_result_num_cols;
 
   /* Query results editing */
-  bool query_result_editing;       /* TODO: Move to UITabState */
-  char *query_result_edit_buf;     /* TODO: Move to UITabState */
-  size_t query_result_edit_pos;    /* TODO: Move to UITabState */
+  bool query_result_editing;    /* TODO: Move to UITabState */
+  char *query_result_edit_buf;  /* TODO: Move to UITabState */
+  size_t query_result_edit_pos; /* TODO: Move to UITabState */
   char *query_source_table;
   TableSchema *query_source_schema;
 
@@ -165,8 +168,8 @@ typedef struct {
 
 /* Workspace - container for tabs */
 typedef struct {
-  bool active;       /* Is this workspace active/used */
-  char name[64];     /* Optional workspace name for display */
+  bool active;   /* Is this workspace active/used */
+  char name[64]; /* Optional workspace name for display */
 
   /* Tabs */
   Tab tabs[MAX_TABS];

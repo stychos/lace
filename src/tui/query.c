@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Query tab implementation
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "tui_internal.h"
@@ -98,7 +101,8 @@ bool tab_create_query(TuiState *state) {
     ui->sidebar_highlight = state->sidebar_highlight;
     ui->sidebar_scroll = state->sidebar_scroll;
     ui->sidebar_filter_len = state->sidebar_filter_len;
-    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+    memcpy(ui->sidebar_filter, state->sidebar_filter,
+           sizeof(ui->sidebar_filter));
 
     /* Query tab has no filters panel */
     ui->filters_visible = false;
@@ -141,11 +145,10 @@ bool tab_create_query(TuiState *state) {
 }
 
 /* Legacy wrapper for compatibility */
-bool workspace_create_query(TuiState *state) {
-  return tab_create_query(state);
-}
+bool workspace_create_query(TuiState *state) { return tab_create_query(state); }
 
-/* Ensure query buffer has enough capacity. Returns false on allocation failure. */
+/* Ensure query buffer has enough capacity. Returns false on allocation failure.
+ */
 static bool query_ensure_capacity(Tab *tab, size_t needed) {
   if (needed <= tab->query_capacity)
     return true;
@@ -241,7 +244,8 @@ static void query_insert_char(Tab *tab, char c) {
 
   /* Shift text after cursor */
   memmove(tab->query_text + tab->query_cursor + 1,
-          tab->query_text + tab->query_cursor, tab->query_len - tab->query_cursor);
+          tab->query_text + tab->query_cursor,
+          tab->query_len - tab->query_cursor);
 
   tab->query_text[tab->query_cursor] = c;
   tab->query_len++;
@@ -708,7 +712,8 @@ static void query_execute(TuiState *state, const char *sql) {
         tui_set_status(state, "Loaded %zu/%zu rows", tab->query_loaded_count,
                        tab->query_total_rows);
       } else {
-        tui_set_status(state, "%zu rows returned", tab->query_results->num_rows);
+        tui_set_status(state, "%zu rows returned",
+                       tab->query_results->num_rows);
       }
     }
   } else {
@@ -736,7 +741,8 @@ static void query_execute(TuiState *state, const char *sql) {
   }
 
   /* Focus results pane after execution (only if there are results) */
-  if (!tab->query_error && tab->query_results && tab->query_results->num_rows > 0) {
+  if (!tab->query_error && tab->query_results &&
+      tab->query_results->num_rows > 0) {
     tab->query_focus_results = true;
   }
 }
@@ -799,8 +805,8 @@ static bool query_load_more_rows(TuiState *state, Tab *tab) {
   if (tab->query_total_rows > 0 && new_offset >= tab->query_total_rows)
     return false;
 
-  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu", tab->query_base_sql,
-                                   PAGE_SIZE, new_offset);
+  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu",
+                                   tab->query_base_sql, PAGE_SIZE, new_offset);
   if (!paginated_sql)
     return false;
 
@@ -1076,12 +1082,13 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset) {
 
   /* Clamp offset */
   if (offset >= tab->query_total_rows) {
-    offset =
-        tab->query_total_rows > PAGE_SIZE ? tab->query_total_rows - PAGE_SIZE : 0;
+    offset = tab->query_total_rows > PAGE_SIZE
+                 ? tab->query_total_rows - PAGE_SIZE
+                 : 0;
   }
 
-  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu", tab->query_base_sql,
-                                   PAGE_SIZE, offset);
+  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu",
+                                   tab->query_base_sql, PAGE_SIZE, offset);
   if (!paginated_sql)
     return false;
 
@@ -1185,14 +1192,15 @@ void tui_draw_query(TuiState *state) {
   if (!tab->query_focus_results) {
     wattron(state->main_win, A_BOLD);
   }
-  mvwprintw(state->main_win, 0, 1, "SQL Query (^R: run, ^A: all, ^T: transaction, ^W: switch)");
+  mvwprintw(state->main_win, 0, 1,
+            "SQL Query (^R: run, ^A: all, ^T: transaction, ^W: switch)");
   if (!tab->query_focus_results) {
     wattroff(state->main_win, A_BOLD);
   }
 
   /* Draw query text */
-  for (int y = 1;
-       y < editor_height && tab->query_scroll_line + (size_t)(y - 1) < num_lines;
+  for (int y = 1; y < editor_height &&
+                  tab->query_scroll_line + (size_t)(y - 1) < num_lines;
        y++) {
     size_t line_idx = tab->query_scroll_line + (size_t)(y - 1);
     QueryLineInfo *li = &lines[line_idx];
@@ -1385,7 +1393,8 @@ static void query_result_start_modal_edit(TuiState *state, Tab *tab) {
   }
 
   /* Always use modal editor */
-  const char *col_name = tab->query_results->columns[tab->query_result_col].name;
+  const char *col_name =
+      tab->query_results->columns[tab->query_result_col].name;
   char *title = str_printf("Edit: %s", col_name);
 
   EditorResult result =
@@ -1460,8 +1469,8 @@ void tui_query_scroll_results(TuiState *state, int delta) {
     tab->query_result_row += (size_t)delta;
     if (tab->query_result_row >= tab->query_results->num_rows) {
       tab->query_result_row = tab->query_results->num_rows > 0
-                                 ? tab->query_results->num_rows - 1
-                                 : 0;
+                                  ? tab->query_results->num_rows - 1
+                                  : 0;
     }
   }
 
@@ -1550,7 +1559,8 @@ typedef struct {
 
 /* Build PK info from query result row. Returns false on error. */
 static bool query_pk_info_build(QueryPkInfo *pk, Tab *tab, size_t row_idx) {
-  if (!pk || !tab || !tab->query_results || row_idx >= tab->query_results->num_rows)
+  if (!pk || !tab || !tab->query_results ||
+      row_idx >= tab->query_results->num_rows)
     return false;
 
   size_t pk_indices[16];
@@ -1791,8 +1801,9 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
 
     if (tab->query_result_scroll_row > 0 &&
         tab->query_result_scroll_row >= tab->query_results->num_rows)
-      tab->query_result_scroll_row =
-          tab->query_results->num_rows > 0 ? tab->query_results->num_rows - 1 : 0;
+      tab->query_result_scroll_row = tab->query_results->num_rows > 0
+                                         ? tab->query_results->num_rows - 1
+                                         : 0;
   } else {
     tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");
     free(err);
@@ -1800,8 +1811,7 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
 }
 
 /* Handle edit input for query results */
-static bool query_result_handle_edit_input(TuiState *state, Tab *tab,
-                                           int ch) {
+static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
   if (!tab->query_result_editing)
     return false;
 
@@ -2032,7 +2042,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     case 'l':
       if (tab->query_result_col < tab->query_results->num_columns - 1) {
         tab->query_result_col++;
-        /* Adjust horizontal scroll to keep cursor visible using actual main window */
+        /* Adjust horizontal scroll to keep cursor visible using actual main
+         * window */
         int right_rows, right_cols;
         getmaxyx(state->main_win, right_rows, right_cols);
         (void)right_rows;
@@ -2041,8 +2052,9 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         size_t last_visible = tab->query_result_scroll_col;
         for (size_t col = tab->query_result_scroll_col;
              col < tab->query_results->num_columns; col++) {
-          int w = tab->query_result_col_widths ? tab->query_result_col_widths[col]
-                                              : 15;
+          int w = tab->query_result_col_widths
+                      ? tab->query_result_col_widths[col]
+                      : 15;
           if (x + w + 3 > avail_width)
             break;
           x += w + 1;
@@ -2076,7 +2088,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     case KEY_END:
       if (tab->query_results->num_columns > 0) {
         tab->query_result_col = tab->query_results->num_columns - 1;
-        /* Adjust horizontal scroll to show last column using actual main window */
+        /* Adjust horizontal scroll to show last column using actual main window
+         */
         int end_rows, end_cols;
         getmaxyx(state->main_win, end_rows, end_cols);
         (void)end_rows;
@@ -2085,9 +2098,10 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         /* Adjust to show as many columns as possible */
         int x = 1;
         while (tab->query_result_scroll_col > 0) {
-          int w = tab->query_result_col_widths
-                      ? tab->query_result_col_widths[tab->query_result_scroll_col]
-                      : 15;
+          int w =
+              tab->query_result_col_widths
+                  ? tab->query_result_col_widths[tab->query_result_scroll_col]
+                  : 15;
           if (x + w + 3 > avail_width)
             break;
           x += w + 1;
@@ -2139,8 +2153,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       tab->query_result_row += visible;
       if (tab->query_result_row >= tab->query_results->num_rows) {
         tab->query_result_row = tab->query_results->num_rows > 0
-                                   ? tab->query_results->num_rows - 1
-                                   : 0;
+                                    ? tab->query_results->num_rows - 1
+                                    : 0;
       }
       /* Adjust scroll to keep cursor visible */
       if (tab->query_result_row >=
@@ -2475,7 +2489,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       tab->query_cursor =
           query_line_col_to_cursor(tab, line - 10, col, lines, num_lines);
     } else {
-      tab->query_cursor = query_line_col_to_cursor(tab, 0, col, lines, num_lines);
+      tab->query_cursor =
+          query_line_col_to_cursor(tab, 0, col, lines, num_lines);
     }
 
     free(lines);

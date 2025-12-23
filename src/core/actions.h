@@ -1,5 +1,5 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core Actions API
  *
  * This module defines the command interface between UI and core logic.
@@ -8,6 +8,9 @@
  *   - Multiple UI frontends (TUI, GUI) sharing the same logic
  *   - Clear separation between input handling and state mutation
  *   - Testable core logic without UI dependencies
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef LACE_CORE_ACTIONS_H
@@ -26,20 +29,20 @@
  */
 typedef enum {
   CHANGED_NONE = 0,
-  CHANGED_CURSOR = 1 << 0,       /* Cursor position changed */
-  CHANGED_SCROLL = 1 << 1,       /* Scroll position changed */
-  CHANGED_DATA = 1 << 2,         /* Table/query data changed */
-  CHANGED_SCHEMA = 1 << 3,       /* Schema information changed */
-  CHANGED_FILTERS = 1 << 4,      /* Filter definitions changed */
-  CHANGED_STATUS = 1 << 5,       /* Status message changed */
-  CHANGED_WORKSPACE = 1 << 6,    /* Current workspace changed */
-  CHANGED_WORKSPACES = 1 << 7,   /* Workspace list changed (add/remove) */
-  CHANGED_SIDEBAR = 1 << 8,      /* Sidebar state changed */
-  CHANGED_CONNECTION = 1 << 9,   /* Connection state changed */
-  CHANGED_TABLES = 1 << 10,      /* Table list changed */
-  CHANGED_FOCUS = 1 << 11,       /* Focus changed (sidebar/table/filters) */
-  CHANGED_EDIT = 1 << 12,        /* Edit mode state changed */
-  CHANGED_LAYOUT = 1 << 13,      /* Window layout changed (resize, toggle) */
+  CHANGED_CURSOR = 1 << 0,     /* Cursor position changed */
+  CHANGED_SCROLL = 1 << 1,     /* Scroll position changed */
+  CHANGED_DATA = 1 << 2,       /* Table/query data changed */
+  CHANGED_SCHEMA = 1 << 3,     /* Schema information changed */
+  CHANGED_FILTERS = 1 << 4,    /* Filter definitions changed */
+  CHANGED_STATUS = 1 << 5,     /* Status message changed */
+  CHANGED_WORKSPACE = 1 << 6,  /* Current workspace changed */
+  CHANGED_WORKSPACES = 1 << 7, /* Workspace list changed (add/remove) */
+  CHANGED_SIDEBAR = 1 << 8,    /* Sidebar state changed */
+  CHANGED_CONNECTION = 1 << 9, /* Connection state changed */
+  CHANGED_TABLES = 1 << 10,    /* Table list changed */
+  CHANGED_FOCUS = 1 << 11,     /* Focus changed (sidebar/table/filters) */
+  CHANGED_EDIT = 1 << 12,      /* Edit mode state changed */
+  CHANGED_LAYOUT = 1 << 13,    /* Window layout changed (resize, toggle) */
 
   /* Convenience combinations */
   CHANGED_VIEW = CHANGED_CURSOR | CHANGED_SCROLL | CHANGED_DATA,
@@ -51,58 +54,58 @@ typedef enum {
  * ============================================================================
  */
 typedef enum {
-  ACTION_NONE = 0,           /* No action (sentinel value) */
+  ACTION_NONE = 0, /* No action (sentinel value) */
 
   /* Navigation */
-  ACTION_CURSOR_MOVE,        /* Move cursor by delta */
-  ACTION_CURSOR_GOTO,        /* Go to specific row */
-  ACTION_PAGE_UP,            /* Page up */
-  ACTION_PAGE_DOWN,          /* Page down */
-  ACTION_HOME,               /* Go to first row */
-  ACTION_END,                /* Go to last row */
-  ACTION_COLUMN_FIRST,       /* Go to first column */
-  ACTION_COLUMN_LAST,        /* Go to last column */
+  ACTION_CURSOR_MOVE,  /* Move cursor by delta */
+  ACTION_CURSOR_GOTO,  /* Go to specific row */
+  ACTION_PAGE_UP,      /* Page up */
+  ACTION_PAGE_DOWN,    /* Page down */
+  ACTION_HOME,         /* Go to first row */
+  ACTION_END,          /* Go to last row */
+  ACTION_COLUMN_FIRST, /* Go to first column */
+  ACTION_COLUMN_LAST,  /* Go to last column */
 
   /* Cell Editing */
-  ACTION_EDIT_START,         /* Start inline editing */
-  ACTION_EDIT_START_MODAL,   /* Start modal editing */
-  ACTION_EDIT_CONFIRM,       /* Confirm edit */
-  ACTION_EDIT_CANCEL,        /* Cancel edit */
-  ACTION_EDIT_INPUT,         /* Input character while editing */
-  ACTION_EDIT_BACKSPACE,     /* Backspace while editing */
-  ACTION_EDIT_DELETE,        /* Delete while editing */
-  ACTION_EDIT_CURSOR_LEFT,   /* Move edit cursor left */
-  ACTION_EDIT_CURSOR_RIGHT,  /* Move edit cursor right */
-  ACTION_EDIT_CURSOR_HOME,   /* Move edit cursor to start */
-  ACTION_EDIT_CURSOR_END,    /* Move edit cursor to end */
+  ACTION_EDIT_START,        /* Start inline editing */
+  ACTION_EDIT_START_MODAL,  /* Start modal editing */
+  ACTION_EDIT_CONFIRM,      /* Confirm edit */
+  ACTION_EDIT_CANCEL,       /* Cancel edit */
+  ACTION_EDIT_INPUT,        /* Input character while editing */
+  ACTION_EDIT_BACKSPACE,    /* Backspace while editing */
+  ACTION_EDIT_DELETE,       /* Delete while editing */
+  ACTION_EDIT_CURSOR_LEFT,  /* Move edit cursor left */
+  ACTION_EDIT_CURSOR_RIGHT, /* Move edit cursor right */
+  ACTION_EDIT_CURSOR_HOME,  /* Move edit cursor to start */
+  ACTION_EDIT_CURSOR_END,   /* Move edit cursor to end */
 
   /* Cell Operations */
-  ACTION_CELL_SET_NULL,      /* Set current cell to NULL */
-  ACTION_CELL_SET_EMPTY,     /* Set current cell to empty string */
-  ACTION_ROW_DELETE,         /* Delete current row */
+  ACTION_CELL_SET_NULL,  /* Set current cell to NULL */
+  ACTION_CELL_SET_EMPTY, /* Set current cell to empty string */
+  ACTION_ROW_DELETE,     /* Delete current row */
 
   /* Tab Management (within current workspace) */
-  ACTION_TAB_NEXT,           /* Switch to next tab */
-  ACTION_TAB_PREV,           /* Switch to previous tab */
-  ACTION_TAB_SWITCH,         /* Switch to specific tab */
-  ACTION_TAB_CREATE,         /* Create new tab for table */
-  ACTION_TAB_CREATE_QUERY,   /* Create new query tab */
-  ACTION_TAB_CLOSE,          /* Close current tab */
+  ACTION_TAB_NEXT,         /* Switch to next tab */
+  ACTION_TAB_PREV,         /* Switch to previous tab */
+  ACTION_TAB_SWITCH,       /* Switch to specific tab */
+  ACTION_TAB_CREATE,       /* Create new tab for table */
+  ACTION_TAB_CREATE_QUERY, /* Create new query tab */
+  ACTION_TAB_CLOSE,        /* Close current tab */
 
   /* Workspace Management (within current connection) */
-  ACTION_WORKSPACE_NEXT,     /* Switch to next workspace */
-  ACTION_WORKSPACE_PREV,     /* Switch to previous workspace */
-  ACTION_WORKSPACE_SWITCH,   /* Switch to specific workspace */
-  ACTION_WORKSPACE_CREATE,   /* Create new workspace for table */
+  ACTION_WORKSPACE_NEXT,         /* Switch to next workspace */
+  ACTION_WORKSPACE_PREV,         /* Switch to previous workspace */
+  ACTION_WORKSPACE_SWITCH,       /* Switch to specific workspace */
+  ACTION_WORKSPACE_CREATE,       /* Create new workspace for table */
   ACTION_WORKSPACE_CREATE_QUERY, /* Create new query workspace */
-  ACTION_WORKSPACE_CLOSE,    /* Close current workspace */
+  ACTION_WORKSPACE_CLOSE,        /* Close current workspace */
 
   /* Sidebar */
-  ACTION_SIDEBAR_TOGGLE,     /* Toggle sidebar visibility */
-  ACTION_SIDEBAR_FOCUS,      /* Focus sidebar */
-  ACTION_SIDEBAR_UNFOCUS,    /* Unfocus sidebar (back to table) */
-  ACTION_SIDEBAR_MOVE,       /* Move highlight in sidebar */
-  ACTION_SIDEBAR_SELECT,     /* Select highlighted table */
+  ACTION_SIDEBAR_TOGGLE,         /* Toggle sidebar visibility */
+  ACTION_SIDEBAR_FOCUS,          /* Focus sidebar */
+  ACTION_SIDEBAR_UNFOCUS,        /* Unfocus sidebar (back to table) */
+  ACTION_SIDEBAR_MOVE,           /* Move highlight in sidebar */
+  ACTION_SIDEBAR_SELECT,         /* Select highlighted table */
   ACTION_SIDEBAR_SELECT_NEW_TAB, /* Select table in new tab */
   ACTION_SIDEBAR_FILTER_START,   /* Start typing filter */
   ACTION_SIDEBAR_FILTER_INPUT,   /* Input to filter */
@@ -110,54 +113,54 @@ typedef enum {
   ACTION_SIDEBAR_FILTER_STOP,    /* Stop filtering */
 
   /* Table Filters Panel */
-  ACTION_FILTERS_TOGGLE,     /* Toggle filters panel */
-  ACTION_FILTERS_FOCUS,      /* Focus filters panel */
-  ACTION_FILTERS_UNFOCUS,    /* Unfocus filters panel */
-  ACTION_FILTERS_MOVE,       /* Move cursor in filters */
-  ACTION_FILTERS_ADD,        /* Add new filter */
-  ACTION_FILTERS_REMOVE,     /* Remove filter at cursor */
-  ACTION_FILTERS_CLEAR,      /* Clear all filters */
-  ACTION_FILTERS_EDIT_START, /* Start editing filter field */
-  ACTION_FILTERS_EDIT_INPUT, /* Input to filter edit */
+  ACTION_FILTERS_TOGGLE,       /* Toggle filters panel */
+  ACTION_FILTERS_FOCUS,        /* Focus filters panel */
+  ACTION_FILTERS_UNFOCUS,      /* Unfocus filters panel */
+  ACTION_FILTERS_MOVE,         /* Move cursor in filters */
+  ACTION_FILTERS_ADD,          /* Add new filter */
+  ACTION_FILTERS_REMOVE,       /* Remove filter at cursor */
+  ACTION_FILTERS_CLEAR,        /* Clear all filters */
+  ACTION_FILTERS_EDIT_START,   /* Start editing filter field */
+  ACTION_FILTERS_EDIT_INPUT,   /* Input to filter edit */
   ACTION_FILTERS_EDIT_CONFIRM, /* Confirm filter edit */
   ACTION_FILTERS_EDIT_CANCEL,  /* Cancel filter edit */
-  ACTION_FILTERS_APPLY,      /* Apply filters (reload data) */
+  ACTION_FILTERS_APPLY,        /* Apply filters (reload data) */
 
   /* Query Editor */
-  ACTION_QUERY_INPUT,        /* Input character to query */
-  ACTION_QUERY_BACKSPACE,    /* Backspace in query */
-  ACTION_QUERY_DELETE,       /* Delete in query */
-  ACTION_QUERY_NEWLINE,      /* New line in query */
-  ACTION_QUERY_CURSOR_MOVE,  /* Move cursor in query */
-  ACTION_QUERY_EXECUTE,      /* Execute query at cursor */
-  ACTION_QUERY_EXECUTE_ALL,  /* Execute all queries */
-  ACTION_QUERY_EXECUTE_TXN,  /* Execute all in transaction */
+  ACTION_QUERY_INPUT,         /* Input character to query */
+  ACTION_QUERY_BACKSPACE,     /* Backspace in query */
+  ACTION_QUERY_DELETE,        /* Delete in query */
+  ACTION_QUERY_NEWLINE,       /* New line in query */
+  ACTION_QUERY_CURSOR_MOVE,   /* Move cursor in query */
+  ACTION_QUERY_EXECUTE,       /* Execute query at cursor */
+  ACTION_QUERY_EXECUTE_ALL,   /* Execute all queries */
+  ACTION_QUERY_EXECUTE_TXN,   /* Execute all in transaction */
   ACTION_QUERY_FOCUS_RESULTS, /* Focus query results */
-  ACTION_QUERY_FOCUS_EDITOR, /* Focus query editor */
+  ACTION_QUERY_FOCUS_EDITOR,  /* Focus query editor */
 
   /* Connection */
-  ACTION_CONNECT,            /* Connect to database */
-  ACTION_DISCONNECT,         /* Disconnect from database */
+  ACTION_CONNECT,    /* Connect to database */
+  ACTION_DISCONNECT, /* Disconnect from database */
 
   /* Data Loading */
-  ACTION_TABLE_LOAD,         /* Load table data */
-  ACTION_TABLE_REFRESH,      /* Refresh current table */
-  ACTION_DATA_LOAD_MORE,     /* Load more rows (pagination) */
-  ACTION_DATA_LOAD_PREV,     /* Load previous rows */
+  ACTION_TABLE_LOAD,     /* Load table data */
+  ACTION_TABLE_REFRESH,  /* Refresh current table */
+  ACTION_DATA_LOAD_MORE, /* Load more rows (pagination) */
+  ACTION_DATA_LOAD_PREV, /* Load previous rows */
 
   /* UI Toggles */
-  ACTION_TOGGLE_HEADER,      /* Toggle header bar */
-  ACTION_TOGGLE_STATUS,      /* Toggle status bar */
+  ACTION_TOGGLE_HEADER, /* Toggle header bar */
+  ACTION_TOGGLE_STATUS, /* Toggle status bar */
 
   /* Dialogs (UI will handle these, but core tracks state) */
-  ACTION_SHOW_SCHEMA,        /* Show schema dialog */
-  ACTION_SHOW_GOTO,          /* Show goto dialog */
-  ACTION_SHOW_CONNECT,       /* Show connect dialog */
-  ACTION_SHOW_HELP,          /* Show help dialog */
+  ACTION_SHOW_SCHEMA,  /* Show schema dialog */
+  ACTION_SHOW_GOTO,    /* Show goto dialog */
+  ACTION_SHOW_CONNECT, /* Show connect dialog */
+  ACTION_SHOW_HELP,    /* Show help dialog */
 
   /* Application */
-  ACTION_QUIT,               /* Quit application */
-  ACTION_QUIT_FORCE,         /* Quit without confirmation */
+  ACTION_QUIT,       /* Quit application */
+  ACTION_QUIT_FORCE, /* Quit without confirmation */
 
 } ActionType;
 
@@ -184,7 +187,7 @@ typedef struct {
     /* ACTION_EDIT_INPUT, ACTION_QUERY_INPUT, ACTION_SIDEBAR_FILTER_INPUT,
        ACTION_FILTERS_EDIT_INPUT */
     struct {
-      int ch;              /* Character code */
+      int ch; /* Character code */
     } input;
 
     /* ACTION_WORKSPACE_SWITCH */
@@ -199,7 +202,7 @@ typedef struct {
 
     /* ACTION_SIDEBAR_MOVE, ACTION_FILTERS_MOVE */
     struct {
-      int delta;           /* +1 down, -1 up */
+      int delta; /* +1 down, -1 up */
     } move;
 
     /* ACTION_QUERY_CURSOR_MOVE */
@@ -335,13 +338,9 @@ static inline Action action_page_down(void) {
   return (Action){.type = ACTION_PAGE_DOWN};
 }
 
-static inline Action action_home(void) {
-  return (Action){.type = ACTION_HOME};
-}
+static inline Action action_home(void) { return (Action){.type = ACTION_HOME}; }
 
-static inline Action action_end(void) {
-  return (Action){.type = ACTION_END};
-}
+static inline Action action_end(void) { return (Action){.type = ACTION_END}; }
 
 static inline Action action_column_first(void) {
   return (Action){.type = ACTION_COLUMN_FIRST};
@@ -537,9 +536,7 @@ static inline Action action_show_help(void) {
 }
 
 /* Application */
-static inline Action action_quit(void) {
-  return (Action){.type = ACTION_QUIT};
-}
+static inline Action action_quit(void) { return (Action){.type = ACTION_QUIT}; }
 
 static inline Action action_quit_force(void) {
   return (Action){.type = ACTION_QUIT_FORCE};

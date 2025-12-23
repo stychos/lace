@@ -1,9 +1,12 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * Core Tab Navigation Implementation
  *
  * Note: Lifecycle functions (tab_init, tab_free_data, etc.) are in app_state.c
  * This file contains navigation and pagination operations.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #include "workspace.h"
@@ -144,8 +147,7 @@ void tab_column_first(Tab *tab) {
 void tab_column_last(Tab *tab) {
   if (!tab || !tab->data)
     return;
-  tab->cursor_col =
-      tab->data->num_columns > 0 ? tab->data->num_columns - 1 : 0;
+  tab->cursor_col = tab->data->num_columns > 0 ? tab->data->num_columns - 1 : 0;
 }
 
 /* ============================================================================

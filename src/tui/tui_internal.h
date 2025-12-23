@@ -1,6 +1,9 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * TUI internal declarations shared between modules
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
 #ifndef LACE_TUI_INTERNAL_H
@@ -23,7 +26,8 @@
 #define LOAD_THRESHOLD 50     /* Load more when within this many rows of edge */
 #define MAX_LOADED_PAGES 5    /* Maximum pages to keep in memory */
 #define TRIM_DISTANCE_PAGES 2 /* Trim data farther than this from cursor */
-#define PREFETCH_THRESHOLD PAGE_SIZE /* Start prefetch when within 1 page of edge */
+#define PREFETCH_THRESHOLD                                                     \
+  PAGE_SIZE /* Start prefetch when within 1 page of edge */
 
 /* ============================================================================
  * Helper functions (tui.c)

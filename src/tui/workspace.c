@@ -1,13 +1,16 @@
 /*
- * lace - Database Viewer and Manager
+ * Lace
  * TUI Tab management
  *
  * Core tab/workspace/connection lifecycle is in core/app_state.c.
  * This file contains TUI-specific operations that sync UI state.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
  */
 
-#include "tui_internal.h"
 #include "../core/workspace.h"
+#include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -54,7 +57,8 @@ void tab_save(TuiState *state) {
     ui->sidebar_highlight = state->sidebar_highlight;
     ui->sidebar_scroll = state->sidebar_scroll;
     ui->sidebar_filter_len = state->sidebar_filter_len;
-    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+    memcpy(ui->sidebar_filter, state->sidebar_filter,
+           sizeof(ui->sidebar_filter));
   }
 }
 
@@ -113,7 +117,8 @@ void tab_restore(TuiState *state) {
     state->sidebar_highlight = ui->sidebar_highlight;
     state->sidebar_scroll = ui->sidebar_scroll;
     state->sidebar_filter_len = ui->sidebar_filter_len;
-    memcpy(state->sidebar_filter, ui->sidebar_filter, sizeof(state->sidebar_filter));
+    memcpy(state->sidebar_filter, ui->sidebar_filter,
+           sizeof(state->sidebar_filter));
   } else {
     /* No UITabState - use defaults */
     state->filters_visible = false;
@@ -147,17 +152,14 @@ void tab_restore(TuiState *state) {
 }
 
 /* Legacy wrapper for compatibility */
-void workspace_save(TuiState *state) {
-  tab_save(state);
-}
+void workspace_save(TuiState *state) { tab_save(state); }
 
 /* Legacy wrapper for compatibility */
-void workspace_restore(TuiState *state) {
-  tab_restore(state);
-}
+void workspace_restore(TuiState *state) { tab_restore(state); }
 
 /* Sync focus and panel state from TuiState to UITabState.
- * Call this when input handlers modify focus state so it persists across tab switches. */
+ * Call this when input handlers modify focus state so it persists across tab
+ * switches. */
 void tab_sync_focus(TuiState *state) {
   UITabState *ui = TUI_TAB_UI(state);
   if (!ui)
@@ -241,7 +243,8 @@ bool tab_create(TuiState *state, size_t table_index) {
   }
 
   /* Create new tab with connection reference */
-  Tab *tab = workspace_create_table_tab(ws, connection_index, table_index, state->tables[table_index]);
+  Tab *tab = workspace_create_table_tab(ws, connection_index, table_index,
+                                        state->tables[table_index]);
   if (!tab) {
     tui_set_error(state, "Failed to create tab");
     return false;
@@ -252,11 +255,12 @@ bool tab_create(TuiState *state, size_t table_index) {
   if (ui) {
     /* Inherit sidebar visibility but reset focus for new tab */
     ui->sidebar_visible = state->sidebar_visible;
-    ui->sidebar_focused = false;  /* New tab: table has focus, not sidebar */
+    ui->sidebar_focused = false; /* New tab: table has focus, not sidebar */
     ui->sidebar_highlight = state->sidebar_highlight;
     ui->sidebar_scroll = state->sidebar_scroll;
     ui->sidebar_filter_len = state->sidebar_filter_len;
-    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+    memcpy(ui->sidebar_filter, state->sidebar_filter,
+           sizeof(ui->sidebar_filter));
     ui->sidebar_last_position = table_index;
 
     /* New tab starts with filters closed */
@@ -428,6 +432,4 @@ void tab_close(TuiState *state) {
 }
 
 /* Legacy wrapper */
-void workspace_close(TuiState *state) {
-  tab_close(state);
-}
+void workspace_close(TuiState *state) { tab_close(state); }
