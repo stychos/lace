@@ -112,17 +112,16 @@ void tui_show_goto_dialog(TuiState *state) {
     return;
 
   /* Determine if we're in a query tab with results */
-  Workspace *ws = NULL;
+  Tab *tab = TUI_TAB(state);
   bool is_query = false;
   size_t total_rows = 0;
 
-  if (state->num_workspaces > 0) {
-    ws = &state->workspaces[state->current_workspace];
-    if (ws->type == WORKSPACE_TYPE_QUERY && ws->query_results &&
-        ws->query_results->num_rows > 0) {
+  if (tab) {
+    if (tab->type == TAB_TYPE_QUERY && tab->query_results &&
+        tab->query_results->num_rows > 0) {
       is_query = true;
-      total_rows = ws->query_paginated ? ws->query_total_rows
-                                       : ws->query_results->num_rows;
+      total_rows = tab->query_paginated ? tab->query_total_rows
+                                        : tab->query_results->num_rows;
     }
   }
 
@@ -233,23 +232,23 @@ void tui_show_goto_dialog(TuiState *state) {
 
           if (is_query) {
             /* Handle query results navigation */
-            if (ws->query_paginated) {
+            if (tab->query_paginated) {
               /* Check if target is in currently loaded range */
-              if (target_row >= ws->query_loaded_offset &&
+              if (target_row >= tab->query_loaded_offset &&
                   target_row <
-                      ws->query_loaded_offset + ws->query_loaded_count) {
+                      tab->query_loaded_offset + tab->query_loaded_count) {
                 /* Already loaded, just move cursor */
-                ws->query_result_row = target_row - ws->query_loaded_offset;
+                tab->query_result_row = target_row - tab->query_loaded_offset;
               } else {
                 /* Need to load new data - use async with progress */
                 size_t load_offset =
                     target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
-                query_load_rows_at(state, ws, load_offset);
-                ws->query_result_row = target_row - ws->query_loaded_offset;
+                query_load_rows_at(state, tab, load_offset);
+                tab->query_result_row = target_row - tab->query_loaded_offset;
               }
             } else {
               /* Non-paginated - just move cursor */
-              ws->query_result_row = target_row;
+              tab->query_result_row = target_row;
             }
 
             /* Adjust scroll */
@@ -261,16 +260,16 @@ void tui_show_goto_dialog(TuiState *state) {
             if (visible < 1)
               visible = 1;
 
-            if (ws->query_result_row < ws->query_result_scroll_row) {
-              ws->query_result_scroll_row = ws->query_result_row;
-            } else if (ws->query_result_row >=
-                       ws->query_result_scroll_row + (size_t)visible) {
-              ws->query_result_scroll_row =
-                  ws->query_result_row - (size_t)visible + 1;
+            if (tab->query_result_row < tab->query_result_scroll_row) {
+              tab->query_result_scroll_row = tab->query_result_row;
+            } else if (tab->query_result_row >=
+                       tab->query_result_scroll_row + (size_t)visible) {
+              tab->query_result_scroll_row =
+                  tab->query_result_row - (size_t)visible + 1;
             }
 
             /* Ensure focus is on results */
-            ws->query_focus_results = true;
+            tab->query_focus_results = true;
           } else {
             /* Handle regular table navigation */
             /* Check if target is in currently loaded range */
@@ -296,18 +295,14 @@ void tui_show_goto_dialog(TuiState *state) {
               char *where_clause = NULL;
 
               /* Build WHERE clause from filters if applicable */
-              if (state->num_workspaces > 0 &&
-                  state->current_workspace < state->num_workspaces) {
-                Workspace *curr_ws =
-                    &state->workspaces[state->current_workspace];
-                if (curr_ws->filters.num_filters > 0 && state->schema &&
-                    state->conn) {
-                  char *err = NULL;
-                  where_clause = filters_build_where(
-                      &curr_ws->filters, state->schema,
-                      state->conn->driver->name, &err);
-                  free(err);
-                }
+              Tab *curr_tab = TUI_TAB(state);
+              if (curr_tab && curr_tab->filters.num_filters > 0 &&
+                  state->schema && state->conn) {
+                char *err = NULL;
+                where_clause = filters_build_where(
+                    &curr_tab->filters, state->schema,
+                    state->conn->driver->name, &err);
+                free(err);
               }
 
               /* Use async operation with progress dialog */
@@ -338,10 +333,9 @@ void tui_show_goto_dialog(TuiState *state) {
 
                   /* Check if we got 0 rows with approximate count */
                   bool was_approximate = false;
-                  if (state->num_workspaces > 0 &&
-                      state->current_workspace < state->num_workspaces) {
-                    was_approximate = state->workspaces[state->current_workspace]
-                                          .row_count_approximate;
+                  Tab *check_tab = TUI_TAB(state);
+                  if (check_tab) {
+                    was_approximate = check_tab->row_count_approximate;
                   }
 
                   if (new_data->num_rows == 0 && was_approximate &&
@@ -365,12 +359,10 @@ void tui_show_goto_dialog(TuiState *state) {
                           count_op.count > 0) {
                         /* Update total rows with exact count */
                         state->total_rows = (size_t)count_op.count;
-                        if (state->num_workspaces > 0 &&
-                            state->current_workspace < state->num_workspaces) {
-                          Workspace *curr_ws =
-                              &state->workspaces[state->current_workspace];
-                          curr_ws->total_rows = state->total_rows;
-                          curr_ws->row_count_approximate = false;
+                        Tab *update_tab = TUI_TAB(state);
+                        if (update_tab) {
+                          update_tab->total_rows = state->total_rows;
+                          update_tab->row_count_approximate = false;
                         }
 
                         /* Clamp target row to actual data */
@@ -435,14 +427,12 @@ void tui_show_goto_dialog(TuiState *state) {
                     }
                   }
 
-                  /* Update workspace pointers */
-                  if (state->num_workspaces > 0 &&
-                      state->current_workspace < state->num_workspaces) {
-                    Workspace *curr_ws =
-                        &state->workspaces[state->current_workspace];
-                    curr_ws->data = state->data;
-                    curr_ws->loaded_offset = state->loaded_offset;
-                    curr_ws->loaded_count = state->loaded_count;
+                  /* Update tab pointers */
+                  Tab *upd_tab = TUI_TAB(state);
+                  if (upd_tab) {
+                    upd_tab->data = state->data;
+                    upd_tab->loaded_offset = state->loaded_offset;
+                    upd_tab->loaded_count = state->loaded_count;
                   }
 
                   load_succeeded = true;
@@ -744,14 +734,255 @@ void tui_show_schema(TuiState *state) {
 
 /* Show connect dialog */
 void tui_show_connect_dialog(TuiState *state) {
-  char *connstr = connect_view_show(state);
-  if (connstr) {
-    tui_disconnect(state);
-    if (tui_connect(state, connstr)) {
-      tui_set_status(state, "Connected successfully");
-    }
-    free(connstr);
+  ConnectResult result = connect_view_show(state);
+
+  if (result.mode == CONNECT_MODE_CANCELLED || !result.connstr) {
+    free(result.connstr);
+    tui_refresh(state);
+    return;
   }
+
+  if (result.mode == CONNECT_MODE_NEW_WORKSPACE) {
+    /* Create a NEW workspace and connect (keep existing workspaces) */
+    char *err = NULL;
+    DbConnection *conn = tui_connect_with_progress(state, result.connstr);
+    if (!conn) {
+      /* Error already shown */
+      free(result.connstr);
+      tui_refresh(state);
+      return;
+    }
+
+    /* Add to connection pool */
+    Connection *app_conn = app_add_connection(state->app, conn, result.connstr);
+    if (!app_conn) {
+      db_disconnect(conn);
+      tui_set_error(state, "Failed to add connection");
+      free(result.connstr);
+      tui_refresh(state);
+      return;
+    }
+
+    /* Load tables for this connection */
+    size_t num_tables = 0;
+    char **tables = db_list_tables(conn, &num_tables, &err);
+    if (tables) {
+      app_conn->tables = tables;
+      app_conn->num_tables = num_tables;
+    } else if (err) {
+      tui_set_error(state, "Failed to load tables: %s", err);
+      free(err);
+    }
+
+    /* Find connection index */
+    size_t conn_index = app_find_connection_index(state->app, conn);
+
+    /* Save current workspace state before switching */
+    if (state->app->num_workspaces > 0) {
+      tui_sync_to_workspace(state);
+    }
+
+    /* Reuse current workspace if it's empty, otherwise create a new one */
+    Workspace *ws = app_current_workspace(state->app);
+    if (ws && ws->num_tabs == 0) {
+      /* Reuse empty workspace */
+    } else {
+      /* Create a NEW workspace */
+      ws = app_create_workspace(state->app);
+      if (!ws) {
+        tui_set_error(state, "Failed to create workspace (max %d)", MAX_WORKSPACES);
+        free(result.connstr);
+        tui_refresh(state);
+        return;
+      }
+    }
+
+    /* Clear TUI state for new workspace */
+    state->data = NULL;
+    state->schema = NULL;
+    state->col_widths = NULL;
+    state->num_col_widths = 0;
+    state->cursor_row = 0;
+    state->cursor_col = 0;
+    state->scroll_row = 0;
+    state->scroll_col = 0;
+
+    /* Update TUI state to use new connection */
+    state->conn = conn;
+    state->tables = app_conn->tables;
+    state->num_tables = app_conn->num_tables;
+
+    if (app_conn->num_tables > 0) {
+      /* Create a table tab for the first table */
+      const char *first_table = app_conn->tables[0];
+      Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
+      if (tab) {
+        /* Load the first table's data */
+        if (!tui_load_table_data(state, first_table)) {
+          /* Failed - remove the tab we just created */
+          workspace_close_tab(ws, ws->current_tab);
+          tui_set_error(state, "Failed to load table data");
+        } else {
+          /* Save loaded data to tab */
+          tab->data = state->data;
+          tab->schema = state->schema;
+          tab->col_widths = state->col_widths;
+          tab->num_col_widths = state->num_col_widths;
+          tab->total_rows = state->total_rows;
+          tab->loaded_offset = state->loaded_offset;
+          tab->loaded_count = state->loaded_count;
+
+          /* Show sidebar for new workspace */
+          state->sidebar_visible = true;
+          state->sidebar_focused = false;
+          UITabState *ui = TUI_TAB_UI(state);
+          if (ui) {
+            ui->sidebar_visible = true;
+            ui->sidebar_focused = false;
+          }
+
+          tui_set_status(state, "Connected in workspace %zu (%s)",
+                         state->app->current_workspace + 1, conn->database);
+        }
+      }
+    } else {
+      /* No tables - create query tab */
+      Tab *tab = workspace_create_query_tab(ws, conn_index);
+      if (tab) {
+        state->sidebar_visible = true;
+        state->sidebar_focused = false;
+        UITabState *ui = TUI_TAB_UI(state);
+        if (ui) {
+          ui->sidebar_visible = true;
+          ui->sidebar_focused = false;
+        }
+        tui_set_status(state, "Connected in workspace %zu (no tables)",
+                       state->app->current_workspace + 1);
+      }
+    }
+
+    /* Recreate windows if sidebar visibility changed */
+    tui_recreate_windows(state);
+  } else if (result.mode == CONNECT_MODE_NEW_TAB) {
+    /* Add connection to pool and create new tab in current workspace */
+    char *err = NULL;
+    DbConnection *conn = db_connect(result.connstr, &err);
+    if (!conn) {
+      tui_set_error(state, "Connection failed: %s", err ? err : "Unknown error");
+      free(err);
+      free(result.connstr);
+      tui_refresh(state);
+      return;
+    }
+
+    /* Add to connection pool */
+    Connection *app_conn = app_add_connection(state->app, conn, result.connstr);
+    if (!app_conn) {
+      db_disconnect(conn);
+      tui_set_error(state, "Failed to add connection");
+      free(result.connstr);
+      tui_refresh(state);
+      return;
+    }
+
+    /* Load tables for this connection */
+    size_t num_tables = 0;
+    char **tables = db_list_tables(conn, &num_tables, &err);
+    if (tables) {
+      app_conn->tables = tables;
+      app_conn->num_tables = num_tables;
+    } else if (err) {
+      tui_set_error(state, "Failed to load tables: %s", err);
+      free(err);
+    }
+
+    /* Find connection index */
+    size_t conn_index = app_find_connection_index(state->app, conn);
+
+    /* Get current workspace */
+    Workspace *ws = app_current_workspace(state->app);
+    if (!ws) {
+      ws = app_create_workspace(state->app);
+    }
+
+    if (ws && app_conn->num_tables > 0) {
+      /* Save current tab state */
+      if (ws->num_tabs > 0) {
+        tab_save(state);
+        /* Clear state pointers - old tab now owns the data (don't free!) */
+        state->data = NULL;
+        state->schema = NULL;
+        state->col_widths = NULL;
+        state->num_col_widths = 0;
+      }
+
+      /* Create a table tab for the first table */
+      const char *first_table = app_conn->tables[0];
+      Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
+      if (tab) {
+        /* Initialize UITabState - new connection always shows sidebar */
+        UITabState *ui = TUI_TAB_UI(state);
+        if (ui) {
+          ui->sidebar_visible = true;
+          ui->sidebar_focused = false;
+          ui->sidebar_highlight = 0;
+          ui->sidebar_scroll = 0;
+          ui->filters_visible = false;
+          ui->filters_focused = false;
+        }
+        state->sidebar_visible = true;
+        state->sidebar_focused = false;
+
+        /* Update TUI state to use new connection */
+        state->conn = conn;
+        state->tables = app_conn->tables;
+        state->num_tables = app_conn->num_tables;
+
+        /* Load the first table's data */
+        if (!tui_load_table_data(state, first_table)) {
+          /* Failed - remove the tab we just created */
+          workspace_close_tab(ws, ws->current_tab);
+          tui_set_error(state, "Failed to load table data");
+        } else {
+          /* Save loaded data to tab */
+          tab->data = state->data;
+          tab->schema = state->schema;
+          tab->col_widths = state->col_widths;
+          tab->num_col_widths = state->num_col_widths;
+          tab->total_rows = state->total_rows;
+          tab->loaded_offset = state->loaded_offset;
+          tab->loaded_count = state->loaded_count;
+
+          tui_recreate_windows(state);
+          tui_set_status(state, "Connected in new tab (%s)", conn->database);
+        }
+      }
+    } else if (ws) {
+      /* No tables - create query tab */
+      Tab *tab = workspace_create_query_tab(ws, conn_index);
+      if (tab) {
+        /* Initialize UITabState - new connection always shows sidebar */
+        UITabState *ui = TUI_TAB_UI(state);
+        if (ui) {
+          ui->sidebar_visible = true;
+          ui->sidebar_focused = false;
+        }
+        state->sidebar_visible = true;
+        state->sidebar_focused = false;
+
+        state->conn = conn;
+        state->tables = app_conn->tables;
+        state->num_tables = app_conn->num_tables;
+        state->data = NULL;
+        state->schema = NULL;
+        tui_recreate_windows(state);
+        tui_set_status(state, "Connected in new tab (%s) - no tables found",
+                       conn->database);
+      }
+    }
+  }
+
+  free(result.connstr);
   tui_refresh(state);
 }
 
@@ -859,12 +1090,9 @@ void tui_show_table_selector(TuiState *state) {
         if (idx >= 0 && (size_t)idx < state->num_tables) {
           state->current_table = idx;
           /* Clear filters when switching tables */
-          if (state->num_workspaces > 0 &&
-              state->current_workspace < state->num_workspaces) {
-            Workspace *ws = &state->workspaces[state->current_workspace];
-            if (ws->type == WORKSPACE_TYPE_TABLE) {
-              filters_clear(&ws->filters);
-            }
+          Tab *sel_tab = TUI_TAB(state);
+          if (sel_tab && sel_tab->type == TAB_TYPE_TABLE) {
+            filters_clear(&sel_tab->filters);
           }
           tui_load_table_data(state, state->tables[idx]);
         }
@@ -920,10 +1148,11 @@ void tui_show_help(TuiState *state) {
     {"x (or Delete)      Delete row", false},
     {"Escape             Cancel editing", false},
     {"", false},
-    {"Tabs", true},
+    {"Tabs & Workspaces", true},
     {"[ / ] (or F7/F6)   Previous/next tab", false},
     {"- / _              Close current tab", false},
     {"+                  Open table in new tab", false},
+    {"{ / }              Previous/next workspace", false},
     {"", false},
     {"Query Tab", true},
     {"p                  Open query tab", false},
@@ -1284,10 +1513,11 @@ bool tui_load_tables_with_progress(TuiState *state) {
     state->tables = (char **)op.result;
     state->num_tables = op.result_count;
 
-    /* Also update app state if available */
-    if (state->app) {
-      state->app->tables = state->tables;
-      state->app->num_tables = state->num_tables;
+    /* Also update connection state if available */
+    Connection *conn = TUI_TAB_CONNECTION(state);
+    if (conn) {
+      conn->tables = state->tables;
+      conn->num_tables = state->num_tables;
     }
 
     async_free(&op);

@@ -253,12 +253,9 @@ void tui_next_table(TuiState *state) {
   }
 
   /* Clear filters when switching tables */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    if (ws->type == WORKSPACE_TYPE_TABLE) {
-      filters_clear(&ws->filters);
-    }
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE) {
+    filters_clear(&tab->filters);
   }
 
   tui_load_table_data(state, state->tables[state->current_table]);
@@ -275,12 +272,9 @@ void tui_prev_table(TuiState *state) {
   }
 
   /* Clear filters when switching tables */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    if (ws->type == WORKSPACE_TYPE_TABLE) {
-      filters_clear(&ws->filters);
-    }
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE) {
+    filters_clear(&tab->filters);
   }
 
   tui_load_table_data(state, state->tables[state->current_table]);

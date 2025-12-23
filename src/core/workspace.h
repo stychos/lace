@@ -1,9 +1,14 @@
 /*
  * lace - Database Viewer and Manager
- * Core Workspace Management (platform-independent)
+ * Core Workspace/Tab Management (platform-independent)
  *
- * This module provides workspace/tab management that operates purely on
- * AppState without any UI dependencies.
+ * This module provides tab management and navigation that operates purely on
+ * core state without any UI dependencies.
+ *
+ * Hierarchy: AppState → Connection → Workspace → Tab
+ *
+ * Note: Most lifecycle functions are declared in app_state.h.
+ * This file contains navigation and pagination operations.
  */
 
 #ifndef LACE_CORE_WORKSPACE_H
@@ -13,84 +18,63 @@
 #include <stdbool.h>
 
 /* ============================================================================
- * Workspace Lifecycle
+ * Tab Navigation Operations (UI-agnostic)
  * ============================================================================
  */
 
-/* Initialize a workspace struct (zeros and inits filters) */
-void workspace_init(Workspace *ws);
-
-/* Free all data owned by a workspace (but not the struct itself) */
-void workspace_free_data(Workspace *ws);
-
-/* ============================================================================
- * Workspace Operations (pure AppState, no UI)
- * ============================================================================
- */
-
-/* Switch to a different workspace index
- * Returns the new workspace pointer, or NULL if invalid index
- * Caller is responsible for saving/restoring UI state */
-Workspace *app_workspace_switch(AppState *app, size_t index);
-
-/* Create a new workspace for a table
- * Returns the new workspace pointer, or NULL on failure
- * Does NOT load data - caller must do that after */
-Workspace *app_workspace_create(AppState *app, size_t table_index,
-                                const char *table_name);
-
-/* Create a new query workspace
- * Returns the new workspace pointer, or NULL on failure */
-Workspace *app_workspace_create_query(AppState *app);
-
-/* Close a workspace by index
- * Returns true if closed, false if invalid or last workspace behavior needed
- * Updates app->current_workspace if needed */
-bool app_workspace_close(AppState *app, size_t index);
-
-/* Get workspace at index (NULL if invalid) */
-Workspace *app_workspace_at(AppState *app, size_t index);
-
-/* ============================================================================
- * Navigation Operations (UI-agnostic)
- * ============================================================================
- */
-
-/* Move cursor within a workspace
+/* Move cursor within a tab
  * Returns true if cursor actually moved
  * visible_rows: number of visible data rows in UI (for scroll adjustment) */
-bool workspace_move_cursor(Workspace *ws, int row_delta, int col_delta,
-                           int visible_rows);
+bool tab_move_cursor(Tab *tab, int row_delta, int col_delta, int visible_rows);
 
-/* Page up/down within a workspace
+/* Page up/down within a tab
  * visible_rows: number of visible data rows in UI */
-void workspace_page_up(Workspace *ws, int visible_rows);
-void workspace_page_down(Workspace *ws, int visible_rows);
+void tab_page_up(Tab *tab, int visible_rows);
+void tab_page_down(Tab *tab, int visible_rows);
 
 /* Go to first/last row */
-void workspace_home(Workspace *ws);
-void workspace_end(Workspace *ws, int visible_rows);
+void tab_home(Tab *tab);
+void tab_end(Tab *tab, int visible_rows);
 
 /* Go to first/last column */
-void workspace_column_first(Workspace *ws);
-void workspace_column_last(Workspace *ws);
+void tab_column_first(Tab *tab);
+void tab_column_last(Tab *tab);
 
 /* ============================================================================
- * Pagination State (tracking only, no I/O)
+ * Tab Pagination State (tracking only, no I/O)
  * ============================================================================
  */
 
 /* Check if cursor is near edge of loaded data
  * Returns: -1 = near start, 0 = in middle, 1 = near end */
-int workspace_check_data_edge(Workspace *ws, size_t threshold);
+int tab_check_data_edge(Tab *tab, size_t threshold);
 
 /* Check if more data exists beyond loaded range */
-bool workspace_has_more_data_forward(Workspace *ws);
-bool workspace_has_more_data_backward(Workspace *ws);
+bool tab_has_more_data_forward(Tab *tab);
+bool tab_has_more_data_backward(Tab *tab);
 
 /* Update pagination tracking after data load
- * Call this after loading data to update workspace state */
-void workspace_update_pagination(Workspace *ws, size_t loaded_offset,
-                                 size_t loaded_count, size_t total_rows);
+ * Call this after loading data to update tab state */
+void tab_update_pagination(Tab *tab, size_t loaded_offset, size_t loaded_count,
+                           size_t total_rows);
+
+/* ============================================================================
+ * Compatibility Aliases (for gradual migration)
+ * ============================================================================
+ * These will be removed after all code is updated to use Tab-based functions.
+ */
+
+/* Old workspace_* functions now operate on Tab */
+#define workspace_move_cursor(ws, rd, cd, vr) tab_move_cursor((ws), (rd), (cd), (vr))
+#define workspace_page_up(ws, vr) tab_page_up((ws), (vr))
+#define workspace_page_down(ws, vr) tab_page_down((ws), (vr))
+#define workspace_home(ws) tab_home((ws))
+#define workspace_end(ws, vr) tab_end((ws), (vr))
+#define workspace_column_first(ws) tab_column_first((ws))
+#define workspace_column_last(ws) tab_column_last((ws))
+#define workspace_check_data_edge(ws, t) tab_check_data_edge((ws), (t))
+#define workspace_has_more_data_forward(ws) tab_has_more_data_forward((ws))
+#define workspace_has_more_data_backward(ws) tab_has_more_data_backward((ws))
+#define workspace_update_pagination(ws, o, c, t) tab_update_pagination((ws), (o), (c), (t))
 
 #endif /* LACE_CORE_WORKSPACE_H */

@@ -22,8 +22,10 @@ int tui_get_filters_panel_height(TuiState *state) {
   if (!state || !state->filters_visible)
     return 0;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  int filter_rows = (int)ws->filters.num_filters;
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
+    return 1;
+  int filter_rows = (int)tab->filters.num_filters;
   if (filter_rows < 1)
     filter_rows = 1; /* Always at least one filter row */
   if (filter_rows > MAX_VISIBLE_FILTERS)
@@ -34,11 +36,13 @@ int tui_get_filters_panel_height(TuiState *state) {
 
 /* Draw the filters panel */
 void tui_draw_filters_panel(TuiState *state) {
-  if (!state || !state->filters_visible || state->num_workspaces == 0)
+  if (!state || !state->filters_visible)
     return;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  TableFilters *f = &ws->filters;
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
+    return;
+  TableFilters *f = &tab->filters;
 
   int panel_height = tui_get_filters_panel_height(state);
 
@@ -478,12 +482,13 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
 
 /* Handle filters panel input */
 bool tui_handle_filters_input(TuiState *state, int ch) {
-  if (!state || !state->filters_visible || !state->filters_focused ||
-      state->num_workspaces == 0)
+  if (!state || !state->filters_visible || !state->filters_focused)
     return false;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  TableFilters *f = &ws->filters;
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
+    return false;
+  TableFilters *f = &tab->filters;
 
   /* Ensure at least one filter exists */
   if (f->num_filters == 0) {
@@ -535,6 +540,8 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       }
       break;
     }
+    /* Sync focus state to Tab so it persists across tab switches */
+    tab_sync_focus(state);
     return true;
   }
 
@@ -542,13 +549,17 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   switch (ch) {
   case 27: /* Escape - close panel */
   case 'f':
-  case '/':
-    /* Save cursor position to workspace before closing */
-    ws->filters_cursor_row = state->filters_cursor_row;
-    ws->filters_cursor_col = state->filters_cursor_col;
+  case '/': {
+    /* Save cursor position to UITabState before closing */
+    UITabState *ui = TUI_TAB_UI(state);
+    if (ui) {
+      ui->filters_cursor_row = state->filters_cursor_row;
+      ui->filters_cursor_col = state->filters_cursor_col;
+    }
     state->filters_visible = false;
     state->filters_focused = false;
     break;
+  }
 
   case KEY_UP:
   case 'k':
@@ -769,6 +780,8 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   /* Global keys - pass through to main loop */
   case '[':
   case ']':
+  case '{':
+  case '}':
   case KEY_F(6):
   case KEY_F(7):
   case 't':
@@ -796,26 +809,25 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     break;
   }
 
+  /* Sync focus state to Tab so it persists across tab switches */
+  tab_sync_focus(state);
   return true;
 }
 
 /* Apply current filters and reload data */
 void tui_apply_filters(TuiState *state) {
-  if (!state || state->num_workspaces == 0)
-    return;
-
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  if (ws->type != WORKSPACE_TYPE_TABLE || !ws->table_name)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_TABLE || !tab->table_name)
     return;
 
   /* Cancel any pending background load before reload */
   tui_cancel_background_load(state);
 
   /* Reload table data with filters applied */
-  tui_load_table_data(state, ws->table_name);
+  tui_load_table_data(state, tab->table_name);
 
   /* Update status - count only active (non-empty) filters */
-  TableFilters *f = &ws->filters;
+  TableFilters *f = &tab->filters;
   size_t active_count = 0;
   for (size_t i = 0; i < f->num_filters; i++) {
     ColumnFilter *cf = &f->filters[i];

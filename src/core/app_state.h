@@ -1,6 +1,9 @@
 /*
  * lace - Database Viewer and Manager
  * Core application state (platform-independent)
+ *
+ * Hierarchy: AppState contains both Connections (pool) and Workspaces (independent)
+ * Each Tab references which Connection it uses.
  */
 
 #ifndef LACE_APP_STATE_H
@@ -10,14 +13,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Maximum number of workspaces/tabs */
+/* Limits */
+#define MAX_CONNECTIONS 5
 #define MAX_WORKSPACES 10
+#define MAX_TABS 10
 
-/* Workspace type */
-typedef enum {
-  WORKSPACE_TYPE_TABLE, /* Table data view */
-  WORKSPACE_TYPE_QUERY  /* SQL query editor */
-} WorkspaceType;
+/* ============================================================================
+ * Filter Types
+ * ============================================================================
+ */
 
 /* Filter operators */
 typedef enum {
@@ -53,13 +57,43 @@ typedef struct {
   size_t filters_cap;    /* Capacity */
 } TableFilters;
 
-/* Workspace - holds per-tab state (both data and view state for now) */
+/* ============================================================================
+ * Connection - Database connection (pool entry)
+ * ============================================================================
+ */
+
+/* Connection - a database connection in the pool */
 typedef struct {
-  WorkspaceType type; /* Type of workspace content */
-  bool active;        /* Is this workspace active/used */
+  bool active;          /* Is this connection slot used */
+  DbConnection *conn;   /* Database connection handle */
+  char *connstr;        /* Connection string (for display/reconnect) */
+
+  /* Tables list (from this connection) */
+  char **tables;
+  size_t num_tables;
+} Connection;
+
+/* ============================================================================
+ * Tab - Individual table view or query editor
+ * ============================================================================
+ */
+
+/* Tab type */
+typedef enum {
+  TAB_TYPE_TABLE, /* Table data view */
+  TAB_TYPE_QUERY  /* SQL query editor */
+} TabType;
+
+/* Tab - holds per-tab state (table data or query) */
+typedef struct {
+  TabType type;   /* Type of tab content */
+  bool active;    /* Is this tab active/used */
+
+  /* Connection reference - which connection this tab uses */
+  size_t connection_index; /* Index into app->connections[] */
 
   /* Table identification */
-  size_t table_index; /* Index into tables array */
+  size_t table_index; /* Index into connection's tables array */
   char *table_name;   /* Table name (for display) */
 
   /* Table data */
@@ -76,8 +110,8 @@ typedef struct {
   size_t total_rows;
   size_t loaded_offset;
   size_t loaded_count;
-  bool row_count_approximate;    /* True if total_rows is approximate */
-  size_t unfiltered_total_rows;  /* Original row count before filtering */
+  bool row_count_approximate;   /* True if total_rows is approximate */
+  size_t unfiltered_total_rows; /* Original row count before filtering */
 
   /* Column widths (computed for display) */
   int *col_widths;
@@ -85,28 +119,6 @@ typedef struct {
 
   /* Filters (per-table) */
   TableFilters filters;
-
-  /* Filter panel UI state */
-  bool filters_visible;
-  bool filters_focused;
-  bool filters_editing;
-  bool filters_was_focused;      /* Was filters focused before sidebar? */
-  size_t filters_cursor_row;
-  size_t filters_cursor_col;
-  size_t filters_scroll;
-
-  /* Sidebar state (per-workspace) */
-  bool sidebar_visible;
-  bool sidebar_focused;
-  size_t sidebar_highlight;
-  size_t sidebar_scroll;
-  size_t sidebar_last_position;  /* Sidebar highlight before leaving */
-  char sidebar_filter[64];
-  size_t sidebar_filter_len;
-
-  /* UI visibility toggles */
-  bool header_visible;
-  bool status_visible;
 
   /* Query mode fields */
   char *query_text;
@@ -118,7 +130,7 @@ typedef struct {
   ResultSet *query_results;
   int64_t query_affected;
   char *query_error;
-  bool query_focus_results;
+  bool query_focus_results;  /* TODO: Move to UITabState */
   size_t query_result_row;
   size_t query_result_col;
   size_t query_result_scroll_row;
@@ -127,9 +139,9 @@ typedef struct {
   size_t query_result_num_cols;
 
   /* Query results editing */
-  bool query_result_editing;
-  char *query_result_edit_buf;
-  size_t query_result_edit_pos;
+  bool query_result_editing;       /* TODO: Move to UITabState */
+  char *query_result_edit_buf;     /* TODO: Move to UITabState */
+  size_t query_result_edit_pos;    /* TODO: Move to UITabState */
   char *query_source_table;
   TableSchema *query_source_schema;
 
@@ -141,42 +153,109 @@ typedef struct {
   bool query_paginated;
 
   /* Background pagination state */
-  void *bg_load_op;           /* AsyncOperation* - current background load (NULL if none) */
-  bool bg_load_forward;       /* Direction: true=forward, false=backward */
+  void *bg_load_op;             /* AsyncOperation* - current background load */
+  bool bg_load_forward;         /* Direction: true=forward, false=backward */
   size_t bg_load_target_offset; /* Target offset being loaded */
+} Tab;
+
+/* ============================================================================
+ * Workspace - Container for tabs
+ * ============================================================================
+ */
+
+/* Workspace - container for tabs */
+typedef struct {
+  bool active;       /* Is this workspace active/used */
+  char name[64];     /* Optional workspace name for display */
+
+  /* Tabs */
+  Tab tabs[MAX_TABS];
+  size_t num_tabs;
+  size_t current_tab;
 } Workspace;
+
+/* ============================================================================
+ * AppState - Top-level application state
+ * ============================================================================
+ */
 
 /* Core application state (platform-independent) */
 typedef struct {
-  /* Database connection */
-  DbConnection *conn;
+  /* Global UI state */
+  bool header_visible;
+  bool status_visible;
 
-  /* Table list */
-  char **tables;
-  size_t num_tables;
-
-  /* Workspaces/Tabs */
-  Workspace workspaces[MAX_WORKSPACES];
-  size_t num_workspaces;
-  size_t current_workspace;
+  /* Application running flag (set false to exit main loop) */
+  bool running;
 
   /* Page size for data loading */
   size_t page_size;
 
-  /* Application running flag (set false to exit main loop) */
-  bool running;
+  /* Connection pool - independent of workspaces */
+  Connection connections[MAX_CONNECTIONS];
+  size_t num_connections;
+
+  /* Workspaces - independent of connections */
+  Workspace workspaces[MAX_WORKSPACES];
+  size_t num_workspaces;
+  size_t current_workspace;
 } AppState;
 
-/* Initialize application state */
-void app_state_init(AppState *app);
+/* ============================================================================
+ * Lifecycle Functions
+ * ============================================================================
+ */
 
-/* Cleanup application state */
+/* Application state */
+void app_state_init(AppState *app);
 void app_state_cleanup(AppState *app);
 
-/* Get current workspace (convenience) */
-Workspace *app_current_workspace(AppState *app);
+/* Connection pool management */
+void connection_init(Connection *conn);
+void connection_free_data(Connection *conn);
+Connection *app_add_connection(AppState *app, DbConnection *db_conn,
+                               const char *connstr);
+Connection *app_get_connection(AppState *app, size_t index);
+bool app_close_connection(AppState *app, size_t index);
+size_t app_find_connection_index(AppState *app, DbConnection *conn);
 
-/* Filter operations (platform-independent) */
+/* Workspace management */
+void workspace_init(Workspace *ws);
+void workspace_free_data(Workspace *ws);
+Workspace *app_current_workspace(AppState *app);
+Workspace *app_create_workspace(AppState *app);
+bool app_close_workspace(AppState *app, size_t index);
+Workspace *app_switch_workspace(AppState *app, size_t index);
+
+/* Tab management */
+void tab_init(Tab *tab);
+void tab_free_data(Tab *tab);
+Tab *workspace_current_tab(Workspace *ws);
+Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
+                                size_t table_index, const char *table_name);
+Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index);
+bool workspace_close_tab(Workspace *ws, size_t index);
+Tab *workspace_switch_tab(Workspace *ws, size_t index);
+
+/* ============================================================================
+ * Convenience Accessors
+ * ============================================================================
+ */
+
+/* Get current tab from app */
+Tab *app_current_tab(AppState *app);
+
+/* Get connection for a specific tab */
+Connection *app_get_tab_connection(AppState *app, Tab *tab);
+
+/* Get connection for current tab */
+Connection *app_current_tab_connection(AppState *app);
+
+/* ============================================================================
+ * Filter Operations (platform-independent)
+ * ============================================================================
+ */
+
 void filters_init(TableFilters *f);
 void filters_free(TableFilters *f);
 void filters_clear(TableFilters *f);

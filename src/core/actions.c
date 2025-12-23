@@ -5,6 +5,8 @@
  * This module implements the action dispatch system, translating UI-agnostic
  * actions into state mutations. UI-specific operations are delegated to
  * callbacks provided by the frontend (TUI, GTK, Cocoa, etc.)
+ *
+ * Hierarchy: AppState → Connection → Workspace → Tab
  */
 
 #include "actions.h"
@@ -17,12 +19,6 @@
  * ============================================================================
  */
 
-/* Get current workspace or return CHANGED_NONE */
-#define GET_WORKSPACE_OR_RETURN(app, ws)                                       \
-  Workspace *ws = app_current_workspace(app);                                  \
-  if (!ws)                                                                     \
-    return CHANGED_NONE
-
 /* Safe callback invocation */
 #define UI_CALL(ui, func, ...)                                                 \
   do {                                                                         \
@@ -34,14 +30,14 @@
   (((ui) && (ui)->func) ? (ui)->func((ui)->ctx, ##__VA_ARGS__) : (default_val))
 
 /* ============================================================================
- * Navigation Actions
+ * Navigation Actions (operate on Tab)
  * ============================================================================
  */
 
 static ChangeFlags handle_cursor_move(AppState *app, const Action *action,
                                       const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data)
     return CHANGED_NONE;
 
   UI_CALL(ui, move_cursor, action->cursor_move.row_delta,
@@ -50,8 +46,8 @@ static ChangeFlags handle_cursor_move(AppState *app, const Action *action,
 }
 
 static ChangeFlags handle_page_up(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data)
     return CHANGED_NONE;
 
   UI_CALL(ui, page_up);
@@ -59,8 +55,8 @@ static ChangeFlags handle_page_up(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_page_down(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data)
     return CHANGED_NONE;
 
   UI_CALL(ui, page_down);
@@ -84,33 +80,33 @@ static ChangeFlags handle_end(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_column_first(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws)
+  Tab *tab = app_current_tab(app);
+  if (!tab)
     return CHANGED_NONE;
 
-  workspace_column_first(ws);
+  tab_column_first(tab);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
 static ChangeFlags handle_column_last(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data)
     return CHANGED_NONE;
 
-  workspace_column_last(ws);
+  tab_column_last(tab);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
 /* ============================================================================
- * Edit Actions
+ * Edit Actions (operate on Tab)
  * ============================================================================
  */
 
 static ChangeFlags handle_edit_start(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data || ws->data->num_rows == 0)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return CHANGED_NONE;
-  if (ws->sidebar_focused)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
   UI_CALL(ui, start_edit);
@@ -119,10 +115,10 @@ static ChangeFlags handle_edit_start(AppState *app, const UICallbacks *ui) {
 
 static ChangeFlags handle_edit_start_modal(AppState *app,
                                            const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data || ws->data->num_rows == 0)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return CHANGED_NONE;
-  if (ws->sidebar_focused)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
   UI_CALL(ui, start_modal_edit);
@@ -136,10 +132,10 @@ static ChangeFlags handle_edit_cancel(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_cell_set_null(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data || ws->data->num_rows == 0)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return CHANGED_NONE;
-  if (ws->sidebar_focused)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
   UI_CALL(ui, set_cell_null);
@@ -147,10 +143,10 @@ static ChangeFlags handle_cell_set_null(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_cell_set_empty(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data || ws->data->num_rows == 0)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return CHANGED_NONE;
-  if (ws->sidebar_focused)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
   UI_CALL(ui, set_cell_empty);
@@ -158,10 +154,10 @@ static ChangeFlags handle_cell_set_empty(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_row_delete(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->data || ws->data->num_rows == 0)
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return CHANGED_NONE;
-  if (ws->sidebar_focused)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
   UI_CALL(ui, delete_row);
@@ -169,7 +165,42 @@ static ChangeFlags handle_row_delete(AppState *app, const UICallbacks *ui) {
 }
 
 /* ============================================================================
- * Workspace Actions
+ * Tab Actions (switch tabs within current workspace)
+ * ============================================================================
+ */
+
+static ChangeFlags handle_tab_next(AppState *app) {
+  Workspace *ws = app_current_workspace(app);
+  if (!ws || ws->num_tabs <= 1)
+    return CHANGED_NONE;
+
+  size_t next = (ws->current_tab + 1) % ws->num_tabs;
+  workspace_switch_tab(ws, next);
+  return CHANGED_WORKSPACE;
+}
+
+static ChangeFlags handle_tab_prev(AppState *app) {
+  Workspace *ws = app_current_workspace(app);
+  if (!ws || ws->num_tabs <= 1)
+    return CHANGED_NONE;
+
+  size_t prev =
+      ws->current_tab > 0 ? ws->current_tab - 1 : ws->num_tabs - 1;
+  workspace_switch_tab(ws, prev);
+  return CHANGED_WORKSPACE;
+}
+
+static ChangeFlags handle_tab_switch(AppState *app, const Action *action) {
+  Workspace *ws = app_current_workspace(app);
+  if (!ws || action->workspace_switch.index >= ws->num_tabs)
+    return CHANGED_NONE;
+
+  workspace_switch_tab(ws, action->workspace_switch.index);
+  return CHANGED_WORKSPACE;
+}
+
+/* ============================================================================
+ * Workspace Actions (switch workspaces - now independent from connections)
  * ============================================================================
  */
 
@@ -178,8 +209,8 @@ static ChangeFlags handle_workspace_next(AppState *app) {
     return CHANGED_NONE;
 
   size_t next = (app->current_workspace + 1) % app->num_workspaces;
-  app_workspace_switch(app, next);
-  return CHANGED_WORKSPACE | CHANGED_DATA | CHANGED_CURSOR | CHANGED_SCROLL;
+  app_switch_workspace(app, next);
+  return CHANGED_WORKSPACE | CHANGED_SIDEBAR;
 }
 
 static ChangeFlags handle_workspace_prev(AppState *app) {
@@ -188,36 +219,30 @@ static ChangeFlags handle_workspace_prev(AppState *app) {
 
   size_t prev = app->current_workspace > 0 ? app->current_workspace - 1
                                            : app->num_workspaces - 1;
-  app_workspace_switch(app, prev);
-  return CHANGED_WORKSPACE | CHANGED_DATA | CHANGED_CURSOR | CHANGED_SCROLL;
-}
-
-static ChangeFlags handle_workspace_switch(AppState *app,
-                                           const Action *action) {
-  if (!app || action->workspace_switch.index >= app->num_workspaces)
-    return CHANGED_NONE;
-
-  app_workspace_switch(app, action->workspace_switch.index);
-  return CHANGED_WORKSPACE | CHANGED_DATA | CHANGED_CURSOR | CHANGED_SCROLL;
+  app_switch_workspace(app, prev);
+  return CHANGED_WORKSPACE | CHANGED_SIDEBAR;
 }
 
 /* ============================================================================
- * Sidebar Actions
+ * Sidebar Actions (operate on Tab)
  * ============================================================================
  */
 
 static ChangeFlags handle_sidebar_toggle(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
+  Tab *tab = app_current_tab(app);
+  if (!tab)
+    return CHANGED_NONE;
 
-  if (ws && ws->sidebar_visible) {
-    ws->sidebar_visible = false;
-    ws->sidebar_focused = false;
-  } else if (ws) {
-    ws->sidebar_visible = true;
-    ws->sidebar_focused = true;
-    ws->sidebar_highlight =
-        UI_CALL_RET(ui, get_sidebar_highlight_for_table, 0, ws->table_index);
-    ws->sidebar_scroll = 0;
+  if (UI_CALL_RET(ui, is_sidebar_visible, false)) {
+    UI_CALL(ui, set_sidebar_visible, false);
+    UI_CALL(ui, set_sidebar_focused, false);
+  } else {
+    UI_CALL(ui, set_sidebar_visible, true);
+    UI_CALL(ui, set_sidebar_focused, true);
+    size_t highlight =
+        UI_CALL_RET(ui, get_sidebar_highlight_for_table, 0, tab->table_index);
+    UI_CALL(ui, set_sidebar_highlight, highlight);
+    UI_CALL(ui, set_sidebar_scroll, 0);
   }
 
   UI_CALL(ui, recreate_layout);
@@ -225,84 +250,89 @@ static ChangeFlags handle_sidebar_toggle(AppState *app, const UICallbacks *ui) {
   return CHANGED_SIDEBAR | CHANGED_LAYOUT | CHANGED_FOCUS;
 }
 
-static ChangeFlags handle_sidebar_focus(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->sidebar_visible)
+static ChangeFlags handle_sidebar_focus(AppState *app, const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab || !UI_CALL_RET(ui, is_sidebar_visible, false))
     return CHANGED_NONE;
 
-  ws->filters_was_focused = false;
-  ws->sidebar_focused = true;
-  ws->sidebar_highlight = ws->sidebar_last_position;
+  UI_CALL(ui, set_filters_was_focused, UI_CALL_RET(ui, is_filters_focused, false));
+  UI_CALL(ui, set_filters_focused, false);
+  UI_CALL(ui, set_sidebar_focused, true);
+  UI_CALL(ui, set_sidebar_highlight, UI_CALL_RET(ui, get_sidebar_last_position, 0));
   return CHANGED_FOCUS | CHANGED_SIDEBAR;
 }
 
-static ChangeFlags handle_sidebar_unfocus(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws)
+static ChangeFlags handle_sidebar_unfocus(AppState *app, const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab)
     return CHANGED_NONE;
 
-  ws->sidebar_focused = false;
+  UI_CALL(ui, set_sidebar_focused, false);
+  /* Restore filters focus if it was focused before */
+  if (UI_CALL_RET(ui, get_filters_was_focused, false) &&
+      UI_CALL_RET(ui, is_filters_visible, false)) {
+    UI_CALL(ui, set_filters_focused, true);
+  }
   return CHANGED_FOCUS;
 }
 
 /* ============================================================================
- * Filter Panel Actions
+ * Filter Panel Actions (operate on Tab)
  * ============================================================================
  */
 
-static ChangeFlags handle_filters_toggle(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || ws->sidebar_focused)
+static ChangeFlags handle_filters_toggle(AppState *app, const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab || tab->type != TAB_TYPE_TABLE || !tab->schema)
     return CHANGED_NONE;
-  if (ws->type != WORKSPACE_TYPE_TABLE || !ws->schema)
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
     return CHANGED_NONE;
 
-  ws->filters_visible = !ws->filters_visible;
-  ws->filters_focused = ws->filters_visible;
-  ws->filters_editing = false;
+  bool visible = !UI_CALL_RET(ui, is_filters_visible, false);
+  UI_CALL(ui, set_filters_visible, visible);
+  UI_CALL(ui, set_filters_focused, visible);
+  UI_CALL(ui, set_filters_editing, false);
 
   return CHANGED_FILTERS | CHANGED_FOCUS | CHANGED_LAYOUT;
 }
 
-static ChangeFlags handle_filters_focus(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws || !ws->filters_visible)
+static ChangeFlags handle_filters_focus(AppState *app, const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab || !UI_CALL_RET(ui, is_filters_visible, false))
     return CHANGED_NONE;
 
-  ws->filters_focused = true;
+  UI_CALL(ui, set_filters_focused, true);
   return CHANGED_FOCUS;
 }
 
-static ChangeFlags handle_filters_unfocus(AppState *app) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws)
+static ChangeFlags handle_filters_unfocus(AppState *app, const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab)
     return CHANGED_NONE;
 
-  ws->filters_focused = false;
+  UI_CALL(ui, set_filters_focused, false);
   return CHANGED_FOCUS;
 }
 
 /* ============================================================================
- * UI Toggle Actions
+ * UI Toggle Actions (operate on AppState - global)
  * ============================================================================
  */
 
 static ChangeFlags handle_toggle_header(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws)
+  if (!app)
     return CHANGED_NONE;
 
-  ws->header_visible = !ws->header_visible;
+  app->header_visible = !app->header_visible;
   UI_CALL(ui, recreate_layout);
   return CHANGED_LAYOUT;
 }
 
 static ChangeFlags handle_toggle_status(AppState *app, const UICallbacks *ui) {
-  Workspace *ws = app_current_workspace(app);
-  if (!ws)
+  if (!app)
     return CHANGED_NONE;
 
-  ws->status_visible = !ws->status_visible;
+  app->status_visible = !app->status_visible;
   UI_CALL(ui, recreate_layout);
   return CHANGED_LAYOUT;
 }
@@ -343,8 +373,8 @@ static ChangeFlags handle_quit(AppState *app) {
   if (!app)
     return CHANGED_NONE;
 
-  /* If no connection, quit immediately */
-  if (!app->conn) {
+  /* If no connections, quit immediately */
+  if (app->num_connections == 0) {
     app->running = false;
     return CHANGED_NONE;
   }
@@ -419,26 +449,38 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
   case ACTION_ROW_DELETE:
     return handle_row_delete(app, ui);
 
-  /* Workspaces */
+  /* Tabs - switch within current workspace */
+  case ACTION_TAB_NEXT:
+    return handle_tab_next(app);
+  case ACTION_TAB_PREV:
+    return handle_tab_prev(app);
+  case ACTION_TAB_SWITCH:
+    return handle_tab_switch(app, action);
+  case ACTION_TAB_CREATE:
+  case ACTION_TAB_CREATE_QUERY:
+  case ACTION_TAB_CLOSE:
+    /* These need UI for table loading - handled by UI layer */
+    return CHANGED_NONE;
+
+  /* Workspaces - switch within current connection */
   case ACTION_WORKSPACE_NEXT:
     return handle_workspace_next(app);
   case ACTION_WORKSPACE_PREV:
     return handle_workspace_prev(app);
   case ACTION_WORKSPACE_SWITCH:
-    return handle_workspace_switch(app, action);
   case ACTION_WORKSPACE_CREATE:
   case ACTION_WORKSPACE_CREATE_QUERY:
   case ACTION_WORKSPACE_CLOSE:
-    /* These need UI for table loading - handled by UI layer */
+    /* These need UI for workspace management - handled by UI layer */
     return CHANGED_NONE;
 
   /* Sidebar */
   case ACTION_SIDEBAR_TOGGLE:
     return handle_sidebar_toggle(app, ui);
   case ACTION_SIDEBAR_FOCUS:
-    return handle_sidebar_focus(app);
+    return handle_sidebar_focus(app, ui);
   case ACTION_SIDEBAR_UNFOCUS:
-    return handle_sidebar_unfocus(app);
+    return handle_sidebar_unfocus(app, ui);
   case ACTION_SIDEBAR_MOVE:
   case ACTION_SIDEBAR_SELECT:
   case ACTION_SIDEBAR_SELECT_NEW_TAB:
@@ -451,11 +493,11 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
 
   /* Filters */
   case ACTION_FILTERS_TOGGLE:
-    return handle_filters_toggle(app);
+    return handle_filters_toggle(app, ui);
   case ACTION_FILTERS_FOCUS:
-    return handle_filters_focus(app);
+    return handle_filters_focus(app, ui);
   case ACTION_FILTERS_UNFOCUS:
-    return handle_filters_unfocus(app);
+    return handle_filters_unfocus(app, ui);
   case ACTION_FILTERS_MOVE:
   case ACTION_FILTERS_ADD:
   case ACTION_FILTERS_REMOVE:

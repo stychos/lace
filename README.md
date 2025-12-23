@@ -71,7 +71,7 @@ Binary will be at `build/lace`.
 | `d` or `Ctrl+D` | Set cell to empty |
 | `x` or `Delete` | Delete row |
 
-### Tabs & Sidebar
+### Tabs, Workspaces & Sidebar
 
 | Key | Action |
 |-----|--------|
@@ -80,6 +80,8 @@ Binary will be at `build/lace`.
 | `]` or `F6` | Next tab |
 | `-` | Close current tab |
 | `+` | Open table in new tab (in sidebar) |
+| `{` | Previous workspace |
+| `}` | Next workspace |
 | `f` or `/` | Filter tables (in sidebar) |
 
 ### Query Tab
@@ -121,6 +123,7 @@ Binary will be at `build/lace`.
 | Action | Effect |
 |--------|--------|
 | Click on tab | Switch to tab |
+| Double-click on tab | Close tab |
 | Click on table | Load in current tab |
 | Double-click on table | Open in new tab |
 | Click on cell | Select cell |

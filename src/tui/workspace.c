@@ -1,10 +1,9 @@
 /*
  * lace - Database Viewer and Manager
- * TUI Workspace/Tab management
+ * TUI Tab management
  *
- * Core workspace lifecycle (workspace_init, workspace_free_data) is in
- * core/workspace.c. This file contains TUI-specific workspace operations
- * that need to sync UI state or call TUI functions.
+ * Core tab/workspace/connection lifecycle is in core/app_state.c.
+ * This file contains TUI-specific operations that sync UI state.
  */
 
 #include "tui_internal.h"
@@ -12,104 +11,132 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Workspace state field mappings - used by save/restore */
-#define WS_COPY_TO_WS(field) ws->field = state->field
-#define WS_COPY_TO_STATE(field) state->field = ws->field
+/* Tab state field mappings - used by save/restore */
+#define TAB_COPY_TO_TAB(field) tab->field = state->field
+#define TAB_COPY_TO_STATE(field) state->field = tab->field
 
-/* Save current TUI state to workspace */
-void workspace_save(TuiState *state) {
-  if (!state || state->num_workspaces == 0)
+/* Save current TUI state to tab */
+void tab_save(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return;
-
-  Workspace *ws = &state->workspaces[state->current_workspace];
 
   /* Cursor and scroll */
-  WS_COPY_TO_WS(cursor_row);
-  WS_COPY_TO_WS(cursor_col);
-  WS_COPY_TO_WS(scroll_row);
-  WS_COPY_TO_WS(scroll_col);
+  TAB_COPY_TO_TAB(cursor_row);
+  TAB_COPY_TO_TAB(cursor_col);
+  TAB_COPY_TO_TAB(scroll_row);
+  TAB_COPY_TO_TAB(scroll_col);
 
   /* Pagination */
-  WS_COPY_TO_WS(total_rows);
-  WS_COPY_TO_WS(loaded_offset);
-  WS_COPY_TO_WS(loaded_count);
+  TAB_COPY_TO_TAB(total_rows);
+  TAB_COPY_TO_TAB(loaded_offset);
+  TAB_COPY_TO_TAB(loaded_count);
+  TAB_COPY_TO_TAB(row_count_approximate);
+  TAB_COPY_TO_TAB(unfiltered_total_rows);
 
   /* Data pointers */
-  WS_COPY_TO_WS(data);
-  WS_COPY_TO_WS(schema);
-  WS_COPY_TO_WS(col_widths);
-  WS_COPY_TO_WS(num_col_widths);
+  TAB_COPY_TO_TAB(data);
+  TAB_COPY_TO_TAB(schema);
+  TAB_COPY_TO_TAB(col_widths);
+  TAB_COPY_TO_TAB(num_col_widths);
 
-  /* Filters panel */
-  WS_COPY_TO_WS(filters_visible);
-  WS_COPY_TO_WS(filters_focused);
-  WS_COPY_TO_WS(filters_cursor_row);
-  WS_COPY_TO_WS(filters_cursor_col);
-  WS_COPY_TO_WS(filters_scroll);
-
-  /* Sidebar */
-  WS_COPY_TO_WS(sidebar_visible);
-  WS_COPY_TO_WS(sidebar_focused);
-  WS_COPY_TO_WS(sidebar_highlight);
-  WS_COPY_TO_WS(sidebar_scroll);
-  WS_COPY_TO_WS(sidebar_filter_len);
-  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
-
-  /* Layout visibility */
-  WS_COPY_TO_WS(header_visible);
-  WS_COPY_TO_WS(status_visible);
+  /* UI state to UITabState (source of truth) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    ui->filters_visible = state->filters_visible;
+    ui->filters_focused = state->filters_focused;
+    ui->filters_was_focused = state->filters_was_focused;
+    ui->filters_cursor_row = state->filters_cursor_row;
+    ui->filters_cursor_col = state->filters_cursor_col;
+    ui->filters_scroll = state->filters_scroll;
+    ui->sidebar_visible = state->sidebar_visible;
+    ui->sidebar_focused = state->sidebar_focused;
+    ui->sidebar_highlight = state->sidebar_highlight;
+    ui->sidebar_scroll = state->sidebar_scroll;
+    ui->sidebar_filter_len = state->sidebar_filter_len;
+    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+  }
 }
 
-/* Restore TUI state from workspace */
-void workspace_restore(TuiState *state) {
-  if (!state || state->num_workspaces == 0)
+/* Restore TUI state from tab */
+void tab_restore(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return;
-
-  Workspace *ws = &state->workspaces[state->current_workspace];
 
   /* Track layout state changes for window recreation */
   bool sidebar_was_visible = state->sidebar_visible;
   bool header_was_visible = state->header_visible;
   bool status_was_visible = state->status_visible;
 
+  /* Update connection state from tab's connection_index */
+  if (state->app) {
+    Connection *conn = app_get_connection(state->app, tab->connection_index);
+    if (conn && conn->active) {
+      state->conn = conn->conn;
+      state->tables = conn->tables;
+      state->num_tables = conn->num_tables;
+    }
+  }
+
   /* Cursor and scroll */
-  WS_COPY_TO_STATE(cursor_row);
-  WS_COPY_TO_STATE(cursor_col);
-  WS_COPY_TO_STATE(scroll_row);
-  WS_COPY_TO_STATE(scroll_col);
+  TAB_COPY_TO_STATE(cursor_row);
+  TAB_COPY_TO_STATE(cursor_col);
+  TAB_COPY_TO_STATE(scroll_row);
+  TAB_COPY_TO_STATE(scroll_col);
 
   /* Pagination */
-  WS_COPY_TO_STATE(total_rows);
-  WS_COPY_TO_STATE(loaded_offset);
-  WS_COPY_TO_STATE(loaded_count);
+  TAB_COPY_TO_STATE(total_rows);
+  TAB_COPY_TO_STATE(loaded_offset);
+  TAB_COPY_TO_STATE(loaded_count);
+  TAB_COPY_TO_STATE(row_count_approximate);
+  TAB_COPY_TO_STATE(unfiltered_total_rows);
 
   /* Data pointers */
-  WS_COPY_TO_STATE(data);
-  WS_COPY_TO_STATE(schema);
-  WS_COPY_TO_STATE(col_widths);
-  WS_COPY_TO_STATE(num_col_widths);
-  state->current_table = ws->table_index;
+  TAB_COPY_TO_STATE(data);
+  TAB_COPY_TO_STATE(schema);
+  TAB_COPY_TO_STATE(col_widths);
+  TAB_COPY_TO_STATE(num_col_widths);
+  state->current_table = tab->table_index;
 
-  /* Filters panel */
-  WS_COPY_TO_STATE(filters_visible);
-  WS_COPY_TO_STATE(filters_focused);
-  WS_COPY_TO_STATE(filters_cursor_row);
-  WS_COPY_TO_STATE(filters_cursor_col);
-  WS_COPY_TO_STATE(filters_scroll);
+  /* UI state from UITabState (source of truth) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    state->filters_visible = ui->filters_visible;
+    state->filters_focused = ui->filters_focused;
+    state->filters_was_focused = ui->filters_was_focused;
+    state->filters_cursor_row = ui->filters_cursor_row;
+    state->filters_cursor_col = ui->filters_cursor_col;
+    state->filters_scroll = ui->filters_scroll;
+    state->sidebar_visible = ui->sidebar_visible;
+    state->sidebar_focused = ui->sidebar_focused;
+    state->sidebar_highlight = ui->sidebar_highlight;
+    state->sidebar_scroll = ui->sidebar_scroll;
+    state->sidebar_filter_len = ui->sidebar_filter_len;
+    memcpy(state->sidebar_filter, ui->sidebar_filter, sizeof(state->sidebar_filter));
+  } else {
+    /* No UITabState - use defaults */
+    state->filters_visible = false;
+    state->filters_focused = false;
+    state->filters_was_focused = false;
+    state->filters_cursor_row = 0;
+    state->filters_cursor_col = 0;
+    state->filters_scroll = 0;
+    state->sidebar_visible = true;
+    state->sidebar_focused = false;
+    state->sidebar_highlight = 0;
+    state->sidebar_scroll = 0;
+    state->sidebar_filter[0] = '\0';
+    state->sidebar_filter_len = 0;
+  }
   state->filters_editing = false;
-
-  /* Sidebar */
-  WS_COPY_TO_STATE(sidebar_visible);
-  WS_COPY_TO_STATE(sidebar_focused);
-  WS_COPY_TO_STATE(sidebar_highlight);
-  WS_COPY_TO_STATE(sidebar_scroll);
-  WS_COPY_TO_STATE(sidebar_filter_len);
-  memcpy(state->sidebar_filter, ws->sidebar_filter, sizeof(state->sidebar_filter));
   state->sidebar_filter_active = false;
 
-  /* Layout visibility */
-  WS_COPY_TO_STATE(header_visible);
-  WS_COPY_TO_STATE(status_visible);
+  /* Layout visibility from app */
+  if (state->app) {
+    state->header_visible = state->app->header_visible;
+    state->status_visible = state->app->status_visible;
+  }
 
   /* Recreate windows if layout changed */
   if (sidebar_was_visible != state->sidebar_visible ||
@@ -119,27 +146,58 @@ void workspace_restore(TuiState *state) {
   }
 }
 
-/* Switch to a different workspace */
-void workspace_switch(TuiState *state, size_t index) {
-  if (!state || !state->app || index >= state->app->num_workspaces)
-    return;
-  if (index == state->app->current_workspace)
+/* Legacy wrapper for compatibility */
+void workspace_save(TuiState *state) {
+  tab_save(state);
+}
+
+/* Legacy wrapper for compatibility */
+void workspace_restore(TuiState *state) {
+  tab_restore(state);
+}
+
+/* Sync focus and panel state from TuiState to UITabState.
+ * Call this when input handlers modify focus state so it persists across tab switches. */
+void tab_sync_focus(TuiState *state) {
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!ui)
     return;
 
-  AppState *app = state->app;
+  /* Sync focus-related state to UITabState (source of truth) */
+  ui->sidebar_visible = state->sidebar_visible;
+  ui->sidebar_focused = state->sidebar_focused;
+  ui->sidebar_highlight = state->sidebar_highlight;
+  ui->sidebar_scroll = state->sidebar_scroll;
+  ui->sidebar_filter_len = state->sidebar_filter_len;
+  memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+
+  ui->filters_visible = state->filters_visible;
+  ui->filters_focused = state->filters_focused;
+  ui->filters_was_focused = state->filters_was_focused;
+  ui->filters_cursor_row = state->filters_cursor_row;
+  ui->filters_cursor_col = state->filters_cursor_col;
+  ui->filters_scroll = state->filters_scroll;
+}
+
+/* Switch to a different tab */
+void tab_switch(TuiState *state, size_t index) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!ws || index >= ws->num_tabs)
+    return;
+  if (index == ws->current_tab)
+    return;
 
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
 
-  /* Save current workspace state */
-  workspace_save(state);
+  /* Save current tab state */
+  tab_save(state);
 
-  /* Switch to new workspace in AppState */
-  app->current_workspace = index;
-  state->current_workspace = index;
+  /* Switch to new tab */
+  workspace_switch_tab(ws, index);
 
-  /* Restore new workspace state */
-  workspace_restore(state);
+  /* Restore new tab state */
+  tab_restore(state);
 
   /* Clear status message */
   free(state->status_msg);
@@ -147,53 +205,81 @@ void workspace_switch(TuiState *state, size_t index) {
   state->status_is_error = false;
 }
 
-/* Create a new workspace for a table */
-bool workspace_create(TuiState *state, size_t table_index) {
+/* Legacy wrapper */
+void workspace_switch(TuiState *state, size_t index) {
+  tab_switch(state, index);
+}
+
+/* Create a new table tab */
+bool tab_create(TuiState *state, size_t table_index) {
   if (!state || !state->app || table_index >= state->num_tables)
     return false;
 
-  AppState *app = state->app;
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!ws) {
+    /* No workspace - need to create one first */
+    ws = app_create_workspace(state->app);
+    if (!ws)
+      return false;
+  }
 
-  if (app->num_workspaces >= MAX_WORKSPACES) {
-    tui_set_error(state, "Maximum %d tabs reached", MAX_WORKSPACES);
+  if (ws->num_tabs >= MAX_TABS) {
+    tui_set_error(state, "Maximum %d tabs reached", MAX_TABS);
     return false;
   }
 
-  /* Save current workspace first */
-  if (app->num_workspaces > 0) {
-    workspace_save(state);
+  /* Get connection index - use current tab's connection if available */
+  size_t connection_index = 0;
+  Tab *current_tab = TUI_TAB(state);
+  if (current_tab) {
+    connection_index = current_tab->connection_index;
   }
 
-  /* Create new workspace in AppState */
-  size_t new_idx = app->num_workspaces;
-  Workspace *ws = &app->workspaces[new_idx];
-  workspace_init(ws);
+  /* Save current tab first */
+  if (ws->num_tabs > 0) {
+    tab_save(state);
+  }
 
-  ws->active = true;
-  ws->table_index = table_index;
-  ws->table_name = str_dup(state->tables[table_index]);
+  /* Create new tab with connection reference */
+  Tab *tab = workspace_create_table_tab(ws, connection_index, table_index, state->tables[table_index]);
+  if (!tab) {
+    tui_set_error(state, "Failed to create tab");
+    return false;
+  }
 
-  /* Initialize sidebar state - inherit current state including scroll position */
-  ws->sidebar_visible = state->sidebar_visible;
-  ws->sidebar_focused = false; /* New workspace starts with table focused */
-  ws->sidebar_highlight = state->sidebar_highlight; /* Keep current highlight position */
-  ws->sidebar_scroll = state->sidebar_scroll; /* Keep current scroll position */
-  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
-  ws->sidebar_filter_len = state->sidebar_filter_len;
+  /* Initialize UITabState for new tab (now source of truth) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    /* Inherit sidebar visibility but reset focus for new tab */
+    ui->sidebar_visible = state->sidebar_visible;
+    ui->sidebar_focused = false;  /* New tab: table has focus, not sidebar */
+    ui->sidebar_highlight = state->sidebar_highlight;
+    ui->sidebar_scroll = state->sidebar_scroll;
+    ui->sidebar_filter_len = state->sidebar_filter_len;
+    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+    ui->sidebar_last_position = table_index;
 
-  /* Initialize sidebar last position for navigation restoration */
-  state->sidebar_last_position = table_index;
+    /* New tab starts with filters closed */
+    ui->filters_visible = false;
+    ui->filters_focused = false;
+    ui->filters_was_focused = false;
+    ui->filters_editing = false;
+    ui->filters_cursor_row = 0;
+    ui->filters_cursor_col = 0;
+    ui->filters_scroll = 0;
+  }
 
-  /* Update AppState */
-  app->num_workspaces++;
-  app->current_workspace = new_idx;
+  /* Reset TUI state cache for new tab - all panels start unfocused */
+  state->sidebar_focused = false;
+  state->filters_visible = false;
+  state->filters_focused = false;
+  state->filters_was_focused = false;
+  state->filters_editing = false;
+  state->filters_cursor_row = 0;
+  state->filters_cursor_col = 0;
+  state->filters_scroll = 0;
 
-  /* Sync to TuiState cache */
-  state->workspaces = app->workspaces;
-  state->num_workspaces = app->num_workspaces;
-  state->current_workspace = app->current_workspace;
-
-  /* Clear TUI state for new workspace */
+  /* Clear data state for new tab */
   state->data = NULL;
   state->schema = NULL;
   state->col_widths = NULL;
@@ -205,37 +291,33 @@ bool workspace_create(TuiState *state, size_t table_index) {
 
   /* Load the table data */
   if (!tui_load_table_data(state, state->tables[table_index])) {
-    /* Failed - remove the workspace using core function */
-    workspace_free_data(ws);
-    memset(ws, 0, sizeof(Workspace)); /* Clear all pointers to prevent dangling refs */
+    /* Failed - remove the tab */
+    workspace_close_tab(ws, ws->current_tab);
 
-    /* Update AppState */
-    app->num_workspaces--;
-
-    /* Sync to TuiState cache */
-    state->num_workspaces = app->num_workspaces;
-
-    /* Restore previous workspace */
-    if (app->num_workspaces > 0) {
-      app->current_workspace = app->num_workspaces - 1;
-      state->current_workspace = app->current_workspace;
-      workspace_restore(state);
+    /* Restore previous tab if any */
+    if (ws->num_tabs > 0) {
+      tab_restore(state);
     }
     return false;
   }
 
-  /* Save the loaded data to workspace */
-  ws->data = state->data;
-  ws->schema = state->schema;
-  ws->col_widths = state->col_widths;
-  ws->num_col_widths = state->num_col_widths;
-  ws->total_rows = state->total_rows;
-  ws->loaded_offset = state->loaded_offset;
-  ws->loaded_count = state->loaded_count;
+  /* Save the loaded data to tab */
+  tab->data = state->data;
+  tab->schema = state->schema;
+  tab->col_widths = state->col_widths;
+  tab->num_col_widths = state->num_col_widths;
+  tab->total_rows = state->total_rows;
+  tab->loaded_offset = state->loaded_offset;
+  tab->loaded_count = state->loaded_count;
 
   state->current_table = table_index;
 
   return true;
+}
+
+/* Legacy wrapper */
+bool workspace_create(TuiState *state, size_t table_index) {
+  return tab_create(state, table_index);
 }
 
 /* Draw tab bar */
@@ -246,20 +328,26 @@ void tui_draw_tabs(TuiState *state) {
   werase(state->tab_win);
   wbkgd(state->tab_win, COLOR_PAIR(COLOR_BORDER));
 
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!ws) {
+    wrefresh(state->tab_win);
+    return;
+  }
+
   int x = 0;
 
-  for (size_t i = 0; i < state->num_workspaces; i++) {
-    Workspace *ws = &state->workspaces[i];
-    if (!ws->active)
+  for (size_t i = 0; i < ws->num_tabs; i++) {
+    Tab *tab = &ws->tabs[i];
+    if (!tab->active)
       continue;
 
-    const char *name = ws->table_name ? ws->table_name : "?";
+    const char *name = tab->table_name ? tab->table_name : "?";
     int tab_width = (int)strlen(name) + 4; /* " name  " with padding */
 
     if (x + tab_width > state->term_cols)
       break;
 
-    if (i == state->current_workspace) {
+    if (i == ws->current_tab) {
       /* Current tab - highlighted */
       wattron(state->tab_win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
       mvwprintw(state->tab_win, 0, x, " %s ", name);
@@ -272,13 +360,13 @@ void tui_draw_tabs(TuiState *state) {
     x += tab_width;
 
     /* Tab separator */
-    if (i < state->num_workspaces - 1 && x < state->term_cols) {
+    if (i < ws->num_tabs - 1 && x < state->term_cols) {
       mvwaddch(state->tab_win, 0, x - 1, ACS_VLINE);
     }
   }
 
   /* Show hint for new tab if space and sidebar visible */
-  if (state->num_workspaces < MAX_WORKSPACES && state->sidebar_focused) {
+  if (ws->num_tabs < MAX_TABS && state->sidebar_focused) {
     const char *hint = "[+] New tab";
     int hint_len = (int)strlen(hint);
     if (state->term_cols - x > hint_len + 2) {
@@ -291,42 +379,20 @@ void tui_draw_tabs(TuiState *state) {
   wrefresh(state->tab_win);
 }
 
-/* Close current workspace */
-void workspace_close(TuiState *state) {
-  if (!state || !state->app || state->app->num_workspaces == 0)
+/* Close current tab */
+void tab_close(TuiState *state) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!ws || ws->num_tabs == 0)
     return;
-
-  AppState *app = state->app;
 
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
 
-  /* Validate current_workspace is within bounds */
-  if (app->current_workspace >= app->num_workspaces)
-    return;
+  /* Close the tab */
+  workspace_close_tab(ws, ws->current_tab);
 
-  Workspace *ws = &app->workspaces[app->current_workspace];
-
-  /* Free workspace data using core function */
-  workspace_free_data(ws);
-  memset(ws, 0, sizeof(Workspace));
-
-  /* Shift remaining workspaces down */
-  for (size_t i = app->current_workspace; i < app->num_workspaces - 1; i++) {
-    app->workspaces[i] = app->workspaces[i + 1];
-  }
-  memset(&app->workspaces[app->num_workspaces - 1], 0, sizeof(Workspace));
-
-  app->num_workspaces--;
-
-  /* Sync to TuiState cache */
-  state->workspaces = app->workspaces;
-  state->num_workspaces = app->num_workspaces;
-
-  if (app->num_workspaces == 0) {
+  if (ws->num_tabs == 0) {
     /* Last tab closed - clear state and focus sidebar */
-    app->current_workspace = 0;
-    state->current_workspace = 0;
     state->data = NULL;
     state->schema = NULL;
     state->col_widths = NULL;
@@ -346,14 +412,22 @@ void workspace_close(TuiState *state) {
     state->sidebar_filter[0] = '\0';
     state->sidebar_filter_len = 0;
     state->sidebar_filter_active = false;
-  } else {
-    /* Adjust current workspace index */
-    if (app->current_workspace >= app->num_workspaces) {
-      app->current_workspace = app->num_workspaces - 1;
-    }
-    state->current_workspace = app->current_workspace;
 
-    /* Restore the now-current workspace */
-    workspace_restore(state);
+    /* Reset filters state */
+    state->filters_visible = false;
+    state->filters_focused = false;
+    state->filters_was_focused = false;
+    state->filters_editing = false;
+    state->filters_cursor_row = 0;
+    state->filters_cursor_col = 0;
+    state->filters_scroll = 0;
+  } else {
+    /* Restore the now-current tab */
+    tab_restore(state);
   }
+}
+
+/* Legacy wrapper */
+void workspace_close(TuiState *state) {
+  tab_close(state);
 }

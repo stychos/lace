@@ -248,7 +248,16 @@ static DbConnection *sqlite_connect(const char *connstr, char **err) {
 
   conn->driver = &sqlite_driver;
   conn->connstr = str_dup(connstr);
-  conn->database = str_dup(cs->database);
+
+  /* Use just the filename for display, not full path */
+  const char *basename = strrchr(cs->database, '/');
+  if (basename) {
+    basename++; /* Skip the '/' */
+  } else {
+    basename = cs->database; /* No '/' found, use as-is */
+  }
+  conn->database = str_dup(basename);
+
   if (!conn->connstr || !conn->database) {
     sqlite3_close(db);
     free(data->path);

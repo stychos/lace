@@ -33,6 +33,42 @@
 #define MIN_TERM_ROWS 10
 #define MIN_TERM_COLS 40
 
+/* ============================================================================
+ * UITabState - Per-tab UI state (TUI-specific)
+ *
+ * This struct holds UI-specific state that persists across tab switches but
+ * should NOT be in the core AppState. This separation allows core/ to remain
+ * platform-independent while TUI maintains its own UI state.
+ *
+ * Indexed by [workspace_index][tab_index] in TuiState.tab_ui array.
+ * ============================================================================
+ */
+typedef struct {
+  /* Filter panel UI state */
+  bool filters_visible;
+  bool filters_focused;
+  bool filters_editing;
+  bool filters_was_focused;  /* Was filters focused before entering sidebar */
+  size_t filters_cursor_row;
+  size_t filters_cursor_col;
+  size_t filters_scroll;
+
+  /* Sidebar state per-tab */
+  bool sidebar_visible;
+  bool sidebar_focused;
+  size_t sidebar_highlight;
+  size_t sidebar_scroll;
+  size_t sidebar_last_position;
+  char sidebar_filter[64];
+  size_t sidebar_filter_len;
+
+  /* Query tab UI state */
+  bool query_focus_results;
+  bool query_result_editing;
+  char *query_result_edit_buf;
+  size_t query_result_edit_pos;
+} UITabState;
+
 /* TUI state - contains UI-specific state and reference to core AppState */
 typedef struct {
   /* Core application state (platform-independent) */
@@ -130,9 +166,18 @@ typedef struct {
   size_t total_rows;
   size_t loaded_offset;
   size_t loaded_count;
+  bool row_count_approximate;
+  size_t unfiltered_total_rows;
   int *col_widths;
   size_t num_col_widths;
   size_t page_size;
+
+  /* =========================================================================
+   * Per-tab UI state (TUI-specific, indexed by [workspace][tab])
+   * This replaces the UI fields that were previously stored in core Tab struct.
+   * =========================================================================
+   */
+  UITabState tab_ui[MAX_WORKSPACES][MAX_TABS];
 } TuiState;
 
 /* Sync view cache from AppState (call after app state changes) */
@@ -142,42 +187,81 @@ void tui_sync_from_app(TuiState *state);
 void tui_sync_to_workspace(TuiState *state);
 
 /* ============================================================================
- * Convenience macros for accessing app state
+ * Convenience macros for accessing app state hierarchy
+ *
+ * New architecture:
+ *   - Connections are a flat pool at AppState level
+ *   - Workspaces are independent at AppState level
+ *   - Each Tab has a connection_index field referencing which connection it uses
  * ============================================================================
  */
 
 /* Get current workspace from TuiState */
 #define TUI_WORKSPACE(state) app_current_workspace((state)->app)
 
-/* Get current table data */
-#define TUI_DATA(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->data : NULL)
+/* Get current tab from TuiState */
+#define TUI_TAB(state) app_current_tab((state)->app)
 
-/* Get current schema */
-#define TUI_SCHEMA(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->schema : NULL)
+/* Get connection for current tab */
+#define TUI_TAB_CONNECTION(state) app_current_tab_connection((state)->app)
 
-/* App state shortcuts */
-#define TUI_CONN(state) ((state)->app->conn)
-#define TUI_TABLES(state) ((state)->app->tables)
-#define TUI_NUM_TABLES(state) ((state)->app->num_tables)
-#define TUI_NUM_WORKSPACES(state) ((state)->app->num_workspaces)
-#define TUI_CURRENT_WS_IDX(state) ((state)->app->current_workspace)
+/* Get current table data (from current tab) */
+#define TUI_DATA(state) (TUI_TAB(state) ? TUI_TAB(state)->data : NULL)
 
-/* Workspace field shortcuts (with null safety) */
+/* Get current schema (from current tab) */
+#define TUI_SCHEMA(state) (TUI_TAB(state) ? TUI_TAB(state)->schema : NULL)
+
+/* Connection shortcuts for current tab (with null safety) */
+#define TUI_CONN(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->conn : NULL)
+#define TUI_TABLES(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->tables : NULL)
+#define TUI_NUM_TABLES(state) (TUI_TAB_CONNECTION(state) ? TUI_TAB_CONNECTION(state)->num_tables : 0)
+
+/* Workspace/Tab count shortcuts */
+#define TUI_NUM_WORKSPACES(state) ((state)->app ? (state)->app->num_workspaces : 0)
+#define TUI_CURRENT_WS_IDX(state) ((state)->app ? (state)->app->current_workspace : 0)
+#define TUI_NUM_TABS(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->num_tabs : 0)
+#define TUI_CURRENT_TAB_IDX(state) (TUI_WORKSPACE(state) ? TUI_WORKSPACE(state)->current_tab : 0)
+
+/* Get current tab's UI state (with bounds checking) */
+static inline UITabState *tui_current_tab_ui(TuiState *state) {
+  if (!state || !state->app)
+    return NULL;
+  size_t ws = state->app->current_workspace;
+  Workspace *workspace = app_current_workspace(state->app);
+  if (!workspace || ws >= MAX_WORKSPACES)
+    return NULL;
+  size_t tab = workspace->current_tab;
+  if (tab >= MAX_TABS)
+    return NULL;
+  return &state->tab_ui[ws][tab];
+}
+
+/* Get UI state for a specific workspace/tab index */
+static inline UITabState *tui_get_tab_ui(TuiState *state, size_t ws_idx, size_t tab_idx) {
+  if (!state || ws_idx >= MAX_WORKSPACES || tab_idx >= MAX_TABS)
+    return NULL;
+  return &state->tab_ui[ws_idx][tab_idx];
+}
+
+/* Macro shortcut for current tab UI state */
+#define TUI_TAB_UI(state) tui_current_tab_ui(state)
+
+/* Tab field shortcuts (with null safety) */
 static inline size_t tui_cursor_row(TuiState *state) {
-  Workspace *ws = TUI_WORKSPACE(state);
-  return ws ? ws->cursor_row : 0;
+  Tab *tab = TUI_TAB(state);
+  return tab ? tab->cursor_row : 0;
 }
 static inline size_t tui_cursor_col(TuiState *state) {
-  Workspace *ws = TUI_WORKSPACE(state);
-  return ws ? ws->cursor_col : 0;
+  Tab *tab = TUI_TAB(state);
+  return tab ? tab->cursor_col : 0;
 }
 static inline bool tui_filters_visible(TuiState *state) {
-  Workspace *ws = TUI_WORKSPACE(state);
-  return ws ? ws->filters_visible : false;
+  UITabState *ui = tui_current_tab_ui(state);
+  return ui ? ui->filters_visible : false;
 }
 static inline bool tui_filters_focused(TuiState *state) {
-  Workspace *ws = TUI_WORKSPACE(state);
-  return ws ? ws->filters_focused : false;
+  UITabState *ui = tui_current_tab_ui(state);
+  return ui ? ui->filters_focused : false;
 }
 
 /* ============================================================================
@@ -274,7 +358,7 @@ bool tui_handle_query_input(TuiState *state, int ch);
 void tui_query_start_result_edit(TuiState *state);
 void tui_query_confirm_result_edit(TuiState *state);
 void tui_query_scroll_results(TuiState *state, int delta);
-bool query_load_rows_at(TuiState *state, Workspace *ws, size_t offset);
+bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset);
 
 /* ============================================================================
  * Filters UI

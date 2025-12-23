@@ -161,6 +161,8 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
       }
       break;
     }
+    /* Sync focus state to Tab so it persists across tab switches */
+    tab_sync_focus(state);
     return true;
   }
 
@@ -201,42 +203,44 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
       size_t actual_idx =
           tui_get_filtered_table_index(state, state->sidebar_highlight);
 
-      if (state->num_workspaces == 0) {
+      Workspace *ws = TUI_WORKSPACE(state);
+      if (!ws || ws->num_tabs == 0) {
         /* No tabs yet - create first one */
-        workspace_create(state, actual_idx);
+        tab_create(state, actual_idx);
       } else {
-        Workspace *ws = &state->workspaces[state->current_workspace];
-        if (ws->type == WORKSPACE_TYPE_QUERY) {
-          /* Query tab active - check if table tab already exists */
+        Tab *tab = TUI_TAB(state);
+        if (tab && tab->type == TAB_TYPE_QUERY) {
+          /* Query tab active - check if table tab already exists for same connection */
           bool found = false;
-          for (size_t i = 0; i < state->num_workspaces; i++) {
-            Workspace *w = &state->workspaces[i];
-            if (w->type == WORKSPACE_TYPE_TABLE &&
-                w->table_index == actual_idx) {
-              /* Found existing tab - switch to it */
-              workspace_switch(state, i);
+          size_t current_conn = tab->connection_index;
+          for (size_t i = 0; i < ws->num_tabs; i++) {
+            Tab *t = &ws->tabs[i];
+            if (t->type == TAB_TYPE_TABLE && t->table_index == actual_idx &&
+                t->connection_index == current_conn) {
+              /* Found existing tab for same table and connection - switch to it */
+              tab_switch(state, i);
               found = true;
               break;
             }
           }
           if (!found) {
             /* No existing tab - create new one */
-            workspace_create(state, actual_idx);
+            tab_create(state, actual_idx);
           }
-        } else if (actual_idx != state->current_table) {
+        } else if (tab && actual_idx != state->current_table) {
           /* Replace current tab's table */
           /* Free old data */
-          db_result_free(ws->data);
-          db_schema_free(ws->schema);
-          free(ws->col_widths);
-          free(ws->table_name);
+          db_result_free(tab->data);
+          db_schema_free(tab->schema);
+          free(tab->col_widths);
+          free(tab->table_name);
 
-          /* Update workspace */
-          ws->table_index = actual_idx;
-          ws->table_name = str_dup(state->tables[actual_idx]);
+          /* Update tab */
+          tab->table_index = actual_idx;
+          tab->table_name = str_dup(state->tables[actual_idx]);
 
           /* Clear filters when switching to a different table */
-          filters_clear(&ws->filters);
+          filters_clear(&tab->filters);
 
           /* Clear state and load new table */
           state->data = NULL;
@@ -247,18 +251,18 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
 
           tui_load_table_data(state, state->tables[actual_idx]);
 
-          /* Save to workspace */
-          ws->data = state->data;
-          ws->schema = state->schema;
-          ws->col_widths = state->col_widths;
-          ws->num_col_widths = state->num_col_widths;
-          ws->total_rows = state->total_rows;
-          ws->loaded_offset = state->loaded_offset;
-          ws->loaded_count = state->loaded_count;
-          ws->cursor_row = state->cursor_row;
-          ws->cursor_col = state->cursor_col;
-          ws->scroll_row = state->scroll_row;
-          ws->scroll_col = state->scroll_col;
+          /* Save to tab */
+          tab->data = state->data;
+          tab->schema = state->schema;
+          tab->col_widths = state->col_widths;
+          tab->num_col_widths = state->num_col_widths;
+          tab->total_rows = state->total_rows;
+          tab->loaded_offset = state->loaded_offset;
+          tab->loaded_count = state->loaded_count;
+          tab->cursor_row = state->cursor_row;
+          tab->cursor_col = state->cursor_col;
+          tab->scroll_row = state->scroll_row;
+          tab->scroll_col = state->scroll_col;
         }
       }
       state->sidebar_focused = false;
@@ -271,7 +275,7 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
       size_t actual_idx =
           tui_get_filtered_table_index(state, state->sidebar_highlight);
-      workspace_create(state, actual_idx);
+      tab_create(state, actual_idx);
       state->sidebar_focused = false;
     }
     break;
@@ -320,6 +324,8 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
   case 'R':
   case '[':
   case ']':
+  case '{':
+  case '}':
   case '-':
   case '_':
   case 's':
@@ -345,6 +351,8 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
     break;
   }
 
+  /* Sync focus state to Tab so it persists across tab switches */
+  tab_sync_focus(state);
   return true;
 }
 
@@ -368,20 +376,16 @@ void tui_draw_sidebar(TuiState *state) {
   int y = 1;
   int max_name_len = SIDEBAR_WIDTH - 4;
 
-  /* Draw filter input */
+  /* Draw filter input - use COLOR_EDIT for active filter (black on yellow) */
   if (state->sidebar_filter_active) {
-    wattron(state->sidebar_win, A_REVERSE);
+    wattron(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
   mvwprintw(state->sidebar_win, y, 1, "/%-*.*s", max_name_len, max_name_len,
             state->sidebar_filter_len > 0 ? state->sidebar_filter : "");
   if (state->sidebar_filter_active) {
-    wattroff(state->sidebar_win, A_REVERSE);
-    /* Show cursor position */
-    curs_set(1);
-    wmove(state->sidebar_win, y, 2 + (int)state->sidebar_filter_len);
-  } else {
-    curs_set(0);
+    wattroff(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
+  int filter_y = y;  /* Remember filter line position for cursor */
   y++;
 
   /* Separator */
@@ -390,6 +394,11 @@ void tui_draw_sidebar(TuiState *state) {
 
   if (!state->tables || state->num_tables == 0) {
     mvwprintw(state->sidebar_win, y, 2, "(no tables)");
+    /* Position cursor in filter field if active */
+    if (state->sidebar_filter_active) {
+      curs_set(1);
+      wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
+    }
     wrefresh(state->sidebar_win);
     return;
   }
@@ -414,6 +423,11 @@ void tui_draw_sidebar(TuiState *state) {
 
   if (filtered_count == 0) {
     mvwprintw(state->sidebar_win, y, 2, "(no matches)");
+    /* Position cursor in filter field if active */
+    if (state->sidebar_filter_active) {
+      curs_set(1);
+      wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
+    }
     wrefresh(state->sidebar_win);
     return;
   }
@@ -490,6 +504,12 @@ void tui_draw_sidebar(TuiState *state) {
 
     y++;
     filtered_idx++;
+  }
+
+  /* Position cursor in filter field if active, before refresh */
+  if (state->sidebar_filter_active) {
+    curs_set(1);
+    wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
   }
 
   wrefresh(state->sidebar_win);

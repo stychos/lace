@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 
@@ -72,48 +73,93 @@ void tui_sync_from_app(TuiState *state) {
 
   AppState *app = state->app;
 
-  /* Sync connection and table list */
-  state->conn = app->conn;
-  state->tables = app->tables;
-  state->num_tables = app->num_tables;
+  /* Track layout changes for window recreation */
+  bool old_sidebar_visible = state->sidebar_visible;
 
-  /* Sync workspaces */
-  state->workspaces = app->workspaces;
-  state->num_workspaces = app->num_workspaces;
-  state->current_workspace = app->current_workspace;
+  /* Get connection from current tab */
+  Connection *conn = app_current_tab_connection(app);
 
-  /* Sync from current workspace */
-  Workspace *ws = app_current_workspace(app);
-  if (ws) {
-    state->current_table = ws->table_index;
-    state->data = ws->data;
-    state->schema = ws->schema;
-    state->cursor_row = ws->cursor_row;
-    state->cursor_col = ws->cursor_col;
-    state->scroll_row = ws->scroll_row;
-    state->scroll_col = ws->scroll_col;
-    state->total_rows = ws->total_rows;
-    state->loaded_offset = ws->loaded_offset;
-    state->loaded_count = ws->loaded_count;
-    state->col_widths = ws->col_widths;
-    state->num_col_widths = ws->num_col_widths;
-    state->filters_visible = ws->filters_visible;
-    state->filters_focused = ws->filters_focused;
-    state->filters_cursor_row = ws->filters_cursor_row;
-    state->filters_cursor_col = ws->filters_cursor_col;
-    state->filters_scroll = ws->filters_scroll;
+  /* Track if connection/tables changed for sidebar reset */
+  char **old_tables = state->tables;
+  size_t old_num_tables = state->num_tables;
 
-    /* Sync visibility toggles */
-    state->header_visible = ws->header_visible;
-    state->status_visible = ws->status_visible;
+  if (conn) {
+    state->conn = conn->conn;
+    state->tables = conn->tables;
+    state->num_tables = conn->num_tables;
+  } else {
+    state->conn = NULL;
+    state->tables = NULL;
+    state->num_tables = 0;
+  }
 
-    /* Sync sidebar state */
-    state->sidebar_visible = ws->sidebar_visible;
-    state->sidebar_focused = ws->sidebar_focused;
-    state->sidebar_highlight = ws->sidebar_highlight;
-    state->sidebar_scroll = ws->sidebar_scroll;
-    memcpy(state->sidebar_filter, ws->sidebar_filter, sizeof(state->sidebar_filter));
-    state->sidebar_filter_len = ws->sidebar_filter_len;
+  /* If tables list changed (different connection), reset sidebar position */
+  bool tables_changed = (state->tables != old_tables) ||
+                        (state->num_tables != old_num_tables);
+  if (tables_changed && state->num_tables > 0) {
+    /* Clamp sidebar_highlight to valid range */
+    if (state->sidebar_highlight >= state->num_tables) {
+      state->sidebar_highlight = 0;
+    }
+    /* Clear filter as it may not match new table names */
+    state->sidebar_filter[0] = '\0';
+    state->sidebar_filter_len = 0;
+    state->sidebar_filter_active = false;
+    state->sidebar_scroll = 0;
+  }
+
+  /* Sync visibility toggles from app level */
+  state->header_visible = app->header_visible;
+  state->status_visible = app->status_visible;
+
+  /* Sync from current tab for data state */
+  Tab *tab = app_current_tab(app);
+  if (tab) {
+    state->current_table = tab->table_index;
+    state->data = tab->data;
+    state->schema = tab->schema;
+    state->cursor_row = tab->cursor_row;
+    state->cursor_col = tab->cursor_col;
+    state->scroll_row = tab->scroll_row;
+    state->scroll_col = tab->scroll_col;
+    state->total_rows = tab->total_rows;
+    state->loaded_offset = tab->loaded_offset;
+    state->loaded_count = tab->loaded_count;
+    state->row_count_approximate = tab->row_count_approximate;
+    state->unfiltered_total_rows = tab->unfiltered_total_rows;
+    state->col_widths = tab->col_widths;
+    state->num_col_widths = tab->num_col_widths;
+
+    /* UI state from UITabState (source of truth) */
+    UITabState *ui = TUI_TAB_UI(state);
+    if (ui) {
+      state->filters_visible = ui->filters_visible;
+      state->filters_focused = ui->filters_focused;
+      state->filters_was_focused = ui->filters_was_focused;
+      state->filters_cursor_row = ui->filters_cursor_row;
+      state->filters_cursor_col = ui->filters_cursor_col;
+      state->filters_scroll = ui->filters_scroll;
+      state->sidebar_visible = ui->sidebar_visible;
+      state->sidebar_focused = ui->sidebar_focused;
+      state->sidebar_highlight = ui->sidebar_highlight;
+      state->sidebar_scroll = ui->sidebar_scroll;
+      state->sidebar_filter_len = ui->sidebar_filter_len;
+      memcpy(state->sidebar_filter, ui->sidebar_filter, sizeof(state->sidebar_filter));
+    } else {
+      /* No UITabState - use defaults */
+      state->filters_visible = false;
+      state->filters_focused = false;
+      state->filters_was_focused = false;
+      state->filters_cursor_row = 0;
+      state->filters_cursor_col = 0;
+      state->filters_scroll = 0;
+      state->sidebar_visible = true;  /* Default: sidebar visible */
+      state->sidebar_focused = false;
+      state->sidebar_highlight = 0;
+      state->sidebar_scroll = 0;
+      state->sidebar_filter[0] = '\0';
+      state->sidebar_filter_len = 0;
+    }
   } else {
     state->current_table = 0;
     state->data = NULL;
@@ -125,17 +171,16 @@ void tui_sync_from_app(TuiState *state) {
     state->total_rows = 0;
     state->loaded_offset = 0;
     state->loaded_count = 0;
+    state->row_count_approximate = false;
+    state->unfiltered_total_rows = 0;
     state->col_widths = NULL;
     state->num_col_widths = 0;
     state->filters_visible = false;
     state->filters_focused = false;
+    state->filters_was_focused = false;
     state->filters_cursor_row = 0;
     state->filters_cursor_col = 0;
     state->filters_scroll = 0;
-
-    /* Default visibility - keep current values */
-
-    /* Default sidebar state */
     state->sidebar_visible = false;
     state->sidebar_focused = false;
     state->sidebar_highlight = 0;
@@ -144,40 +189,71 @@ void tui_sync_from_app(TuiState *state) {
     state->sidebar_filter_len = 0;
   }
 
+  /* Sync workspace cache fields for legacy code compatibility */
+  state->workspaces = app->workspaces;
+  state->num_workspaces = app->num_workspaces;
+  state->current_workspace = app->current_workspace;
+
   state->page_size = app->page_size;
+
+  /* Recreate windows if sidebar visibility changed */
+  if (old_sidebar_visible != state->sidebar_visible) {
+    tui_recreate_windows(state);
+  }
 }
 
-/* Sync current workspace from view cache - call before workspace switch */
+/* Sync current tab/workspace from view cache - call before tab/workspace switch */
 void tui_sync_to_workspace(TuiState *state) {
   if (!state || !state->app)
     return;
 
-  Workspace *ws = app_current_workspace(state->app);
-  if (!ws)
+  AppState *app = state->app;
+
+  /* Cancel any pending background load before switching away */
+  tui_cancel_background_load(state);
+
+  /* Save visibility toggles to app level */
+  app->header_visible = state->header_visible;
+  app->status_visible = state->status_visible;
+
+  /* Save data state to current tab */
+  Tab *tab = app_current_tab(app);
+  if (!tab)
     return;
 
-  /* Save UI state back to workspace */
-  ws->cursor_row = state->cursor_row;
-  ws->cursor_col = state->cursor_col;
-  ws->scroll_row = state->scroll_row;
-  ws->scroll_col = state->scroll_col;
-  ws->filters_visible = state->filters_visible;
-  ws->filters_focused = state->filters_focused;
-  ws->filters_cursor_row = state->filters_cursor_row;
-  ws->filters_cursor_col = state->filters_cursor_col;
-  ws->filters_scroll = state->filters_scroll;
+  /* Data pointers - sync in case they were updated */
+  tab->data = state->data;
+  tab->schema = state->schema;
+  tab->col_widths = state->col_widths;
+  tab->num_col_widths = state->num_col_widths;
+  tab->total_rows = state->total_rows;
+  tab->loaded_offset = state->loaded_offset;
+  tab->loaded_count = state->loaded_count;
+  tab->row_count_approximate = state->row_count_approximate;
+  tab->unfiltered_total_rows = state->unfiltered_total_rows;
 
-  /* Save visibility toggles */
-  ws->header_visible = state->header_visible;
-  ws->status_visible = state->status_visible;
+  /* Cursor and scroll */
+  tab->cursor_row = state->cursor_row;
+  tab->cursor_col = state->cursor_col;
+  tab->scroll_row = state->scroll_row;
+  tab->scroll_col = state->scroll_col;
 
-  /* Save sidebar state back to workspace */
-  ws->sidebar_visible = state->sidebar_visible;
-  ws->sidebar_focused = state->sidebar_focused;
-  ws->sidebar_highlight = state->sidebar_highlight;
-  ws->sidebar_scroll = state->sidebar_scroll;
-  memcpy(ws->sidebar_filter, state->sidebar_filter, sizeof(ws->sidebar_filter));
-  ws->sidebar_filter_len = state->sidebar_filter_len;
+  /* UI state to UITabState (source of truth) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    ui->filters_visible = state->filters_visible;
+    ui->filters_focused = state->filters_focused;
+    ui->filters_was_focused = state->filters_was_focused;
+    ui->filters_cursor_row = state->filters_cursor_row;
+    ui->filters_cursor_col = state->filters_cursor_col;
+    ui->filters_scroll = state->filters_scroll;
+    ui->sidebar_visible = state->sidebar_visible;
+    ui->sidebar_focused = state->sidebar_focused;
+    ui->sidebar_highlight = state->sidebar_highlight;
+    ui->sidebar_scroll = state->sidebar_scroll;
+    ui->sidebar_filter_len = state->sidebar_filter_len;
+    memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
+  }
 }
 
 /* ============================================================================
@@ -233,13 +309,16 @@ static void ui_delete_row(void *ctx) {
 
 static void ui_recreate_layout(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  /* Sync layout-related state from workspace before recreating windows */
-  Workspace *ws = app_current_workspace(state->app);
-  if (ws) {
-    state->sidebar_visible = ws->sidebar_visible;
-    state->sidebar_focused = ws->sidebar_focused;
-    state->header_visible = ws->header_visible;
-    state->status_visible = ws->status_visible;
+  /* Sync layout-related state before recreating windows */
+  AppState *app = state->app;
+  if (app) {
+    state->header_visible = app->header_visible;
+    state->status_visible = app->status_visible;
+  }
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    state->sidebar_visible = ui->sidebar_visible;
+    state->sidebar_focused = ui->sidebar_focused;
   }
   tui_recreate_windows(state);
 }
@@ -264,6 +343,132 @@ static size_t ui_get_sidebar_highlight_for_table(void *ctx, size_t table_idx) {
   return tui_get_sidebar_highlight_for_table((TuiState *)ctx, table_idx);
 }
 
+/* ============================================================================
+ * UI State Callbacks - Sidebar
+ * These read/write sidebar state from UITabState (source of truth)
+ * Also sync to TuiState cache for legacy code compatibility
+ * ============================================================================
+ */
+
+static bool ui_is_sidebar_visible(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->sidebar_visible : state->sidebar_visible;
+}
+
+static bool ui_is_sidebar_focused(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->sidebar_focused : state->sidebar_focused;
+}
+
+static void ui_set_sidebar_visible(void *ctx, bool visible) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->sidebar_visible = visible;
+  /* Sync to TuiState cache for legacy code */
+  state->sidebar_visible = visible;
+}
+
+static void ui_set_sidebar_focused(void *ctx, bool focused) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->sidebar_focused = focused;
+  /* Sync to TuiState cache for legacy code */
+  state->sidebar_focused = focused;
+}
+
+static size_t ui_get_sidebar_highlight(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->sidebar_highlight : state->sidebar_highlight;
+}
+
+static void ui_set_sidebar_highlight(void *ctx, size_t highlight) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->sidebar_highlight = highlight;
+  /* Sync to TuiState cache for legacy code */
+  state->sidebar_highlight = highlight;
+}
+
+static void ui_set_sidebar_scroll(void *ctx, size_t scroll) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->sidebar_scroll = scroll;
+  /* Sync to TuiState cache for legacy code */
+  state->sidebar_scroll = scroll;
+}
+
+static size_t ui_get_sidebar_last_position(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->sidebar_last_position : 0;
+}
+
+static void ui_set_sidebar_last_position(void *ctx, size_t position) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->sidebar_last_position = position;
+}
+
+/* ============================================================================
+ * UI State Callbacks - Filters Panel
+ * These read/write filters state from UITabState (source of truth)
+ * Also sync to TuiState cache for legacy code compatibility
+ * ============================================================================
+ */
+
+static bool ui_is_filters_visible(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->filters_visible : state->filters_visible;
+}
+
+static bool ui_is_filters_focused(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->filters_focused : state->filters_focused;
+}
+
+static void ui_set_filters_visible(void *ctx, bool visible) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->filters_visible = visible;
+  /* Sync to TuiState cache for legacy code */
+  state->filters_visible = visible;
+}
+
+static void ui_set_filters_focused(void *ctx, bool focused) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->filters_focused = focused;
+  /* Sync to TuiState cache for legacy code */
+  state->filters_focused = focused;
+}
+
+static void ui_set_filters_editing(void *ctx, bool editing) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->filters_editing = editing;
+  /* Sync to TuiState cache for legacy code */
+  state->filters_editing = editing;
+}
+
+static bool ui_get_filters_was_focused(void *ctx) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  return ui ? ui->filters_was_focused : state->filters_was_focused;
+}
+
+static void ui_set_filters_was_focused(void *ctx, bool was_focused) {
+  TuiState *state = (TuiState *)ctx;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) ui->filters_was_focused = was_focused;
+  /* Sync to TuiState cache for legacy code */
+  state->filters_was_focused = was_focused;
+}
+
 /* Build UICallbacks structure for dispatch */
 static UICallbacks tui_make_callbacks(TuiState *state) {
   return (UICallbacks){
@@ -284,7 +489,25 @@ static UICallbacks tui_make_callbacks(TuiState *state) {
     .load_more_rows = ui_load_more_rows,
     .load_prev_rows = ui_load_prev_rows,
     .disconnect = ui_disconnect,
+    /* UI State - Sidebar */
+    .is_sidebar_visible = ui_is_sidebar_visible,
+    .is_sidebar_focused = ui_is_sidebar_focused,
+    .set_sidebar_visible = ui_set_sidebar_visible,
+    .set_sidebar_focused = ui_set_sidebar_focused,
+    .get_sidebar_highlight = ui_get_sidebar_highlight,
+    .set_sidebar_highlight = ui_set_sidebar_highlight,
+    .set_sidebar_scroll = ui_set_sidebar_scroll,
+    .get_sidebar_last_position = ui_get_sidebar_last_position,
+    .set_sidebar_last_position = ui_set_sidebar_last_position,
     .get_sidebar_highlight_for_table = ui_get_sidebar_highlight_for_table,
+    /* UI State - Filters Panel */
+    .is_filters_visible = ui_is_filters_visible,
+    .is_filters_focused = ui_is_filters_focused,
+    .set_filters_visible = ui_set_filters_visible,
+    .set_filters_focused = ui_set_filters_focused,
+    .set_filters_editing = ui_set_filters_editing,
+    .get_filters_was_focused = ui_get_filters_was_focused,
+    .set_filters_was_focused = ui_set_filters_was_focused,
   };
 }
 
@@ -492,22 +715,138 @@ bool tui_connect(TuiState *state, const char *connstr) {
     return false;
   }
 
-  state->app->conn = conn;
-
-  /* Show sidebar on successful connection */
-  if (!state->sidebar_visible) {
-    state->sidebar_visible = true;
-    tui_recreate_windows(state);
-    tui_calculate_column_widths(state);
+  /* Create a new connection in the app state hierarchy */
+  Connection *app_conn = app_add_connection(state->app, conn, connstr);
+  if (!app_conn) {
+    db_disconnect(conn);
+    tui_set_error(state, "Failed to create connection");
+    return false;
   }
 
-  tui_set_status(state, "Connected to %s", state->app->conn->database);
-  return tui_load_tables(state);
+  /* Sync to TUI state cache */
+  state->conn = conn;
+
+  /* Load tables first */
+  if (!tui_load_tables(state)) {
+    return false;
+  }
+
+  /* Create a workspace if none exists */
+  Workspace *ws = app_current_workspace(state->app);
+  if (!ws) {
+    ws = app_create_workspace(state->app);
+    if (!ws) {
+      tui_set_error(state, "Failed to create workspace");
+      return false;
+    }
+  }
+
+  /* Find connection index */
+  size_t conn_index = app_find_connection_index(state->app, conn);
+
+  /* If we have tables, create a tab for the first one automatically */
+  if (state->num_tables > 0) {
+    const char *first_table = state->tables[0];
+    Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
+    if (tab) {
+      /* Initialize UITabState for new tab with defaults */
+      UITabState *ui = TUI_TAB_UI(state);
+      if (ui) {
+        ui->sidebar_visible = true;
+        ui->sidebar_focused = false;
+        ui->sidebar_highlight = 0;
+        ui->sidebar_scroll = 0;
+        ui->filters_visible = false;
+        ui->filters_focused = false;
+      }
+
+      /* Load the first table's data */
+      if (tui_load_table_data(state, first_table)) {
+        /* Save loaded data to tab */
+        tab->data = state->data;
+        tab->schema = state->schema;
+        tab->col_widths = state->col_widths;
+        tab->num_col_widths = state->num_col_widths;
+        tab->total_rows = state->total_rows;
+        tab->loaded_offset = state->loaded_offset;
+        tab->loaded_count = state->loaded_count;
+        state->current_table = 0;
+
+        /* Apply UITabState to TUI cache */
+        state->sidebar_visible = ui ? ui->sidebar_visible : true;
+        state->sidebar_focused = ui ? ui->sidebar_focused : false;
+        state->sidebar_highlight = ui ? ui->sidebar_highlight : 0;
+        state->sidebar_scroll = ui ? ui->sidebar_scroll : 0;
+
+        /* Sync workspace cache */
+        state->workspaces = state->app->workspaces;
+        state->num_workspaces = state->app->num_workspaces;
+        state->current_workspace = state->app->current_workspace;
+
+        tui_recreate_windows(state);
+        tui_calculate_column_widths(state);
+        tui_set_status(state, "Connected to %s", conn->database);
+        return true;
+      } else {
+        /* Data loading failed - remove the tab we just created */
+        workspace_close_tab(ws, ws->current_tab);
+      }
+    }
+  }
+
+  /* No tables or failed to load - show sidebar to select/create */
+  state->sidebar_visible = true;
+  state->sidebar_focused = true;
+  state->sidebar_highlight = 0;
+  state->sidebar_scroll = 0;
+
+  /* Sync workspace cache */
+  state->workspaces = state->app->workspaces;
+  state->num_workspaces = state->app->num_workspaces;
+  state->current_workspace = state->app->current_workspace;
+
+  tui_recreate_windows(state);
+  tui_calculate_column_widths(state);
+
+  if (state->num_tables == 0) {
+    tui_set_status(state, "Connected to %s - No tables found", conn->database);
+  } else {
+    tui_set_status(state, "Connected to %s - Select a table", conn->database);
+  }
+  return true;
 }
 
 void tui_disconnect(TuiState *state) {
   if (!state || !state->app)
     return;
+
+  /* Cancel all background operations before cleanup to prevent use-after-free */
+  /* Iterate through all workspaces/tabs and cancel their bg ops */
+  AppState *app = state->app;
+  for (size_t w = 0; w < app->num_workspaces; w++) {
+    Workspace *ws = &app->workspaces[w];
+    for (size_t t = 0; t < ws->num_tabs; t++) {
+      Tab *tab = &ws->tabs[t];
+      if (tab->bg_load_op) {
+        AsyncOperation *op = (AsyncOperation *)tab->bg_load_op;
+        async_cancel(op);
+        async_wait(op, 500); /* Wait for cancellation */
+        /* Poll until done */
+        while (async_poll(op) == ASYNC_STATE_RUNNING) {
+          struct timespec ts = {0, 10000000L}; /* 10ms */
+          nanosleep(&ts, NULL);
+        }
+        if (op->result) {
+          db_result_free((ResultSet *)op->result);
+          op->result = NULL;
+        }
+        async_free(op);
+        free(op);
+        tab->bg_load_op = NULL;
+      }
+    }
+  }
+  state->bg_loading_active = false;
 
   /* Cleanup is handled by app_state_cleanup() */
   app_state_cleanup(state->app);
@@ -520,38 +859,84 @@ void tui_disconnect(TuiState *state) {
     tui_recreate_windows(state);
   }
 
-  /* Clear cached state */
+  /* Clear all cached state pointers (memory was freed by app_state_cleanup) */
   state->conn = NULL;
   state->tables = NULL;
   state->num_tables = 0;
   state->data = NULL;
   state->schema = NULL;
+  state->col_widths = NULL;
+  state->num_col_widths = 0;
+  state->current_table = 0;
+  state->cursor_row = 0;
+  state->cursor_col = 0;
+  state->scroll_row = 0;
+  state->scroll_col = 0;
+  state->total_rows = 0;
+  state->loaded_offset = 0;
+  state->loaded_count = 0;
+  state->filters_visible = false;
+  state->filters_focused = false;
+  state->sidebar_highlight = 0;
+  state->sidebar_scroll = 0;
+  state->sidebar_filter[0] = '\0';
+  state->sidebar_filter_len = 0;
+  state->sidebar_filter_active = false;
+
+  /* Clear workspace cache (points to app->workspaces which was zeroed) */
+  state->workspaces = state->app->workspaces;
+  state->num_workspaces = 0;
+  state->current_workspace = 0;
+
+  /* Clear edit state */
+  state->editing = false;
+  free(state->edit_buffer);
+  state->edit_buffer = NULL;
+  state->edit_pos = 0;
 }
 
 bool tui_load_tables(TuiState *state) {
-  if (!state || !state->app || !state->app->conn)
+  if (!state || !state->app)
     return false;
 
-  AppState *app = state->app;
+  /* Get connection - prefer from current tab, fall back to state->conn */
+  Connection *conn_obj = TUI_TAB_CONNECTION(state);
+  DbConnection *db_conn = NULL;
+
+  if (conn_obj && conn_obj->conn) {
+    db_conn = conn_obj->conn;
+  } else if (state->conn) {
+    /* No tab yet - find connection in pool by DbConnection pointer */
+    db_conn = state->conn;
+    for (size_t i = 0; i < state->app->num_connections; i++) {
+      if (state->app->connections[i].conn == db_conn) {
+        conn_obj = &state->app->connections[i];
+        break;
+      }
+    }
+  }
+
+  if (!conn_obj || !db_conn)
+    return false;
 
   /* Free old tables */
-  if (app->tables) {
-    for (size_t i = 0; i < app->num_tables; i++) {
-      free(app->tables[i]);
+  if (conn_obj->tables) {
+    for (size_t i = 0; i < conn_obj->num_tables; i++) {
+      free(conn_obj->tables[i]);
     }
-    free(app->tables);
-    app->tables = NULL;
-    app->num_tables = 0;
+    free(conn_obj->tables);
+    conn_obj->tables = NULL;
+    conn_obj->num_tables = 0;
   }
 
   /* Sync conn for async operation */
-  state->conn = app->conn;
+  state->conn = db_conn;
 
   /* Use async operation with progress dialog */
   AsyncOperation op;
   async_init(&op);
   op.op_type = ASYNC_OP_LIST_TABLES;
-  op.conn = app->conn;
+  op.conn = db_conn;
 
   if (!async_start(&op)) {
     tui_set_error(state, "Failed to start operation");
@@ -573,24 +958,13 @@ bool tui_load_tables(TuiState *state) {
     return false;
   }
 
-  app->tables = (char **)op.result;
-  app->num_tables = op.result_count;
+  conn_obj->tables = (char **)op.result;
+  conn_obj->num_tables = op.result_count;
   async_free(&op);
 
-  /* Sync tables to TUI state so workspace_create can access them */
-  state->tables = app->tables;
-  state->num_tables = app->num_tables;
-
-  state->sidebar_highlight = 0;
-
-  if (app->num_tables == 0) {
-    tui_set_status(state, "No tables found");
-    state->sidebar_focused = true;
-  } else {
-    /* Auto-load first table */
-    workspace_create(state, 0);
-    state->sidebar_focused = false;
-  }
+  /* Sync tables to TUI state */
+  state->tables = conn_obj->tables;
+  state->num_tables = conn_obj->num_tables;
 
   return true;
 }
@@ -600,10 +974,10 @@ void tui_refresh(TuiState *state) {
   tui_draw_tabs(state);
   tui_draw_sidebar(state);
 
-  /* Dispatch drawing based on workspace type */
-  Workspace *ws = TUI_WORKSPACE(state);
-  if (ws) {
-    if (ws->type == WORKSPACE_TYPE_QUERY) {
+  /* Dispatch drawing based on tab type */
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    if (tab->type == TAB_TYPE_QUERY) {
       tui_draw_query(state);
     } else {
       tui_draw_table(state);
@@ -716,9 +1090,9 @@ void tui_run(TuiState *state) {
     }
 
     /* Handle query tab input (no key translation - user is typing SQL) */
-    if (state->num_workspaces > 0 && !state->sidebar_focused) {
-      Workspace *ws = &state->workspaces[state->current_workspace];
-      if (ws->type == WORKSPACE_TYPE_QUERY) {
+    Tab *query_tab = TUI_TAB(state);
+    if (query_tab && !state->sidebar_focused) {
+      if (query_tab->type == TAB_TYPE_QUERY) {
         if (tui_handle_query_input(state, ch)) {
           tui_refresh(state);
           continue;
@@ -769,8 +1143,9 @@ void tui_run(TuiState *state) {
       /* At first row with filters visible - focus filters */
       if (state->cursor_row == 0 && state->filters_visible) {
         action = action_filters_focus();
-        state->filters_cursor_row =
-            state->workspaces[state->current_workspace].filters.num_filters - 1;
+        Tab *filters_tab = TUI_TAB(state);
+        state->filters_cursor_row = filters_tab ?
+            filters_tab->filters.num_filters - 1 : 0;
         if (state->filters_cursor_row == (size_t)-1)
           state->filters_cursor_row = 0;
       } else {
@@ -858,28 +1233,38 @@ void tui_run(TuiState *state) {
 
     case ']':
     case KEY_F(6):
-      action = action_workspace_next();
+      action = action_tab_next();
       break;
 
     case '[':
     case KEY_F(7):
+      action = action_tab_prev();
+      break;
+
+    case '}':
+      action = action_workspace_next();
+      break;
+
+    case '{':
       action = action_workspace_prev();
       break;
 
     case '-':
     case '_':
       /* Close with confirmation for query tabs with content */
-      if (state->num_workspaces > 0) {
-        Workspace *ws = &state->workspaces[state->current_workspace];
-        if (ws->type == WORKSPACE_TYPE_QUERY &&
-            ((ws->query_text && ws->query_len > 0) || ws->query_results)) {
-          if (!tui_show_confirm_dialog(
-                  state, "Close query tab with unsaved content?")) {
-            handled = false;
-            break;
+      {
+        Tab *close_tab = TUI_TAB(state);
+        if (close_tab) {
+          if (close_tab->type == TAB_TYPE_QUERY &&
+              ((close_tab->query_text && close_tab->query_len > 0) || close_tab->query_results)) {
+            if (!tui_show_confirm_dialog(
+                    state, "Close query tab with unsaved content?")) {
+              handled = false;
+              break;
+            }
           }
+          tab_close(state);
         }
-        action = action_workspace_close();
       }
       break;
 
@@ -887,7 +1272,12 @@ void tui_run(TuiState *state) {
     case 't':
     case 'T':
     case KEY_F(9):
-      action = action_sidebar_toggle();
+      /* If sidebar visible but not focused, focus it; otherwise toggle */
+      if (state->sidebar_visible && !state->sidebar_focused) {
+        action = action_sidebar_focus();
+      } else {
+        action = action_sidebar_toggle();
+      }
       break;
 
     /* ========== Filters ========== */
@@ -922,11 +1312,11 @@ void tui_run(TuiState *state) {
     /* ========== Table Operations ========== */
     case 'r':
     case 'R':
-      /* Refresh table (only for table workspaces, not query) */
-      if (state->num_workspaces > 0 &&
-          state->current_workspace < state->num_workspaces) {
-        Workspace *ws = &state->workspaces[state->current_workspace];
-        if (ws->type == WORKSPACE_TYPE_TABLE) {
+    case 18: /* Ctrl+R */
+      /* Refresh table (only for table tabs, not query) */
+      {
+        Tab *refresh_tab = TUI_TAB(state);
+        if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
           tui_refresh_table(state);
         }
       }
@@ -994,13 +1384,13 @@ void tui_run(TuiState *state) {
         state->cursor_col = saved_cursor_col;
         state->scroll_row = saved_scroll_row;
         state->scroll_col = saved_scroll_col;
-        /* Also save to workspace */
-        Workspace *ws = app_current_workspace(state->app);
-        if (ws) {
-          ws->cursor_row = saved_cursor_row;
-          ws->cursor_col = saved_cursor_col;
-          ws->scroll_row = saved_scroll_row;
-          ws->scroll_col = saved_scroll_col;
+        /* Also save to tab */
+        Tab *tab = app_current_tab(state->app);
+        if (tab) {
+          tab->cursor_row = saved_cursor_row;
+          tab->cursor_col = saved_cursor_col;
+          tab->scroll_row = saved_scroll_row;
+          tab->scroll_col = saved_scroll_col;
         }
       }
     }

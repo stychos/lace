@@ -14,6 +14,10 @@ void tui_calculate_column_widths(TuiState *state) {
   if (!state || !state->data)
     return;
 
+  /* Validate columns array exists */
+  if (!state->data->columns || state->data->num_columns == 0)
+    return;
+
   free(state->col_widths);
   state->num_col_widths = state->data->num_columns;
   state->col_widths = calloc(state->num_col_widths, sizeof(int));
@@ -62,20 +66,17 @@ int tui_get_column_width(TuiState *state, size_t col) {
   return state->col_widths[col];
 }
 
-/* Build WHERE clause for current workspace filters */
+/* Build WHERE clause for current tab filters */
 static char *build_filter_where(TuiState *state) {
-  if (!state || state->num_workspaces == 0)
-    return NULL;
-
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  if (ws->filters.num_filters == 0)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->filters.num_filters == 0)
     return NULL;
 
   if (!state->schema || !state->conn)
     return NULL;
 
   char *err = NULL;
-  char *where = filters_build_where(&ws->filters, state->schema,
+  char *where = filters_build_where(&tab->filters, state->schema,
                                     state->conn->driver->name, &err);
   free(err);
   return where;
@@ -118,10 +119,10 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   }
   async_free(&schema_op);
 
-  /* Update workspace schema pointer for filter building */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    state->workspaces[state->current_workspace].schema = state->schema;
+  /* Update tab schema pointer for filter building */
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    tab->schema = state->schema;
   }
 
   /* Build WHERE clause from filters */
@@ -164,14 +165,12 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   state->page_size = PAGE_SIZE;
   state->loaded_offset = 0;
 
-  /* Store approximate flag and unfiltered count in workspace if available */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    ws->row_count_approximate = is_approximate;
+  /* Store approximate flag and unfiltered count in tab if available */
+  if (tab) {
+    tab->row_count_approximate = is_approximate;
     /* Store unfiltered total only when loading without filters */
     if (!where_clause) {
-      ws->unfiltered_total_rows = state->total_rows;
+      tab->unfiltered_total_rows = state->total_rows;
     }
   }
 
@@ -249,17 +248,15 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   /* Calculate column widths */
   tui_calculate_column_widths(state);
 
-  /* Update current workspace's pointers to prevent dangling references */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    ws->data = state->data;
-    ws->schema = state->schema;
-    ws->col_widths = state->col_widths;
-    ws->num_col_widths = state->num_col_widths;
-    ws->total_rows = state->total_rows;
-    ws->loaded_offset = state->loaded_offset;
-    ws->loaded_count = state->loaded_count;
+  /* Update current tab's pointers to prevent dangling references */
+  if (tab) {
+    tab->data = state->data;
+    tab->schema = state->schema;
+    tab->col_widths = state->col_widths;
+    tab->num_col_widths = state->num_col_widths;
+    tab->total_rows = state->total_rows;
+    tab->loaded_offset = state->loaded_offset;
+    tab->loaded_count = state->loaded_count;
   }
 
   /* Clear any previous status message so column info is shown */
@@ -275,12 +272,9 @@ bool tui_refresh_table(TuiState *state) {
     return false;
   if (state->current_table >= state->num_tables)
     return false;
-  if (state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
-    return false;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  if (ws->type != WORKSPACE_TYPE_TABLE || !ws->table_name)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_TABLE || !tab->table_name)
     return false;
 
   /* Cancel any pending background load */
@@ -297,7 +291,7 @@ bool tui_refresh_table(TuiState *state) {
   size_t abs_row = saved_offset + saved_cursor_row;
 
   /* Reload table data */
-  if (!tui_load_table_data(state, ws->table_name)) {
+  if (!tui_load_table_data(state, tab->table_name)) {
     return false;
   }
 
@@ -344,11 +338,11 @@ bool tui_refresh_table(TuiState *state) {
     }
   }
 
-  /* Update workspace */
-  ws->cursor_row = state->cursor_row;
-  ws->cursor_col = state->cursor_col;
-  ws->scroll_row = state->scroll_row;
-  ws->scroll_col = state->scroll_col;
+  /* Update tab */
+  tab->cursor_row = state->cursor_row;
+  tab->cursor_col = state->cursor_col;
+  tab->scroll_row = state->scroll_row;
+  tab->scroll_col = state->scroll_col;
 
   tui_set_status(state, "Table refreshed (%zu rows)", state->total_rows);
   return true;
@@ -490,16 +484,15 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     }
   }
 
-  /* Update current workspace's pointers to prevent dangling references */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    ws->data = state->data;
-    ws->col_widths = state->col_widths;
-    ws->num_col_widths = state->num_col_widths;
-    ws->total_rows = state->total_rows;
-    ws->loaded_offset = state->loaded_offset;
-    ws->loaded_count = state->loaded_count;
+  /* Update current tab's pointers to prevent dangling references */
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    tab->data = state->data;
+    tab->col_widths = state->col_widths;
+    tab->num_col_widths = state->num_col_widths;
+    tab->total_rows = state->total_rows;
+    tab->loaded_offset = state->loaded_offset;
+    tab->loaded_count = state->loaded_count;
   }
 
   return true;
@@ -704,12 +697,9 @@ void tui_check_load_more(TuiState *state) {
     return;
 
   /* Don't do synchronous load if background load is in progress */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    if (ws->bg_load_op != NULL)
-      return;
-  }
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->bg_load_op != NULL)
+    return;
 
   /* If cursor is within LOAD_THRESHOLD of the END, load more at end */
   size_t rows_from_end = state->data->num_rows > state->cursor_row
@@ -799,13 +789,12 @@ static bool merge_page_result(TuiState *state, ResultSet *new_data,
     state->loaded_count = new_count;
   }
 
-  /* Update workspace pointers */
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    ws->data = state->data;
-    ws->loaded_offset = state->loaded_offset;
-    ws->loaded_count = state->loaded_count;
+  /* Update tab pointers */
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    tab->data = state->data;
+    tab->loaded_offset = state->loaded_offset;
+    tab->loaded_count = state->loaded_count;
   }
 
   return true;
@@ -825,10 +814,9 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
 
   /* Check if we're using approximate count */
   bool was_approximate = false;
-  if (state->num_workspaces > 0 &&
-      state->current_workspace < state->num_workspaces) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    was_approximate = ws->row_count_approximate;
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    was_approximate = tab->row_count_approximate;
   }
 
   /* Clamp offset */
@@ -903,11 +891,9 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
       if (exact_count > 0) {
         /* Update total_rows with exact count */
         state->total_rows = (size_t)exact_count;
-        if (state->num_workspaces > 0 &&
-            state->current_workspace < state->num_workspaces) {
-          Workspace *ws = &state->workspaces[state->current_workspace];
-          ws->total_rows = state->total_rows;
-          ws->row_count_approximate = false;
+        if (tab) {
+          tab->total_rows = state->total_rows;
+          tab->row_count_approximate = false;
         }
 
         /* Recalculate offset and retry */
@@ -947,13 +933,11 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
     state->loaded_offset = offset;
     state->loaded_count = new_data->num_rows;
 
-    /* Update workspace pointers */
-    if (state->num_workspaces > 0 &&
-        state->current_workspace < state->num_workspaces) {
-      Workspace *ws = &state->workspaces[state->current_workspace];
-      ws->data = state->data;
-      ws->loaded_offset = state->loaded_offset;
-      ws->loaded_count = state->loaded_count;
+    /* Update tab pointers */
+    if (tab) {
+      tab->data = state->data;
+      tab->loaded_offset = state->loaded_offset;
+      tab->loaded_count = state->loaded_count;
     }
 
     success = true;
@@ -974,15 +958,14 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     return false;
   if (state->current_table >= state->num_tables)
     return false;
-  if (state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
+
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return false;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-
   /* Check if a background load is already running in the same direction */
-  if (ws->bg_load_op != NULL && ws->bg_load_forward == forward) {
-    AsyncOperation *bg_op = (AsyncOperation *)ws->bg_load_op;
+  if (tab->bg_load_op != NULL && tab->bg_load_forward == forward) {
+    AsyncOperation *bg_op = (AsyncOperation *)tab->bg_load_op;
 
     /* Show progress dialog and wait for existing operation */
     bool completed = tui_show_processing_dialog(state, bg_op, "Loading data...");
@@ -1025,7 +1008,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     /* Clean up background operation */
     async_free(bg_op);
     free(bg_op);
-    ws->bg_load_op = NULL;
+    tab->bg_load_op = NULL;
     state->bg_loading_active = false;
 
     return success;
@@ -1132,14 +1115,13 @@ bool tui_start_background_load(TuiState *state, bool forward) {
     return false;
   if (state->current_table >= state->num_tables)
     return false;
-  if (state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
+
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return false;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-
   /* Already have a background load in progress */
-  if (ws->bg_load_op != NULL)
+  if (tab->bg_load_op != NULL)
     return false;
 
   const char *table = state->tables[state->current_table];
@@ -1190,10 +1172,10 @@ bool tui_start_background_load(TuiState *state, bool forward) {
     return false;
   }
 
-  /* Store in workspace */
-  ws->bg_load_op = op;
-  ws->bg_load_forward = forward;
-  ws->bg_load_target_offset = target_offset;
+  /* Store in tab */
+  tab->bg_load_op = op;
+  tab->bg_load_forward = forward;
+  tab->bg_load_target_offset = target_offset;
   state->bg_loading_active = true;
 
   return true;
@@ -1201,12 +1183,11 @@ bool tui_start_background_load(TuiState *state, bool forward) {
 
 /* Poll background load, merge if complete - call from main loop */
 bool tui_poll_background_load(TuiState *state) {
-  if (!state || state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return false;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  AsyncOperation *op = (AsyncOperation *)ws->bg_load_op;
+  AsyncOperation *op = (AsyncOperation *)tab->bg_load_op;
 
   if (!op)
     return false;
@@ -1239,7 +1220,7 @@ bool tui_poll_background_load(TuiState *state) {
     }
 
     /* Merge into existing data */
-    merged = merge_page_result(state, new_data, ws->bg_load_forward);
+    merged = merge_page_result(state, new_data, tab->bg_load_forward);
     if (merged) {
       tui_trim_loaded_data(state);
     }
@@ -1250,7 +1231,7 @@ bool tui_poll_background_load(TuiState *state) {
   /* Clean up */
   async_free(op);
   free(op);
-  ws->bg_load_op = NULL;
+  tab->bg_load_op = NULL;
   state->bg_loading_active = false;
 
   return merged; /* Return true if we merged data (need redraw) */
@@ -1258,12 +1239,11 @@ bool tui_poll_background_load(TuiState *state) {
 
 /* Cancel pending background load */
 void tui_cancel_background_load(TuiState *state) {
-  if (!state || state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
-  AsyncOperation *op = (AsyncOperation *)ws->bg_load_op;
+  AsyncOperation *op = (AsyncOperation *)tab->bg_load_op;
 
   if (!op)
     return;
@@ -1289,7 +1269,7 @@ void tui_cancel_background_load(TuiState *state) {
 
   async_free(op);
   free(op);
-  ws->bg_load_op = NULL;
+  tab->bg_load_op = NULL;
   state->bg_loading_active = false;
 }
 
@@ -1297,18 +1277,17 @@ void tui_cancel_background_load(TuiState *state) {
 void tui_check_speculative_prefetch(TuiState *state) {
   if (!state || !state->data)
     return;
-  if (state->num_workspaces == 0 ||
-      state->current_workspace >= state->num_workspaces)
-    return;
 
-  Workspace *ws = &state->workspaces[state->current_workspace];
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
+    return;
 
   /* Skip if background load already in progress */
-  if (ws->bg_load_op != NULL)
+  if (tab->bg_load_op != NULL)
     return;
 
-  /* Skip if we're in a special workspace type */
-  if (ws->type != WORKSPACE_TYPE_TABLE)
+  /* Skip if we're in a special tab type */
+  if (tab->type != TAB_TYPE_TABLE)
     return;
 
   /* Calculate distance from edges */

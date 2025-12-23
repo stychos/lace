@@ -8,13 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Check if workspace has active filters (filters that affect the query) */
-static bool has_active_filters(Workspace *ws) {
-  if (!ws || ws->filters.num_filters == 0)
+/* Check if tab has active filters (filters that affect the query) */
+static bool has_active_filters(Tab *tab) {
+  if (!tab || tab->filters.num_filters == 0)
     return false;
 
-  for (size_t i = 0; i < ws->filters.num_filters; i++) {
-    ColumnFilter *cf = &ws->filters.filters[i];
+  for (size_t i = 0; i < tab->filters.num_filters; i++) {
+    ColumnFilter *cf = &tab->filters.filters[i];
     /* Filter is active if it has a value OR doesn't need one (IS NULL, etc.) */
     if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
       return true;
@@ -34,7 +34,7 @@ static int grid_get_col_width(GridDrawParams *params, size_t col) {
 /* Draw a result set grid - shared between table view and query results */
 void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
   if (!params || !params->win || !params->data ||
-      params->data->num_columns == 0) {
+      params->data->num_columns == 0 || !params->data->columns) {
     return;
   }
 
@@ -214,15 +214,59 @@ void tui_draw_header(TuiState *state) {
   werase(state->header_win);
   wbkgd(state->header_win, COLOR_PAIR(COLOR_HEADER));
 
-  /* Draw title */
-  mvwprintw(state->header_win, 0, 1, " lace ");
+  /* Draw connection info: driver://host/database [N] */
+  if (state->conn) {
+    Tab *tab = TUI_TAB(state);
+    int x = 1;
 
-  if (state->conn && state->conn->database) {
-    mvwprintw(state->header_win, 0, 8, "| %s ", state->conn->database);
+    /* Driver name */
+    if (state->conn->driver && state->conn->driver->name) {
+      mvwprintw(state->header_win, 0, x, "%s://", state->conn->driver->name);
+      x += (int)strlen(state->conn->driver->name) + 3;
+    }
+
+    /* Host (for network databases) or just database path (for SQLite) */
+    if (state->conn->host && state->conn->host[0]) {
+      mvwprintw(state->header_win, 0, x, "%s", state->conn->host);
+      x += (int)strlen(state->conn->host);
+      if (state->conn->port > 0) {
+        mvwprintw(state->header_win, 0, x, ":%d", state->conn->port);
+        x += 6; /* Approximate for port */
+      }
+      mvwprintw(state->header_win, 0, x, "/");
+      x += 1;
+    }
+
+    /* Database name */
+    if (state->conn->database) {
+      mvwprintw(state->header_win, 0, x, "%s", state->conn->database);
+      x += (int)strlen(state->conn->database);
+    }
+
+    /* Connection number in brackets after URI (only if multiple connections) */
+    if (tab && state->app && state->app->num_connections > 1) {
+      mvwprintw(state->header_win, 0, x, " [C%zu]", tab->connection_index + 1);
+    }
   }
 
-  /* Help hint */
-  const char *help = "q:Quit t:Sidebar /:GoTo []:Tabs -:Close ?:Help";
+  /* Workspace indicator centered (only if multiple workspaces) */
+  if (state->app && state->app->num_workspaces > 1) {
+    char ws_str[32];
+    snprintf(ws_str, sizeof(ws_str), "Workspace: %zu", state->app->current_workspace + 1);
+    int ws_len = (int)strlen(ws_str);
+    int ws_x = (state->term_cols - ws_len) / 2;
+    if (ws_x > 0) {
+      mvwprintw(state->header_win, 0, ws_x, "%s", ws_str);
+    }
+  }
+
+  /* Help hint - show workspace switching if multiple workspaces */
+  const char *help;
+  if (state->app && state->app->num_workspaces > 1) {
+    help = "q:Quit t:Sidebar []:Tabs {}:Workspaces ?:Help";
+  } else {
+    help = "q:Quit t:Sidebar /:GoTo []:Tabs -:Close ?:Help";
+  }
   int help_len = (int)strlen(help);
   int help_x = state->term_cols - help_len - 1;
   if (help_x > 0) {
@@ -249,7 +293,7 @@ void tui_draw_table(TuiState *state) {
     tui_draw_filters_panel(state);
   }
 
-  if (!state->data || state->data->num_columns == 0) {
+  if (!state->data || state->data->num_columns == 0 || !state->data->columns) {
     int msg_y = filters_height + (win_rows - filters_height) / 2;
     mvwprintw(state->main_win, msg_y, (win_cols - 7) / 2, "No data");
     wrefresh(state->main_win);
@@ -291,13 +335,12 @@ void tui_draw_status(TuiState *state) {
     wbkgd(state->status_win, COLOR_PAIR(COLOR_STATUS));
   }
 
-  /* Check if we're in a query workspace with results focus */
-  Workspace *ws = NULL;
+  /* Check if we're in a query tab with results focus */
+  Tab *tab = TUI_TAB(state);
   bool query_results_active = false;
-  if (state->num_workspaces > 0) {
-    ws = &state->workspaces[state->current_workspace];
-    query_results_active = (ws->type == WORKSPACE_TYPE_QUERY &&
-                            ws->query_focus_results && ws->query_results);
+  if (tab) {
+    query_results_active = (tab->type == TAB_TYPE_QUERY &&
+                            tab->query_focus_results && tab->query_results);
   }
 
   /* Left: show table name when sidebar focused, otherwise column info */
@@ -309,18 +352,18 @@ void tui_draw_status(TuiState *state) {
       const char *name = state->tables[actual_idx];
       mvwprintw(state->status_win, 0, 1, "%s", name);
     }
-  } else if (query_results_active && ws->query_results->columns &&
-             ws->query_result_col < ws->query_results->num_columns) {
+  } else if (query_results_active && tab->query_results->columns &&
+             tab->query_result_col < tab->query_results->num_columns) {
     /* Query results column info */
-    ColumnDef *col = &ws->query_results->columns[ws->query_result_col];
+    ColumnDef *col = &tab->query_results->columns[tab->query_result_col];
     ColumnDef *schema_col = NULL;
 
     /* Try to get richer info from schema if available */
-    if (ws->query_source_schema && col->name) {
-      for (size_t i = 0; i < ws->query_source_schema->num_columns; i++) {
-        if (ws->query_source_schema->columns[i].name &&
-            strcmp(ws->query_source_schema->columns[i].name, col->name) == 0) {
-          schema_col = &ws->query_source_schema->columns[i];
+    if (tab->query_source_schema && col->name) {
+      for (size_t i = 0; i < tab->query_source_schema->num_columns; i++) {
+        if (tab->query_source_schema->columns[i].name &&
+            strcmp(tab->query_source_schema->columns[i].name, col->name) == 0) {
+          schema_col = &tab->query_source_schema->columns[i];
           break;
         }
       }
@@ -411,15 +454,15 @@ void tui_draw_status(TuiState *state) {
   if (query_results_active) {
     /* Query results row position */
     char pos[64];
-    if (ws->query_paginated && ws->query_total_rows > 0) {
+    if (tab->query_paginated && tab->query_total_rows > 0) {
       /* Paginated: show actual row number in total dataset */
-      size_t actual_row = ws->query_loaded_offset + ws->query_result_row + 1;
+      size_t actual_row = tab->query_loaded_offset + tab->query_result_row + 1;
       snprintf(pos, sizeof(pos), "Row %zu/%zu", actual_row,
-               ws->query_total_rows);
+               tab->query_total_rows);
     } else {
       /* Non-paginated */
-      snprintf(pos, sizeof(pos), "Row %zu/%zu", ws->query_result_row + 1,
-               ws->query_results->num_rows);
+      snprintf(pos, sizeof(pos), "Row %zu/%zu", tab->query_result_row + 1,
+               tab->query_results->num_rows);
     }
     int pos_len = (int)strlen(pos);
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
@@ -429,11 +472,11 @@ void tui_draw_status(TuiState *state) {
     size_t total =
         state->total_rows > 0 ? state->total_rows : state->data->num_rows;
     /* Show ~ prefix for approximate counts */
-    bool approx = ws && ws->row_count_approximate;
-    bool filtered = has_active_filters(ws);
-    if (filtered && ws && ws->unfiltered_total_rows > 0) {
+    bool approx = tab && tab->row_count_approximate;
+    bool filtered = has_active_filters(tab);
+    if (filtered && tab && tab->unfiltered_total_rows > 0) {
       snprintf(pos, sizeof(pos), "Row %zu/%s%zu [%zu]", actual_row,
-               approx ? "~" : "", total, ws->unfiltered_total_rows);
+               approx ? "~" : "", total, tab->unfiltered_total_rows);
     } else {
       snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
                total);
@@ -467,26 +510,24 @@ bool tui_handle_mouse_event(TuiState *state) {
     if (mouse_x >= sidebar_width) {
       int scroll_amount = 3; /* Scroll 3 rows at a time */
 
-      /* Check if we're in a query workspace with results */
-      if (state->num_workspaces > 0) {
-        Workspace *ws = &state->workspaces[state->current_workspace];
-        if (ws->type == WORKSPACE_TYPE_QUERY && ws->query_results &&
-            ws->query_results->num_rows > 0) {
-          /* Calculate results area position */
-          int win_rows = state->term_rows - 4;
-          int editor_height = (win_rows - 1) * 3 / 10;
-          if (editor_height < 3)
-            editor_height = 3;
-          int results_start_y = 2 + editor_height + 1;
+      /* Check if we're in a query tab with results */
+      Tab *scroll_tab = TUI_TAB(state);
+      if (scroll_tab && scroll_tab->type == TAB_TYPE_QUERY &&
+          scroll_tab->query_results && scroll_tab->query_results->num_rows > 0) {
+        /* Calculate results area position */
+        int win_rows = state->term_rows - 4;
+        int editor_height = (win_rows - 1) * 3 / 10;
+        if (editor_height < 3)
+          editor_height = 3;
+        int results_start_y = 2 + editor_height + 1;
 
-          if (mouse_y >= results_start_y) {
-            /* Scroll query results using helper that handles pagination */
-            ws->query_focus_results = true;
-            int delta = is_scroll_up ? -scroll_amount : scroll_amount;
-            tui_query_scroll_results(state, delta);
-            state->sidebar_focused = false;
-            return true;
-          }
+        if (mouse_y >= results_start_y) {
+          /* Scroll query results using helper that handles pagination */
+          scroll_tab->query_focus_results = true;
+          int delta = is_scroll_up ? -scroll_amount : scroll_amount;
+          tui_query_scroll_results(state, delta);
+          state->sidebar_focused = false;
+          return true;
         }
       }
 
@@ -535,31 +576,35 @@ bool tui_handle_mouse_event(TuiState *state) {
     return false;
 
   /* Check if click is on tab bar (row 1) */
-  if (mouse_y == 1 && state->num_workspaces > 0) {
+  if (mouse_y == 1 && TUI_NUM_WORKSPACES(state) > 0) {
     /* If currently editing, save the edit first */
     if (state->editing) {
       tui_confirm_edit(state);
     }
 
     /* Calculate which tab was clicked based on x position */
+    Workspace *click_ws = TUI_WORKSPACE(state);
+    if (!click_ws)
+      return true;
+
     int x = 0;
-    for (size_t i = 0; i < state->num_workspaces; i++) {
-      Workspace *ws = &state->workspaces[i];
-      if (!ws->active)
+    for (size_t i = 0; i < click_ws->num_tabs; i++) {
+      Tab *click_tab = &click_ws->tabs[i];
+      if (!click_tab->active)
         continue;
 
-      const char *name = ws->table_name ? ws->table_name : "?";
+      const char *name = click_tab->table_name ? click_tab->table_name : "?";
       int tab_width = (int)strlen(name) + 4; /* " name  " with padding */
 
       if (mouse_x >= x && mouse_x < x + tab_width) {
         if (is_double) {
           /* Double-click: close the tab */
-          Workspace *target_ws = &state->workspaces[i];
+          Tab *target_tab = &click_ws->tabs[i];
 
           /* Check if query tab has content */
-          if (target_ws->type == WORKSPACE_TYPE_QUERY &&
-              ((target_ws->query_text && target_ws->query_len > 0) ||
-               target_ws->query_results)) {
+          if (target_tab->type == TAB_TYPE_QUERY &&
+              ((target_tab->query_text && target_tab->query_len > 0) ||
+               target_tab->query_results)) {
             /* Ask for confirmation */
             if (!tui_show_confirm_dialog(
                     state, "Close query tab with unsaved content?")) {
@@ -568,15 +613,15 @@ bool tui_handle_mouse_event(TuiState *state) {
           }
 
           /* Switch to tab first if not current, then close */
-          if (i != state->current_workspace) {
-            workspace_switch(state, i);
+          if (i != click_ws->current_tab) {
+            tab_switch(state, i);
           }
-          workspace_close(state);
+          tab_close(state);
           state->sidebar_focused = false;
         } else {
           /* Single click: switch to tab */
-          if (i != state->current_workspace) {
-            workspace_switch(state, i);
+          if (i != click_ws->current_tab) {
+            tab_switch(state, i);
             state->sidebar_focused = false;
           }
         }
@@ -635,57 +680,58 @@ bool tui_handle_mouse_event(TuiState *state) {
 
           if (is_double) {
             /* Double-click: always open in new tab */
-            workspace_create(state, actual_idx);
+            tab_create(state, actual_idx);
             state->sidebar_focused = false;
           } else {
             /* Single click: change current tab's table or switch to existing */
-            if (state->num_workspaces > 0) {
-              Workspace *ws = &state->workspaces[state->current_workspace];
-              if (ws->type == WORKSPACE_TYPE_QUERY) {
+            Workspace *curr_ws = TUI_WORKSPACE(state);
+            Tab *curr_tab = TUI_TAB(state);
+            if (curr_ws && curr_tab) {
+              if (curr_tab->type == TAB_TYPE_QUERY) {
                 /* Query tab active - check if table tab already exists */
                 bool found = false;
-                for (size_t i = 0; i < state->num_workspaces; i++) {
-                  Workspace *w = &state->workspaces[i];
-                  if (w->type == WORKSPACE_TYPE_TABLE &&
-                      w->table_index == actual_idx) {
+                for (size_t i = 0; i < curr_ws->num_tabs; i++) {
+                  Tab *t = &curr_ws->tabs[i];
+                  if (t->type == TAB_TYPE_TABLE &&
+                      t->table_index == actual_idx) {
                     /* Found existing tab - switch to it */
-                    workspace_switch(state, i);
+                    tab_switch(state, i);
                     found = true;
                     break;
                   }
                 }
                 if (!found) {
                   /* No existing tab - create new one */
-                  workspace_create(state, actual_idx);
+                  tab_create(state, actual_idx);
                 }
                 state->sidebar_focused = false;
               } else if (state->current_table != actual_idx) {
-                /* Table tab - update current workspace with new table */
+                /* Table tab - update current tab with new table */
                 state->current_table = actual_idx;
-                /* Free old workspace data */
-                free(ws->table_name);
-                ws->table_name = str_dup(state->tables[actual_idx]);
-                ws->table_index = actual_idx;
+                /* Free old tab data */
+                free(curr_tab->table_name);
+                curr_tab->table_name = str_dup(state->tables[actual_idx]);
+                curr_tab->table_index = actual_idx;
                 /* Clear filters when switching tables */
-                filters_clear(&ws->filters);
+                filters_clear(&curr_tab->filters);
                 /* Load new table data */
                 tui_load_table_data(state, state->tables[actual_idx]);
-                /* Update workspace with new data */
-                ws->data = state->data;
-                ws->schema = state->schema;
-                ws->col_widths = state->col_widths;
-                ws->num_col_widths = state->num_col_widths;
-                ws->total_rows = state->total_rows;
-                ws->loaded_offset = state->loaded_offset;
-                ws->loaded_count = state->loaded_count;
-                ws->cursor_row = 0;
-                ws->cursor_col = 0;
-                ws->scroll_row = 0;
-                ws->scroll_col = 0;
+                /* Update tab with new data */
+                curr_tab->data = state->data;
+                curr_tab->schema = state->schema;
+                curr_tab->col_widths = state->col_widths;
+                curr_tab->num_col_widths = state->num_col_widths;
+                curr_tab->total_rows = state->total_rows;
+                curr_tab->loaded_offset = state->loaded_offset;
+                curr_tab->loaded_count = state->loaded_count;
+                curr_tab->cursor_row = 0;
+                curr_tab->cursor_col = 0;
+                curr_tab->scroll_row = 0;
+                curr_tab->scroll_col = 0;
               }
             } else {
               /* No tabs yet - create first one */
-              workspace_create(state, actual_idx);
+              tab_create(state, actual_idx);
             }
           }
           return true;
@@ -696,56 +742,57 @@ bool tui_handle_mouse_event(TuiState *state) {
   }
 
   /* Check if click is in query tab area */
-  if (mouse_x >= sidebar_width && state->num_workspaces > 0) {
-    Workspace *ws = &state->workspaces[state->current_workspace];
-    if (ws->type == WORKSPACE_TYPE_QUERY) {
-      state->sidebar_filter_active = false;
-      state->sidebar_focused = false;
+  Tab *query_click_tab = TUI_TAB(state);
+  if (mouse_x >= sidebar_width && query_click_tab &&
+      query_click_tab->type == TAB_TYPE_QUERY) {
+    state->sidebar_filter_active = false;
+    state->sidebar_focused = false;
 
-      /* If currently editing query results, save the edit first */
-      if (ws->query_result_editing) {
-        tui_query_confirm_result_edit(state);
-      }
+    /* If currently editing query results, save the edit first */
+    if (query_click_tab->query_result_editing) {
+      tui_query_confirm_result_edit(state);
+    }
 
-      /* Get actual main window dimensions */
-      int main_win_rows, main_win_cols;
-      getmaxyx(state->main_win, main_win_rows, main_win_cols);
+    /* Get actual main window dimensions */
+    int main_win_rows, main_win_cols;
+    getmaxyx(state->main_win, main_win_rows, main_win_cols);
 
-      /* Calculate query view layout */
-      int win_rows = main_win_rows;
-      int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
-      if (editor_height < 3)
-        editor_height = 3;
-      int results_start_y = 2 + editor_height + 1; /* screen coords */
-      int results_header_y =
-          results_start_y + 1; /* "Results (N rows)" header */
-      int results_data_y =
-          results_header_y + 3; /* After header + col names + separator */
+    /* Calculate query view layout */
+    int win_rows = main_win_rows;
+    int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
+    if (editor_height < 3)
+      editor_height = 3;
+    int results_start_y = 2 + editor_height + 1; /* screen coords */
+    int results_header_y =
+        results_start_y + 1; /* "Results (N rows)" header */
+    int results_data_y =
+        results_header_y + 3; /* After header + col names + separator */
 
-      if (mouse_y < results_start_y) {
-        /* Clicked in editor area */
-        ws->query_focus_results = false;
-      } else if (ws->query_results && ws->query_results->num_rows > 0 &&
-                 mouse_y >= results_data_y) {
-        /* Clicked in results data area */
-        ws->query_focus_results = true;
+    if (mouse_y < results_start_y) {
+      /* Clicked in editor area */
+      query_click_tab->query_focus_results = false;
+    } else if (query_click_tab->query_results &&
+               query_click_tab->query_results->num_rows > 0 &&
+               mouse_y >= results_data_y) {
+      /* Clicked in results data area */
+      query_click_tab->query_focus_results = true;
 
-        /* Calculate which row was clicked */
+      /* Calculate which row was clicked */
         int clicked_row = mouse_y - results_data_y;
-        size_t target_row = ws->query_result_scroll_row + (size_t)clicked_row;
+        size_t target_row = query_click_tab->query_result_scroll_row + (size_t)clicked_row;
 
-        if (target_row < ws->query_results->num_rows) {
+        if (target_row < query_click_tab->query_results->num_rows) {
           /* Calculate which column was clicked */
           int rel_x = mouse_x - sidebar_width;
           int x_pos = 1;
-          size_t target_col = ws->query_result_scroll_col;
+          size_t target_col = query_click_tab->query_result_scroll_col;
 
-          for (size_t col = ws->query_result_scroll_col;
-               col < ws->query_results->num_columns; col++) {
+          for (size_t col = query_click_tab->query_result_scroll_col;
+               col < query_click_tab->query_results->num_columns; col++) {
             int width = DEFAULT_COL_WIDTH;
-            if (ws->query_result_col_widths &&
-                col < ws->query_result_num_cols) {
-              width = ws->query_result_col_widths[col];
+            if (query_click_tab->query_result_col_widths &&
+                col < query_click_tab->query_result_num_cols) {
+              width = query_click_tab->query_result_col_widths[col];
             }
             if (rel_x >= x_pos && rel_x < x_pos + width) {
               target_col = col;
@@ -757,22 +804,21 @@ bool tui_handle_mouse_event(TuiState *state) {
             target_col = col + 1;
           }
 
-          if (target_col < ws->query_results->num_columns) {
-            ws->query_result_row = target_row;
-            ws->query_result_col = target_col;
+          if (target_col < query_click_tab->query_results->num_columns) {
+            query_click_tab->query_result_row = target_row;
+            query_click_tab->query_result_col = target_col;
 
             /* Double-click: enter edit mode */
-            if (is_double && !ws->query_result_editing) {
+            if (is_double && !query_click_tab->query_result_editing) {
               tui_query_start_result_edit(state);
             }
           }
         }
       } else {
         /* Clicked in results header area */
-        ws->query_focus_results = true;
+        query_click_tab->query_focus_results = true;
       }
       return true;
-    }
   }
 
   /* Check if click is in main table area */

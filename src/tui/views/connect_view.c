@@ -23,6 +23,13 @@ typedef struct {
   int width;
 } InputField;
 
+/* Dialog focus states */
+typedef enum {
+  FOCUS_INPUT,      /* Connection string input */
+  FOCUS_MODE,       /* Mode selection (after successful connection test) */
+  FOCUS_BUTTONS     /* Connect/Cancel buttons */
+} DialogFocus;
+
 static void input_init(InputField *input, int width) {
   memset(input, 0, sizeof(InputField));
   input->width = width < 3 ? 3 : width; /* Minimum 3 for borders + 1 char */
@@ -156,7 +163,8 @@ static void input_handle_key(InputField *input, int ch) {
 }
 
 static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
-                        const char *error_msg, int selected) {
+                        const char *error_msg, int selected_button,
+                        bool has_existing_tabs, DialogFocus focus) {
   werase(win);
   box(win, 0, 0);
 
@@ -174,7 +182,6 @@ static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
   mvwprintw(win, y++, 4, "sqlite:///path/to/database.db");
   mvwprintw(win, y++, 4, "pg://user:pass@host/db");
   mvwprintw(win, y++, 4, "mysql://user:pass@host/db");
-  mvwprintw(win, y++, 4, "mariadb://user:pass@host/db");
   wattroff(win, COLOR_PAIR(COLOR_NULL));
 
   y++;
@@ -191,33 +198,82 @@ static void draw_dialog(WINDOW *win, int height, int width, InputField *input,
     wattroff(win, COLOR_PAIR(COLOR_ERROR));
   }
 
-  /* Buttons */
+  /* Buttons - layout depends on whether we have existing tabs */
   int btn_y = height - 2;
-  int connect_x = width / 2 - 14;
-  int cancel_x = width / 2 + 4;
+  bool btn_focused = (focus == FOCUS_BUTTONS);
 
-  if (selected == 0) {
-    wattron(win, A_REVERSE);
-    mvwprintw(win, btn_y, connect_x, "[ Connect ]");
-    wattroff(win, A_REVERSE);
-    mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+  if (has_existing_tabs) {
+    /* Three buttons: [Connect] [New Workspace] [Cancel] */
+    int total_width = 11 + 17 + 10 + 4; /* buttons + spacing */
+    int start_x = (width - total_width) / 2;
+
+    /* Connect (in tab) */
+    if (selected_button == 0) {
+      if (btn_focused) wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, start_x, "[ Connect ]");
+      if (btn_focused) wattroff(win, A_REVERSE);
+    } else {
+      mvwprintw(win, btn_y, start_x, "[ Connect ]");
+    }
+
+    /* New Workspace */
+    if (selected_button == 1) {
+      if (btn_focused) wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, start_x + 13, "[ New Workspace ]");
+      if (btn_focused) wattroff(win, A_REVERSE);
+    } else {
+      mvwprintw(win, btn_y, start_x + 13, "[ New Workspace ]");
+    }
+
+    /* Cancel */
+    if (selected_button == 2) {
+      if (btn_focused) wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, start_x + 32, "[ Cancel ]");
+      if (btn_focused) wattroff(win, A_REVERSE);
+    } else {
+      mvwprintw(win, btn_y, start_x + 32, "[ Cancel ]");
+    }
   } else {
-    mvwprintw(win, btn_y, connect_x, "[ Connect ]");
-    wattron(win, A_REVERSE);
-    mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
-    wattroff(win, A_REVERSE);
+    /* Two buttons: [Connect] [Cancel] */
+    int connect_x = width / 2 - 12;
+    int cancel_x = width / 2 + 2;
+
+    if (selected_button == 0) {
+      if (btn_focused) wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, connect_x, "[ Connect ]");
+      if (btn_focused) wattroff(win, A_REVERSE);
+      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+    } else {
+      mvwprintw(win, btn_y, connect_x, "[ Connect ]");
+      if (btn_focused) wattron(win, A_REVERSE);
+      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
+      if (btn_focused) wattroff(win, A_REVERSE);
+    }
   }
 
-  /* Position cursor in input field */
-  wmove(win, cursor_y, cursor_x);
+  /* Position cursor in input field when focused */
+  if (focus == FOCUS_INPUT) {
+    wmove(win, cursor_y, cursor_x);
+  }
   wrefresh(win);
 }
 
-char *connect_view_show(TuiState *state) {
+ConnectResult connect_view_show(TuiState *state) {
+  ConnectResult result = {NULL, CONNECT_MODE_CANCELLED};
+
   int term_rows, term_cols;
   getmaxyx(stdscr, term_rows, term_cols);
 
-  int height = 15;
+  /* Check if we have an existing workspace with tabs */
+  bool has_existing_workspace = false;
+  if (state && state->app) {
+    Workspace *ws = app_current_workspace(state->app);
+    if (ws && ws->num_tabs > 0) {
+      has_existing_workspace = true;
+    }
+  }
+
+  int height = 15; /* Simplified - no mode options */
   int width = 50;
   if (width > term_cols - 4)
     width = term_cols - 4;
@@ -229,7 +285,7 @@ char *connect_view_show(TuiState *state) {
 
   WINDOW *dialog = newwin(height, width, starty, startx);
   if (!dialog)
-    return NULL;
+    return result;
 
   keypad(dialog, TRUE);
   curs_set(1); /* Show cursor */
@@ -238,67 +294,157 @@ char *connect_view_show(TuiState *state) {
   input_init(&input, width - 6);
 
   char *error_msg = NULL;
-  char *result = NULL;
-  int selected = 0; /* 0 = Connect, 1 = Cancel */
+  int selected_button = 0; /* 0 = Connect, 1 = New Workspace (if shown), last = Cancel */
+  int num_buttons = has_existing_workspace ? 3 : 2;
+  int cancel_button = num_buttons - 1;
+  DialogFocus focus = FOCUS_INPUT;
 
   bool running = true;
   while (running) {
-    draw_dialog(dialog, height, width, &input, error_msg, selected);
+    /* Show/hide cursor based on focus */
+    curs_set(focus == FOCUS_INPUT ? 1 : 0);
+
+    draw_dialog(dialog, height, width, &input, error_msg, selected_button,
+                has_existing_workspace, focus);
 
     int ch = wgetch(dialog);
 
     free(error_msg);
     error_msg = NULL;
 
-    switch (ch) {
-    case '\t':
-      selected = 1 - selected;
-      break;
+    /* Tab cycles through focus areas */
+    if (ch == '\t') {
+      focus = (focus == FOCUS_INPUT) ? FOCUS_BUTTONS : FOCUS_INPUT;
+      continue;
+    }
 
-    case 27: /* Escape */
+    /* Escape cancels */
+    if (ch == 27) {
       running = false;
-      break;
+      continue;
+    }
 
-    case '\n':
-    case KEY_ENTER:
-      if (selected == 1) {
-        /* Cancel button selected */
-        running = false;
-        break;
-      }
-      if (input.len > 0) {
-        /* Determine the connection string to use */
-        char *connstr_to_use = NULL;
-        char *err = NULL;
+    /* Handle input based on focus */
+    switch (focus) {
+    case FOCUS_INPUT:
+      switch (ch) {
+      case '\n':
+      case KEY_ENTER:
+        /* Enter in input field = Connect (in tab if available) */
+        if (input.len > 0) {
+          char *connstr_to_use = NULL;
+          char *err = NULL;
 
-        if (!strstr(input.buffer, "://")) {
-          /* No scheme - try to detect SQLite file */
-          connstr_to_use = connstr_from_path(input.buffer, &err);
-          if (!connstr_to_use) {
-            error_msg = err ? err : str_dup("Invalid file path");
-            break;
+          if (!strstr(input.buffer, "://")) {
+            connstr_to_use = connstr_from_path(input.buffer, &err);
+            if (!connstr_to_use) {
+              error_msg = err ? err : str_dup("Invalid file path");
+              break;
+            }
+          } else {
+            connstr_to_use = str_dup(input.buffer);
+          }
+
+          DbConnection *conn = db_connect(connstr_to_use, &err);
+          if (conn) {
+            db_disconnect(conn);
+            result.connstr = connstr_to_use;
+            /* Default action: new tab if tabs exist, otherwise new workspace */
+            result.mode = has_existing_workspace ? CONNECT_MODE_NEW_TAB
+                                                 : CONNECT_MODE_NEW_WORKSPACE;
+            running = false;
+          } else {
+            error_msg = err ? err : str_dup("Connection failed");
+            free(connstr_to_use);
           }
         } else {
-          connstr_to_use = str_dup(input.buffer);
+          error_msg = str_dup("Please enter a connection string or file path");
         }
+        break;
 
-        /* Try to connect */
-        DbConnection *conn = db_connect(connstr_to_use, &err);
-        if (conn) {
-          db_disconnect(conn);
-          result = connstr_to_use;
-          running = false;
-        } else {
-          error_msg = err ? err : str_dup("Connection failed");
-          free(connstr_to_use);
-        }
-      } else {
-        error_msg = str_dup("Please enter a connection string or file path");
+      case KEY_DOWN:
+        focus = FOCUS_BUTTONS;
+        break;
+
+      default:
+        input_handle_key(&input, ch);
+        break;
       }
       break;
 
-    default:
-      input_handle_key(&input, ch);
+    case FOCUS_MODE:
+      /* Not used anymore - fall through to buttons */
+      focus = FOCUS_BUTTONS;
+      break;
+
+    case FOCUS_BUTTONS:
+      switch (ch) {
+      case KEY_LEFT:
+      case 'h':
+        if (selected_button > 0)
+          selected_button--;
+        break;
+
+      case KEY_RIGHT:
+      case 'l':
+        if (selected_button < num_buttons - 1)
+          selected_button++;
+        break;
+
+      case KEY_UP:
+        focus = FOCUS_INPUT;
+        break;
+
+      case '\n':
+      case KEY_ENTER:
+        if (selected_button == cancel_button) {
+          /* Cancel */
+          running = false;
+        } else {
+          /* Connect or New Workspace */
+          if (input.len > 0) {
+            char *connstr_to_use = NULL;
+            char *err = NULL;
+
+            if (!strstr(input.buffer, "://")) {
+              connstr_to_use = connstr_from_path(input.buffer, &err);
+              if (!connstr_to_use) {
+                error_msg = err ? err : str_dup("Invalid file path");
+                focus = FOCUS_INPUT;
+                break;
+              }
+            } else {
+              connstr_to_use = str_dup(input.buffer);
+            }
+
+            DbConnection *conn = db_connect(connstr_to_use, &err);
+            if (conn) {
+              db_disconnect(conn);
+              result.connstr = connstr_to_use;
+              /* Button 0 = Connect (new tab), Button 1 = New Workspace */
+              if (has_existing_workspace && selected_button == 1) {
+                result.mode = CONNECT_MODE_NEW_WORKSPACE;
+              } else if (has_existing_workspace) {
+                result.mode = CONNECT_MODE_NEW_TAB;
+              } else {
+                result.mode = CONNECT_MODE_NEW_WORKSPACE;
+              }
+              running = false;
+            } else {
+              error_msg = err ? err : str_dup("Connection failed");
+              free(connstr_to_use);
+              focus = FOCUS_INPUT;
+            }
+          } else {
+            error_msg = str_dup("Please enter a connection string or file path");
+            focus = FOCUS_INPUT;
+          }
+        }
+        break;
+
+      default:
+        break;
+      }
       break;
     }
   }

@@ -47,19 +47,32 @@ void tui_recreate_windows(TuiState *state);
 /* Initialize a workspace struct (zeroes and inits filters) */
 void workspace_init(Workspace *ws);
 
-/* Save current state to workspace */
+/* Save current TUI state to current tab */
+void tab_save(TuiState *state);
+
+/* Restore TUI state from current tab */
+void tab_restore(TuiState *state);
+
+/* Sync focus and panel state from TuiState to current Tab */
+void tab_sync_focus(TuiState *state);
+
+/* Switch to a different tab */
+void tab_switch(TuiState *state, size_t index);
+
+/* Create new tab for a table */
+bool tab_create(TuiState *state, size_t table_index);
+
+/* Create new query tab */
+bool tab_create_query(TuiState *state);
+
+/* Close current tab */
+void tab_close(TuiState *state);
+
+/* Legacy wrappers for compatibility */
 void workspace_save(TuiState *state);
-
-/* Restore state from current workspace */
 void workspace_restore(TuiState *state);
-
-/* Switch to a different workspace */
 void workspace_switch(TuiState *state, size_t index);
-
-/* Create new workspace for a table */
 bool workspace_create(TuiState *state, size_t table_index);
-
-/* Close current workspace */
 void workspace_close(TuiState *state);
 
 /* ============================================================================

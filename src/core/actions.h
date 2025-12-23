@@ -81,7 +81,15 @@ typedef enum {
   ACTION_CELL_SET_EMPTY,     /* Set current cell to empty string */
   ACTION_ROW_DELETE,         /* Delete current row */
 
-  /* Workspace/Tab Management */
+  /* Tab Management (within current workspace) */
+  ACTION_TAB_NEXT,           /* Switch to next tab */
+  ACTION_TAB_PREV,           /* Switch to previous tab */
+  ACTION_TAB_SWITCH,         /* Switch to specific tab */
+  ACTION_TAB_CREATE,         /* Create new tab for table */
+  ACTION_TAB_CREATE_QUERY,   /* Create new query tab */
+  ACTION_TAB_CLOSE,          /* Close current tab */
+
+  /* Workspace Management (within current connection) */
   ACTION_WORKSPACE_NEXT,     /* Switch to next workspace */
   ACTION_WORKSPACE_PREV,     /* Switch to previous workspace */
   ACTION_WORKSPACE_SWITCH,   /* Switch to specific workspace */
@@ -246,8 +254,35 @@ typedef struct UICallbacks {
   bool (*load_prev_rows)(void *ctx);
   void (*disconnect)(void *ctx);
 
-  /* Sidebar helpers */
+  /* =========================================================================
+   * UI State - Sidebar
+   * These callbacks manage sidebar visibility/focus state in the UI layer.
+   * This allows core to coordinate UI state without depending on UI structs.
+   * =========================================================================
+   */
+  bool (*is_sidebar_visible)(void *ctx);
+  bool (*is_sidebar_focused)(void *ctx);
+  void (*set_sidebar_visible)(void *ctx, bool visible);
+  void (*set_sidebar_focused)(void *ctx, bool focused);
+  size_t (*get_sidebar_highlight)(void *ctx);
+  void (*set_sidebar_highlight)(void *ctx, size_t highlight);
+  void (*set_sidebar_scroll)(void *ctx, size_t scroll);
+  size_t (*get_sidebar_last_position)(void *ctx);
+  void (*set_sidebar_last_position)(void *ctx, size_t position);
   size_t (*get_sidebar_highlight_for_table)(void *ctx, size_t table_idx);
+
+  /* =========================================================================
+   * UI State - Filters Panel
+   * These callbacks manage filters panel visibility/focus state.
+   * =========================================================================
+   */
+  bool (*is_filters_visible)(void *ctx);
+  bool (*is_filters_focused)(void *ctx);
+  void (*set_filters_visible)(void *ctx, bool visible);
+  void (*set_filters_focused)(void *ctx, bool focused);
+  void (*set_filters_editing)(void *ctx, bool editing);
+  bool (*get_filters_was_focused)(void *ctx);
+  void (*set_filters_was_focused)(void *ctx, bool was_focused);
 } UICallbacks;
 
 /* ============================================================================
@@ -349,7 +384,34 @@ static inline Action action_row_delete(void) {
   return (Action){.type = ACTION_ROW_DELETE};
 }
 
-/* Workspaces */
+/* Tabs (within workspace) */
+static inline Action action_tab_next(void) {
+  return (Action){.type = ACTION_TAB_NEXT};
+}
+
+static inline Action action_tab_prev(void) {
+  return (Action){.type = ACTION_TAB_PREV};
+}
+
+static inline Action action_tab_switch(size_t index) {
+  return (Action){.type = ACTION_TAB_SWITCH,
+                  .workspace_switch = {.index = index}};
+}
+
+static inline Action action_tab_create(size_t table_index) {
+  return (Action){.type = ACTION_TAB_CREATE,
+                  .workspace_create = {.table_index = table_index}};
+}
+
+static inline Action action_tab_create_query(void) {
+  return (Action){.type = ACTION_TAB_CREATE_QUERY};
+}
+
+static inline Action action_tab_close(void) {
+  return (Action){.type = ACTION_TAB_CLOSE};
+}
+
+/* Workspaces (within connection) */
 static inline Action action_workspace_next(void) {
   return (Action){.type = ACTION_WORKSPACE_NEXT};
 }
