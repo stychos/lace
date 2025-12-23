@@ -35,7 +35,8 @@ endif
 
 # Source directories
 SRC_DIRS = src src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
-           src/tui src/tui/views src/tui/widgets src/net src/util src/async
+           src/tui src/tui/views src/tui/widgets src/net src/util src/async \
+           src/platform
 
 # Find all C source files
 SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))

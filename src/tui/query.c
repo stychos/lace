@@ -122,7 +122,7 @@ bool tab_create_query(TuiState *state) {
   tab->query_cursor = 0;
   tab->query_scroll_line = 0;
   tab->query_scroll_col = 0;
-  tab->query_focus_results = false;
+  ui->query_focus_results = false;
 
   /* Clear convenience pointers (query mode doesn't use them) */
   state->data = NULL;
@@ -577,7 +577,8 @@ static void query_execute(TuiState *state, const char *sql) {
     return;
 
   Tab *tab = TUI_TAB(state);
-  if (!tab || tab->type != TAB_TYPE_QUERY)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return;
 
   /* Free previous results */
@@ -743,7 +744,7 @@ static void query_execute(TuiState *state, const char *sql) {
   /* Focus results pane after execution (only if there are results) */
   if (!tab->query_error && tab->query_results &&
       tab->query_results->num_rows > 0) {
-    tab->query_focus_results = true;
+    ui->query_focus_results = true;
   }
 }
 
@@ -1154,7 +1155,8 @@ void tui_draw_query(TuiState *state) {
     return;
 
   Tab *tab = TUI_TAB(state);
-  if (!tab || tab->type != TAB_TYPE_QUERY)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return;
 
   werase(state->main_win);
@@ -1189,12 +1191,12 @@ void tui_draw_query(TuiState *state) {
   }
 
   /* Draw editor area */
-  if (!tab->query_focus_results) {
+  if (!ui->query_focus_results) {
     wattron(state->main_win, A_BOLD);
   }
   mvwprintw(state->main_win, 0, 1,
             "SQL Query (^R: run, ^A: all, ^T: transaction, ^W: switch)");
-  if (!tab->query_focus_results) {
+  if (!ui->query_focus_results) {
     wattroff(state->main_win, A_BOLD);
   }
 
@@ -1225,7 +1227,7 @@ void tui_draw_query(TuiState *state) {
     }
 
     /* Draw cursor if on this line and editor focused */
-    if (!tab->query_focus_results && line_idx == cursor_line) {
+    if (!ui->query_focus_results && line_idx == cursor_line) {
       int cursor_x = 4 + (int)cursor_col;
       if (cursor_x < win_cols) {
         char cursor_char = ' ';
@@ -1269,10 +1271,10 @@ void tui_draw_query(TuiState *state) {
                              .cursor_col = tab->query_result_col,
                              .scroll_row = tab->query_result_scroll_row,
                              .scroll_col = tab->query_result_scroll_col,
-                             .is_focused = tab->query_focus_results,
-                             .is_editing = tab->query_result_editing,
-                             .edit_buffer = tab->query_result_edit_buf,
-                             .edit_pos = tab->query_result_edit_pos,
+                             .is_focused = ui->query_focus_results,
+                             .is_editing = ui->query_result_editing,
+                             .edit_buffer = ui->query_result_edit_buf,
+                             .edit_pos = ui->query_result_edit_pos,
                              .show_header_line = false};
 
     tui_draw_result_grid(state, &params);
@@ -1304,7 +1306,8 @@ static int query_get_col_width(Tab *tab, size_t col) {
 
 /* Start editing a cell in query results (inline or modal based on content) */
 static void query_result_start_edit(TuiState *state, Tab *tab) {
-  if (!tab || !tab->query_results || tab->query_result_editing)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !tab->query_results || !ui || ui->query_result_editing)
     return;
   if (tab->query_result_row >= tab->query_results->num_rows)
     return;
@@ -1347,9 +1350,9 @@ static void query_result_start_edit(TuiState *state, Tab *tab) {
 
     if (result.saved) {
       /* Update via the confirm flow */
-      free(tab->query_result_edit_buf);
-      tab->query_result_edit_buf = result.set_null ? NULL : result.content;
-      tab->query_result_editing = true;
+      free(ui->query_result_edit_buf);
+      ui->query_result_edit_buf = result.set_null ? NULL : result.content;
+      ui->query_result_editing = true;
       query_result_confirm_edit(state, tab);
     } else {
       free(result.content);
@@ -1358,18 +1361,19 @@ static void query_result_start_edit(TuiState *state, Tab *tab) {
     free(content);
   } else {
     /* Use inline editing for short content */
-    free(tab->query_result_edit_buf);
-    tab->query_result_edit_buf = content;
-    tab->query_result_edit_pos =
-        tab->query_result_edit_buf ? strlen(tab->query_result_edit_buf) : 0;
-    tab->query_result_editing = true;
+    free(ui->query_result_edit_buf);
+    ui->query_result_edit_buf = content;
+    ui->query_result_edit_pos =
+        ui->query_result_edit_buf ? strlen(ui->query_result_edit_buf) : 0;
+    ui->query_result_editing = true;
     curs_set(1);
   }
 }
 
 /* Start modal editing for query results (always uses modal) */
 static void query_result_start_modal_edit(TuiState *state, Tab *tab) {
-  if (!tab || !tab->query_results || tab->query_result_editing)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !tab->query_results || !ui || ui->query_result_editing)
     return;
   if (tab->query_result_row >= tab->query_results->num_rows)
     return;
@@ -1403,9 +1407,9 @@ static void query_result_start_modal_edit(TuiState *state, Tab *tab) {
 
   if (result.saved) {
     /* Update via the confirm flow */
-    free(tab->query_result_edit_buf);
-    tab->query_result_edit_buf = result.set_null ? NULL : result.content;
-    tab->query_result_editing = true;
+    free(ui->query_result_edit_buf);
+    ui->query_result_edit_buf = result.set_null ? NULL : result.content;
+    ui->query_result_editing = true;
     query_result_confirm_edit(state, tab);
   } else {
     free(result.content);
@@ -1417,9 +1421,10 @@ static void query_result_start_modal_edit(TuiState *state, Tab *tab) {
 /* Public wrapper for starting edit from mouse handler */
 void tui_query_start_result_edit(TuiState *state) {
   Tab *tab = TUI_TAB(state);
-  if (!tab)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !ui)
     return;
-  if (tab->type != TAB_TYPE_QUERY || !tab->query_focus_results)
+  if (tab->type != TAB_TYPE_QUERY || !ui->query_focus_results)
     return;
   query_result_start_edit(state, tab);
 }
@@ -1427,9 +1432,10 @@ void tui_query_start_result_edit(TuiState *state) {
 /* Public wrapper for confirming edit from mouse handler */
 void tui_query_confirm_result_edit(TuiState *state) {
   Tab *tab = TUI_TAB(state);
-  if (!tab)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !ui)
     return;
-  if (tab->type != TAB_TYPE_QUERY || !tab->query_result_editing)
+  if (tab->type != TAB_TYPE_QUERY || !ui->query_result_editing)
     return;
   query_result_confirm_edit(state, tab);
 }
@@ -1487,14 +1493,18 @@ void tui_query_scroll_results(TuiState *state, int delta) {
 }
 
 /* Cancel editing in query results */
-static void query_result_cancel_edit(Tab *tab) {
+static void query_result_cancel_edit(TuiState *state, Tab *tab) {
   if (!tab)
     return;
 
-  free(tab->query_result_edit_buf);
-  tab->query_result_edit_buf = NULL;
-  tab->query_result_edit_pos = 0;
-  tab->query_result_editing = false;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!ui)
+    return;
+
+  free(ui->query_result_edit_buf);
+  ui->query_result_edit_buf = NULL;
+  ui->query_result_edit_pos = 0;
+  ui->query_result_editing = false;
   curs_set(0);
 }
 
@@ -1611,7 +1621,8 @@ static void query_pk_info_free(QueryPkInfo *pk) {
 
 /* Confirm edit and update database */
 static void query_result_confirm_edit(TuiState *state, Tab *tab) {
-  if (!tab || !tab->query_result_editing || !tab->query_results)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !ui || !ui->query_result_editing || !tab->query_results)
     return;
   if (tab->query_result_row >= tab->query_results->num_rows)
     return;
@@ -1620,16 +1631,16 @@ static void query_result_confirm_edit(TuiState *state, Tab *tab) {
 
   Row *row = &tab->query_results->rows[tab->query_result_row];
   if (tab->query_result_col >= row->num_cells) {
-    query_result_cancel_edit(tab);
+    query_result_cancel_edit(state, tab);
     return;
   }
 
   /* Create new value from edit buffer */
   DbValue new_val;
-  if (tab->query_result_edit_buf == NULL) {
+  if (ui->query_result_edit_buf == NULL) {
     new_val = db_value_null();
   } else {
-    new_val = db_value_text(tab->query_result_edit_buf);
+    new_val = db_value_text(ui->query_result_edit_buf);
   }
 
   /* Try to update database if we have table name and primary keys */
@@ -1663,7 +1674,7 @@ static void query_result_confirm_edit(TuiState *state, Tab *tab) {
   /* If database update failed, don't update local cell */
   if (db_error) {
     db_value_free(&new_val);
-    query_result_cancel_edit(tab);
+    query_result_cancel_edit(state, tab);
     return;
   }
 
@@ -1682,13 +1693,14 @@ static void query_result_confirm_edit(TuiState *state, Tab *tab) {
     tui_set_status(state, "Cell updated (local only - no primary key)");
   }
 
-  query_result_cancel_edit(tab);
+  query_result_cancel_edit(state, tab);
 }
 
 /* Set query result cell directly to NULL or empty string */
 static void query_result_set_cell_direct(TuiState *state, Tab *tab,
                                          bool set_null) {
-  if (!tab || !tab->query_results || tab->query_result_editing)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || !tab->query_results || !ui || ui->query_result_editing)
     return;
   if (tab->query_result_row >= tab->query_results->num_rows)
     return;
@@ -1696,13 +1708,13 @@ static void query_result_set_cell_direct(TuiState *state, Tab *tab,
     return;
 
   /* Set up the edit buffer and trigger confirm */
-  free(tab->query_result_edit_buf);
+  free(ui->query_result_edit_buf);
   if (set_null) {
-    tab->query_result_edit_buf = NULL;
+    ui->query_result_edit_buf = NULL;
   } else {
-    tab->query_result_edit_buf = str_dup("");
+    ui->query_result_edit_buf = str_dup("");
   }
-  tab->query_result_editing = true;
+  ui->query_result_editing = true;
   query_result_confirm_edit(state, tab);
 }
 
@@ -1812,15 +1824,16 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
 
 /* Handle edit input for query results */
 static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
-  if (!tab->query_result_editing)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!ui || !ui->query_result_editing)
     return false;
 
   size_t len =
-      tab->query_result_edit_buf ? strlen(tab->query_result_edit_buf) : 0;
+      ui->query_result_edit_buf ? strlen(ui->query_result_edit_buf) : 0;
 
   switch (ch) {
   case 27: /* Escape - cancel */
-    query_result_cancel_edit(tab);
+    query_result_cancel_edit(state, tab);
     return true;
 
   case '\n':
@@ -1829,55 +1842,55 @@ static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
     return true;
 
   case KEY_LEFT:
-    if (tab->query_result_edit_pos > 0) {
-      tab->query_result_edit_pos--;
+    if (ui->query_result_edit_pos > 0) {
+      ui->query_result_edit_pos--;
     }
     return true;
 
   case KEY_RIGHT:
-    if (tab->query_result_edit_pos < len) {
-      tab->query_result_edit_pos++;
+    if (ui->query_result_edit_pos < len) {
+      ui->query_result_edit_pos++;
     }
     return true;
 
   case KEY_HOME:
-    tab->query_result_edit_pos = 0;
+    ui->query_result_edit_pos = 0;
     return true;
 
   case KEY_END:
-    tab->query_result_edit_pos = len;
+    ui->query_result_edit_pos = len;
     return true;
 
   case KEY_BACKSPACE:
   case 127:
   case 8:
-    if (tab->query_result_edit_pos > 0 && tab->query_result_edit_buf) {
-      memmove(tab->query_result_edit_buf + tab->query_result_edit_pos - 1,
-              tab->query_result_edit_buf + tab->query_result_edit_pos,
-              len - tab->query_result_edit_pos + 1);
-      tab->query_result_edit_pos--;
+    if (ui->query_result_edit_pos > 0 && ui->query_result_edit_buf) {
+      memmove(ui->query_result_edit_buf + ui->query_result_edit_pos - 1,
+              ui->query_result_edit_buf + ui->query_result_edit_pos,
+              len - ui->query_result_edit_pos + 1);
+      ui->query_result_edit_pos--;
     }
     return true;
 
   case KEY_DC: /* Delete */
-    if (tab->query_result_edit_pos < len && tab->query_result_edit_buf) {
-      memmove(tab->query_result_edit_buf + tab->query_result_edit_pos,
-              tab->query_result_edit_buf + tab->query_result_edit_pos + 1,
-              len - tab->query_result_edit_pos);
+    if (ui->query_result_edit_pos < len && ui->query_result_edit_buf) {
+      memmove(ui->query_result_edit_buf + ui->query_result_edit_pos,
+              ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
+              len - ui->query_result_edit_pos);
     }
     return true;
 
   case 21: /* Ctrl+U - clear line */
-    if (tab->query_result_edit_buf) {
-      tab->query_result_edit_buf[0] = '\0';
-      tab->query_result_edit_pos = 0;
+    if (ui->query_result_edit_buf) {
+      ui->query_result_edit_buf[0] = '\0';
+      ui->query_result_edit_pos = 0;
     }
     return true;
 
   case 14: /* Ctrl+N - set to NULL */
-    free(tab->query_result_edit_buf);
-    tab->query_result_edit_buf = NULL;
-    tab->query_result_edit_pos = 0;
+    free(ui->query_result_edit_buf);
+    ui->query_result_edit_buf = NULL;
+    ui->query_result_edit_pos = 0;
     query_result_confirm_edit(state, tab);
     return true;
 
@@ -1885,19 +1898,19 @@ static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
     if (ch >= 32 && ch < 127) {
       /* Insert character */
       size_t new_len = len + 2;
-      char *new_buf = realloc(tab->query_result_edit_buf, new_len);
+      char *new_buf = realloc(ui->query_result_edit_buf, new_len);
       if (new_buf) {
-        tab->query_result_edit_buf = new_buf;
+        ui->query_result_edit_buf = new_buf;
         if (len == 0) {
-          tab->query_result_edit_buf[0] = (char)ch;
-          tab->query_result_edit_buf[1] = '\0';
-          tab->query_result_edit_pos = 1;
+          ui->query_result_edit_buf[0] = (char)ch;
+          ui->query_result_edit_buf[1] = '\0';
+          ui->query_result_edit_pos = 1;
         } else {
-          memmove(tab->query_result_edit_buf + tab->query_result_edit_pos + 1,
-                  tab->query_result_edit_buf + tab->query_result_edit_pos,
-                  len - tab->query_result_edit_pos + 1);
-          tab->query_result_edit_buf[tab->query_result_edit_pos] = (char)ch;
-          tab->query_result_edit_pos++;
+          memmove(ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
+                  ui->query_result_edit_buf + ui->query_result_edit_pos,
+                  len - ui->query_result_edit_pos + 1);
+          ui->query_result_edit_buf[ui->query_result_edit_pos] = (char)ch;
+          ui->query_result_edit_pos++;
         }
       }
     }
@@ -1913,30 +1926,31 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return false;
 
   Tab *tab = TUI_TAB(state);
-  if (!tab || tab->type != TAB_TYPE_QUERY)
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return false;
 
   /* Handle edit mode first if active */
-  if (tab->query_result_editing) {
+  if (ui->query_result_editing) {
     return query_result_handle_edit_input(state, tab, ch);
   }
 
   /* Ctrl+W or Esc switches focus (only when not editing) */
   if (ch == 23 || ch == 27) { /* 23 = Ctrl+W */
-    if (tab->query_focus_results) {
+    if (ui->query_focus_results) {
       /* Always allow switching from results to editor */
-      tab->query_focus_results = false;
+      ui->query_focus_results = false;
     } else {
       /* Only switch to results if there are results to show */
       if (tab->query_results && tab->query_results->num_rows > 0) {
-        tab->query_focus_results = true;
+        ui->query_focus_results = true;
       }
     }
     return true;
   }
 
   /* Handle results navigation when focused on results */
-  if (tab->query_focus_results) {
+  if (ui->query_focus_results) {
     if (!tab->query_results)
       return false;
 
@@ -1997,7 +2011,7 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         query_check_load_more(state, tab);
       } else {
         /* At top row - switch focus to editor */
-        tab->query_focus_results = false;
+        ui->query_focus_results = false;
       }
       return true;
 
@@ -2417,7 +2431,7 @@ bool tui_handle_query_input(TuiState *state, int ch) {
           query_line_col_to_cursor(tab, line + 1, col, lines, num_lines);
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* On last line - move focus to results panel */
-      tab->query_focus_results = true;
+      ui->query_focus_results = true;
     }
 
     free(lines);
@@ -2438,7 +2452,7 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       tab->query_cursor++;
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* At end of text - move focus to results panel */
-      tab->query_focus_results = true;
+      ui->query_focus_results = true;
     }
     return true;
 

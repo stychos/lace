@@ -228,6 +228,11 @@ DbConnection *db_connect(const char *connstr, char **err) {
 void db_disconnect(DbConnection *conn) {
   if (!conn || !conn->driver)
     return;
+
+  /* Clear transaction state - connection close implicitly rolls back */
+  conn->in_transaction = false;
+  conn->transaction_depth = 0;
+
   conn->driver->disconnect(conn);
 }
 
@@ -501,12 +506,19 @@ bool db_begin_transaction(DbConnection *conn, char **err) {
     return false;
   }
 
+  bool success;
   if (conn->driver->begin_transaction) {
-    return conn->driver->begin_transaction(conn, err);
+    success = conn->driver->begin_transaction(conn, err);
+  } else {
+    /* Fallback */
+    success = db_exec(conn, "BEGIN", err) >= 0;
   }
 
-  /* Fallback */
-  return db_exec(conn, "BEGIN", err) >= 0;
+  if (success) {
+    conn->in_transaction = true;
+    conn->transaction_depth = 1;
+  }
+  return success;
 }
 
 bool db_commit(DbConnection *conn, char **err) {
@@ -515,12 +527,19 @@ bool db_commit(DbConnection *conn, char **err) {
     return false;
   }
 
+  bool success;
   if (conn->driver->commit) {
-    return conn->driver->commit(conn, err);
+    success = conn->driver->commit(conn, err);
+  } else {
+    /* Fallback */
+    success = db_exec(conn, "COMMIT", err) >= 0;
   }
 
-  /* Fallback */
-  return db_exec(conn, "COMMIT", err) >= 0;
+  if (success) {
+    conn->in_transaction = false;
+    conn->transaction_depth = 0;
+  }
+  return success;
 }
 
 bool db_rollback(DbConnection *conn, char **err) {
@@ -529,10 +548,94 @@ bool db_rollback(DbConnection *conn, char **err) {
     return false;
   }
 
+  bool success;
   if (conn->driver->rollback) {
-    return conn->driver->rollback(conn, err);
+    success = conn->driver->rollback(conn, err);
+  } else {
+    /* Fallback */
+    success = db_exec(conn, "ROLLBACK", err) >= 0;
   }
 
-  /* Fallback */
-  return db_exec(conn, "ROLLBACK", err) >= 0;
+  /* Always clear transaction state on rollback attempt */
+  conn->in_transaction = false;
+  conn->transaction_depth = 0;
+  return success;
+}
+
+bool db_in_transaction(DbConnection *conn) {
+  return conn && conn->in_transaction;
+}
+
+/* Transaction context API - auto-rollback on scope exit or error */
+
+#define MAX_TRANSACTION_DEPTH 100
+
+DbTransaction db_transaction_begin(DbConnection *conn, char **err) {
+  DbTransaction txn = {
+      .conn = conn, .committed = false, .owns_transaction = false};
+
+  if (!conn) {
+    SET_ERROR(err, "Not connected");
+    return txn;
+  }
+
+  /* If already in transaction, participate but don't own */
+  if (conn->in_transaction) {
+    if (conn->transaction_depth >= MAX_TRANSACTION_DEPTH) {
+      SET_ERROR(err, "Maximum transaction nesting depth exceeded");
+      return txn;
+    }
+    conn->transaction_depth++;
+    return txn;
+  }
+
+  /* Start new transaction */
+  if (db_begin_transaction(conn, err)) {
+    txn.owns_transaction = true;
+  }
+  return txn;
+}
+
+bool db_transaction_commit(DbTransaction *txn, char **err) {
+  if (!txn || !txn->conn || txn->committed) {
+    return false;
+  }
+
+  /* Only actually commit if we own the transaction */
+  if (txn->owns_transaction) {
+    if (!db_commit(txn->conn, err)) {
+      return false; /* Don't set committed - allow auto-rollback */
+    }
+    txn->committed = true;
+    return true;
+  }
+
+  /* Nested: just decrement depth */
+  if (txn->conn->transaction_depth > 0) {
+    txn->conn->transaction_depth--;
+  }
+  txn->committed = true;
+  return true;
+}
+
+bool db_transaction_rollback(DbTransaction *txn, char **err) {
+  if (!txn || !txn->conn) {
+    return false;
+  }
+
+  /* Mark as "committed" to prevent double rollback in end */
+  txn->committed = true;
+
+  /* Always rollback the whole transaction */
+  return db_rollback(txn->conn, err);
+}
+
+void db_transaction_end(DbTransaction *txn) {
+  if (!txn || !txn->conn || txn->committed) {
+    return;
+  }
+
+  /* Auto-rollback if not committed */
+  db_rollback(txn->conn, NULL);
+  txn->committed = true;
 }

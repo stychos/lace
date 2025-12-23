@@ -604,6 +604,14 @@ void tui_cleanup(TuiState *state) {
 
   tui_disconnect(state);
 
+  /* Free UITabState allocated memory */
+  for (size_t ws = 0; ws < MAX_WORKSPACES; ws++) {
+    for (size_t tab = 0; tab < MAX_TABS; tab++) {
+      free(state->tab_ui[ws][tab].query_result_edit_buf);
+      state->tab_ui[ws][tab].query_result_edit_buf = NULL;
+    }
+  }
+
   /* Free status message */
   free(state->status_msg);
 

@@ -7,19 +7,18 @@
  */
 
 #include "async.h"
+#include "../platform/thread.h"
 #include "../util/str.h"
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* Worker thread function */
 static void *async_worker_thread(void *arg) {
   AsyncOperation *op = (AsyncOperation *)arg;
 
-  pthread_mutex_lock(&op->mutex);
+  lace_mutex_lock(&op->mutex);
   op->state = ASYNC_STATE_RUNNING;
-  pthread_mutex_unlock(&op->mutex);
+  lace_mutex_unlock(&op->mutex);
 
   /* Prepare cancellation handle before starting operation */
   if (op->conn && op->conn->driver && op->conn->driver->prepare_cancel) {
@@ -103,7 +102,7 @@ static void *async_worker_thread(void *arg) {
   }
 
   /* Update state and signal completion */
-  pthread_mutex_lock(&op->mutex);
+  lace_mutex_lock(&op->mutex);
   if (op->cancel_requested) {
     op->state = ASYNC_STATE_CANCELLED;
     /* Free any partial result on cancellation */
@@ -143,8 +142,8 @@ static void *async_worker_thread(void *arg) {
   } else {
     op->state = ASYNC_STATE_COMPLETED;
   }
-  pthread_cond_signal(&op->cond);
-  pthread_mutex_unlock(&op->mutex);
+  lace_cond_signal(&op->cond);
+  lace_mutex_unlock(&op->mutex);
 
   return NULL;
 }
@@ -160,26 +159,28 @@ bool async_start(AsyncOperation *op) {
   if (!op)
     return false;
 
-  pthread_mutex_init(&op->mutex, NULL);
-  pthread_cond_init(&op->cond, NULL);
+  if (!lace_mutex_init(&op->mutex))
+    return false;
+  if (!lace_cond_init(&op->cond)) {
+    lace_mutex_destroy(&op->mutex);
+    return false;
+  }
   op->state = ASYNC_STATE_IDLE;
   op->cancel_requested = false;
   op->cancel_handle = NULL;
 
   /* Use smaller stack size (256KB instead of default 8MB) to reduce VIRT */
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 256 * 1024);
+  lace_thread_attr_t attr;
+  lace_thread_attr_init(&attr);
+  attr.stack_size = 256 * 1024;
+  attr.detached = true; /* Thread cleans up itself */
 
-  pthread_t thread;
-  if (pthread_create(&thread, &attr, async_worker_thread, op) != 0) {
-    pthread_attr_destroy(&attr);
-    pthread_mutex_destroy(&op->mutex);
-    pthread_cond_destroy(&op->cond);
+  lace_thread_t thread;
+  if (!lace_thread_create(&thread, &attr, async_worker_thread, op)) {
+    lace_mutex_destroy(&op->mutex);
+    lace_cond_destroy(&op->cond);
     return false;
   }
-  pthread_attr_destroy(&attr);
-  pthread_detach(thread); /* Thread cleans up itself */
   return true;
 }
 
@@ -187,9 +188,9 @@ AsyncState async_poll(AsyncOperation *op) {
   if (!op)
     return ASYNC_STATE_ERROR;
 
-  pthread_mutex_lock(&op->mutex);
+  lace_mutex_lock(&op->mutex);
   AsyncState state = op->state;
-  pthread_mutex_unlock(&op->mutex);
+  lace_mutex_unlock(&op->mutex);
   return state;
 }
 
@@ -197,7 +198,7 @@ void async_cancel(AsyncOperation *op) {
   if (!op)
     return;
 
-  pthread_mutex_lock(&op->mutex);
+  lace_mutex_lock(&op->mutex);
   op->cancel_requested = true;
 
   /* Call driver-specific cancel if operation is running */
@@ -207,40 +208,31 @@ void async_cancel(AsyncOperation *op) {
     op->conn->driver->cancel_query(op->conn, op->cancel_handle, &err);
     free(err);
   }
-  pthread_mutex_unlock(&op->mutex);
+  lace_mutex_unlock(&op->mutex);
 }
 
 bool async_wait(AsyncOperation *op, int timeout_ms) {
   if (!op)
     return false;
 
-  pthread_mutex_lock(&op->mutex);
+  lace_mutex_lock(&op->mutex);
 
   if (timeout_ms == 0) {
     /* Just check */
     bool done =
         (op->state != ASYNC_STATE_IDLE && op->state != ASYNC_STATE_RUNNING);
-    pthread_mutex_unlock(&op->mutex);
+    lace_mutex_unlock(&op->mutex);
     return done;
   }
 
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  ts.tv_sec += timeout_ms / 1000;
-  ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-  if (ts.tv_nsec >= 1000000000) {
-    ts.tv_sec++;
-    ts.tv_nsec -= 1000000000;
-  }
-
   while (op->state == ASYNC_STATE_IDLE || op->state == ASYNC_STATE_RUNNING) {
-    if (pthread_cond_timedwait(&op->cond, &op->mutex, &ts) == ETIMEDOUT) {
-      pthread_mutex_unlock(&op->mutex);
+    if (!lace_cond_timedwait(&op->cond, &op->mutex, timeout_ms)) {
+      lace_mutex_unlock(&op->mutex);
       return false;
     }
   }
 
-  pthread_mutex_unlock(&op->mutex);
+  lace_mutex_unlock(&op->mutex);
   return true;
 }
 
@@ -248,8 +240,8 @@ void async_free(AsyncOperation *op) {
   if (!op)
     return;
 
-  pthread_mutex_destroy(&op->mutex);
-  pthread_cond_destroy(&op->cond);
+  lace_mutex_destroy(&op->mutex);
+  lace_cond_destroy(&op->cond);
   free(op->connstr);
   free(op->table_name);
   free(op->sql);

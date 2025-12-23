@@ -88,6 +88,10 @@ struct DbConnection {
   ConnStatus status;
   char *last_error;
   void *driver_data; /* Driver-specific data */
+
+  /* Transaction state tracking */
+  bool in_transaction;   /* True if transaction is active */
+  int transaction_depth; /* Nesting depth (for savepoints, future use) */
 };
 
 /* Driver registration */
@@ -144,6 +148,26 @@ bool db_delete_row(DbConnection *conn, const char *table, const char **pk_cols,
 bool db_begin_transaction(DbConnection *conn, char **err);
 bool db_commit(DbConnection *conn, char **err);
 bool db_rollback(DbConnection *conn, char **err);
+bool db_in_transaction(DbConnection *conn);
+
+/* Transaction context - auto-rollback on scope exit or error */
+typedef struct {
+  DbConnection *conn;
+  bool committed;
+  bool owns_transaction; /* True if this context started the transaction */
+} DbTransaction;
+
+/* Start a transaction context (auto-rollback if not committed) */
+DbTransaction db_transaction_begin(DbConnection *conn, char **err);
+
+/* Commit the transaction context */
+bool db_transaction_commit(DbTransaction *txn, char **err);
+
+/* Rollback the transaction context (also called automatically on scope exit) */
+bool db_transaction_rollback(DbTransaction *txn, char **err);
+
+/* End transaction context - rolls back if not committed */
+void db_transaction_end(DbTransaction *txn);
 
 /* Initialize database subsystem */
 void db_init(void);

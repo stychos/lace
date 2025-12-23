@@ -59,8 +59,7 @@ void tab_free_data(Tab *tab) {
   free(tab->query_result_col_widths);
   tab->query_result_col_widths = NULL;
 
-  free(tab->query_result_edit_buf);
-  tab->query_result_edit_buf = NULL;
+  /* Note: query_result_edit_buf is now in UITabState (TUI layer) */
 
   free(tab->query_source_table);
   tab->query_source_table = NULL;
@@ -114,19 +113,27 @@ Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index) {
   Tab *tab = &ws->tabs[new_idx];
   tab_init(tab);
 
-  tab->active = true;
   tab->type = TAB_TYPE_QUERY;
   tab->connection_index = connection_index;
   tab->table_name = str_dup("Query");
+  if (!tab->table_name) {
+    memset(tab, 0, sizeof(Tab));
+    return NULL;
+  }
 
   /* Initialize query buffer */
   tab->query_capacity = 1024;
   tab->query_text = malloc(tab->query_capacity);
-  if (tab->query_text) {
-    tab->query_text[0] = '\0';
-    tab->query_len = 0;
+  if (!tab->query_text) {
+    free(tab->table_name);
+    memset(tab, 0, sizeof(Tab));
+    return NULL;
   }
+  tab->query_text[0] = '\0';
+  tab->query_len = 0;
 
+  /* All allocations succeeded - now commit the tab */
+  tab->active = true;
   ws->num_tabs++;
   ws->current_tab = new_idx;
 

@@ -130,6 +130,17 @@ Binary will be at `build/lace`.
 | Double-click on cell | Edit cell |
 | Scroll wheel | Scroll rows |
 
+## TODO
+
+- [ ] Configuration management
+- [ ] Connection management (saved connections)
+- [ ] Data adding (insert rows)
+- [ ] Batch operations (bulk delete, export)
+- [ ] Schema management (indexes, keys)
+- [ ] Table creation
+- [ ] Foreign keys (management, navigation)
+- [ ] Session persistence (save/restore tabs on restart)
+
 ## License
 
 MIT

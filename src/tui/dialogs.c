@@ -116,6 +116,7 @@ void tui_show_goto_dialog(TuiState *state) {
 
   /* Determine if we're in a query tab with results */
   Tab *tab = TUI_TAB(state);
+  UITabState *ui = TUI_TAB_UI(state);
   bool is_query = false;
   size_t total_rows = 0;
 
@@ -272,7 +273,8 @@ void tui_show_goto_dialog(TuiState *state) {
             }
 
             /* Ensure focus is on results */
-            tab->query_focus_results = true;
+            if (ui)
+              ui->query_focus_results = true;
           } else {
             /* Handle regular table navigation */
             /* Check if target is in currently loaded range */

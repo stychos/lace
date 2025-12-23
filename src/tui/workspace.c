@@ -392,8 +392,27 @@ void tab_close(TuiState *state) {
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
 
-  /* Close the tab */
-  workspace_close_tab(ws, ws->current_tab);
+  /* Get indices before close */
+  size_t ws_idx = state->app->current_workspace;
+  size_t tab_idx = ws->current_tab;
+  size_t old_num_tabs = ws->num_tabs;
+
+  /* Free UITabState resources for the closing tab */
+  UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
+  if (ui) {
+    free(ui->query_result_edit_buf);
+    ui->query_result_edit_buf = NULL;
+  }
+
+  /* Close the tab (shifts tabs array) */
+  workspace_close_tab(ws, tab_idx);
+
+  /* Shift UITabState entries to match (workspace_close_tab shifts tabs) */
+  for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
+    state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+  }
+  /* Clear the last entry */
+  memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
   if (ws->num_tabs == 0) {
     /* Last tab closed - clear state and focus sidebar */

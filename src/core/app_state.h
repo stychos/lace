@@ -133,7 +133,6 @@ typedef struct {
   ResultSet *query_results;
   int64_t query_affected;
   char *query_error;
-  bool query_focus_results; /* TODO: Move to UITabState */
   size_t query_result_row;
   size_t query_result_col;
   size_t query_result_scroll_row;
@@ -141,10 +140,7 @@ typedef struct {
   int *query_result_col_widths;
   size_t query_result_num_cols;
 
-  /* Query results editing */
-  bool query_result_editing;    /* TODO: Move to UITabState */
-  char *query_result_edit_buf;  /* TODO: Move to UITabState */
-  size_t query_result_edit_pos; /* TODO: Move to UITabState */
+  /* Query results editing - source table tracking */
   char *query_source_table;
   TableSchema *query_source_schema;
 

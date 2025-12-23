@@ -342,10 +342,11 @@ void tui_draw_status(TuiState *state) {
 
   /* Check if we're in a query tab with results focus */
   Tab *tab = TUI_TAB(state);
+  UITabState *ui = TUI_TAB_UI(state);
   bool query_results_active = false;
-  if (tab) {
+  if (tab && ui) {
     query_results_active = (tab->type == TAB_TYPE_QUERY &&
-                            tab->query_focus_results && tab->query_results);
+                            ui->query_focus_results && tab->query_results);
   }
 
   /* Left: show table name when sidebar focused, otherwise column info */
@@ -529,7 +530,9 @@ bool tui_handle_mouse_event(TuiState *state) {
 
         if (mouse_y >= results_start_y) {
           /* Scroll query results using helper that handles pagination */
-          scroll_tab->query_focus_results = true;
+          UITabState *scroll_ui = TUI_TAB_UI(state);
+          if (scroll_ui)
+            scroll_ui->query_focus_results = true;
           int delta = is_scroll_up ? -scroll_amount : scroll_amount;
           tui_query_scroll_results(state, delta);
           state->sidebar_focused = false;
@@ -750,13 +753,14 @@ bool tui_handle_mouse_event(TuiState *state) {
 
   /* Check if click is in query tab area */
   Tab *query_click_tab = TUI_TAB(state);
-  if (mouse_x >= sidebar_width && query_click_tab &&
+  UITabState *query_click_ui = TUI_TAB_UI(state);
+  if (mouse_x >= sidebar_width && query_click_tab && query_click_ui &&
       query_click_tab->type == TAB_TYPE_QUERY) {
     state->sidebar_filter_active = false;
     state->sidebar_focused = false;
 
     /* If currently editing query results, save the edit first */
-    if (query_click_tab->query_result_editing) {
+    if (query_click_ui->query_result_editing) {
       tui_query_confirm_result_edit(state);
     }
 
@@ -776,12 +780,12 @@ bool tui_handle_mouse_event(TuiState *state) {
 
     if (mouse_y < results_start_y) {
       /* Clicked in editor area */
-      query_click_tab->query_focus_results = false;
+      query_click_ui->query_focus_results = false;
     } else if (query_click_tab->query_results &&
                query_click_tab->query_results->num_rows > 0 &&
                mouse_y >= results_data_y) {
       /* Clicked in results data area */
-      query_click_tab->query_focus_results = true;
+      query_click_ui->query_focus_results = true;
 
       /* Calculate which row was clicked */
       int clicked_row = mouse_y - results_data_y;
@@ -816,14 +820,14 @@ bool tui_handle_mouse_event(TuiState *state) {
           query_click_tab->query_result_col = target_col;
 
           /* Double-click: enter edit mode */
-          if (is_double && !query_click_tab->query_result_editing) {
+          if (is_double && !query_click_ui->query_result_editing) {
             tui_query_start_result_edit(state);
           }
         }
       }
     } else {
       /* Clicked in results header area */
-      query_click_tab->query_focus_results = true;
+      query_click_ui->query_focus_results = true;
     }
     return true;
   }

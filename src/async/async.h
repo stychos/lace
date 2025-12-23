@@ -10,7 +10,7 @@
 #define ASYNC_H
 
 #include "../db/db.h"
-#include <pthread.h>
+#include "../platform/thread.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -62,8 +62,8 @@ typedef struct {
   bool is_approximate; /* True if count is an estimate */
 
   /* Synchronization */
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
+  lace_mutex_t mutex;
+  lace_cond_t cond;
   volatile bool cancel_requested;
 
   /* For cancellation */

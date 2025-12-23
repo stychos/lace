@@ -286,6 +286,54 @@ typedef struct UICallbacks {
   void (*set_filters_editing)(void *ctx, bool editing);
   bool (*get_filters_was_focused)(void *ctx);
   void (*set_filters_was_focused)(void *ctx, bool was_focused);
+
+  /* =========================================================================
+   * Async Completion Callbacks
+   * These callbacks allow core to notify UI when async operations complete.
+   * This enables platform-independent async result handling.
+   * =========================================================================
+   */
+
+  /* Called when async data load completes (pagination, table load, etc.)
+   * Parameters:
+   *   ctx     - UI context
+   *   success - true if operation succeeded
+   *   result  - operation-specific result (ResultSet*, TableSchema*, etc.)
+   *   error   - error message if failed (NULL on success)
+   */
+  void (*on_data_loaded)(void *ctx, bool success, void *result,
+                         const char *error);
+
+  /* Called when async row count completes
+   * Parameters:
+   *   ctx         - UI context
+   *   count       - row count (-1 on error)
+   *   approximate - true if count is an estimate
+   *   error       - error message if failed (NULL on success)
+   */
+  void (*on_count_complete)(void *ctx, int64_t count, bool approximate,
+                            const char *error);
+
+  /* Called when async query execution completes
+   * Parameters:
+   *   ctx      - UI context
+   *   success  - true if operation succeeded
+   *   result   - ResultSet* for SELECT, NULL for non-SELECT
+   *   affected - rows affected for INSERT/UPDATE/DELETE
+   *   error    - error message if failed (NULL on success)
+   */
+  void (*on_query_complete)(void *ctx, bool success, void *result,
+                            int64_t affected, const char *error);
+
+  /* Called when async connection completes
+   * Parameters:
+   *   ctx     - UI context
+   *   success - true if connection succeeded
+   *   conn    - DbConnection* on success, NULL on failure
+   *   error   - error message if failed (NULL on success)
+   */
+  void (*on_connect_complete)(void *ctx, bool success, void *conn,
+                              const char *error);
 } UICallbacks;
 
 /* ============================================================================
