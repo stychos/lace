@@ -6,6 +6,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
 #include <stdlib.h>
@@ -98,21 +99,32 @@ static void pk_info_free(PkInfo *pk) {
 
 /* Start inline editing */
 void tui_start_edit(TuiState *state) {
-  if (!state || !state->data || state->editing)
-    return;
-  if (state->cursor_row >= state->data->num_rows)
-    return;
-  if (state->cursor_col >= state->data->num_columns)
-    return;
-  if (!state->data->rows)
+  if (!state || state->editing)
     return;
 
-  Row *row = &state->data->rows[state->cursor_row];
-  if (!row->cells || state->cursor_col >= row->num_cells)
+  /*
+   * Use TuiState as source of truth during ViewModel migration.
+   * TuiState has the live cursor position; Tab/VmTable may have stale values.
+   */
+  ResultSet *data = state->data;
+  size_t cursor_row = state->cursor_row;
+  size_t cursor_col = state->cursor_col;
+
+  if (!data)
+    return;
+  if (cursor_row >= data->num_rows)
+    return;
+  if (cursor_col >= data->num_columns)
+    return;
+  if (!data->rows)
+    return;
+
+  Row *row = &data->rows[cursor_row];
+  if (!row->cells || cursor_col >= row->num_cells)
     return;
 
   /* Get current cell value */
-  DbValue *val = &row->cells[state->cursor_col];
+  DbValue *val = &row->cells[cursor_col];
 
   /* Convert value to string */
   char *content = NULL;
@@ -125,7 +137,7 @@ void tui_start_edit(TuiState *state) {
   }
 
   /* Check if content is truncated (exceeds column width) */
-  int col_width = tui_get_column_width(state, state->cursor_col);
+  int col_width = tui_get_column_width(state, cursor_col);
   size_t content_len = content ? strlen(content) : 0;
   bool is_truncated = content_len > (size_t)col_width;
 
@@ -134,7 +146,7 @@ void tui_start_edit(TuiState *state) {
 
   if (is_truncated || has_newlines) {
     /* Use modal editor for truncated or multi-line content */
-    const char *col_name = state->data->columns[state->cursor_col].name;
+    const char *col_name = data->columns[cursor_col].name;
     char *title = str_printf("Edit: %s", col_name);
 
     EditorResult result =
@@ -164,21 +176,31 @@ void tui_start_edit(TuiState *state) {
 
 /* Start modal editing */
 void tui_start_modal_edit(TuiState *state) {
-  if (!state || !state->data || state->editing)
-    return;
-  if (state->cursor_row >= state->data->num_rows)
-    return;
-  if (state->cursor_col >= state->data->num_columns)
-    return;
-  if (!state->data->rows)
+  if (!state || state->editing)
     return;
 
-  Row *row = &state->data->rows[state->cursor_row];
-  if (!row->cells || state->cursor_col >= row->num_cells)
+  /*
+   * Use TuiState as source of truth during ViewModel migration.
+   */
+  ResultSet *data = state->data;
+  size_t cursor_row = state->cursor_row;
+  size_t cursor_col = state->cursor_col;
+
+  if (!data)
+    return;
+  if (cursor_row >= data->num_rows)
+    return;
+  if (cursor_col >= data->num_columns)
+    return;
+  if (!data->rows)
+    return;
+
+  Row *row = &data->rows[cursor_row];
+  if (!row->cells || cursor_col >= row->num_cells)
     return;
 
   /* Get current cell value */
-  DbValue *val = &row->cells[state->cursor_col];
+  DbValue *val = &row->cells[cursor_col];
 
   /* Convert value to string */
   char *content = NULL;
@@ -191,7 +213,7 @@ void tui_start_modal_edit(TuiState *state) {
   }
 
   /* Always use modal editor */
-  const char *col_name = state->data->columns[state->cursor_col].name;
+  const char *col_name = data->columns[cursor_col].name;
   char *title = str_printf("Edit: %s", col_name);
 
   EditorResult result =
@@ -278,24 +300,34 @@ void tui_confirm_edit(TuiState *state) {
 
 /* Set cell value directly (NULL or empty string) */
 void tui_set_cell_direct(TuiState *state, bool set_null) {
-  if (!state || !state->data || !state->conn)
+  if (!state || !state->conn)
     return;
   if (!state->tables || state->num_tables == 0)
     return;
-  if (state->cursor_row >= state->data->num_rows)
+
+  /*
+   * Use TuiState as source of truth during ViewModel migration.
+   */
+  ResultSet *data = state->data;
+  size_t cursor_row = state->cursor_row;
+  size_t cursor_col = state->cursor_col;
+
+  if (!data)
     return;
-  if (state->cursor_col >= state->data->num_columns)
+  if (cursor_row >= data->num_rows)
+    return;
+  if (cursor_col >= data->num_columns)
     return;
 
   /* Build primary key info */
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, state->data, state->cursor_row, state->schema)) {
+  if (!pk_info_build(&pk, data, cursor_row, state->schema)) {
     tui_set_error(state, "Cannot update: no primary key found");
     return;
   }
 
   const char *table = state->tables[state->current_table];
-  const char *col_name = state->data->columns[state->cursor_col].name;
+  const char *col_name = data->columns[cursor_col].name;
   DbValue new_val = set_null ? db_value_null() : db_value_text("");
 
   /* Attempt to update */
@@ -306,8 +338,7 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
 
   if (success) {
     /* Update the local data */
-    DbValue *cell =
-        &state->data->rows[state->cursor_row].cells[state->cursor_col];
+    DbValue *cell = &data->rows[cursor_row].cells[cursor_col];
     db_value_free(cell);
     *cell = new_val;
     tui_set_status(state, set_null ? "Cell set to NULL" : "Cell set to empty");
@@ -320,16 +351,25 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
 
 /* Delete current row */
 void tui_delete_row(TuiState *state) {
-  if (!state || !state->data || !state->conn)
+  if (!state || !state->conn)
     return;
   if (!state->tables || state->num_tables == 0)
     return;
-  if (state->cursor_row >= state->data->num_rows)
+
+  /*
+   * Use TuiState as source of truth during ViewModel migration.
+   */
+  ResultSet *data = state->data;
+  size_t cursor_row = state->cursor_row;
+
+  if (!data)
+    return;
+  if (cursor_row >= data->num_rows)
     return;
 
   /* Build primary key info */
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, state->data, state->cursor_row, state->schema)) {
+  if (!pk_info_build(&pk, data, cursor_row, state->schema)) {
     tui_set_error(state, "Cannot delete: no primary key found");
     return;
   }
@@ -341,12 +381,16 @@ void tui_delete_row(TuiState *state) {
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_rows;
 
-  int row_y = 3 + (int)(state->cursor_row - state->scroll_row);
-  Row *del_row = &state->data->rows[state->cursor_row];
+  /* Use TuiState scroll positions directly */
+  size_t scroll_row = state->scroll_row;
+  size_t scroll_col = state->scroll_col;
+
+  int row_y = 3 + (int)(cursor_row - scroll_row);
+  Row *del_row = &data->rows[cursor_row];
   wattron(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   int x = 1;
-  for (size_t col = state->scroll_col;
-       col < state->data->num_columns && col < del_row->num_cells; col++) {
+  for (size_t col = scroll_col;
+       col < data->num_columns && col < del_row->num_cells; col++) {
     int col_width = tui_get_column_width(state, col);
     if (x + col_width + 3 > win_cols)
       break;
@@ -448,111 +492,131 @@ void tui_delete_row(TuiState *state) {
 }
 
 /* Handle edit mode input */
-bool tui_handle_edit_input(TuiState *state, int ch) {
+bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   if (!state->editing)
+    return false;
+  if (!event || event->type != UI_EVENT_KEY)
     return false;
 
   size_t len = state->edit_buffer ? strlen(state->edit_buffer) : 0;
+  int key_char = render_event_get_char(event);
 
-  switch (ch) {
-  case 27: /* Escape - cancel */
+  /* Escape - cancel */
+  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
     tui_cancel_edit(state);
     return true;
+  }
 
-  case '\n':
-  case KEY_ENTER:
+  /* Enter - confirm */
+  if (render_event_is_special(event, UI_KEY_ENTER)) {
     tui_confirm_edit(state);
     return true;
+  }
 
-  case KEY_LEFT:
+  /* Left arrow - move cursor left */
+  if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (state->edit_pos > 0) {
       state->edit_pos--;
     }
     return true;
+  }
 
-  case KEY_RIGHT:
+  /* Right arrow - move cursor right */
+  if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (state->edit_pos < len) {
       state->edit_pos++;
     }
     return true;
+  }
 
-  case KEY_HOME:
-  case 1: /* Ctrl+A */
+  /* Home or Ctrl+A - go to start */
+  if (render_event_is_special(event, UI_KEY_HOME) ||
+      render_event_is_ctrl(event, 'A')) {
     state->edit_pos = 0;
     return true;
+  }
 
-  case KEY_END:
-  case 5: /* Ctrl+E */
+  /* End or Ctrl+E - go to end */
+  if (render_event_is_special(event, UI_KEY_END) ||
+      render_event_is_ctrl(event, 'E')) {
     state->edit_pos = len;
     return true;
+  }
 
-  case KEY_BACKSPACE:
-  case 127:
-  case 8:
+  /* Backspace - delete character before cursor */
+  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (state->edit_pos > 0 && state->edit_pos <= len && state->edit_buffer) {
       memmove(state->edit_buffer + state->edit_pos - 1,
               state->edit_buffer + state->edit_pos, len - state->edit_pos + 1);
       state->edit_pos--;
     }
     return true;
+  }
 
-  case KEY_DC: /* Delete */
+  /* Delete - delete character at cursor */
+  if (render_event_is_special(event, UI_KEY_DELETE)) {
     if (state->edit_pos < len && state->edit_buffer) {
       memmove(state->edit_buffer + state->edit_pos,
               state->edit_buffer + state->edit_pos + 1, len - state->edit_pos);
     }
     return true;
+  }
 
-  case 21: /* Ctrl+U - clear line */
+  /* Ctrl+U - clear line */
+  if (render_event_is_ctrl(event, 'U')) {
     if (state->edit_buffer) {
       state->edit_buffer[0] = '\0';
       state->edit_pos = 0;
     }
     return true;
+  }
 
-  case 14: /* Ctrl+N - set to NULL */
+  /* Ctrl+N - set to NULL */
+  if (render_event_is_ctrl(event, 'N')) {
     free(state->edit_buffer);
     state->edit_buffer = NULL;
     state->edit_pos = 0;
     tui_confirm_edit(state);
     return true;
+  }
 
-  case 4: /* Ctrl+D - set to empty string */
+  /* Ctrl+D - set to empty string */
+  if (render_event_is_ctrl(event, 'D')) {
     free(state->edit_buffer);
     state->edit_buffer = str_dup("");
     state->edit_pos = 0;
     tui_confirm_edit(state);
     return true;
+  }
 
-  default:
-    if (ch >= 32 && ch < 127) {
-      /* Insert character - check for overflow */
-      if (len > SIZE_MAX - 2) {
-        /* Buffer too large - ignore keystroke */
-        return true;
-      }
-      size_t new_len = len + 2;
-      char *new_buf = realloc(state->edit_buffer, new_len);
-      if (!new_buf) {
-        /* Allocation failed - ignore keystroke */
-        return true;
-      }
-      state->edit_buffer = new_buf;
-      if (len == 0) {
-        /* Buffer was NULL or empty - initialize it */
-        state->edit_buffer[0] = (char)ch;
-        state->edit_buffer[1] = '\0';
-        state->edit_pos = 1;
-      } else {
-        memmove(state->edit_buffer + state->edit_pos + 1,
-                state->edit_buffer + state->edit_pos,
-                len - state->edit_pos + 1);
-        state->edit_buffer[state->edit_pos] = (char)ch;
-        state->edit_pos++;
-      }
+  /* Printable character - insert at cursor */
+  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    /* Check for overflow */
+    if (len > SIZE_MAX - 2) {
+      /* Buffer too large - ignore keystroke */
+      return true;
+    }
+    size_t new_len = len + 2;
+    char *new_buf = realloc(state->edit_buffer, new_len);
+    if (!new_buf) {
+      /* Allocation failed - ignore keystroke */
+      return true;
+    }
+    state->edit_buffer = new_buf;
+    if (len == 0) {
+      /* Buffer was NULL or empty - initialize it */
+      state->edit_buffer[0] = (char)key_char;
+      state->edit_buffer[1] = '\0';
+      state->edit_pos = 1;
+    } else {
+      memmove(state->edit_buffer + state->edit_pos + 1,
+              state->edit_buffer + state->edit_pos, len - state->edit_pos + 1);
+      state->edit_buffer[state->edit_pos] = (char)key_char;
+      state->edit_pos++;
     }
     return true;
   }
 
-  return false;
+  /* Consume all other keys when editing */
+  return true;
 }

@@ -56,8 +56,8 @@ static char *escape_table_name(DbConnection *conn, const char *table) {
   if (dot && str_eq(conn->driver->name, "postgres")) {
     /* Schema-qualified: escape each part separately */
     size_t schema_len = (size_t)(dot - table);
-    char *schema = strndup(table, schema_len);
-    char *tbl = strdup(dot + 1);
+    char *schema = str_ndup(table, schema_len);
+    char *tbl = str_dup(dot + 1);
     if (!schema || !tbl) {
       free(schema);
       free(tbl);

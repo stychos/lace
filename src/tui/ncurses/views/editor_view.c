@@ -7,7 +7,8 @@
  */
 
 #include "editor_view.h"
-#include "../../util/str.h"
+#include "../../../util/str.h"
+#include "../render_helpers.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -497,17 +498,17 @@ EditorResult editor_view_show(TuiState *state, const char *title,
 
     int ch = wgetch(win);
 
-    switch (ch) {
-    case KEY_MOUSE: {
-      MEVENT event;
-      if (getmouse(&event) == OK) {
+    /* Handle mouse separately (not a key event) */
+    if (ch == KEY_MOUSE) {
+      MEVENT mouse_event;
+      if (getmouse(&mouse_event) == OK) {
         /* Convert screen coords to window coords */
-        int mouse_y = event.y - starty;
-        int mouse_x = event.x - startx;
+        int mouse_y = mouse_event.y - starty;
+        int mouse_x = mouse_event.x - startx;
         int status_y = height - 2;
 
         /* Check if click is on status bar */
-        if (mouse_y == status_y && (event.bstate & BUTTON1_CLICKED)) {
+        if (mouse_y == status_y && (mouse_event.bstate & BUTTON1_CLICKED)) {
           if (readonly) {
             /* "[Esc] Close" at width - 13 */
             if (mouse_x >= width - 13 && mouse_x < width - 2) {
@@ -538,103 +539,94 @@ EditorResult editor_view_show(TuiState *state, const char *title,
           }
         }
       }
-      break;
+      continue;
     }
 
-    case 27: /* Escape */
+    /* Translate key to UiEvent */
+    UiEvent event;
+    render_translate_key(ch, &event);
+    int key_char = render_event_get_char(&event);
+    int fkey = render_event_get_fkey(&event);
+
+    /* Escape - cancel */
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
       running = false;
-      break;
-
-    case KEY_F(2): /* F2 - save */
-      if (!readonly) {
-        result.saved = true;
-        result.content = str_dup(editor.buf.data);
-        running = false;
-      }
-      break;
-
-    case KEY_LEFT:
+    }
+    /* F2 - save */
+    else if (fkey == 2 && !readonly) {
+      result.saved = true;
+      result.content = str_dup(editor.buf.data);
+      running = false;
+    }
+    /* Left arrow */
+    else if (render_event_is_special(&event, UI_KEY_LEFT)) {
       editor_move_left(&editor);
-      break;
-
-    case KEY_RIGHT:
+    }
+    /* Right arrow */
+    else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
       editor_move_right(&editor);
-      break;
-
-    case KEY_UP:
+    }
+    /* Up arrow */
+    else if (render_event_is_special(&event, UI_KEY_UP)) {
       editor_move_up(&editor);
-      break;
-
-    case KEY_DOWN:
+    }
+    /* Down arrow */
+    else if (render_event_is_special(&event, UI_KEY_DOWN)) {
       editor_move_down(&editor);
-      break;
-
-    case KEY_HOME:
-    case 1: /* Ctrl+A */
+    }
+    /* Home or Ctrl+A */
+    else if (render_event_is_special(&event, UI_KEY_HOME) ||
+             render_event_is_ctrl(&event, 'A')) {
       editor_move_home(&editor);
-      break;
-
-    case KEY_END:
-    case 5: /* Ctrl+E */
+    }
+    /* End or Ctrl+E */
+    else if (render_event_is_special(&event, UI_KEY_END) ||
+             render_event_is_ctrl(&event, 'E')) {
       editor_move_end(&editor);
-      break;
-
-    case KEY_PPAGE:
+    }
+    /* Page Up */
+    else if (render_event_is_special(&event, UI_KEY_PAGEUP)) {
       editor_page_up(&editor);
-      break;
-
-    case KEY_NPAGE:
+    }
+    /* Page Down */
+    else if (render_event_is_special(&event, UI_KEY_PAGEDOWN)) {
       editor_page_down(&editor);
-      break;
-
-    case KEY_BACKSPACE:
-    case 127:
-    case 8:
+    }
+    /* Backspace */
+    else if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
       editor_backspace(&editor);
-      break;
-
-    case KEY_DC:
+    }
+    /* Delete */
+    else if (render_event_is_special(&event, UI_KEY_DELETE)) {
       editor_delete_char(&editor);
-      break;
-
-    case 14: /* Ctrl+N - set to NULL */
-      if (!readonly) {
-        result.saved = true;
-        result.set_null = true;
-        result.content = NULL;
-        running = false;
+    }
+    /* Ctrl+N - set to NULL */
+    else if (render_event_is_ctrl(&event, 'N') && !readonly) {
+      result.saved = true;
+      result.set_null = true;
+      result.content = NULL;
+      running = false;
+    }
+    /* Ctrl+D - set to empty string */
+    else if (render_event_is_ctrl(&event, 'D') && !readonly) {
+      result.saved = true;
+      result.content = str_dup("");
+      running = false;
+    }
+    /* Enter - insert newline */
+    else if (render_event_is_special(&event, UI_KEY_ENTER) && !readonly) {
+      editor_insert_char(&editor, '\n');
+    }
+    /* Tab - insert spaces */
+    else if (render_event_is_special(&event, UI_KEY_TAB) && !readonly) {
+      for (int i = 0; i < 4; i++) {
+        editor_insert_char(&editor, ' ');
       }
-      break;
-
-    case 4: /* Ctrl+D - set to empty string */
-      if (!readonly) {
-        result.saved = true;
-        result.content = str_dup("");
-        running = false;
-      }
-      break;
-
-    case '\n':
-    case KEY_ENTER:
-      if (!readonly) {
-        editor_insert_char(&editor, '\n');
-      }
-      break;
-
-    case '\t':
-      if (!readonly) {
-        /* Insert spaces for tab */
-        for (int i = 0; i < 4; i++) {
-          editor_insert_char(&editor, ' ');
-        }
-      }
-      break;
-
-    default:
-      if (ch >= 32 && ch < 127 && !readonly) {
-        editor_insert_char(&editor, (char)ch);
-      }
-      break;
+    }
+    /* Printable character - insert */
+    else if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
+             !readonly) {
+      editor_insert_char(&editor, (char)key_char);
     }
   }
 

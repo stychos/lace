@@ -7,11 +7,11 @@
  */
 
 #include "app.h"
-#include "core/app_state.h"
-#include "db/connstr.h"
-#include "db/db.h"
-#include "tui/tui.h"
-#include "util/str.h"
+#include "../core/app_state.h"
+#include "../db/connstr.h"
+#include "../db/db.h"
+#include "../tui/ncurses/tui.h"
+#include "../util/str.h"
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>

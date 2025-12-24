@@ -9,7 +9,7 @@
  * https://github.com/stychos/lace
  */
 
-#include "../core/workspace.h"
+#include "../../core/workspace.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +56,7 @@ void tab_save(TuiState *state) {
     ui->sidebar_focused = state->sidebar_focused;
     ui->sidebar_highlight = state->sidebar_highlight;
     ui->sidebar_scroll = state->sidebar_scroll;
+    ui->sidebar_last_position = state->sidebar_last_position;
     ui->sidebar_filter_len = state->sidebar_filter_len;
     memcpy(ui->sidebar_filter, state->sidebar_filter,
            sizeof(ui->sidebar_filter));
@@ -116,6 +117,7 @@ void tab_restore(TuiState *state) {
     state->sidebar_focused = ui->sidebar_focused;
     state->sidebar_highlight = ui->sidebar_highlight;
     state->sidebar_scroll = ui->sidebar_scroll;
+    state->sidebar_last_position = ui->sidebar_last_position;
     state->sidebar_filter_len = ui->sidebar_filter_len;
     memcpy(state->sidebar_filter, ui->sidebar_filter,
            sizeof(state->sidebar_filter));
@@ -131,6 +133,7 @@ void tab_restore(TuiState *state) {
     state->sidebar_focused = false;
     state->sidebar_highlight = 0;
     state->sidebar_scroll = 0;
+    state->sidebar_last_position = 0;
     state->sidebar_filter[0] = '\0';
     state->sidebar_filter_len = 0;
   }
@@ -170,6 +173,7 @@ void tab_sync_focus(TuiState *state) {
   ui->sidebar_focused = state->sidebar_focused;
   ui->sidebar_highlight = state->sidebar_highlight;
   ui->sidebar_scroll = state->sidebar_scroll;
+  ui->sidebar_last_position = state->sidebar_last_position;
   ui->sidebar_filter_len = state->sidebar_filter_len;
   memcpy(ui->sidebar_filter, state->sidebar_filter, sizeof(ui->sidebar_filter));
 
@@ -415,7 +419,7 @@ void tab_close(TuiState *state) {
   memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
   if (ws->num_tabs == 0) {
-    /* Last tab closed - clear state and focus sidebar */
+    /* Last tab closed - clear all state */
     state->data = NULL;
     state->schema = NULL;
     state->col_widths = NULL;
@@ -427,6 +431,13 @@ void tab_close(TuiState *state) {
     state->total_rows = 0;
     state->loaded_offset = 0;
     state->loaded_count = 0;
+    state->current_table = 0;
+
+    /*
+     * Note: We keep connection state (conn, tables, num_tables) intact
+     * because the sidebar still needs to display tables for opening new tabs.
+     * Connection state is only cleared when the connection itself is closed.
+     */
 
     /* Reset sidebar state and focus it */
     state->sidebar_focused = true;

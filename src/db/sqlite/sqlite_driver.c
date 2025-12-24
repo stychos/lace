@@ -9,6 +9,7 @@
 #include "../../util/str.h"
 #include "../connstr.h"
 #include "../db.h"
+#include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1184,11 +1185,14 @@ static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
     const char *stat = (const char *)sqlite3_column_text(stmt, 0);
     if (stat && *stat) {
       /* First number in stat string is the row count estimate */
-      int64_t count = strtoll(stat, NULL, 10);
+      errno = 0;
+      char *endptr;
+      int64_t count = strtoll(stat, &endptr, 10);
       sqlite3_finalize(stmt);
-      if (count >= 0) {
+      if (errno == 0 && endptr != stat && count >= 0) {
         return count;
       }
+      return -1;
     }
   }
 

@@ -3,7 +3,7 @@
 
 CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -g
-LDFLAGS = -lncursesw -lssl -lcrypto -lpanel -lform -lmenu -lsqlite3 -lmariadb -lpq -lpthread
+LDFLAGS = -lncursesw -lpanel -lmenu -lsqlite3 -lmariadb -lpq -lpthread
 
 # Build directory
 BUILD_DIR = build
@@ -20,7 +20,6 @@ ifeq ($(UNAME_S),Darwin)
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include/mysql
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/libpq/include
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/openssl/include
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/sqlite/include
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/ncurses/include
 
@@ -28,15 +27,22 @@ ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -L$(HOMEBREW_PREFIX)/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/mariadb/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/libpq/lib
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/openssl/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/sqlite/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/ncurses/lib
 endif
 
-# Source directories
-SRC_DIRS = src src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
-           src/tui src/tui/views src/tui/widgets src/net src/util src/async \
-           src/platform
+# Source directories (common)
+SRC_DIRS_COMMON = src/app src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
+                  src/tui/ncurses src/tui/ncurses/views src/util src/async src/viewmodel
+
+# Platform-specific source directories
+ifeq ($(UNAME_S),Windows_NT)
+    SRC_DIRS_PLATFORM = src/platform/win32
+else
+    SRC_DIRS_PLATFORM = src/platform/posix
+endif
+
+SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM)
 
 # Find all C source files
 SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))

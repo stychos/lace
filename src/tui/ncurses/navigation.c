@@ -250,6 +250,54 @@ void tui_end(TuiState *state) {
                           : 0;
 }
 
+void tui_column_first(TuiState *state) {
+  if (!state)
+    return;
+  state->cursor_col = 0;
+  state->scroll_col = 0;
+}
+
+void tui_column_last(TuiState *state) {
+  if (!state || !state->data)
+    return;
+  state->cursor_col =
+      state->data->num_columns > 0 ? state->data->num_columns - 1 : 0;
+
+  /* Check if cursor is already visible - no scroll needed */
+  if (!state->main_win)
+    return;
+
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_rows;
+
+  /* Calculate last visible column with current scroll */
+  int x = 1;
+  size_t last_visible_col = state->scroll_col;
+  for (size_t col = state->scroll_col; col < state->data->num_columns; col++) {
+    int width = tui_get_column_width(state, col);
+    if (x + width + 3 > win_cols)
+      break;
+    x += width + 1;
+    last_visible_col = col;
+  }
+
+  /* Only scroll if cursor is not visible */
+  if (state->cursor_col > last_visible_col) {
+    state->scroll_col = state->cursor_col;
+    x = 1;
+    while (state->scroll_col > 0) {
+      int width = tui_get_column_width(state, state->scroll_col);
+      if (x + width + 3 > win_cols)
+        break;
+      x += width + 1;
+      if (state->scroll_col == state->cursor_col)
+        break;
+      state->scroll_col--;
+    }
+  }
+}
+
 void tui_next_table(TuiState *state) {
   if (!state || !state->tables || state->num_tables == 0)
     return;

@@ -9,8 +9,9 @@
 #ifndef LACE_TUI_INTERNAL_H
 #define LACE_TUI_INTERNAL_H
 
-#include "../db/db.h"
-#include "../util/str.h"
+#include "../../db/db.h"
+#include "../../util/str.h"
+#include "render_helpers.h"
 #include "tui.h"
 #include <menu.h>
 #include <ncurses.h>
@@ -94,7 +95,7 @@ size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx);
 size_t tui_get_sidebar_highlight_for_table(TuiState *state, size_t table_idx);
 
 /* Handle sidebar input when focused */
-bool tui_handle_sidebar_input(TuiState *state, int ch);
+bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event);
 
 /* Update sidebar name scroll animation */
 void tui_update_sidebar_scroll_animation(TuiState *state);
@@ -164,7 +165,7 @@ void tui_set_cell_direct(TuiState *state, bool set_null);
 void tui_delete_row(TuiState *state);
 
 /* Handle edit mode input */
-bool tui_handle_edit_input(TuiState *state, int ch);
+bool tui_handle_edit_input(TuiState *state, const UiEvent *event);
 
 /* ============================================================================
  * Navigation functions (navigation.c)

@@ -7,8 +7,9 @@
  */
 
 #include "connect_view.h"
-#include "../../db/connstr.h"
-#include "../../util/str.h"
+#include "../../../db/connstr.h"
+#include "../../../util/str.h"
+#include "../render_helpers.h"
 #include <ctype.h>
 #include <form.h>
 #include <stdlib.h>
@@ -65,18 +66,25 @@ static void input_draw(InputField *input, WINDOW *win, int y, int x,
   *cursor_x = x + (int)(input->cursor - input->scroll);
 }
 
-static void input_handle_key(InputField *input, int ch) {
-  switch (ch) {
-  case KEY_LEFT:
+static void input_handle_key(InputField *input, const UiEvent *event) {
+  if (!event || event->type != UI_EVENT_KEY)
+    return;
+
+  int key_char = render_event_get_char(event);
+
+  /* Left arrow */
+  if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (input->cursor > 0) {
       input->cursor--;
       if (input->cursor < input->scroll) {
         input->scroll = input->cursor;
       }
     }
-    break;
+    return;
+  }
 
-  case KEY_RIGHT:
+  /* Right arrow */
+  if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (input->cursor < input->len) {
       input->cursor++;
       if (input->cursor >= input->scroll + input->width - 2) {
@@ -87,16 +95,20 @@ static void input_handle_key(InputField *input, int ch) {
         }
       }
     }
-    break;
+    return;
+  }
 
-  case KEY_HOME:
-  case 1: /* Ctrl+A */
+  /* Home or Ctrl+A */
+  if (render_event_is_special(event, UI_KEY_HOME) ||
+      render_event_is_ctrl(event, 'A')) {
     input->cursor = 0;
     input->scroll = 0;
-    break;
+    return;
+  }
 
-  case KEY_END:
-  case 5: /* Ctrl+E */
+  /* End or Ctrl+E */
+  if (render_event_is_special(event, UI_KEY_END) ||
+      render_event_is_ctrl(event, 'E')) {
     input->cursor = input->len;
     if (input->cursor >= input->scroll + input->width - 2) {
       if (input->cursor > (size_t)(input->width - 3)) {
@@ -105,11 +117,11 @@ static void input_handle_key(InputField *input, int ch) {
         input->scroll = 0;
       }
     }
-    break;
+    return;
+  }
 
-  case KEY_BACKSPACE:
-  case 127:
-  case 8:
+  /* Backspace */
+  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (input->cursor > 0 && input->cursor <= input->len) {
       memmove(input->buffer + input->cursor - 1, input->buffer + input->cursor,
               input->len - input->cursor + 1);
@@ -119,49 +131,51 @@ static void input_handle_key(InputField *input, int ch) {
         input->scroll = input->cursor;
       }
     }
-    break;
+    return;
+  }
 
-  case KEY_DC: /* Delete */
-  case 4:      /* Ctrl+D */
+  /* Delete or Ctrl+D */
+  if (render_event_is_special(event, UI_KEY_DELETE) ||
+      render_event_is_ctrl(event, 'D')) {
     if (input->cursor < input->len) {
       memmove(input->buffer + input->cursor, input->buffer + input->cursor + 1,
               input->len - input->cursor);
       input->len--;
     }
-    break;
+    return;
+  }
 
-  case 21: /* Ctrl+U - clear line */
+  /* Ctrl+U - clear line */
+  if (render_event_is_ctrl(event, 'U')) {
     input->buffer[0] = '\0';
     input->len = 0;
     input->cursor = 0;
     input->scroll = 0;
-    break;
+    return;
+  }
 
-  case 11: /* Ctrl+K - clear to end */
+  /* Ctrl+K - clear to end */
+  if (render_event_is_ctrl(event, 'K')) {
     input->buffer[input->cursor] = '\0';
     input->len = input->cursor;
-    break;
+    return;
+  }
 
-  default:
-    if (ch >= 32 && ch < 127 && input->len < MAX_CONNSTR_LEN - 1 &&
-        input->cursor <= input->len) {
-      /* Insert character */
-      memmove(input->buffer + input->cursor + 1, input->buffer + input->cursor,
-              input->len - input->cursor + 1);
-      input->buffer[input->cursor] = (char)ch;
-      input->cursor++;
-      input->len++;
-      if (input->cursor >= input->scroll + input->width - 2) {
-        /* Guard against underflow: ensure cursor > width - 3 before subtraction
-         */
-        if (input->cursor > (size_t)(input->width - 3)) {
-          input->scroll = input->cursor - input->width + 3;
-        } else {
-          input->scroll = 0;
-        }
+  /* Printable character - insert */
+  if (render_event_is_char(event) && key_char >= 32 && key_char < 127 &&
+      input->len < MAX_CONNSTR_LEN - 1 && input->cursor <= input->len) {
+    memmove(input->buffer + input->cursor + 1, input->buffer + input->cursor,
+            input->len - input->cursor + 1);
+    input->buffer[input->cursor] = (char)key_char;
+    input->cursor++;
+    input->len++;
+    if (input->cursor >= input->scroll + input->width - 2) {
+      if (input->cursor > (size_t)(input->width - 3)) {
+        input->scroll = input->cursor - input->width + 3;
+      } else {
+        input->scroll = 0;
       }
     }
-    break;
   }
 }
 
@@ -322,29 +336,31 @@ ConnectResult connect_view_show(TuiState *state) {
                 has_existing_workspace, focus);
 
     int ch = wgetch(dialog);
+    UiEvent event;
+    render_translate_key(ch, &event);
 
     free(error_msg);
     error_msg = NULL;
 
     /* Tab cycles through focus areas */
-    if (ch == '\t') {
+    if (render_event_is_special(&event, UI_KEY_TAB)) {
       focus = (focus == FOCUS_INPUT) ? FOCUS_BUTTONS : FOCUS_INPUT;
       continue;
     }
 
     /* Escape cancels */
-    if (ch == 27) {
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
       running = false;
       continue;
     }
 
+    int key_char = render_event_get_char(&event);
+
     /* Handle input based on focus */
     switch (focus) {
     case FOCUS_INPUT:
-      switch (ch) {
-      case '\n':
-      case KEY_ENTER:
-        /* Enter in input field = Connect (in tab if available) */
+      /* Enter in input field = Connect (in tab if available) */
+      if (render_event_is_special(&event, UI_KEY_ENTER)) {
         if (input.len > 0) {
           char *connstr_to_use = NULL;
           char *err = NULL;
@@ -374,15 +390,10 @@ ConnectResult connect_view_show(TuiState *state) {
         } else {
           error_msg = str_dup("Please enter a connection string or file path");
         }
-        break;
-
-      case KEY_DOWN:
+      } else if (render_event_is_special(&event, UI_KEY_DOWN)) {
         focus = FOCUS_BUTTONS;
-        break;
-
-      default:
-        input_handle_key(&input, ch);
-        break;
+      } else {
+        input_handle_key(&input, &event);
       }
       break;
 
@@ -392,25 +403,16 @@ ConnectResult connect_view_show(TuiState *state) {
       break;
 
     case FOCUS_BUTTONS:
-      switch (ch) {
-      case KEY_LEFT:
-      case 'h':
+      if (render_event_is_special(&event, UI_KEY_LEFT) || key_char == 'h') {
         if (selected_button > 0)
           selected_button--;
-        break;
-
-      case KEY_RIGHT:
-      case 'l':
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT) ||
+                 key_char == 'l') {
         if (selected_button < num_buttons - 1)
           selected_button++;
-        break;
-
-      case KEY_UP:
+      } else if (render_event_is_special(&event, UI_KEY_UP)) {
         focus = FOCUS_INPUT;
-        break;
-
-      case '\n':
-      case KEY_ENTER:
+      } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
         if (selected_button == cancel_button) {
           /* Cancel */
           running = false;
@@ -455,10 +457,6 @@ ConnectResult connect_view_show(TuiState *state) {
             focus = FOCUS_INPUT;
           }
         }
-        break;
-
-      default:
-        break;
       }
       break;
     }

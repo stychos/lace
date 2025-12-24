@@ -6,9 +6,10 @@
  * https://github.com/stychos/lace
  */
 
-#include "../async/async.h"
+#include "../../async/async.h"
 #include "tui_internal.h"
 #include "views/connect_view.h"
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -218,8 +219,11 @@ void tui_show_goto_dialog(TuiState *state) {
         break;
       }
       if (input_len > 0) {
-        long long parsed = strtoll(input, NULL, 10);
-        if (parsed <= 0 || (unsigned long long)parsed > total_rows) {
+        errno = 0;
+        char *endptr;
+        long long parsed = strtoll(input, &endptr, 10);
+        if (errno != 0 || endptr == input || parsed <= 0 ||
+            (unsigned long long)parsed > total_rows) {
           flash();
           break;
         }

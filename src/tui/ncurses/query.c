@@ -6,15 +6,18 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../viewmodel/vm_query.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
 #define QUERY_INITIAL_CAPACITY 1024
 #define QUERY_GROWTH_FACTOR 2
+#define QUERY_MAX_SIZE (64 * 1024 * 1024) /* 64 MB max query size */
 
 /* Line info for cursor tracking */
 typedef struct {
@@ -109,7 +112,13 @@ bool tab_create_query(TuiState *state) {
     ui->filters_focused = false;
   }
 
+  /* Update tab name (free the default "Query" name set by workspace_create_query_tab) */
+  free(tab->table_name);
   tab->table_name = str_printf("Query %d", max_query_num + 1);
+  if (!tab->table_name) {
+    workspace_close_tab(ws, ws->current_tab);
+    return false;
+  }
 
   /* Initialize query buffer */
   tab->query_capacity = QUERY_INITIAL_CAPACITY;
@@ -152,6 +161,10 @@ bool workspace_create_query(TuiState *state) { return tab_create_query(state); }
 static bool query_ensure_capacity(Tab *tab, size_t needed) {
   if (needed <= tab->query_capacity)
     return true;
+
+  /* Reject unreasonably large queries */
+  if (needed > QUERY_MAX_SIZE)
+    return false;
 
   size_t new_cap = tab->query_capacity;
   while (new_cap < needed) {
@@ -562,7 +575,12 @@ static int64_t query_count_rows(TuiState *state, const char *base_sql) {
     } else if (val->type == DB_TYPE_FLOAT) {
       count = (int64_t)val->float_val;
     } else if (val->type == DB_TYPE_TEXT && val->text.data) {
-      count = strtoll(val->text.data, NULL, 10);
+      errno = 0;
+      char *endptr;
+      long long parsed = strtoll(val->text.data, &endptr, 10);
+      if (errno == 0 && endptr != val->text.data) {
+        count = parsed;
+      }
     }
   }
 
@@ -1823,47 +1841,60 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
 }
 
 /* Handle edit input for query results */
-static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
+static bool query_result_handle_edit_input(TuiState *state, Tab *tab,
+                                           const UiEvent *event) {
   UITabState *ui = TUI_TAB_UI(state);
   if (!ui || !ui->query_result_editing)
+    return false;
+  if (!event || event->type != UI_EVENT_KEY)
     return false;
 
   size_t len =
       ui->query_result_edit_buf ? strlen(ui->query_result_edit_buf) : 0;
+  int key_char = render_event_get_char(event);
 
-  switch (ch) {
-  case 27: /* Escape - cancel */
+  /* Escape - cancel */
+  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
     query_result_cancel_edit(state, tab);
     return true;
+  }
 
-  case '\n':
-  case KEY_ENTER:
+  /* Enter - confirm */
+  if (render_event_is_special(event, UI_KEY_ENTER)) {
     query_result_confirm_edit(state, tab);
     return true;
+  }
 
-  case KEY_LEFT:
+  /* Left arrow */
+  if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (ui->query_result_edit_pos > 0) {
       ui->query_result_edit_pos--;
     }
     return true;
+  }
 
-  case KEY_RIGHT:
+  /* Right arrow */
+  if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (ui->query_result_edit_pos < len) {
       ui->query_result_edit_pos++;
     }
     return true;
+  }
 
-  case KEY_HOME:
+  /* Home */
+  if (render_event_is_special(event, UI_KEY_HOME)) {
     ui->query_result_edit_pos = 0;
     return true;
+  }
 
-  case KEY_END:
+  /* End */
+  if (render_event_is_special(event, UI_KEY_END)) {
     ui->query_result_edit_pos = len;
     return true;
+  }
 
-  case KEY_BACKSPACE:
-  case 127:
-  case 8:
+  /* Backspace */
+  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (ui->query_result_edit_pos > 0 && ui->query_result_edit_buf) {
       memmove(ui->query_result_edit_buf + ui->query_result_edit_pos - 1,
               ui->query_result_edit_buf + ui->query_result_edit_pos,
@@ -1871,58 +1902,66 @@ static bool query_result_handle_edit_input(TuiState *state, Tab *tab, int ch) {
       ui->query_result_edit_pos--;
     }
     return true;
+  }
 
-  case KEY_DC: /* Delete */
+  /* Delete */
+  if (render_event_is_special(event, UI_KEY_DELETE)) {
     if (ui->query_result_edit_pos < len && ui->query_result_edit_buf) {
       memmove(ui->query_result_edit_buf + ui->query_result_edit_pos,
               ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
               len - ui->query_result_edit_pos);
     }
     return true;
+  }
 
-  case 21: /* Ctrl+U - clear line */
+  /* Ctrl+U - clear line */
+  if (render_event_is_ctrl(event, 'U')) {
     if (ui->query_result_edit_buf) {
       ui->query_result_edit_buf[0] = '\0';
       ui->query_result_edit_pos = 0;
     }
     return true;
+  }
 
-  case 14: /* Ctrl+N - set to NULL */
+  /* Ctrl+N - set to NULL */
+  if (render_event_is_ctrl(event, 'N')) {
     free(ui->query_result_edit_buf);
     ui->query_result_edit_buf = NULL;
     ui->query_result_edit_pos = 0;
     query_result_confirm_edit(state, tab);
     return true;
+  }
 
-  default:
-    if (ch >= 32 && ch < 127) {
-      /* Insert character */
-      size_t new_len = len + 2;
-      char *new_buf = realloc(ui->query_result_edit_buf, new_len);
-      if (new_buf) {
-        ui->query_result_edit_buf = new_buf;
-        if (len == 0) {
-          ui->query_result_edit_buf[0] = (char)ch;
-          ui->query_result_edit_buf[1] = '\0';
-          ui->query_result_edit_pos = 1;
-        } else {
-          memmove(ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
-                  ui->query_result_edit_buf + ui->query_result_edit_pos,
-                  len - ui->query_result_edit_pos + 1);
-          ui->query_result_edit_buf[ui->query_result_edit_pos] = (char)ch;
-          ui->query_result_edit_pos++;
-        }
+  /* Printable character - insert */
+  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    size_t new_len = len + 2;
+    char *new_buf = realloc(ui->query_result_edit_buf, new_len);
+    if (new_buf) {
+      ui->query_result_edit_buf = new_buf;
+      if (len == 0) {
+        ui->query_result_edit_buf[0] = (char)key_char;
+        ui->query_result_edit_buf[1] = '\0';
+        ui->query_result_edit_pos = 1;
+      } else {
+        memmove(ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
+                ui->query_result_edit_buf + ui->query_result_edit_pos,
+                len - ui->query_result_edit_pos + 1);
+        ui->query_result_edit_buf[ui->query_result_edit_pos] = (char)key_char;
+        ui->query_result_edit_pos++;
       }
     }
     return true;
   }
 
-  return false;
+  /* Consume all other keys when editing */
+  return true;
 }
 
 /* Handle query tab input */
-bool tui_handle_query_input(TuiState *state, int ch) {
+bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   if (!state)
+    return false;
+  if (!event || event->type != UI_EVENT_KEY)
     return false;
 
   Tab *tab = TUI_TAB(state);
@@ -1930,13 +1969,17 @@ bool tui_handle_query_input(TuiState *state, int ch) {
   if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return false;
 
+  int key_char = render_event_get_char(event);
+  int fkey = render_event_get_fkey(event);
+
   /* Handle edit mode first if active */
   if (ui->query_result_editing) {
-    return query_result_handle_edit_input(state, tab, ch);
+    return query_result_handle_edit_input(state, tab, event);
   }
 
   /* Ctrl+W or Esc switches focus (only when not editing) */
-  if (ch == 23 || ch == 27) { /* 23 = Ctrl+W */
+  if (render_event_is_ctrl(event, 'W') ||
+      render_event_is_special(event, UI_KEY_ESCAPE)) {
     if (ui->query_focus_results) {
       /* Always allow switching from results to editor */
       ui->query_focus_results = false;
@@ -1954,54 +1997,57 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     if (!tab->query_results)
       return false;
 
-    switch (ch) {
-    case '\n':
-    case KEY_ENTER:
-      /* Start editing (inline or modal based on content) */
+    /* Enter - start editing */
+    if (render_event_is_special(event, UI_KEY_ENTER)) {
       query_result_start_edit(state, tab);
-      return true;
-
-    case 'e':
-    case KEY_F(4):
-      /* Start modal editing */
-      query_result_start_modal_edit(state, tab);
-      return true;
-
-    case 14: /* Ctrl+N - set cell to NULL */
-    case 'n':
-      query_result_set_cell_direct(state, tab, true);
-      return true;
-
-    case 4: /* Ctrl+D - set cell to empty string */
-    case 'd':
-      query_result_set_cell_direct(state, tab, false);
-      return true;
-
-    case 'x':    /* Delete row */
-    case KEY_DC: /* Delete key */
-      query_result_delete_row(state, tab);
-      return true;
-
-    case 'r':
-    case 'R':
-    case 18: /* Ctrl+R - refresh query results */
-    {
-      /* Re-execute the base SQL if available, otherwise find query at cursor */
-      if (tab->query_base_sql && *tab->query_base_sql) {
-        query_execute(state, tab->query_base_sql);
-      } else if (tab->query_text && *tab->query_text) {
-        /* Fall back to finding query at cursor */
-        char *query = query_find_at_cursor(tab->query_text, tab->query_cursor);
-        if (query && *query) {
-          query_execute(state, query);
-        }
-        free(query);
-      }
       return true;
     }
 
-    case KEY_UP:
-    case 'k':
+    /* e or F4 - start modal editing */
+    if (key_char == 'e' || fkey == 4) {
+      query_result_start_modal_edit(state, tab);
+      return true;
+    }
+
+    /* Ctrl+N or n - set cell to NULL */
+    if (render_event_is_ctrl(event, 'N') || key_char == 'n') {
+      query_result_set_cell_direct(state, tab, true);
+      return true;
+    }
+
+    /* Ctrl+D or d - set cell to empty string */
+    if (render_event_is_ctrl(event, 'D') || key_char == 'd') {
+      query_result_set_cell_direct(state, tab, false);
+      return true;
+    }
+
+    /* x or Delete - delete row */
+    if (key_char == 'x' || render_event_is_special(event, UI_KEY_DELETE)) {
+      query_result_delete_row(state, tab);
+      return true;
+    }
+
+    /* r/R or Ctrl+R - refresh query results */
+    if (key_char == 'r' || key_char == 'R' || render_event_is_ctrl(event, 'R')) {
+      /* Re-execute the base SQL if available, otherwise find query at cursor.
+       * IMPORTANT: Must copy the SQL before calling query_execute because
+       * query_execute frees tab->query_base_sql before re-using it. */
+      char *sql_copy = NULL;
+      if (tab->query_base_sql && *tab->query_base_sql) {
+        sql_copy = str_dup(tab->query_base_sql);
+      } else if (tab->query_text && *tab->query_text) {
+        /* Fall back to finding query at cursor */
+        sql_copy = query_find_at_cursor(tab->query_text, tab->query_cursor);
+      }
+      if (sql_copy && *sql_copy) {
+        query_execute(state, sql_copy);
+      }
+      free(sql_copy);
+      return true;
+    }
+
+    /* Up / k - move cursor up */
+    if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
       if (tab->query_result_row > 0) {
         tab->query_result_row--;
         /* Adjust scroll */
@@ -2014,9 +2060,10 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         ui->query_focus_results = false;
       }
       return true;
+    }
 
-    case KEY_DOWN:
-    case 'j':
+    /* Down / j - move cursor down */
+    if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
       if (tab->query_results->num_rows > 0 &&
           tab->query_result_row < tab->query_results->num_rows - 1) {
         tab->query_result_row++;
@@ -2037,9 +2084,10 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         query_check_load_more(state, tab);
       }
       return true;
+    }
 
-    case KEY_LEFT:
-    case 'h':
+    /* Left / h - move cursor left */
+    if (render_event_is_special(event, UI_KEY_LEFT) || key_char == 'h') {
       if (tab->query_result_col > 0) {
         tab->query_result_col--;
         /* Adjust horizontal scroll */
@@ -2049,11 +2097,14 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       } else if (state->sidebar_visible) {
         /* At left-most column - move focus to sidebar */
         state->sidebar_focused = true;
+        /* Restore last sidebar position */
+        state->sidebar_highlight = state->sidebar_last_position;
       }
       return true;
+    }
 
-    case KEY_RIGHT:
-    case 'l':
+    /* Right / l - move cursor right */
+    if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
       if (tab->query_result_col < tab->query_results->num_columns - 1) {
         tab->query_result_col++;
         /* Adjust horizontal scroll to keep cursor visible using actual main
@@ -2093,13 +2144,17 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         }
       }
       return true;
+    }
 
-    case KEY_HOME:
+    /* Home */
+    if (render_event_is_special(event, UI_KEY_HOME)) {
       tab->query_result_col = 0;
       tab->query_result_scroll_col = 0;
       return true;
+    }
 
-    case KEY_END:
+    /* End */
+    if (render_event_is_special(event, UI_KEY_END)) {
       if (tab->query_results->num_columns > 0) {
         tab->query_result_col = tab->query_results->num_columns - 1;
         /* Adjust horizontal scroll to show last column using actual main window
@@ -2125,8 +2180,10 @@ bool tui_handle_query_input(TuiState *state, int ch) {
         }
       }
       return true;
+    }
 
-    case KEY_PPAGE: {
+    /* Page Up */
+    if (render_event_is_special(event, UI_KEY_PAGEUP)) {
       /* Calculate visible rows in results area using actual main window */
       int ppage_rows, ppage_cols;
       getmaxyx(state->main_win, ppage_rows, ppage_cols);
@@ -2152,7 +2209,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       return true;
     }
 
-    case KEY_NPAGE: {
+    /* Page Down */
+    if (render_event_is_special(event, UI_KEY_PAGEDOWN)) {
       /* Calculate visible rows in results area using actual main window */
       int npage_rows, npage_cols;
       getmaxyx(state->main_win, npage_rows, npage_cols);
@@ -2179,32 +2237,30 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       return true;
     }
 
-    case 'g':
-    case 'a':
-      /* Go to first row */
+    /* g or a - go to first row */
+    if (key_char == 'g' || key_char == 'a') {
       tab->query_result_row = 0;
       tab->query_result_scroll_row = 0;
       query_check_load_more(state, tab);
       return true;
+    }
 
-    case 'G':
-    case 'z':
-      /* Go to last row */
+    /* G or z - go to last row */
+    if (key_char == 'G' || key_char == 'z') {
       if (tab->query_results->num_rows > 0) {
         tab->query_result_row = tab->query_results->num_rows - 1;
       }
       query_check_load_more(state, tab);
       return true;
-
-    default:
-      return false;
     }
+
+    return false;
   }
 
   /* Handle editor input */
-  switch (ch) {
-  case 18: /* Ctrl+R - run query under cursor */
-  {
+
+  /* Ctrl+R - run query under cursor */
+  if (render_event_is_ctrl(event, 'R')) {
     char *query = query_find_at_cursor(tab->query_text, tab->query_cursor);
     if (query && *query) {
       query_execute(state, query);
@@ -2215,8 +2271,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case 1: /* Ctrl+A - run all queries */
-  {
+  /* Ctrl+A - run all queries */
+  if (render_event_is_ctrl(event, 'A')) {
     if (!tab->query_text || !*tab->query_text) {
       tui_set_error(state, "No queries to execute");
       return true;
@@ -2295,8 +2351,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case 20: /* Ctrl+T - run all queries in a transaction */
-  {
+  /* Ctrl+T - run all queries in a transaction */
+  if (render_event_is_ctrl(event, 'T')) {
     if (!tab->query_text || !*tab->query_text) {
       tui_set_error(state, "No queries to execute");
       return true;
@@ -2400,8 +2456,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_UP: {
-    /* Move cursor up one line */
+  /* Up arrow - move cursor up one line */
+  if (render_event_is_special(event, UI_KEY_UP)) {
     QueryLineInfo *lines = NULL;
     size_t num_lines = 0;
     query_rebuild_line_cache(tab, &lines, &num_lines);
@@ -2418,7 +2474,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_DOWN: {
+  /* Down arrow - move cursor down one line */
+  if (render_event_is_special(event, UI_KEY_DOWN)) {
     QueryLineInfo *lines = NULL;
     size_t num_lines = 0;
     query_rebuild_line_cache(tab, &lines, &num_lines);
@@ -2438,16 +2495,21 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_LEFT:
+  /* Left arrow */
+  if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (tab->query_cursor > 0) {
       tab->query_cursor--;
     } else if (state->sidebar_visible) {
       /* At top-left position - move focus to sidebar */
       state->sidebar_focused = true;
+      /* Restore last sidebar position */
+      state->sidebar_highlight = state->sidebar_last_position;
     }
     return true;
+  }
 
-  case KEY_RIGHT:
+  /* Right arrow */
+  if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (tab->query_cursor < tab->query_len) {
       tab->query_cursor++;
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
@@ -2455,9 +2517,10 @@ bool tui_handle_query_input(TuiState *state, int ch) {
       ui->query_focus_results = true;
     }
     return true;
+  }
 
-  case KEY_HOME: {
-    /* Move to start of line */
+  /* Home - move to start of line */
+  if (render_event_is_special(event, UI_KEY_HOME)) {
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
 
@@ -2472,10 +2535,9 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_END:
-  case 5: /* Ctrl+E */
-  {
-    /* Move to end of line */
+  /* End or Ctrl+E - move to end of line */
+  if (render_event_is_special(event, UI_KEY_END) ||
+      render_event_is_ctrl(event, 'E')) {
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
 
@@ -2490,8 +2552,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_PPAGE: {
-    /* Page up */
+  /* Page Up */
+  if (render_event_is_special(event, UI_KEY_PAGEUP)) {
     QueryLineInfo *lines = NULL;
     size_t num_lines = 0;
     query_rebuild_line_cache(tab, &lines, &num_lines);
@@ -2511,8 +2573,8 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_NPAGE: {
-    /* Page down */
+  /* Page Down */
+  if (render_event_is_special(event, UI_KEY_PAGEDOWN)) {
     QueryLineInfo *lines = NULL;
     size_t num_lines = 0;
     query_rebuild_line_cache(tab, &lines, &num_lines);
@@ -2527,25 +2589,26 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  case KEY_BACKSPACE:
-  case 127:
-  case 8:
+  /* Backspace */
+  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     query_backspace(tab);
     return true;
+  }
 
-  case KEY_DC: /* Delete key */
+  /* Delete */
+  if (render_event_is_special(event, UI_KEY_DELETE)) {
     query_delete_char(tab);
     return true;
+  }
 
-  case '\n':
-  case KEY_ENTER:
-  case 529: /* Shift+Enter in some terminals - treat as regular Enter */
-  case 527: /* Shift+Enter in other terminals - treat as regular Enter */
+  /* Enter - insert newline */
+  if (render_event_is_special(event, UI_KEY_ENTER)) {
     query_insert_char(tab, '\n');
     return true;
+  }
 
-  case 21: /* Ctrl+U - clear line */
-  {
+  /* Ctrl+U - clear line */
+  if (render_event_is_ctrl(event, 'U')) {
     QueryLineInfo *lines = NULL;
     size_t num_lines = 0;
     query_rebuild_line_cache(tab, &lines, &num_lines);
@@ -2568,12 +2631,11 @@ bool tui_handle_query_input(TuiState *state, int ch) {
     return true;
   }
 
-  default:
-    /* Insert printable characters */
-    if (ch >= 32 && ch < 127) {
-      query_insert_char(tab, (char)ch);
-      return true;
-    }
-    return false;
+  /* Printable character - insert */
+  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    query_insert_char(tab, (char)key_char);
+    return true;
   }
+
+  return false;
 }

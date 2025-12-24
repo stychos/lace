@@ -2,14 +2,24 @@
  * Lace
  * Drawing functions
  *
+ * Uses RenderBackend abstraction for portability while maintaining
+ * ncurses compatibility during migration.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
-#include "../core/app_state.h"
+#include "../../core/app_state.h"
+#include "../../viewmodel/vm_table.h"
+#include "render_helpers.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
+
+/* ============================================================================
+ * Helper Functions
+ * ============================================================================
+ */
 
 /* Check if tab has active filters (filters that affect the query) */
 static bool has_active_filters(Tab *tab) {
@@ -33,6 +43,11 @@ static int grid_get_col_width(GridDrawParams *params, size_t col) {
   }
   return DEFAULT_COL_WIDTH;
 }
+
+/* ============================================================================
+ * Result Grid Drawing
+ * ============================================================================
+ */
 
 /* Draw a result set grid - shared between table view and query results */
 void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
@@ -210,6 +225,11 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
   (void)state; /* May be used for future enhancements */
 }
 
+/* ============================================================================
+ * Header Drawing
+ * ============================================================================
+ */
+
 void tui_draw_header(TuiState *state) {
   if (!state || !state->header_win || !state->header_visible)
     return;
@@ -280,6 +300,11 @@ void tui_draw_header(TuiState *state) {
   wrefresh(state->header_win);
 }
 
+/* ============================================================================
+ * Table Drawing
+ * ============================================================================
+ */
+
 void tui_draw_table(TuiState *state) {
   if (!state || !state->main_win)
     return;
@@ -297,7 +322,26 @@ void tui_draw_table(TuiState *state) {
     tui_draw_filters_panel(state);
   }
 
-  if (!state->data || state->data->num_columns == 0 || !state->data->columns) {
+  /*
+   * During the ViewModel migration, we use TuiState as the source of truth
+   * for UI state (cursor, scroll, editing). VmTable is available for future
+   * native GUI use but TUI continues to use its own state.
+   *
+   * This avoids the bug where VmTable reads stale cursor/scroll from Tab
+   * while TuiState has the live values being updated by input handlers.
+   */
+  ResultSet *data = state->data;
+  int *col_widths = state->col_widths;
+  size_t num_col_widths = state->num_col_widths;
+  size_t cursor_row = state->cursor_row;
+  size_t cursor_col = state->cursor_col;
+  size_t scroll_row = state->scroll_row;
+  size_t scroll_col = state->scroll_col;
+  bool is_editing = state->editing;
+  char *edit_buffer = state->edit_buffer;
+  size_t edit_pos = state->edit_pos;
+
+  if (!data || data->num_columns == 0 || !data->columns) {
     int msg_y = filters_height + (win_rows - filters_height) / 2;
     mvwprintw(state->main_win, msg_y, (win_cols - 7) / 2, "No data");
     wrefresh(state->main_win);
@@ -310,23 +354,28 @@ void tui_draw_table(TuiState *state) {
                            .start_x = 0,
                            .height = win_rows - filters_height,
                            .width = win_cols,
-                           .data = state->data,
-                           .col_widths = state->col_widths,
-                           .num_col_widths = state->num_col_widths,
-                           .cursor_row = state->cursor_row,
-                           .cursor_col = state->cursor_col,
-                           .scroll_row = state->scroll_row,
-                           .scroll_col = state->scroll_col,
+                           .data = data,
+                           .col_widths = col_widths,
+                           .num_col_widths = num_col_widths,
+                           .cursor_row = cursor_row,
+                           .cursor_col = cursor_col,
+                           .scroll_row = scroll_row,
+                           .scroll_col = scroll_col,
                            .is_focused = !state->sidebar_focused &&
                                          !state->filters_focused,
-                           .is_editing = state->editing,
-                           .edit_buffer = state->edit_buffer,
-                           .edit_pos = state->edit_pos,
+                           .is_editing = is_editing,
+                           .edit_buffer = edit_buffer,
+                           .edit_pos = edit_pos,
                            .show_header_line = true};
 
   tui_draw_result_grid(state, &params);
   wrefresh(state->main_win);
 }
+
+/* ============================================================================
+ * Status Bar Drawing
+ * ============================================================================
+ */
 
 void tui_draw_status(TuiState *state) {
   if (!state || !state->status_win || !state->status_visible)
@@ -494,7 +543,11 @@ void tui_draw_status(TuiState *state) {
   wrefresh(state->status_win);
 }
 
-/* Handle mouse events */
+/* ============================================================================
+ * Mouse Event Handling
+ * ============================================================================
+ */
+
 bool tui_handle_mouse_event(TuiState *state) {
   MEVENT event;
   if (getmouse(&event) != OK)
@@ -718,9 +771,11 @@ bool tui_handle_mouse_event(TuiState *state) {
               } else if (state->current_table != actual_idx) {
                 /* Table tab - update current tab with new table */
                 state->current_table = actual_idx;
-                /* Free old tab data */
+                /* Update table name safely (copy first to avoid use-after-free
+                 * if pointers were ever aliased) */
+                char *new_name = str_dup(state->tables[actual_idx]);
                 free(curr_tab->table_name);
-                curr_tab->table_name = str_dup(state->tables[actual_idx]);
+                curr_tab->table_name = new_name;
                 curr_tab->table_index = actual_idx;
                 /* Clear filters when switching tables */
                 filters_clear(&curr_tab->filters);
@@ -773,8 +828,8 @@ bool tui_handle_mouse_event(TuiState *state) {
     int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
     if (editor_height < 3)
       editor_height = 3;
-    int results_start_y = 2 + editor_height + 1; /* screen coords */
-    int results_header_y = results_start_y + 1;  /* "Results (N rows)" header */
+    int results_start_y = 2 + editor_height + 1;  /* screen coords */
+    int results_header_y = results_start_y + 1;   /* "Results (N rows)" header */
     int results_data_y =
         results_header_y + 3; /* After header + col names + separator */
 

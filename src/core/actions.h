@@ -239,6 +239,8 @@ typedef struct UICallbacks {
   void (*page_down)(void *ctx);
   void (*home)(void *ctx);
   void (*end)(void *ctx);
+  void (*column_first)(void *ctx);
+  void (*column_last)(void *ctx);
 
   /* Editing - cell modification */
   void (*start_edit)(void *ctx);

@@ -89,8 +89,12 @@ bool filters_add(TableFilters *f, size_t col_idx, FilterOperator op,
   cf->column_index = col_idx;
   cf->op = op;
   if (value) {
-    strncpy(cf->value, value, sizeof(cf->value) - 1);
-    cf->value[sizeof(cf->value) - 1] = '\0';
+    size_t len = strlen(value);
+    if (len >= sizeof(cf->value)) {
+      /* Value too long - reject instead of silent truncation */
+      return false;
+    }
+    memcpy(cf->value, value, len + 1);
   } else {
     cf->value[0] = '\0';
   }
@@ -301,7 +305,7 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
       sb_append(sb, " AND ");
     first = false;
 
-    /* Handle RAW filters (virtual column) */
+    /* Handle RAW filters (virtual column) - advanced feature for SQL-savvy users */
     if (cf->column_index == SIZE_MAX) {
       sb_printf(sb, "(%s)", cf->value);
       continue;

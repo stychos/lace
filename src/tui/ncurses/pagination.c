@@ -6,7 +6,7 @@
  * https://github.com/stychos/lace
  */
 
-#include "../async/async.h"
+#include "../../async/async.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>

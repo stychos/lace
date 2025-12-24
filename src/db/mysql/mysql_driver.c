@@ -1397,7 +1397,12 @@ static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
   int64_t count = -1;
   MYSQL_ROW row = mysql_fetch_row(result);
   if (row && row[0]) {
-    count = strtoll(row[0], NULL, 10);
+    errno = 0;
+    char *endptr;
+    long long parsed = strtoll(row[0], &endptr, 10);
+    if (errno == 0 && endptr != row[0] && parsed >= 0) {
+      count = parsed;
+    }
   }
 
   mysql_free_result(result);

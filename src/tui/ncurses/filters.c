@@ -491,8 +491,10 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
 }
 
 /* Handle filters panel input */
-bool tui_handle_filters_input(TuiState *state, int ch) {
+bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   if (!state || !state->filters_visible || !state->filters_focused)
+    return false;
+  if (!event || event->type != UI_EVENT_KEY)
     return false;
 
   Tab *tab = TUI_TAB(state);
@@ -505,21 +507,20 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     filters_add(f, 0, FILTER_OP_EQ, "");
   }
 
+  int key_char = render_event_get_char(event);
+
   /* Ctrl+W - switch focus to table */
-  if (ch == 23) {
+  if (render_event_is_ctrl(event, 'W')) {
     state->filters_focused = false;
     return true;
   }
 
   /* Handle editing mode */
   if (state->filters_editing) {
-    switch (ch) {
-    case 27: /* Escape - cancel edit */
+    if (render_event_is_special(event, UI_KEY_ESCAPE)) {
+      /* Escape - cancel edit */
       state->filters_editing = false;
-      break;
-
-    case '\n':
-    case KEY_ENTER:
+    } else if (render_event_is_special(event, UI_KEY_ENTER)) {
       /* Confirm edit and auto-apply */
       if (state->filters_cursor_row < f->num_filters) {
         size_t filter_idx = state->filters_cursor_row;
@@ -531,23 +532,16 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       }
       state->filters_editing = false;
       tui_apply_filters(state); /* Auto-apply */
-      break;
-
-    case KEY_BACKSPACE:
-    case 127:
-    case 8:
+    } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
       if (state->filters_edit_len > 0) {
         state->filters_edit_buffer[--state->filters_edit_len] = '\0';
       }
-      break;
-
-    default:
-      if (ch >= 32 && ch < 127 &&
-          state->filters_edit_len < sizeof(state->filters_edit_buffer) - 1) {
-        state->filters_edit_buffer[state->filters_edit_len++] = (char)ch;
+    } else if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+      /* Printable character */
+      if (state->filters_edit_len < sizeof(state->filters_edit_buffer) - 1) {
+        state->filters_edit_buffer[state->filters_edit_len++] = (char)key_char;
         state->filters_edit_buffer[state->filters_edit_len] = '\0';
       }
-      break;
     }
     /* Sync focus state to Tab so it persists across tab switches */
     tab_sync_focus(state);
@@ -555,10 +549,11 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
   }
 
   /* Navigation mode */
-  switch (ch) {
-  case 27: /* Escape - close panel */
-  case 'f':
-  case '/': {
+  int fkey = render_event_get_fkey(event);
+
+  /* Escape, f, / - close panel */
+  if (render_event_is_special(event, UI_KEY_ESCAPE) || key_char == 'f' ||
+      key_char == '/') {
     /* Save cursor position to UITabState before closing */
     UITabState *ui = TUI_TAB_UI(state);
     if (ui) {
@@ -567,11 +562,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     }
     state->filters_visible = false;
     state->filters_focused = false;
-    break;
   }
-
-  case KEY_UP:
-  case 'k':
+  /* Up / k - move cursor up */
+  else if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
     if (state->filters_cursor_row > 0) {
       state->filters_cursor_row--;
       /* Adjust scroll if cursor moved above visible area */
@@ -579,10 +572,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         state->filters_scroll = state->filters_cursor_row;
       }
     }
-    break;
-
-  case KEY_DOWN:
-  case 'j':
+  }
+  /* Down / j - move cursor down */
+  else if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
     if (state->filters_cursor_row < f->num_filters - 1) {
       state->filters_cursor_row++;
       /* Adjust scroll if cursor moved below visible area */
@@ -595,10 +587,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       /* At last filter row - move focus to table */
       state->filters_focused = false;
     }
-    break;
-
-  case KEY_LEFT:
-  case 'h': {
+  }
+  /* Left / h - move cursor left */
+  else if (render_event_is_special(event, UI_KEY_LEFT) || key_char == 'h') {
     size_t idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
@@ -619,11 +610,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       /* Restore last sidebar position */
       state->sidebar_highlight = state->sidebar_last_position;
     }
-    break;
   }
-
-  case KEY_RIGHT:
-  case 'l': {
+  /* Right / l - move cursor right */
+  else if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
     size_t idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
@@ -637,11 +626,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       if (!is_raw && !needs_value && state->filters_cursor_col == 2)
         state->filters_cursor_col = 3;
     }
-    break;
   }
-
-  case '\t':
-    /* Tab - move to next field/row */
+  /* Tab - move to next field/row */
+  else if (render_event_is_special(event, UI_KEY_TAB)) {
     state->filters_cursor_col++;
     if (state->filters_cursor_col > 3) {
       state->filters_cursor_col = 0;
@@ -651,10 +638,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
         state->filters_cursor_row = 0; /* Wrap to first */
       }
     }
-    break;
-
-  case '\n':
-  case KEY_ENTER: {
+  }
+  /* Enter - activate field */
+  else if (render_event_is_special(event, UI_KEY_ENTER)) {
     size_t filter_idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[filter_idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
@@ -719,12 +705,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
       break;
     }
     }
-    break;
   }
-
-  case '+':
-  case '=':
-    /* Add new filter */
+  /* + or = - add new filter */
+  else if (key_char == '+' || key_char == '=') {
     if (state->schema && state->schema->num_columns > 0) {
       filters_add(f, 0, FILTER_OP_EQ, "");
       state->filters_cursor_row = f->num_filters - 1;
@@ -736,11 +719,9 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
             state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
       }
     }
-    break;
-
-  case 'c':
-  case 'C': {
-    /* Clear all - reset to single empty filter */
+  }
+  /* c/C - clear all filters */
+  else if (key_char == 'c' || key_char == 'C') {
     /* Check if any filters had effect before clearing */
     bool had_effect = false;
     for (size_t i = 0; i < f->num_filters; i++) {
@@ -759,13 +740,10 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     if (had_effect) {
       tui_apply_filters(state);
     }
-    break;
   }
-
-  case '-':
-  case 'x':
-  case KEY_DC: {
-    /* Delete/Reset current filter */
+  /* - or x or Delete - delete current filter */
+  else if (key_char == '-' || key_char == 'x' ||
+           render_event_is_special(event, UI_KEY_DELETE)) {
     size_t filter_idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[filter_idx];
     /* Check if filter had an effect before deleting */
@@ -790,40 +768,18 @@ bool tui_handle_filters_input(TuiState *state, int ch) {
     if (had_effect) {
       tui_apply_filters(state);
     }
-    break;
   }
-
   /* Global keys - pass through to main loop */
-  case '[':
-  case ']':
-  case '{':
-  case '}':
-  case KEY_F(6):
-  case KEY_F(7):
-  case 't':
-  case 'T':
-  case KEY_F(9):
-  case 'm':
-  case 'M':
-  case 'b':
-  case 'B':
-  case 'p':
-  case 'P':
-  case 'r':
-  case 'R':
-  case 's':
-  case 'S':
-  case KEY_F(3):
-  case 'q':
-  case 'Q':
-  case KEY_F(10):
-  case 24:        /* Ctrl+X */
+  else if (key_char == '[' || key_char == ']' || key_char == '{' ||
+           key_char == '}' || fkey == 6 || fkey == 7 || key_char == 't' ||
+           key_char == 'T' || fkey == 9 || key_char == 'm' || key_char == 'M' ||
+           key_char == 'b' || key_char == 'B' || key_char == 'p' ||
+           key_char == 'P' || key_char == 'r' || key_char == 'R' ||
+           key_char == 's' || key_char == 'S' || fkey == 3 || key_char == 'q' ||
+           key_char == 'Q' || fkey == 10 || render_event_is_ctrl(event, 'X')) {
     return false; /* Let global keys work from filters */
-
-  default:
-    /* Consume all other keys when filters focused */
-    break;
   }
+  /* Consume all other keys when filters focused */
 
   /* Sync focus state to Tab so it persists across tab switches */
   tab_sync_focus(state);

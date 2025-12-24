@@ -6,7 +6,7 @@
  * https://github.com/stychos/lace
  */
 
-#include "thread.h"
+#include "../thread.h"
 
 #ifdef LACE_PLATFORM_WINDOWS
 

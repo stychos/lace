@@ -6,7 +6,7 @@
  * https://github.com/stychos/lace
  */
 
-#include "../core/actions.h"
+#include "../../core/actions.h"
 #include "tui_internal.h"
 #include <ctype.h>
 #include <locale.h>
@@ -199,6 +199,31 @@ void tui_sync_from_app(TuiState *state) {
 
   state->page_size = app->page_size;
 
+  /* Bind ViewModels to current tab */
+  Tab *current_tab = app_current_tab(app);
+  if (current_tab) {
+    /* Bind sidebar to current connection */
+    Connection *current_conn = app_get_tab_connection(app, current_tab);
+    if (state->vm_sidebar && current_conn) {
+      vm_sidebar_bind(state->vm_sidebar, current_conn);
+    }
+
+    /* Bind or create appropriate ViewModel based on tab type */
+    if (current_tab->type == TAB_TYPE_TABLE) {
+      if (!state->vm_table) {
+        state->vm_table = vm_table_create(app, current_tab, NULL);
+      } else {
+        vm_table_bind(state->vm_table, current_tab);
+      }
+    } else if (current_tab->type == TAB_TYPE_QUERY) {
+      if (!state->vm_query) {
+        state->vm_query = vm_query_create(app, current_tab, NULL);
+      } else {
+        vm_query_bind(state->vm_query, current_tab);
+      }
+    }
+  }
+
   /* Recreate windows if sidebar visibility changed */
   if (old_sidebar_visible != state->sidebar_visible) {
     tui_recreate_windows(state);
@@ -279,6 +304,10 @@ static void ui_page_down(void *ctx) { tui_page_down((TuiState *)ctx); }
 static void ui_home(void *ctx) { tui_home((TuiState *)ctx); }
 
 static void ui_end(void *ctx) { tui_end((TuiState *)ctx); }
+
+static void ui_column_first(void *ctx) { tui_column_first((TuiState *)ctx); }
+
+static void ui_column_last(void *ctx) { tui_column_last((TuiState *)ctx); }
 
 static void ui_start_edit(void *ctx) { tui_start_edit((TuiState *)ctx); }
 
@@ -476,6 +505,8 @@ static UICallbacks tui_make_callbacks(TuiState *state) {
       .page_down = ui_page_down,
       .home = ui_home,
       .end = ui_end,
+      .column_first = ui_column_first,
+      .column_last = ui_column_last,
       .start_edit = ui_start_edit,
       .start_modal_edit = ui_start_modal_edit,
       .cancel_edit = ui_cancel_edit,
@@ -515,6 +546,13 @@ bool tui_init(TuiState *state, AppState *app) {
 
   memset(state, 0, sizeof(TuiState));
   state->app = app;
+
+  /* Initialize ViewModels */
+  state->vm_app = vm_app_create(app, NULL);
+  if (state->vm_app) {
+    state->vm_sidebar = vm_app_sidebar_vm(state->vm_app);
+  }
+  /* vm_table and vm_query are created on-demand when tabs are accessed */
 
   /* Set locale for UTF-8 support */
   setlocale(LC_ALL, "");
@@ -603,6 +641,16 @@ void tui_cleanup(TuiState *state) {
     return;
 
   tui_disconnect(state);
+
+  /* Cleanup ViewModels */
+  vm_table_destroy(state->vm_table);
+  state->vm_table = NULL;
+  vm_query_destroy(state->vm_query);
+  state->vm_query = NULL;
+  /* vm_sidebar is owned by vm_app, don't destroy separately */
+  state->vm_sidebar = NULL;
+  vm_app_destroy(state->vm_app);
+  state->vm_app = NULL;
 
   /* Free UITabState allocated memory */
   for (size_t ws = 0; ws < MAX_WORKSPACES; ws++) {
@@ -1054,8 +1102,12 @@ void tui_run(TuiState *state) {
                             : state->main_win;
     int ch = wgetch(input_win);
 
+    /* Translate ncurses key to platform-independent UiEvent */
+    UiEvent event;
+    bool has_event = render_translate_key(ch, &event);
+
     /* Handle timeout - update animations and background operations */
-    if (ch == ERR) {
+    if (!has_event || event.type == UI_EVENT_NONE) {
       /* Poll background pagination */
       bool bg_activity = tui_poll_background_load(state);
 
@@ -1083,70 +1135,67 @@ void tui_run(TuiState *state) {
     }
 
     /* Handle mouse events first - they should work regardless of mode */
-    if (ch == KEY_MOUSE) {
+    if (event.type == UI_EVENT_MOUSE) {
       if (tui_handle_mouse_event(state)) {
         tui_refresh(state);
       }
       continue;
     }
 
-    /* Handle edit mode input (no key translation - user is typing) */
-    if (state->editing && tui_handle_edit_input(state, ch)) {
+    /* Handle resize events */
+    if (event.type == UI_EVENT_RESIZE) {
+      tui_recreate_windows(state);
+      tui_calculate_column_widths(state);
       tui_refresh(state);
       continue;
     }
 
-    /* Handle query tab input (no key translation - user is typing SQL) */
+    /* Handle edit mode input */
+    if (state->editing && tui_handle_edit_input(state, &event)) {
+      tui_refresh(state);
+      continue;
+    }
+
+    /* Handle query tab input */
     Tab *query_tab = TUI_TAB(state);
     if (query_tab && !state->sidebar_focused) {
       if (query_tab->type == TAB_TYPE_QUERY) {
-        if (tui_handle_query_input(state, ch)) {
+        if (tui_handle_query_input(state, &event)) {
           tui_refresh(state);
           continue;
         }
       }
     }
 
-    /* Handle sidebar filter input (no translation - user is typing filter text)
-     */
-    if (state->sidebar_focused && state->sidebar_filter_active) {
-      if (tui_handle_sidebar_input(state, ch)) {
-        tui_refresh(state);
-        continue;
-      }
-    }
-
-    /* Handle sidebar navigation if focused */
-    if (state->sidebar_focused && tui_handle_sidebar_input(state, ch)) {
+    /* Handle sidebar input (filter text or navigation) */
+    if (state->sidebar_focused && tui_handle_sidebar_input(state, &event)) {
       tui_refresh(state);
       continue;
     }
 
     /* Handle filters panel input if visible */
-    if (state->filters_visible && tui_handle_filters_input(state, ch)) {
+    if (state->filters_visible && tui_handle_filters_input(state, &event)) {
       tui_refresh(state);
       continue;
     }
 
-    /* Dispatch actions based on key input */
+    /* Dispatch actions based on key input using platform-independent UiEvent.
+     * All key checks use render_event_* helpers for portability. */
     Action action = {0};
     bool handled = true;
+    int key_char = render_event_get_char(&event);
+    int fkey = render_event_get_fkey(&event);
 
-    switch (ch) {
     /* ========== Application ========== */
-    case 'q':
-    case 'Q':
-    case 24: /* Ctrl+X */
-    case KEY_F(10):
+    if (key_char == 'q' || key_char == 'Q' || render_event_is_ctrl(&event, 'X') ||
+        fkey == 10) {
       /* Quit with confirmation if connected */
       if (!state->conn || tui_show_confirm_dialog(state, "Quit application?")) {
         action = action_quit_force();
       }
-      break;
-
+    }
     /* ========== Navigation ========== */
-    case KEY_UP:
-    case 'k':
+    else if (render_event_is_special(&event, UI_KEY_UP) || key_char == 'k') {
       /* At first row with filters visible - focus filters */
       if (state->cursor_row == 0 && state->filters_visible) {
         action = action_filters_focus();
@@ -1158,212 +1207,123 @@ void tui_run(TuiState *state) {
       } else {
         action = action_cursor_move(-1, 0);
       }
-      break;
-
-    case KEY_DOWN:
-    case 'j':
+    } else if (render_event_is_special(&event, UI_KEY_DOWN) || key_char == 'j') {
       action = action_cursor_move(1, 0);
-      break;
-
-    case KEY_LEFT:
-    case 'h':
+    } else if (render_event_is_special(&event, UI_KEY_LEFT) || key_char == 'h') {
       /* At leftmost column with sidebar visible - focus sidebar */
       if (state->cursor_col == 0 && state->sidebar_visible) {
         action = action_sidebar_focus();
       } else {
         action = action_cursor_move(0, -1);
       }
-      break;
-
-    case KEY_RIGHT:
-    case 'l':
+    } else if (render_event_is_special(&event, UI_KEY_RIGHT) || key_char == 'l') {
       action = action_cursor_move(0, 1);
-      break;
-
-    case KEY_PPAGE:
+    } else if (render_event_is_special(&event, UI_KEY_PAGEUP)) {
       action = action_page_up();
-      break;
-
-    case KEY_NPAGE:
+    } else if (render_event_is_special(&event, UI_KEY_PAGEDOWN)) {
       action = action_page_down();
-      break;
-
-    case KEY_HOME:
+    } else if (render_event_is_special(&event, UI_KEY_HOME)) {
       action = action_column_first();
-      break;
-
-    case KEY_END:
+    } else if (render_event_is_special(&event, UI_KEY_END)) {
       action = action_column_last();
-      break;
-
-    case KEY_F(61): /* Ctrl+Home */
-    case 'a':
+    } else if (key_char == 'a' || ch == KEY_F(61)) {
+      /* Ctrl+Home or 'a' - go to first row */
       action = action_home();
-      break;
-
-    case KEY_F(62): /* Ctrl+End */
-    case 'z':
+    } else if (key_char == 'z' || ch == KEY_F(62)) {
+      /* Ctrl+End or 'z' - go to last row */
       action = action_end();
-      break;
-
+    }
     /* ========== Editing ========== */
-    case '\n':
-    case KEY_ENTER:
+    else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       action = action_edit_start();
-      break;
-
-    case 'e':
-    case KEY_F(4):
+    } else if (key_char == 'e' || fkey == 4) {
       action = action_edit_start_modal();
-      break;
-
-    case 14: /* Ctrl+N */
-    case 'n':
+    } else if (key_char == 'n' || render_event_is_ctrl(&event, 'N')) {
       action = action_cell_set_null();
-      break;
-
-    case 4: /* Ctrl+D */
-    case 'd':
+    } else if (key_char == 'd' || render_event_is_ctrl(&event, 'D')) {
       action = action_cell_set_empty();
-      break;
-
-    case 'x':
-    case KEY_DC:
+    } else if (key_char == 'x' || render_event_is_special(&event, UI_KEY_DELETE)) {
       action = action_row_delete();
-      break;
-
+    }
     /* ========== Workspaces ========== */
-    case 'p':
-    case 'P':
+    else if (key_char == 'p' || key_char == 'P') {
       workspace_create_query(state);
-      break;
-
-    case ']':
-    case KEY_F(6):
+    } else if (key_char == ']' || fkey == 6) {
       action = action_tab_next();
-      break;
-
-    case '[':
-    case KEY_F(7):
+    } else if (key_char == '[' || fkey == 7) {
       action = action_tab_prev();
-      break;
-
-    case '}':
+    } else if (key_char == '}') {
       action = action_workspace_next();
-      break;
-
-    case '{':
+    } else if (key_char == '{') {
       action = action_workspace_prev();
-      break;
-
-    case '-':
-    case '_':
+    } else if (key_char == '-' || key_char == '_') {
       /* Close with confirmation for query tabs with content */
-      {
-        Tab *close_tab = TUI_TAB(state);
-        if (close_tab) {
-          if (close_tab->type == TAB_TYPE_QUERY &&
-              ((close_tab->query_text && close_tab->query_len > 0) ||
-               close_tab->query_results)) {
-            if (!tui_show_confirm_dialog(
-                    state, "Close query tab with unsaved content?")) {
-              handled = false;
-              break;
-            }
+      Tab *close_tab = TUI_TAB(state);
+      if (close_tab) {
+        if (close_tab->type == TAB_TYPE_QUERY &&
+            ((close_tab->query_text && close_tab->query_len > 0) ||
+             close_tab->query_results)) {
+          if (!tui_show_confirm_dialog(state,
+                                       "Close query tab with unsaved content?")) {
+            handled = false;
+          } else {
+            tab_close(state);
           }
+        } else {
           tab_close(state);
         }
       }
-      break;
-
+    }
     /* ========== Sidebar ========== */
-    case 't':
-    case 'T':
-    case KEY_F(9):
+    else if (key_char == 't' || key_char == 'T' || fkey == 9) {
       /* If sidebar visible but not focused, focus it; otherwise toggle */
       if (state->sidebar_visible && !state->sidebar_focused) {
         action = action_sidebar_focus();
       } else {
         action = action_sidebar_toggle();
       }
-      break;
-
+    }
     /* ========== Filters ========== */
-    case '/':
-    case 'f':
-    case 'F':
+    else if (key_char == '/' || key_char == 'f' || key_char == 'F') {
       /* If filters visible but not focused, focus them; otherwise toggle */
       if (state->filters_visible && !state->filters_focused) {
         action = action_filters_focus();
       } else {
         action = action_filters_toggle();
       }
-      break;
-
-    case 23: /* Ctrl+W */
+    } else if (render_event_is_ctrl(&event, 'W')) {
       if (state->filters_visible) {
         action = action_filters_focus();
       }
-      break;
-
+    }
     /* ========== UI Toggles ========== */
-    case 'm':
-    case 'M':
+    else if (key_char == 'm' || key_char == 'M') {
       action = action_toggle_header();
-      break;
-
-    case 'b':
-    case 'B':
+    } else if (key_char == 'b' || key_char == 'B') {
       action = action_toggle_status();
-      break;
-
+    }
     /* ========== Table Operations ========== */
-    case 'r':
-    case 'R':
-    case 18: /* Ctrl+R */
+    else if (key_char == 'r' || key_char == 'R' || render_event_is_ctrl(&event, 'R')) {
       /* Refresh table (only for table tabs, not query) */
-      {
-        Tab *refresh_tab = TUI_TAB(state);
-        if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
-          tui_refresh_table(state);
-        }
+      Tab *refresh_tab = TUI_TAB(state);
+      if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
+        tui_refresh_table(state);
       }
-      break;
-
+    }
     /* ========== Dialogs (handled directly by TUI) ========== */
-    case 's':
-    case 'S':
-    case KEY_F(3):
+    else if (key_char == 's' || key_char == 'S' || fkey == 3) {
       tui_show_schema(state);
-      break;
-
-    case 'g':
-    case 'G':
-    case 7: /* Ctrl+G */
-    case KEY_F(5):
+    } else if (key_char == 'g' || key_char == 'G' ||
+               render_event_is_ctrl(&event, 'G') || fkey == 5) {
       tui_show_goto_dialog(state);
-      break;
-
-    case 'c':
-    case 'C':
-    case KEY_F(2):
+    } else if (key_char == 'c' || key_char == 'C' || fkey == 2) {
       tui_show_connect_dialog(state);
-      break;
-
-    case '?':
-    case KEY_F(1):
+    } else if (key_char == '?' || fkey == 1) {
       tui_show_help(state);
-      break;
-
-    /* ========== Terminal Events ========== */
-    case KEY_RESIZE:
-      tui_recreate_windows(state);
-      tui_calculate_column_widths(state);
-      break;
-
-    default:
+    }
+    /* ========== Unhandled ========== */
+    else {
       handled = false;
-      break;
     }
 
     /* Dispatch action if one was created */
@@ -1374,12 +1334,6 @@ void tui_run(TuiState *state) {
       UICallbacks callbacks = tui_make_callbacks(state);
       ChangeFlags changes = app_dispatch(state->app, &action, &callbacks);
 
-      /* Save cursor/scroll state modified by callbacks */
-      size_t saved_cursor_row = state->cursor_row;
-      size_t saved_cursor_col = state->cursor_col;
-      size_t saved_scroll_row = state->scroll_row;
-      size_t saved_scroll_col = state->scroll_col;
-
       /* Sync core changes from workspace to TuiState */
       if (changes & (CHANGED_SIDEBAR | CHANGED_FILTERS | CHANGED_FOCUS |
                      CHANGED_WORKSPACE | CHANGED_CONNECTION | CHANGED_TABLES |
@@ -1387,19 +1341,21 @@ void tui_run(TuiState *state) {
         tui_sync_from_app(state);
       }
 
-      /* Restore cursor/scroll if they were modified by callbacks */
+      /* Sync Tab with TuiState cursor/scroll after action
+       * This handles both:
+       * - Callback-based actions that modified TuiState (sync to Tab)
+       * - Core actions that modified Tab (sync to TuiState)
+       * We use Tab as authority for core actions, TuiState for callbacks.
+       * Navigation callbacks now update Tab directly, so Tab is always current.
+       */
       if (changes & (CHANGED_CURSOR | CHANGED_SCROLL)) {
-        state->cursor_row = saved_cursor_row;
-        state->cursor_col = saved_cursor_col;
-        state->scroll_row = saved_scroll_row;
-        state->scroll_col = saved_scroll_col;
-        /* Also save to tab */
         Tab *tab = app_current_tab(state->app);
         if (tab) {
-          tab->cursor_row = saved_cursor_row;
-          tab->cursor_col = saved_cursor_col;
-          tab->scroll_row = saved_scroll_row;
-          tab->scroll_col = saved_scroll_col;
+          /* Sync TuiState to Tab (for callback-based changes) */
+          tab->cursor_row = state->cursor_row;
+          tab->cursor_col = state->cursor_col;
+          tab->scroll_row = state->scroll_row;
+          tab->scroll_col = state->scroll_col;
         }
       }
     }

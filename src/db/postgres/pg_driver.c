@@ -39,12 +39,12 @@ static bool pg_parse_table_name(const char *full_name, char **schema_out,
   if (dot) {
     /* Schema-qualified: schema.table */
     size_t schema_len = (size_t)(dot - full_name);
-    *schema_out = strndup(full_name, schema_len);
-    *table_out = strdup(dot + 1);
+    *schema_out = str_ndup(full_name, schema_len);
+    *table_out = str_dup(dot + 1);
   } else {
     /* Unqualified: assume public schema */
-    *schema_out = strdup("public");
-    *table_out = strdup(full_name);
+    *schema_out = str_dup("public");
+    *table_out = str_dup(full_name);
   }
 
   if (!*schema_out || !*table_out) {
@@ -676,26 +676,26 @@ static bool pg_update_cell(DbConnection *conn, const char *table,
     return false;
   }
 
-  /* Parameter 1: new value */
-  char new_buf[128]; /* Large enough for any numeric representation */
+  /* Parameter 1: new value (heap-allocated for safety) */
   if (new_val->is_null) {
     paramValues[0] = NULL;
     paramLengths[0] = 0;
   } else {
     switch (new_val->type) {
     case DB_TYPE_INT:
-      snprintf(new_buf, sizeof(new_buf), "%lld", (long long)new_val->int_val);
-      paramValues[0] = new_buf;
-      paramLengths[0] = safe_size_to_int(strlen(new_buf));
+      new_str = str_printf("%lld", (long long)new_val->int_val);
+      paramValues[0] = new_str;
+      paramLengths[0] = new_str ? safe_size_to_int(strlen(new_str)) : 0;
       break;
     case DB_TYPE_FLOAT:
-      snprintf(new_buf, sizeof(new_buf), "%g", new_val->float_val);
-      paramValues[0] = new_buf;
-      paramLengths[0] = safe_size_to_int(strlen(new_buf));
+      new_str = str_printf("%g", new_val->float_val);
+      paramValues[0] = new_str;
+      paramLengths[0] = new_str ? safe_size_to_int(strlen(new_str)) : 0;
       break;
     case DB_TYPE_BOOL:
-      paramValues[0] = new_val->bool_val ? "t" : "f";
-      paramLengths[0] = 1;
+      new_str = str_dup(new_val->bool_val ? "t" : "f");
+      paramValues[0] = new_str;
+      paramLengths[0] = new_str ? 1 : 0;
       break;
     case DB_TYPE_BLOB:
       new_str = str_dup("\\x");
@@ -1432,10 +1432,13 @@ static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
   if (PQntuples(res) > 0 && !PQgetisnull(res, 0, 0)) {
     const char *val = PQgetvalue(res, 0, 0);
     if (val && *val) {
-      count = strtoll(val, NULL, 10);
+      errno = 0;
+      char *endptr;
+      long long parsed = strtoll(val, &endptr, 10);
       /* reltuples can be -1 if never analyzed, treat as unavailable */
-      if (count < 0)
-        count = -1;
+      if (errno == 0 && endptr != val && parsed >= 0) {
+        count = parsed;
+      }
     }
   }
 

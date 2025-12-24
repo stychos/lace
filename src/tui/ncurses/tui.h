@@ -9,9 +9,14 @@
 #ifndef LACE_TUI_H
 #define LACE_TUI_H
 
-#include "../async/async.h"
-#include "../core/app_state.h"
-#include "../db/db.h"
+#include "../../async/async.h"
+#include "../../core/app_state.h"
+#include "../../db/db.h"
+#include "backend.h"
+#include "../../viewmodel/vm_app.h"
+#include "../../viewmodel/vm_query.h"
+#include "../../viewmodel/vm_sidebar.h"
+#include "../../viewmodel/vm_table.h"
 #include <ncurses.h>
 #include <stdbool.h>
 
@@ -77,7 +82,20 @@ typedef struct {
   /* Core application state (platform-independent) */
   AppState *app;
 
-  /* ncurses windows */
+  /* =========================================================================
+   * ViewModels - Platform-independent view state
+   * These provide a clean interface between TUI and core state.
+   * =========================================================================
+   */
+  VmApp *vm_app;         /* App-level viewmodel (owns sidebar_vm) */
+  VmTable *vm_table;     /* Current table viewmodel */
+  VmQuery *vm_query;     /* Current query viewmodel */
+  VmSidebar *vm_sidebar; /* Sidebar viewmodel (owned by vm_app) */
+
+  /* Render backend context (for gradual migration from direct ncurses) */
+  RenderContext *render_ctx;
+
+  /* ncurses windows (legacy - will be replaced by RenderBackend regions) */
   WINDOW *main_win;
   WINDOW *status_win;
   WINDOW *header_win;
@@ -330,6 +348,8 @@ void tui_page_up(TuiState *state);
 void tui_page_down(TuiState *state);
 void tui_home(TuiState *state);
 void tui_end(TuiState *state);
+void tui_column_first(TuiState *state);
+void tui_column_last(TuiState *state);
 
 /* ============================================================================
  * Actions
@@ -366,7 +386,7 @@ void tui_calculate_column_widths(TuiState *state);
 
 bool workspace_create_query(TuiState *state);
 void tui_draw_query(TuiState *state);
-bool tui_handle_query_input(TuiState *state, int ch);
+bool tui_handle_query_input(TuiState *state, const UiEvent *event);
 void tui_query_start_result_edit(TuiState *state);
 void tui_query_confirm_result_edit(TuiState *state);
 void tui_query_scroll_results(TuiState *state, int delta);
@@ -378,7 +398,7 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset);
  */
 
 void tui_draw_filters_panel(TuiState *state);
-bool tui_handle_filters_input(TuiState *state, int ch);
+bool tui_handle_filters_input(TuiState *state, const UiEvent *event);
 void tui_apply_filters(TuiState *state);
 int tui_get_filters_panel_height(TuiState *state);
 

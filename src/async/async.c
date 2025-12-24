@@ -242,19 +242,25 @@ void async_free(AsyncOperation *op) {
 
   lace_mutex_destroy(&op->mutex);
   lace_cond_destroy(&op->cond);
-  free(op->connstr);
-  free(op->table_name);
-  free(op->sql);
-  free(op->where_clause);
-  free(op->order_by);
-  free(op->error);
-  /* Note: op->result is owned by caller, not freed here */
 
-  /* Reset to safe state */
+  /* Free and NULL each pointer immediately for defensive safety */
+  free(op->connstr);
   op->connstr = NULL;
+
+  free(op->table_name);
   op->table_name = NULL;
+
+  free(op->sql);
   op->sql = NULL;
+
+  free(op->where_clause);
   op->where_clause = NULL;
+
+  free(op->order_by);
   op->order_by = NULL;
+
+  free(op->error);
   op->error = NULL;
+
+  /* Note: op->result is owned by caller, not freed here */
 }

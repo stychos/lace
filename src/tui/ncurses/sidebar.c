@@ -10,8 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Count filtered tables */
+/*
+ * Count filtered tables.
+ *
+ * During ViewModel migration, TuiState is the source of truth for sidebar
+ * filter state. VmSidebar is available for future native GUI use but its
+ * filter state isn't synced with TuiState, so we use TuiState directly.
+ */
 size_t tui_count_filtered_tables(TuiState *state) {
+  if (!state)
+    return 0;
+
   if (state->sidebar_filter_len == 0)
     return state->num_tables;
 
@@ -25,8 +34,15 @@ size_t tui_count_filtered_tables(TuiState *state) {
   return count;
 }
 
-/* Get actual table index from filtered index */
+/*
+ * Get actual table index from filtered index.
+ *
+ * Uses TuiState directly during ViewModel migration.
+ */
 size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx) {
+  if (!state)
+    return 0;
+
   if (state->sidebar_filter_len == 0)
     return filtered_idx;
 
@@ -125,44 +141,36 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
 }
 
 /* Handle sidebar input when focused */
-bool tui_handle_sidebar_input(TuiState *state, int ch) {
-  if (!state->sidebar_focused)
+bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
+  if (!state->sidebar_focused || !event || event->type != UI_EVENT_KEY)
     return false;
+
+  int key_char = render_event_get_char(event);
+  int fkey = render_event_get_fkey(event);
 
   /* Handle filter input mode */
   if (state->sidebar_filter_active) {
-    switch (ch) {
-    case 27: /* Escape */
+    if (render_event_is_special(event, UI_KEY_ESCAPE)) {
       state->sidebar_filter_active = false;
-      break;
-
-    case '\n':
-    case KEY_ENTER:
-    case KEY_DOWN:
+    } else if (render_event_is_special(event, UI_KEY_ENTER) ||
+               render_event_is_special(event, UI_KEY_DOWN)) {
       state->sidebar_filter_active = false;
       state->sidebar_highlight = 0;
       state->sidebar_scroll = 0;
-      break;
-
-    case KEY_BACKSPACE:
-    case 127:
-    case 8:
+    } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
       if (state->sidebar_filter_len > 0) {
         state->sidebar_filter[--state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
         state->sidebar_scroll = 0;
       }
-      break;
-
-    default:
-      if (ch >= 32 && ch < 127 &&
-          state->sidebar_filter_len < sizeof(state->sidebar_filter) - 1) {
-        state->sidebar_filter[state->sidebar_filter_len++] = (char)ch;
+    } else if (render_event_is_char(event)) {
+      /* Printable character - add to filter */
+      if (state->sidebar_filter_len < sizeof(state->sidebar_filter) - 1) {
+        state->sidebar_filter[state->sidebar_filter_len++] = (char)key_char;
         state->sidebar_filter[state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
         state->sidebar_scroll = 0;
       }
-      break;
     }
     /* Sync focus state to Tab so it persists across tab switches */
     tab_sync_focus(state);
@@ -171,36 +179,28 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
 
   size_t filtered_count = tui_count_filtered_tables(state);
 
-  switch (ch) {
-  case KEY_UP:
-  case 'k':
+  /* Navigation */
+  if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
     if (state->sidebar_highlight > 0) {
       state->sidebar_highlight--;
     } else {
       /* At top of list, move to filter field */
       state->sidebar_filter_active = true;
     }
-    break;
-
-  case KEY_DOWN:
-  case 'j':
+  } else if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count - 1) {
       state->sidebar_highlight++;
     }
-    break;
-
-  case KEY_RIGHT:
-  case 'l':
+  } else if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
     /* Save sidebar position and move focus back to filters or table view */
     state->sidebar_last_position = state->sidebar_highlight;
     state->sidebar_focused = false;
     if (state->filters_visible && state->filters_was_focused) {
       state->filters_focused = true;
     }
-    break;
-
-  case '\n':
-  case KEY_ENTER:
+  }
+  /* Select table */
+  else if (render_event_is_special(event, UI_KEY_ENTER)) {
     /* Select the highlighted table - open in current tab or create first tab */
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
       size_t actual_idx =
@@ -234,6 +234,9 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
           }
         } else if (tab && actual_idx != state->current_table) {
           /* Replace current tab's table */
+          /* Copy new name first to avoid use-after-free if aliased */
+          char *new_name = str_dup(state->tables[actual_idx]);
+
           /* Free old data */
           db_result_free(tab->data);
           db_schema_free(tab->schema);
@@ -242,7 +245,7 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
 
           /* Update tab */
           tab->table_index = actual_idx;
-          tab->table_name = str_dup(state->tables[actual_idx]);
+          tab->table_name = new_name;
 
           /* Clear filters when switching to a different table */
           filters_clear(&tab->filters);
@@ -270,90 +273,64 @@ bool tui_handle_sidebar_input(TuiState *state, int ch) {
           tab->scroll_col = state->scroll_col;
         }
       }
+      /* Save position before leaving sidebar */
+      state->sidebar_last_position = state->sidebar_highlight;
       state->sidebar_focused = false;
     }
-    break;
-
-  case '+':
-  case '=':
-    /* Open highlighted table in new tab */
+  }
+  /* Open in new tab */
+  else if (key_char == '+' || key_char == '=') {
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
       size_t actual_idx =
           tui_get_filtered_table_index(state, state->sidebar_highlight);
       tab_create(state, actual_idx);
+      /* Save position before leaving sidebar */
+      state->sidebar_last_position = state->sidebar_highlight;
       state->sidebar_focused = false;
     }
-    break;
-
-  case 'f':
-  case 'F':
-  case '/':
-    /* Activate filter */
+  }
+  /* Activate filter */
+  else if (key_char == 'f' || key_char == 'F' || key_char == '/') {
     state->sidebar_filter_active = true;
-    break;
-
-  case 27: /* Escape */
-    /* Clear filter if set, otherwise unfocus sidebar */
+  }
+  /* Escape - clear filter or unfocus */
+  else if (render_event_is_special(event, UI_KEY_ESCAPE)) {
     if (state->sidebar_filter_len > 0) {
+      /* Clear filter but keep highlight position */
       state->sidebar_filter[0] = '\0';
       state->sidebar_filter_len = 0;
-      state->sidebar_highlight = 0;
-      state->sidebar_scroll = 0;
+      /* Don't reset highlight - user may want to stay at current position */
     } else {
+      /* Save position before leaving sidebar */
+      state->sidebar_last_position = state->sidebar_highlight;
       state->sidebar_focused = false;
     }
-    break;
-
-  case 't':
-  case 'T':
-  case KEY_F(9): /* F9 - toggle sidebar */
-    /* Close sidebar immediately */
+  }
+  /* Toggle sidebar (close) */
+  else if (key_char == 't' || key_char == 'T' || fkey == 9) {
     state->sidebar_visible = false;
     state->sidebar_focused = false;
     state->sidebar_filter[0] = '\0';
     state->sidebar_filter_len = 0;
     tui_recreate_windows(state);
     tui_calculate_column_widths(state);
-    break;
-
-  case '?':
-  case KEY_F(1):
+  }
+  /* Help */
+  else if (key_char == '?' || fkey == 1) {
     tui_show_help(state);
-    break;
-
-  case 'q':
-  case 'Q':
-  case 'p':
-  case 'P':
-  case 'r':
-  case 'R':
-  case '[':
-  case ']':
-  case '{':
-  case '}':
-  case '-':
-  case '_':
-  case 's':
-  case 'S':
-  case 'c':
-  case 'C':
-  case 'm':
-  case 'M':
-  case 'b':
-  case 'B':
-  case 7:         /* Ctrl+G - Go to row */
-  case KEY_F(2):  /* Connect */
-  case KEY_F(3):  /* Schema */
-  case KEY_F(5):  /* Go to row */
-  case KEY_F(6):  /* Next tab */
-  case KEY_F(7):  /* Previous tab */
-  case KEY_F(10): /* Quit */
-  case 24:        /* Ctrl+X - Quit */
-    /* Pass through to main handler for global hotkeys */
+  }
+  /* Pass through global hotkeys to main handler */
+  else if (key_char == 'q' || key_char == 'Q' || key_char == 'p' ||
+           key_char == 'P' || key_char == 'r' || key_char == 'R' ||
+           key_char == '[' || key_char == ']' || key_char == '{' ||
+           key_char == '}' || key_char == '-' || key_char == '_' ||
+           key_char == 's' || key_char == 'S' || key_char == 'c' ||
+           key_char == 'C' || key_char == 'm' || key_char == 'M' ||
+           key_char == 'b' || key_char == 'B' ||
+           render_event_is_ctrl(event, 'G') || render_event_is_ctrl(event, 'X') ||
+           fkey == 2 || fkey == 3 || fkey == 5 || fkey == 6 || fkey == 7 ||
+           fkey == 10) {
     return false;
-
-  default:
-    break;
   }
 
   /* Sync focus state to Tab so it persists across tab switches */

@@ -82,21 +82,21 @@ static ChangeFlags handle_end(AppState *app, const UICallbacks *ui) {
   return CHANGED_CURSOR | CHANGED_SCROLL | CHANGED_DATA;
 }
 
-static ChangeFlags handle_column_first(AppState *app) {
+static ChangeFlags handle_column_first(AppState *app, const UICallbacks *ui) {
   Tab *tab = app_current_tab(app);
   if (!tab)
     return CHANGED_NONE;
 
-  tab_column_first(tab);
+  UI_CALL(ui, column_first);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
-static ChangeFlags handle_column_last(AppState *app) {
+static ChangeFlags handle_column_last(AppState *app, const UICallbacks *ui) {
   Tab *tab = app_current_tab(app);
   if (!tab || !tab->data)
     return CHANGED_NONE;
 
-  tab_column_last(tab);
+  UI_CALL(ui, column_last);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
@@ -423,9 +423,9 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
   case ACTION_END:
     return handle_end(app, ui);
   case ACTION_COLUMN_FIRST:
-    return handle_column_first(app);
+    return handle_column_first(app, ui);
   case ACTION_COLUMN_LAST:
-    return handle_column_last(app);
+    return handle_column_last(app, ui);
 
   /* Editing */
   case ACTION_EDIT_START:
