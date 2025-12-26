@@ -2,7 +2,7 @@
 # Built with clang
 
 CC = clang
-CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -g
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ivendor/cJSON -g
 LDFLAGS = -lncursesw -lpanel -lmenu -lsqlite3 -lmariadb -lpq -lpthread
 
 # Build directory
@@ -32,8 +32,11 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 # Source directories (common)
-SRC_DIRS_COMMON = src/app src/core src/db src/db/sqlite src/db/postgres src/db/mysql \
+SRC_DIRS_COMMON = src/app src/core src/config src/db src/db/sqlite src/db/postgres src/db/mysql \
                   src/tui/ncurses src/tui/ncurses/views src/util src/async src/viewmodel
+
+# Vendor directories
+SRC_DIRS_VENDOR = vendor/cJSON
 
 # Platform-specific source directories
 ifeq ($(UNAME_S),Windows_NT)
@@ -42,13 +45,17 @@ else
     SRC_DIRS_PLATFORM = src/platform/posix
 endif
 
-SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM)
+SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM) $(SRC_DIRS_VENDOR)
 
-# Find all C source files
-SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
+# Find all C source files (exclude vendor test files)
+SRCS_ALL = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
+SRCS = $(filter-out vendor/cJSON/test.c vendor/cJSON/cJSON_Utils.c,$(SRCS_ALL))
 
-# Object files in build directory (strip src/ prefix, keep subdirs)
-OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+# Object files in build directory
+# Handle both src/ and vendor/ prefixes
+OBJS_SRC = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(filter src/%,$(SRCS)))
+OBJS_VENDOR = $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(SRCS)))
+OBJS = $(OBJS_SRC) $(OBJS_VENDOR)
 DEPS = $(OBJS:.o=.d)
 
 TARGET = $(BUILD_DIR)/lace
@@ -62,6 +69,11 @@ $(TARGET): $(OBJS)
 
 # Compile C files with dependency generation
 $(BUILD_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Compile vendor C files
+$(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 

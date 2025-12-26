@@ -222,6 +222,59 @@ Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index) {
   return tab;
 }
 
+Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
+                                     const char *connstr) {
+  if (!ws)
+    return NULL;
+
+  if (!workspace_ensure_tab_capacity(ws))
+    return NULL;
+
+  size_t new_idx = ws->num_tabs;
+  Tab *tab = &ws->tabs[new_idx];
+  tab_init(tab);
+
+  tab->type = TAB_TYPE_CONNECTION;
+  tab->connection_index = connection_index;
+
+  /* Create a short display name from connection string */
+  if (connstr) {
+    /* Try to extract database name from URL */
+    const char *last_slash = strrchr(connstr, '/');
+    if (last_slash && last_slash[1] != '\0') {
+      /* Has path component - use it */
+      const char *db_name = last_slash + 1;
+      /* Remove query parameters if any */
+      const char *query = strchr(db_name, '?');
+      if (query) {
+        size_t len = query - db_name;
+        tab->table_name = malloc(len + 1);
+        if (tab->table_name) {
+          memcpy(tab->table_name, db_name, len);
+          tab->table_name[len] = '\0';
+        }
+      } else {
+        tab->table_name = str_dup(db_name);
+      }
+    } else {
+      /* Fallback to full connstr */
+      tab->table_name = str_dup(connstr);
+    }
+  } else {
+    tab->table_name = str_dup("Connection");
+  }
+  if (!tab->table_name) {
+    memset(tab, 0, sizeof(Tab));
+    return NULL;
+  }
+
+  tab->active = true;
+  ws->num_tabs++;
+  ws->current_tab = new_idx;
+
+  return tab;
+}
+
 bool workspace_close_tab(Workspace *ws, size_t index) {
   if (!ws || index >= ws->num_tabs)
     return false;

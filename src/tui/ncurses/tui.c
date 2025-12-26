@@ -1128,6 +1128,8 @@ void tui_refresh(TuiState *state) {
   if (tab) {
     if (tab->type == TAB_TYPE_QUERY) {
       tui_draw_query(state);
+    } else if (tab->type == TAB_TYPE_CONNECTION) {
+      tui_draw_connection_tab(state);
     } else {
       tui_draw_table(state);
     }

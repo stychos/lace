@@ -1,0 +1,928 @@
+/*
+ * Lace
+ * Connection Manager - Saved Connections Storage
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
+ */
+
+#include "connections.h"
+#include "../db/connstr.h"
+#include "../platform/platform.h"
+#include "../util/str.h"
+#include <cJSON.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CONNECTIONS_FILE "connections.json"
+#define CONNECTIONS_VERSION 1
+#define MAX_RECENT 10
+
+/* ============================================================================
+ * UUID Generation
+ * ============================================================================
+ */
+
+/* Generate a simple UUID v4 string */
+static char *generate_uuid(void) {
+  static bool seeded = false;
+  if (!seeded) {
+    srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+    seeded = true;
+  }
+
+  char *uuid = malloc(37);
+  if (!uuid)
+    return NULL;
+
+  unsigned char bytes[16];
+  for (int i = 0; i < 16; i++) {
+    bytes[i] = (unsigned char)(rand() & 0xff);
+  }
+
+  /* Set version (4) and variant bits */
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  snprintf(uuid, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+           bytes[0], bytes[1], bytes[2], bytes[3],
+           bytes[4], bytes[5], bytes[6], bytes[7],
+           bytes[8], bytes[9], bytes[10], bytes[11],
+           bytes[12], bytes[13], bytes[14], bytes[15]);
+
+  return uuid;
+}
+
+/* ============================================================================
+ * Internal Helpers
+ * ============================================================================
+ */
+
+static void set_error(char **err, const char *fmt, ...) {
+  if (!err)
+    return;
+
+  va_list args;
+  va_start(args, fmt);
+  *err = str_vprintf(fmt, args);
+  va_end(args);
+}
+
+/* Get path to connections.json file */
+static char *get_connections_path(void) {
+  const char *config_dir = platform_get_config_dir();
+  if (!config_dir)
+    return NULL;
+
+  return str_printf("%s%s%s", config_dir, LACE_PATH_SEP_STR, CONNECTIONS_FILE);
+}
+
+/* Initialize a connection item as a folder */
+static void init_folder_item(ConnectionItem *item, const char *name) {
+  item->type = CONN_ITEM_FOLDER;
+  item->folder.name = str_dup(name);
+  item->folder.expanded = true;
+  item->folder.children = NULL;
+  item->folder.num_children = 0;
+  item->folder.children_capacity = 0;
+  item->parent = NULL;
+}
+
+/* Ensure folder has capacity for more children */
+static bool folder_ensure_capacity(ConnectionFolder *folder, size_t needed) {
+  if (folder->num_children + needed <= folder->children_capacity)
+    return true;
+
+  size_t new_cap = folder->children_capacity == 0 ? 8 : folder->children_capacity * 2;
+  while (new_cap < folder->num_children + needed)
+    new_cap *= 2;
+
+  ConnectionItem *new_children = realloc(folder->children, new_cap * sizeof(ConnectionItem));
+  if (!new_children)
+    return false;
+
+  folder->children = new_children;
+  folder->children_capacity = new_cap;
+  return true;
+}
+
+/* ============================================================================
+ * JSON Parsing
+ * ============================================================================
+ */
+
+static bool parse_connection(cJSON *json, SavedConnection *conn) {
+  cJSON *id = cJSON_GetObjectItem(json, "id");
+  cJSON *name = cJSON_GetObjectItem(json, "name");
+  cJSON *driver = cJSON_GetObjectItem(json, "driver");
+  cJSON *host = cJSON_GetObjectItem(json, "host");
+  cJSON *database = cJSON_GetObjectItem(json, "database");
+  cJSON *user = cJSON_GetObjectItem(json, "user");
+  cJSON *password = cJSON_GetObjectItem(json, "password");
+  cJSON *port = cJSON_GetObjectItem(json, "port");
+  cJSON *save_password = cJSON_GetObjectItem(json, "save_password");
+
+  conn->id = str_dup(cJSON_IsString(id) ? id->valuestring : "");
+  conn->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
+  conn->driver = str_dup(cJSON_IsString(driver) ? driver->valuestring : "");
+  conn->host = str_dup(cJSON_IsString(host) ? host->valuestring : "");
+  conn->database = str_dup(cJSON_IsString(database) ? database->valuestring : "");
+  conn->user = str_dup(cJSON_IsString(user) ? user->valuestring : "");
+  conn->password = str_dup(cJSON_IsString(password) ? password->valuestring : "");
+  conn->port = cJSON_IsNumber(port) ? port->valueint : 0;
+  conn->save_password = cJSON_IsBool(save_password) ? cJSON_IsTrue(save_password) : false;
+
+  return conn->id && conn->name && conn->driver && conn->host &&
+         conn->database && conn->user && conn->password;
+}
+
+static bool parse_item(cJSON *json, ConnectionItem *item, ConnectionItem *parent);
+
+static bool parse_folder(cJSON *json, ConnectionFolder *folder) {
+  cJSON *name = cJSON_GetObjectItem(json, "name");
+  cJSON *expanded = cJSON_GetObjectItem(json, "expanded");
+  cJSON *children = cJSON_GetObjectItem(json, "children");
+
+  folder->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
+  folder->expanded = cJSON_IsBool(expanded) ? cJSON_IsTrue(expanded) : true;
+  folder->children = NULL;
+  folder->num_children = 0;
+  folder->children_capacity = 0;
+
+  if (!folder->name)
+    return false;
+
+  if (cJSON_IsArray(children)) {
+    size_t count = (size_t)cJSON_GetArraySize(children);
+    if (count > 0) {
+      if (!folder_ensure_capacity(folder, count))
+        return false;
+
+      /* Note: item->parent is set in parse_item, but we need a way to
+       * pass the parent. We'll handle this in the caller. */
+    }
+  }
+
+  return true;
+}
+
+static bool parse_item(cJSON *json, ConnectionItem *item, ConnectionItem *parent) {
+  cJSON *type = cJSON_GetObjectItem(json, "type");
+  const char *type_str = cJSON_IsString(type) ? type->valuestring : "";
+
+  item->parent = parent;
+
+  if (str_eq(type_str, "folder")) {
+    item->type = CONN_ITEM_FOLDER;
+    if (!parse_folder(json, &item->folder))
+      return false;
+
+    /* Parse children */
+    cJSON *children = cJSON_GetObjectItem(json, "children");
+    if (cJSON_IsArray(children)) {
+      size_t count = (size_t)cJSON_GetArraySize(children);
+      if (count > 0) {
+        if (!folder_ensure_capacity(&item->folder, count))
+          return false;
+
+        cJSON *child;
+        cJSON_ArrayForEach(child, children) {
+          ConnectionItem *child_item = &item->folder.children[item->folder.num_children];
+          if (!parse_item(child, child_item, item)) {
+            /* Cleanup already parsed children */
+            for (size_t i = 0; i < item->folder.num_children; i++) {
+              if (connmgr_is_folder(&item->folder.children[i]))
+                connmgr_free_folder(&item->folder.children[i].folder);
+              else
+                connmgr_free_connection(&item->folder.children[i].connection);
+            }
+            return false;
+          }
+          item->folder.num_children++;
+        }
+      }
+    }
+  } else if (str_eq(type_str, "connection")) {
+    item->type = CONN_ITEM_CONNECTION;
+    if (!parse_connection(json, &item->connection))
+      return false;
+  } else {
+    return false;
+  }
+
+  return true;
+}
+
+/* ============================================================================
+ * JSON Serialization
+ * ============================================================================
+ */
+
+static cJSON *serialize_connection(const SavedConnection *conn) {
+  cJSON *json = cJSON_CreateObject();
+  if (!json)
+    return NULL;
+
+  cJSON_AddStringToObject(json, "type", "connection");
+  cJSON_AddStringToObject(json, "id", conn->id ? conn->id : "");
+  cJSON_AddStringToObject(json, "name", conn->name ? conn->name : "");
+  cJSON_AddStringToObject(json, "driver", conn->driver ? conn->driver : "");
+  cJSON_AddStringToObject(json, "host", conn->host ? conn->host : "");
+  cJSON_AddNumberToObject(json, "port", conn->port);
+  cJSON_AddStringToObject(json, "database", conn->database ? conn->database : "");
+  cJSON_AddStringToObject(json, "user", conn->user ? conn->user : "");
+  if (conn->save_password && conn->password) {
+    cJSON_AddStringToObject(json, "password", conn->password);
+  } else {
+    cJSON_AddStringToObject(json, "password", "");
+  }
+  cJSON_AddBoolToObject(json, "save_password", conn->save_password);
+
+  return json;
+}
+
+static cJSON *serialize_item(const ConnectionItem *item);
+
+static cJSON *serialize_folder(const ConnectionFolder *folder) {
+  cJSON *json = cJSON_CreateObject();
+  if (!json)
+    return NULL;
+
+  cJSON_AddStringToObject(json, "type", "folder");
+  cJSON_AddStringToObject(json, "name", folder->name ? folder->name : "");
+  cJSON_AddBoolToObject(json, "expanded", folder->expanded);
+
+  cJSON *children = cJSON_CreateArray();
+  if (!children) {
+    cJSON_Delete(json);
+    return NULL;
+  }
+
+  for (size_t i = 0; i < folder->num_children; i++) {
+    cJSON *child = serialize_item(&folder->children[i]);
+    if (!child) {
+      cJSON_Delete(children);
+      cJSON_Delete(json);
+      return NULL;
+    }
+    cJSON_AddItemToArray(children, child);
+  }
+
+  cJSON_AddItemToObject(json, "children", children);
+  return json;
+}
+
+static cJSON *serialize_item(const ConnectionItem *item) {
+  if (item->type == CONN_ITEM_FOLDER) {
+    return serialize_folder(&item->folder);
+  } else {
+    return serialize_connection(&item->connection);
+  }
+}
+
+/* ============================================================================
+ * Lifecycle
+ * ============================================================================
+ */
+
+ConnectionManager *connmgr_new(void) {
+  ConnectionManager *mgr = calloc(1, sizeof(ConnectionManager));
+  if (!mgr)
+    return NULL;
+
+  mgr->version = CONNECTIONS_VERSION;
+  init_folder_item(&mgr->root, "Connections");
+  mgr->recent_ids = NULL;
+  mgr->num_recent = 0;
+  mgr->recent_capacity = 0;
+  mgr->modified = false;
+  mgr->file_path = get_connections_path();
+
+  return mgr;
+}
+
+ConnectionManager *connmgr_load(char **error) {
+  char *path = get_connections_path();
+  if (!path) {
+    set_error(error, "Failed to get config directory");
+    return NULL;
+  }
+
+  /* Check if file exists */
+  if (!platform_file_exists(path)) {
+    /* No file yet - return empty manager */
+    ConnectionManager *mgr = connmgr_new();
+    free(path);
+    return mgr;
+  }
+
+  /* Read file */
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    free(path);
+    return NULL;
+  }
+
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  if (size <= 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
+    fclose(f);
+    set_error(error, "Invalid file size");
+    free(path);
+    return NULL;
+  }
+
+  char *content = malloc((size_t)size + 1);
+  if (!content) {
+    fclose(f);
+    set_error(error, "Out of memory");
+    free(path);
+    return NULL;
+  }
+
+  size_t read = fread(content, 1, (size_t)size, f);
+  fclose(f);
+  content[read] = '\0';
+
+  /* Parse JSON */
+  cJSON *json = cJSON_Parse(content);
+  free(content);
+
+  if (!json) {
+    const char *err_ptr = cJSON_GetErrorPtr();
+    set_error(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
+    free(path);
+    return NULL;
+  }
+
+  /* Create manager */
+  ConnectionManager *mgr = calloc(1, sizeof(ConnectionManager));
+  if (!mgr) {
+    cJSON_Delete(json);
+    set_error(error, "Out of memory");
+    free(path);
+    return NULL;
+  }
+
+  mgr->file_path = path;
+
+  /* Parse version */
+  cJSON *version = cJSON_GetObjectItem(json, "version");
+  mgr->version = cJSON_IsNumber(version) ? version->valueint : 1;
+
+  /* Parse root */
+  cJSON *root = cJSON_GetObjectItem(json, "root");
+  if (root && cJSON_IsObject(root)) {
+    if (!parse_item(root, &mgr->root, NULL)) {
+      cJSON_Delete(json);
+      free(mgr->file_path);
+      free(mgr);
+      set_error(error, "Failed to parse root folder");
+      return NULL;
+    }
+  } else {
+    init_folder_item(&mgr->root, "Connections");
+  }
+
+  /* Parse recent */
+  cJSON *recent = cJSON_GetObjectItem(json, "recent");
+  if (cJSON_IsArray(recent)) {
+    size_t count = (size_t)cJSON_GetArraySize(recent);
+    if (count > 0) {
+      mgr->recent_ids = calloc(count, sizeof(char *));
+      if (mgr->recent_ids) {
+        mgr->recent_capacity = count;
+        cJSON *item;
+        cJSON_ArrayForEach(item, recent) {
+          if (cJSON_IsString(item) && mgr->num_recent < count) {
+            mgr->recent_ids[mgr->num_recent++] = str_dup(item->valuestring);
+          }
+        }
+      }
+    }
+  }
+
+  cJSON_Delete(json);
+  return mgr;
+}
+
+bool connmgr_save(ConnectionManager *mgr, char **error) {
+  if (!mgr || !mgr->file_path) {
+    set_error(error, "Invalid connection manager");
+    return false;
+  }
+
+  /* Ensure config directory exists */
+  const char *config_dir = platform_get_config_dir();
+  if (!config_dir) {
+    set_error(error, "Failed to get config directory");
+    return false;
+  }
+
+  if (!platform_dir_exists(config_dir)) {
+    if (!platform_mkdir(config_dir)) {
+      set_error(error, "Failed to create config directory");
+      return false;
+    }
+  }
+
+  /* Build JSON */
+  cJSON *json = cJSON_CreateObject();
+  if (!json) {
+    set_error(error, "Out of memory");
+    return false;
+  }
+
+  cJSON_AddNumberToObject(json, "version", mgr->version);
+
+  cJSON *root = serialize_item(&mgr->root);
+  if (!root) {
+    cJSON_Delete(json);
+    set_error(error, "Failed to serialize connections");
+    return false;
+  }
+  cJSON_AddItemToObject(json, "root", root);
+
+  /* Add recent */
+  cJSON *recent = cJSON_CreateArray();
+  if (recent) {
+    for (size_t i = 0; i < mgr->num_recent; i++) {
+      if (mgr->recent_ids[i]) {
+        cJSON_AddItemToArray(recent, cJSON_CreateString(mgr->recent_ids[i]));
+      }
+    }
+    cJSON_AddItemToObject(json, "recent", recent);
+  }
+
+  /* Write to file */
+  char *content = cJSON_Print(json);
+  cJSON_Delete(json);
+
+  if (!content) {
+    set_error(error, "Failed to serialize JSON");
+    return false;
+  }
+
+  FILE *f = fopen(mgr->file_path, "w");
+  if (!f) {
+    free(content);
+    set_error(error, "Failed to open %s for writing: %s", mgr->file_path, strerror(errno));
+    return false;
+  }
+
+  /* Set file permissions to 0600 (owner read/write only) */
+#ifndef LACE_OS_WINDOWS
+  chmod(mgr->file_path, 0600);
+#endif
+
+  size_t len = strlen(content);
+  size_t written = fwrite(content, 1, len, f);
+  fclose(f);
+  free(content);
+
+  if (written != len) {
+    set_error(error, "Failed to write all data");
+    return false;
+  }
+
+  mgr->modified = false;
+  return true;
+}
+
+void connmgr_free_connection(SavedConnection *conn) {
+  if (!conn)
+    return;
+  free(conn->id);
+  free(conn->name);
+  free(conn->driver);
+  free(conn->host);
+  free(conn->database);
+  free(conn->user);
+  str_secure_free(conn->password);
+}
+
+void connmgr_free_folder(ConnectionFolder *folder) {
+  if (!folder)
+    return;
+
+  free(folder->name);
+
+  for (size_t i = 0; i < folder->num_children; i++) {
+    ConnectionItem *child = &folder->children[i];
+    if (child->type == CONN_ITEM_FOLDER) {
+      connmgr_free_folder(&child->folder);
+    } else {
+      connmgr_free_connection(&child->connection);
+    }
+  }
+  free(folder->children);
+}
+
+void connmgr_free(ConnectionManager *mgr) {
+  if (!mgr)
+    return;
+
+  connmgr_free_folder(&mgr->root.folder);
+
+  for (size_t i = 0; i < mgr->num_recent; i++) {
+    free(mgr->recent_ids[i]);
+  }
+  free(mgr->recent_ids);
+  free(mgr->file_path);
+  free(mgr);
+}
+
+/* ============================================================================
+ * Connection CRUD
+ * ============================================================================
+ */
+
+SavedConnection *connmgr_new_connection(void) {
+  SavedConnection *conn = calloc(1, sizeof(SavedConnection));
+  if (!conn)
+    return NULL;
+
+  conn->id = generate_uuid();
+  conn->name = str_dup("");
+  conn->driver = str_dup("");
+  conn->host = str_dup("");
+  conn->database = str_dup("");
+  conn->user = str_dup("");
+  conn->password = str_dup("");
+  conn->port = 0;
+  conn->save_password = false;
+
+  if (!conn->id || !conn->name || !conn->driver || !conn->host ||
+      !conn->database || !conn->user || !conn->password) {
+    connmgr_free_connection(conn);
+    free(conn);
+    return NULL;
+  }
+
+  return conn;
+}
+
+bool connmgr_add_connection(ConnectionItem *folder, SavedConnection *conn) {
+  if (!folder || folder->type != CONN_ITEM_FOLDER || !conn)
+    return false;
+
+  if (!folder_ensure_capacity(&folder->folder, 1))
+    return false;
+
+  ConnectionItem *item = &folder->folder.children[folder->folder.num_children];
+  item->type = CONN_ITEM_CONNECTION;
+  item->connection = *conn;
+  item->parent = folder;
+
+  folder->folder.num_children++;
+  return true;
+}
+
+static ConnectionItem *find_by_id_recursive(ConnectionItem *item, const char *id) {
+  if (item->type == CONN_ITEM_CONNECTION) {
+    if (item->connection.id && str_eq(item->connection.id, id)) {
+      return item;
+    }
+  } else {
+    for (size_t i = 0; i < item->folder.num_children; i++) {
+      ConnectionItem *found = find_by_id_recursive(&item->folder.children[i], id);
+      if (found)
+        return found;
+    }
+  }
+  return NULL;
+}
+
+ConnectionItem *connmgr_find_by_id(ConnectionManager *mgr, const char *id) {
+  if (!mgr || !id)
+    return NULL;
+  return find_by_id_recursive(&mgr->root, id);
+}
+
+bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item) {
+  if (!mgr || !item || !item->parent)
+    return false;
+
+  ConnectionFolder *parent = &item->parent->folder;
+
+  /* Find item index in parent */
+  size_t idx = 0;
+  bool found = false;
+  for (size_t i = 0; i < parent->num_children; i++) {
+    if (&parent->children[i] == item) {
+      idx = i;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found)
+    return false;
+
+  /* Free item contents */
+  if (item->type == CONN_ITEM_FOLDER) {
+    connmgr_free_folder(&item->folder);
+  } else {
+    connmgr_free_connection(&item->connection);
+  }
+
+  /* Shift remaining items */
+  for (size_t i = idx; i < parent->num_children - 1; i++) {
+    parent->children[i] = parent->children[i + 1];
+  }
+  parent->num_children--;
+
+  mgr->modified = true;
+  return true;
+}
+
+/* ============================================================================
+ * Folder CRUD
+ * ============================================================================
+ */
+
+ConnectionFolder *connmgr_new_folder(const char *name) {
+  ConnectionFolder *folder = calloc(1, sizeof(ConnectionFolder));
+  if (!folder)
+    return NULL;
+
+  folder->name = str_dup(name ? name : "New Folder");
+  folder->expanded = true;
+  folder->children = NULL;
+  folder->num_children = 0;
+  folder->children_capacity = 0;
+
+  if (!folder->name) {
+    free(folder);
+    return NULL;
+  }
+
+  return folder;
+}
+
+bool connmgr_add_folder(ConnectionItem *parent, ConnectionFolder *folder) {
+  if (!parent || parent->type != CONN_ITEM_FOLDER || !folder)
+    return false;
+
+  if (!folder_ensure_capacity(&parent->folder, 1))
+    return false;
+
+  ConnectionItem *item = &parent->folder.children[parent->folder.num_children];
+  item->type = CONN_ITEM_FOLDER;
+  item->folder = *folder;
+  item->parent = parent;
+
+  parent->folder.num_children++;
+  return true;
+}
+
+/* ============================================================================
+ * Tree Navigation
+ * ============================================================================
+ */
+
+static size_t count_visible_recursive(ConnectionItem *item) {
+  size_t count = 1; /* Count self */
+
+  if (item->type == CONN_ITEM_FOLDER && item->folder.expanded) {
+    for (size_t i = 0; i < item->folder.num_children; i++) {
+      count += count_visible_recursive(&item->folder.children[i]);
+    }
+  }
+
+  return count;
+}
+
+size_t connmgr_count_visible(ConnectionManager *mgr) {
+  if (!mgr)
+    return 0;
+
+  /* Don't count root itself, just its visible contents */
+  size_t count = 0;
+  if (mgr->root.folder.expanded) {
+    for (size_t i = 0; i < mgr->root.folder.num_children; i++) {
+      count += count_visible_recursive(&mgr->root.folder.children[i]);
+    }
+  }
+  return count;
+}
+
+static ConnectionItem *get_visible_item_recursive(ConnectionItem *item, size_t *idx, size_t target) {
+  if (*idx == target)
+    return item;
+  (*idx)++;
+
+  if (item->type == CONN_ITEM_FOLDER && item->folder.expanded) {
+    for (size_t i = 0; i < item->folder.num_children; i++) {
+      ConnectionItem *found = get_visible_item_recursive(&item->folder.children[i], idx, target);
+      if (found)
+        return found;
+    }
+  }
+
+  return NULL;
+}
+
+ConnectionItem *connmgr_get_visible_item(ConnectionManager *mgr, size_t target) {
+  if (!mgr)
+    return NULL;
+
+  /* Skip root, iterate its children */
+  size_t idx = 0;
+  if (mgr->root.folder.expanded) {
+    for (size_t i = 0; i < mgr->root.folder.num_children; i++) {
+      ConnectionItem *found = get_visible_item_recursive(&mgr->root.folder.children[i], &idx, target);
+      if (found)
+        return found;
+    }
+  }
+  return NULL;
+}
+
+int connmgr_get_item_depth(ConnectionItem *item) {
+  int depth = 0;
+  ConnectionItem *p = item ? item->parent : NULL;
+  while (p) {
+    depth++;
+    p = p->parent;
+  }
+  /* Subtract 1 because root shouldn't count as depth */
+  return depth > 0 ? depth - 1 : 0;
+}
+
+void connmgr_toggle_folder(ConnectionItem *item) {
+  if (item && item->type == CONN_ITEM_FOLDER) {
+    item->folder.expanded = !item->folder.expanded;
+  }
+}
+
+/* ============================================================================
+ * Connection Strings
+ * ============================================================================
+ */
+
+char *connmgr_build_connstr(const SavedConnection *conn) {
+  if (!conn || !conn->driver)
+    return NULL;
+
+  return connstr_build(
+      conn->driver,
+      (conn->user && conn->user[0]) ? conn->user : NULL,
+      (conn->password && conn->password[0]) ? conn->password : NULL,
+      (conn->host && conn->host[0]) ? conn->host : NULL,
+      conn->port,
+      (conn->database && conn->database[0]) ? conn->database : NULL,
+      NULL, NULL, 0);
+}
+
+SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
+  if (!url || !url[0]) {
+    set_error(error, "Empty URL");
+    return NULL;
+  }
+
+  ConnString *cs = connstr_parse(url, error);
+  if (!cs)
+    return NULL;
+
+  SavedConnection *conn = connmgr_new_connection();
+  if (!conn) {
+    connstr_free(cs);
+    set_error(error, "Out of memory");
+    return NULL;
+  }
+
+  /* Copy fields */
+  free(conn->driver);
+  conn->driver = str_dup(cs->driver ? cs->driver : "");
+
+  free(conn->host);
+  conn->host = str_dup(cs->host ? cs->host : "");
+
+  free(conn->database);
+  conn->database = str_dup(cs->database ? cs->database : "");
+
+  free(conn->user);
+  conn->user = str_dup(cs->user ? cs->user : "");
+
+  str_secure_free(conn->password);
+  conn->password = str_dup(cs->password ? cs->password : "");
+
+  conn->port = cs->port;
+  conn->save_password = (cs->password && cs->password[0]);
+
+  /* Generate a default name from the connection */
+  free(conn->name);
+  if (str_eq(cs->driver, "sqlite")) {
+    /* Use filename for SQLite */
+    const char *name = cs->database;
+    const char *slash = strrchr(cs->database, '/');
+    if (slash)
+      name = slash + 1;
+    conn->name = str_dup(name);
+  } else {
+    /* Use host/database for network DBs */
+    conn->name = str_printf("%s/%s", cs->host ? cs->host : "localhost",
+                            cs->database ? cs->database : "");
+  }
+
+  connstr_free(cs);
+  return conn;
+}
+
+/* ============================================================================
+ * Recent Connections
+ * ============================================================================
+ */
+
+void connmgr_add_recent(ConnectionManager *mgr, const char *id) {
+  if (!mgr || !id)
+    return;
+
+  /* Remove if already in list */
+  for (size_t i = 0; i < mgr->num_recent; i++) {
+    if (mgr->recent_ids[i] && str_eq(mgr->recent_ids[i], id)) {
+      /* Move to front */
+      char *existing = mgr->recent_ids[i];
+      for (size_t j = i; j > 0; j--) {
+        mgr->recent_ids[j] = mgr->recent_ids[j - 1];
+      }
+      mgr->recent_ids[0] = existing;
+      mgr->modified = true;
+      return;
+    }
+  }
+
+  /* Ensure capacity */
+  if (mgr->num_recent >= mgr->recent_capacity) {
+    size_t new_cap = mgr->recent_capacity == 0 ? MAX_RECENT : mgr->recent_capacity + MAX_RECENT;
+    char **new_ids = realloc(mgr->recent_ids, new_cap * sizeof(char *));
+    if (!new_ids)
+      return;
+    mgr->recent_ids = new_ids;
+    mgr->recent_capacity = new_cap;
+  }
+
+  /* Add to front */
+  for (size_t i = mgr->num_recent; i > 0; i--) {
+    mgr->recent_ids[i] = mgr->recent_ids[i - 1];
+  }
+  mgr->recent_ids[0] = str_dup(id);
+  mgr->num_recent++;
+
+  /* Trim to max */
+  while (mgr->num_recent > MAX_RECENT) {
+    mgr->num_recent--;
+    free(mgr->recent_ids[mgr->num_recent]);
+    mgr->recent_ids[mgr->num_recent] = NULL;
+  }
+
+  mgr->modified = true;
+}
+
+ConnectionItem *connmgr_get_most_recent(ConnectionManager *mgr) {
+  if (!mgr || mgr->num_recent == 0)
+    return NULL;
+
+  /* Find first valid recent connection */
+  for (size_t i = 0; i < mgr->num_recent; i++) {
+    if (mgr->recent_ids[i]) {
+      ConnectionItem *item = connmgr_find_by_id(mgr, mgr->recent_ids[i]);
+      if (item)
+        return item;
+    }
+  }
+
+  return NULL;
+}
+
+/* ============================================================================
+ * Item Helpers
+ * ============================================================================
+ */
+
+const char *connmgr_item_name(const ConnectionItem *item) {
+  if (!item)
+    return "";
+  if (item->type == CONN_ITEM_FOLDER) {
+    return item->folder.name ? item->folder.name : "";
+  } else {
+    return item->connection.name ? item->connection.name : "";
+  }
+}
+
+bool connmgr_is_folder(const ConnectionItem *item) {
+  return item && item->type == CONN_ITEM_FOLDER;
+}
+
+bool connmgr_is_connection(const ConnectionItem *item) {
+  return item && item->type == CONN_ITEM_CONNECTION;
+}

@@ -336,6 +336,7 @@ void tui_refresh(TuiState *state);
 
 void tui_draw_header(TuiState *state);
 void tui_draw_table(TuiState *state);
+void tui_draw_connection_tab(TuiState *state);
 void tui_draw_status(TuiState *state);
 void tui_draw_sidebar(TuiState *state);
 void tui_draw_tabs(TuiState *state);

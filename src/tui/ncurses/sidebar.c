@@ -253,6 +253,34 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
             /* No existing tab - create new one */
             tab_create(state, actual_idx);
           }
+        } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
+          /* Connection tab active - convert to table tab */
+          free(tab->table_name);
+          tab->table_name = str_dup(state->tables[actual_idx]);
+          tab->type = TAB_TYPE_TABLE;
+          tab->table_index = actual_idx;
+
+          /* Clear state and load table */
+          state->data = NULL;
+          state->schema = NULL;
+          state->col_widths = NULL;
+          state->num_col_widths = 0;
+          state->current_table = actual_idx;
+
+          tui_load_table_data(state, state->tables[actual_idx]);
+
+          /* Save to tab */
+          tab->data = state->data;
+          tab->schema = state->schema;
+          tab->col_widths = state->col_widths;
+          tab->num_col_widths = state->num_col_widths;
+          tab->total_rows = state->total_rows;
+          tab->loaded_offset = state->loaded_offset;
+          tab->loaded_count = state->loaded_count;
+          tab->cursor_row = state->cursor_row;
+          tab->cursor_col = state->cursor_col;
+          tab->scroll_row = state->scroll_row;
+          tab->scroll_col = state->scroll_col;
         } else if (tab && actual_idx != state->current_table) {
           /* Replace current tab's table */
           /* Copy new name first to avoid use-after-free if aliased */
@@ -391,8 +419,10 @@ void tui_draw_sidebar(TuiState *state) {
   int filter_y = y; /* Remember filter line position for cursor */
   y++;
 
-  /* Separator */
+  /* Separator with T-junctions connecting to borders */
+  mvwaddch(state->sidebar_win, y, 0, ACS_LTEE);
   mvwhline(state->sidebar_win, y, 1, ACS_HLINE, SIDEBAR_WIDTH - 2);
+  mvwaddch(state->sidebar_win, y, SIDEBAR_WIDTH - 1, ACS_RTEE);
   y++;
 
   if (!state->tables || state->num_tables == 0) {

@@ -72,10 +72,31 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
   int max_y = params->start_y + params->height;
   int max_x = params->start_x + params->width;
 
+  /* Calculate column divider positions for intersection characters */
+  int divider_positions[256]; /* Max 256 columns */
+  size_t num_dividers = 0;
+
+  {
+    int calc_x = x_base + 1;
+    for (size_t col = params->scroll_col; col < data->num_columns; col++) {
+      int width = grid_get_col_width(params, col);
+      if (calc_x + width + 3 > max_x)
+        break;
+      calc_x += width + 1;
+      if (num_dividers < 256) {
+        divider_positions[num_dividers++] = calc_x - 1;
+      }
+    }
+  }
+
   /* Draw top border if requested */
   if (params->show_header_line && y < max_y) {
     wattron(win, A_BOLD | COLOR_PAIR(COLOR_BORDER));
     mvwhline(win, y, x_base, ACS_HLINE, params->width);
+    /* Add T-junctions where column dividers will be */
+    for (size_t i = 0; i < num_dividers; i++) {
+      mvwaddch(win, y, divider_positions[i], ACS_TTEE);
+    }
     wattroff(win, A_BOLD | COLOR_PAIR(COLOR_BORDER));
     y++;
   }
@@ -115,6 +136,10 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
   /* Header separator */
   wattron(win, COLOR_PAIR(COLOR_BORDER));
   mvwhline(win, y, x_base, ACS_HLINE, params->width);
+  /* Add cross/plus junctions where column dividers are */
+  for (size_t i = 0; i < num_dividers; i++) {
+    mvwaddch(win, y, divider_positions[i], ACS_PLUS);
+  }
   wattroff(win, COLOR_PAIR(COLOR_BORDER));
   y++;
 
@@ -374,6 +399,77 @@ void tui_draw_table(TuiState *state) {
                            .show_header_line = true};
 
   tui_draw_result_grid(state, &params);
+  wrefresh(state->main_win);
+}
+
+/* ============================================================================
+ * Connection Tab Drawing
+ * ============================================================================
+ */
+
+void tui_draw_connection_tab(TuiState *state) {
+  if (!state || !state->main_win)
+    return;
+
+  werase(state->main_win);
+
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+
+  Tab *tab = TUI_TAB(state);
+  /* Get full connection string from connection object */
+  const char *connstr = NULL;
+  if (tab) {
+    Connection *conn = app_get_connection(state->app, tab->connection_index);
+    if (conn) {
+      connstr = conn->connstr;
+    }
+  }
+  if (!connstr) {
+    connstr = tab ? tab->table_name : "Connection";
+  }
+
+  /* Center the content vertically */
+  int center_y = win_rows / 2 - 2;
+  if (center_y < 1)
+    center_y = 1;
+
+  /* Draw connection info */
+  wattron(state->main_win, A_BOLD);
+  const char *title = "Connection";
+  int title_x = (win_cols - (int)strlen(title)) / 2;
+  if (title_x < 0)
+    title_x = 0;
+  mvwprintw(state->main_win, center_y, title_x, "%s", title);
+  wattroff(state->main_win, A_BOLD);
+
+  /* Show connection string (truncated if needed) */
+  wattron(state->main_win, COLOR_PAIR(COLOR_STATUS));
+  int max_connstr_len = win_cols - 4;
+  if (max_connstr_len < 10)
+    max_connstr_len = 10;
+  int connstr_x = (win_cols - (int)strlen(connstr)) / 2;
+  if (connstr_x < 2)
+    connstr_x = 2;
+  mvwprintw(state->main_win, center_y + 2, connstr_x, "%.*s", max_connstr_len,
+            connstr);
+  wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
+
+  /* Show instruction */
+  wattron(state->main_win, A_DIM);
+  const char *hint = "Select a table from the sidebar to view data";
+  int hint_x = (win_cols - (int)strlen(hint)) / 2;
+  if (hint_x < 0)
+    hint_x = 0;
+  mvwprintw(state->main_win, center_y + 4, hint_x, "%s", hint);
+
+  const char *hint2 = "Press '-' to close this connection";
+  int hint2_x = (win_cols - (int)strlen(hint2)) / 2;
+  if (hint2_x < 0)
+    hint2_x = 0;
+  mvwprintw(state->main_win, center_y + 5, hint2_x, "%s", hint2);
+  wattroff(state->main_win, A_DIM);
+
   wrefresh(state->main_win);
 }
 

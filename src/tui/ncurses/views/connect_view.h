@@ -15,7 +15,8 @@
 typedef enum {
   CONNECT_MODE_CANCELLED,    /* User cancelled */
   CONNECT_MODE_NEW_TAB,      /* Open in new tab of current workspace */
-  CONNECT_MODE_NEW_WORKSPACE /* Open in new workspace */
+  CONNECT_MODE_NEW_WORKSPACE, /* Open in new workspace */
+  CONNECT_MODE_QUIT          /* User wants to quit the app */
 } ConnectMode;
 
 /* Connection dialog result */

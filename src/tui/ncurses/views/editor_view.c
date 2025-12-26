@@ -411,9 +411,11 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     mvwaddch(win, row, width - 1, ACS_VLINE);
   }
 
-  /* Status bar */
+  /* Status bar separator with T-junctions */
   int status_y = height - 2;
+  mvwaddch(win, status_y - 1, 0, ACS_LTEE);
   mvwhline(win, status_y - 1, 1, ACS_HLINE, width - 2);
+  mvwaddch(win, status_y - 1, width - 1, ACS_RTEE);
 
   /* Status text */
   if (state->readonly) {

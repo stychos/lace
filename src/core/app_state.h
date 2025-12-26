@@ -83,8 +83,9 @@ typedef struct {
 
 /* Tab type */
 typedef enum {
-  TAB_TYPE_TABLE, /* Table data view */
-  TAB_TYPE_QUERY  /* SQL query editor */
+  TAB_TYPE_TABLE,      /* Table data view */
+  TAB_TYPE_QUERY,      /* SQL query editor */
+  TAB_TYPE_CONNECTION  /* Connection placeholder (no table loaded) */
 } TabType;
 
 /* Tab - holds per-tab state (table data or query) */
@@ -236,6 +237,8 @@ Tab *workspace_current_tab(Workspace *ws);
 Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
                                 size_t table_index, const char *table_name);
 Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index);
+Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
+                                     const char *connstr);
 bool workspace_close_tab(Workspace *ws, size_t index);
 Tab *workspace_switch_tab(Workspace *ws, size_t index);
 

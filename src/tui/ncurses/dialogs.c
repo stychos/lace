@@ -764,6 +764,13 @@ void tui_show_schema(TuiState *state) {
 void tui_show_connect_dialog(TuiState *state) {
   ConnectResult result = connect_view_show(state);
 
+  if (result.mode == CONNECT_MODE_QUIT) {
+    free(result.connstr);
+    state->running = false;
+    state->app->running = false;
+    return;
+  }
+
   if (result.mode == CONNECT_MODE_CANCELLED || !result.connstr) {
     free(result.connstr);
     tui_refresh(state);
