@@ -2,17 +2,30 @@
  * Lace
  * Modal dialogs
  *
+ * These are TUI-specific modal dialogs. VmTable is used for schema access
+ * where applicable for future cross-platform consistency.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
 #include "../../async/async.h"
+#include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include "views/connect_view.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Helper to get VmTable, returns NULL if not valid */
+static VmTable *get_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  if (!vm_table_valid(state->vm_table))
+    return NULL;
+  return state->vm_table;
+}
 
 /* Show confirmation dialog - returns true if user confirms */
 bool tui_show_confirm_dialog(TuiState *state, const char *message) {
@@ -514,7 +527,11 @@ void tui_show_goto_dialog(TuiState *state) {
 
 /* Show schema dialog */
 void tui_show_schema(TuiState *state) {
-  if (!state || !state->schema) {
+  /* Get schema via VmTable if available, fallback to state->schema */
+  VmTable *vm = get_vm_table(state);
+  const TableSchema *schema = vm ? vm_table_schema(vm) : state->schema;
+
+  if (!state || !schema) {
     tui_set_error(state, "No schema available");
     return;
   }
@@ -545,7 +562,7 @@ void tui_show_schema(TuiState *state) {
     werase(schema_win);
     box(schema_win, 0, 0);
     wattron(schema_win, A_BOLD);
-    mvwprintw(schema_win, 0, 2, " Schema: %s ", state->schema->name);
+    mvwprintw(schema_win, 0, 2, " Schema: %s ", schema->name);
     wattroff(schema_win, A_BOLD);
 
     int y = 2;
@@ -554,12 +571,12 @@ void tui_show_schema(TuiState *state) {
 
     /* Calculate total lines needed */
     int total_lines =
-        2 + (int)state->schema->num_columns; /* Columns header + data */
-    if (state->schema->num_indexes > 0) {
-      total_lines += 2 + (int)state->schema->num_indexes; /* Indexes section */
+        2 + (int)schema->num_columns; /* Columns header + data */
+    if (schema->num_indexes > 0) {
+      total_lines += 2 + (int)schema->num_indexes; /* Indexes section */
     }
-    if (state->schema->num_foreign_keys > 0) {
-      total_lines += 2 + (int)state->schema->num_foreign_keys; /* FKs section */
+    if (schema->num_foreign_keys > 0) {
+      total_lines += 2 + (int)schema->num_foreign_keys; /* FKs section */
     }
 
     max_scroll = total_lines - content_height;
@@ -577,7 +594,7 @@ void tui_show_schema(TuiState *state) {
 
     /* Columns section */
     wattron(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-    DRAW_LINE("Columns (%zu):", state->schema->num_columns);
+    DRAW_LINE("Columns (%zu):", schema->num_columns);
     wattroff(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
 
     if (line >= scroll_offset && y < height - 2) {
@@ -588,8 +605,8 @@ void tui_show_schema(TuiState *state) {
     }
     line++;
 
-    for (size_t i = 0; i < state->schema->num_columns; i++) {
-      ColumnDef *col = &state->schema->columns[i];
+    for (size_t i = 0; i < schema->num_columns; i++) {
+      const ColumnDef *col = &schema->columns[i];
       if (line >= scroll_offset && y < height - 2) {
         mvwprintw(schema_win, y++, 4, "%-20s %-15s %-8s %-8s %-8s",
                   col->name ? col->name : "",
@@ -602,17 +619,17 @@ void tui_show_schema(TuiState *state) {
     }
 
     /* Indexes section */
-    if (state->schema->num_indexes > 0) {
+    if (schema->num_indexes > 0) {
       line++; /* blank line */
       if (line >= scroll_offset && y < height - 2)
         y++;
 
       wattron(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-      DRAW_LINE("Indexes (%zu):", state->schema->num_indexes);
+      DRAW_LINE("Indexes (%zu):", schema->num_indexes);
       wattroff(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
 
-      for (size_t i = 0; i < state->schema->num_indexes; i++) {
-        IndexDef *idx = &state->schema->indexes[i];
+      for (size_t i = 0; i < schema->num_indexes; i++) {
+        const IndexDef *idx = &schema->indexes[i];
         if (line >= scroll_offset && y < height - 2) {
           /* Build column list string safely */
           char cols[256] = "";
@@ -641,17 +658,17 @@ void tui_show_schema(TuiState *state) {
     }
 
     /* Foreign Keys section */
-    if (state->schema->num_foreign_keys > 0) {
+    if (schema->num_foreign_keys > 0) {
       line++; /* blank line */
       if (line >= scroll_offset && y < height - 2)
         y++;
 
       wattron(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-      DRAW_LINE("Foreign Keys (%zu):", state->schema->num_foreign_keys);
+      DRAW_LINE("Foreign Keys (%zu):", schema->num_foreign_keys);
       wattroff(schema_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
 
-      for (size_t i = 0; i < state->schema->num_foreign_keys; i++) {
-        ForeignKeyDef *fk = &state->schema->foreign_keys[i];
+      for (size_t i = 0; i < schema->num_foreign_keys; i++) {
+        const ForeignKeyDef *fk = &schema->foreign_keys[i];
         if (line >= scroll_offset && y < height - 2) {
           /* Build column lists safely */
           char src_cols[128] = "";
@@ -801,8 +818,7 @@ void tui_show_connect_dialog(TuiState *state) {
       /* Create a NEW workspace */
       ws = app_create_workspace(state->app);
       if (!ws) {
-        tui_set_error(state, "Failed to create workspace (max %d)",
-                      MAX_WORKSPACES);
+        tui_set_error(state, "Failed to create workspace (out of memory)");
         free(result.connstr);
         tui_refresh(state);
         return;
@@ -847,6 +863,8 @@ void tui_show_connect_dialog(TuiState *state) {
           /* Show sidebar for new workspace */
           state->sidebar_visible = true;
           state->sidebar_focused = false;
+          tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                     ws->current_tab);
           UITabState *ui = TUI_TAB_UI(state);
           if (ui) {
             ui->sidebar_visible = true;
@@ -863,6 +881,8 @@ void tui_show_connect_dialog(TuiState *state) {
       if (tab) {
         state->sidebar_visible = true;
         state->sidebar_focused = false;
+        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                   ws->current_tab);
         UITabState *ui = TUI_TAB_UI(state);
         if (ui) {
           ui->sidebar_visible = true;
@@ -934,6 +954,8 @@ void tui_show_connect_dialog(TuiState *state) {
       Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
       if (tab) {
         /* Initialize UITabState - new connection always shows sidebar */
+        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                   ws->current_tab);
         UITabState *ui = TUI_TAB_UI(state);
         if (ui) {
           ui->sidebar_visible = true;
@@ -975,6 +997,8 @@ void tui_show_connect_dialog(TuiState *state) {
       Tab *tab = workspace_create_query_tab(ws, conn_index);
       if (tab) {
         /* Initialize UITabState - new connection always shows sidebar */
+        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                   ws->current_tab);
         UITabState *ui = TUI_TAB_UI(state);
         if (ui) {
           ui->sidebar_visible = true;

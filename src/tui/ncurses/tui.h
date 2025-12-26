@@ -196,9 +196,12 @@ typedef struct {
   /* =========================================================================
    * Per-tab UI state (TUI-specific, indexed by [workspace][tab])
    * This replaces the UI fields that were previously stored in core Tab struct.
+   * Dynamic 2D array: tab_ui[workspace_index][tab_index]
    * =========================================================================
    */
-  UITabState tab_ui[MAX_WORKSPACES][MAX_TABS];
+  UITabState **tab_ui;          /* Array of per-workspace UITabState arrays */
+  size_t *tab_ui_capacity;      /* Capacity per workspace */
+  size_t tab_ui_ws_capacity;    /* Capacity for workspace dimension */
 } TuiState;
 
 /* Sync view cache from AppState (call after app state changes) */
@@ -253,14 +256,16 @@ void tui_sync_to_workspace(TuiState *state);
 
 /* Get current tab's UI state (with bounds checking) */
 static inline UITabState *tui_current_tab_ui(TuiState *state) {
-  if (!state || !state->app)
+  if (!state || !state->app || !state->tab_ui)
     return NULL;
   size_t ws = state->app->current_workspace;
   Workspace *workspace = app_current_workspace(state->app);
-  if (!workspace || ws >= MAX_WORKSPACES)
+  if (!workspace)
+    return NULL;
+  if (ws >= state->tab_ui_ws_capacity || !state->tab_ui[ws])
     return NULL;
   size_t tab = workspace->current_tab;
-  if (tab >= MAX_TABS)
+  if (tab >= state->tab_ui_capacity[ws])
     return NULL;
   return &state->tab_ui[ws][tab];
 }
@@ -268,10 +273,17 @@ static inline UITabState *tui_current_tab_ui(TuiState *state) {
 /* Get UI state for a specific workspace/tab index */
 static inline UITabState *tui_get_tab_ui(TuiState *state, size_t ws_idx,
                                          size_t tab_idx) {
-  if (!state || ws_idx >= MAX_WORKSPACES || tab_idx >= MAX_TABS)
+  if (!state || !state->tab_ui)
+    return NULL;
+  if (ws_idx >= state->tab_ui_ws_capacity || !state->tab_ui[ws_idx])
+    return NULL;
+  if (tab_idx >= state->tab_ui_capacity[ws_idx])
     return NULL;
   return &state->tab_ui[ws_idx][tab_idx];
 }
+
+/* Ensure UITabState capacity for a workspace/tab - call before accessing */
+bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx);
 
 /* Macro shortcut for current tab UI state */
 #define TUI_TAB_UI(state) tui_current_tab_ui(state)

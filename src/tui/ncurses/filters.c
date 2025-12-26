@@ -5,14 +5,26 @@
  * Core filter logic (filters_init, filters_add, filters_build_where, etc.)
  * is in core/filters.c. This file contains only TUI-specific code.
  *
+ * Uses VmTable for schema access where applicable.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
+#include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Helper to get VmTable, returns NULL if not valid */
+static VmTable *get_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  if (!vm_table_valid(state->vm_table))
+    return NULL;
+  return state->vm_table;
+}
 
 /* Maximum number of visible filter rows in panel */
 #define MAX_VISIBLE_FILTERS 8
@@ -128,11 +140,17 @@ void tui_draw_filters_panel(TuiState *state) {
         state->filters_focused && (state->filters_cursor_row == filter_idx);
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
 
-    /* Column name */
+    /* Column name - use VmTable if available */
     const char *col_name = is_raw ? "(RAW)" : "???";
-    if (!is_raw && state->schema &&
-        cf->column_index < state->schema->num_columns) {
-      col_name = state->schema->columns[cf->column_index].name;
+    if (!is_raw) {
+      VmTable *vm = get_vm_table(state);
+      if (vm) {
+        const char *name = vm_table_column_name(vm, cf->column_index);
+        if (name)
+          col_name = name;
+      } else if (state->schema && cf->column_index < state->schema->num_columns) {
+        col_name = state->schema->columns[cf->column_index].name;
+      }
     }
 
     /* Column field */
@@ -211,10 +229,12 @@ void tui_draw_filters_panel(TuiState *state) {
  * Returns FILTER_COL_RAW (SIZE_MAX) if RAW is selected */
 static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
                                     size_t filter_row) {
-  if (!state || !state->schema || state->schema->num_columns == 0)
+  /* Get schema via VmTable if available, fallback to state->schema */
+  VmTable *vm = get_vm_table(state);
+  const TableSchema *schema = vm ? vm_table_schema(vm) : state->schema;
+  if (!state || !schema || schema->num_columns == 0)
     return -1;
 
-  TableSchema *schema = state->schema;
   size_t num_cols = schema->num_columns;
   size_t total_items = num_cols + 1; /* +1 for RAW */
 

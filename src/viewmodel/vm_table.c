@@ -232,6 +232,10 @@ const DbValue *vm_table_cell(const VmTable *vm, size_t row, size_t col) {
   if (!data->rows || !data->rows[row].cells)
     return NULL;
 
+  /* Validate column index against actual cell count in this row */
+  if (col >= data->rows[row].num_cells)
+    return NULL;
+
   return &data->rows[row].cells[col];
 }
 
@@ -1040,7 +1044,7 @@ void vm_table_recalc_column_widths(VmTable *vm) {
 
     /* Check data widths */
     for (size_t r = 0; r < data->num_rows && r < 100; r++) {
-      if (!data->rows[r].cells)
+      if (!data->rows[r].cells || c >= data->rows[r].num_cells)
         continue;
 
       const DbValue *val = &data->rows[r].cells[c];

@@ -15,6 +15,82 @@
 #define DEFAULT_PAGE_SIZE 500
 
 /* ============================================================================
+ * Dynamic Array Helpers
+ * ============================================================================
+ */
+
+/* Grow tabs array if needed, returns true on success */
+static bool workspace_ensure_tab_capacity(Workspace *ws) {
+  if (!ws)
+    return false;
+
+  if (ws->num_tabs < ws->tab_capacity)
+    return true; /* Already have capacity */
+
+  size_t new_capacity = ws->tab_capacity == 0 ? INITIAL_TAB_CAPACITY
+                                              : ws->tab_capacity * 2;
+  Tab *new_tabs = realloc(ws->tabs, new_capacity * sizeof(Tab));
+  if (!new_tabs)
+    return false;
+
+  /* Zero new entries */
+  memset(&new_tabs[ws->tab_capacity], 0,
+         (new_capacity - ws->tab_capacity) * sizeof(Tab));
+
+  ws->tabs = new_tabs;
+  ws->tab_capacity = new_capacity;
+  return true;
+}
+
+/* Grow connections array if needed, returns true on success */
+static bool app_ensure_connection_capacity(AppState *app) {
+  if (!app)
+    return false;
+
+  if (app->num_connections < app->connection_capacity)
+    return true;
+
+  size_t new_capacity = app->connection_capacity == 0
+                            ? INITIAL_CONNECTION_CAPACITY
+                            : app->connection_capacity * 2;
+  Connection *new_conns =
+      realloc(app->connections, new_capacity * sizeof(Connection));
+  if (!new_conns)
+    return false;
+
+  memset(&new_conns[app->connection_capacity], 0,
+         (new_capacity - app->connection_capacity) * sizeof(Connection));
+
+  app->connections = new_conns;
+  app->connection_capacity = new_capacity;
+  return true;
+}
+
+/* Grow workspaces array if needed, returns true on success */
+static bool app_ensure_workspace_capacity(AppState *app) {
+  if (!app)
+    return false;
+
+  if (app->num_workspaces < app->workspace_capacity)
+    return true;
+
+  size_t new_capacity = app->workspace_capacity == 0
+                            ? INITIAL_WORKSPACE_CAPACITY
+                            : app->workspace_capacity * 2;
+  Workspace *new_ws =
+      realloc(app->workspaces, new_capacity * sizeof(Workspace));
+  if (!new_ws)
+    return false;
+
+  memset(&new_ws[app->workspace_capacity], 0,
+         (new_capacity - app->workspace_capacity) * sizeof(Workspace));
+
+  app->workspaces = new_ws;
+  app->workspace_capacity = new_capacity;
+  return true;
+}
+
+/* ============================================================================
  * Tab Lifecycle
  * ============================================================================
  */
@@ -81,7 +157,10 @@ Tab *workspace_current_tab(Workspace *ws) {
 
 Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
                                 size_t table_index, const char *table_name) {
-  if (!ws || ws->num_tabs >= MAX_TABS || !table_name)
+  if (!ws || !table_name)
+    return NULL;
+
+  if (!workspace_ensure_tab_capacity(ws))
     return NULL;
 
   size_t new_idx = ws->num_tabs;
@@ -106,7 +185,10 @@ Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
 }
 
 Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index) {
-  if (!ws || ws->num_tabs >= MAX_TABS)
+  if (!ws)
+    return NULL;
+
+  if (!workspace_ensure_tab_capacity(ws))
     return NULL;
 
   size_t new_idx = ws->num_tabs;
@@ -189,6 +271,12 @@ void workspace_init(Workspace *ws) {
   if (!ws)
     return;
   memset(ws, 0, sizeof(Workspace));
+
+  /* Allocate initial tabs array */
+  ws->tabs = calloc(INITIAL_TAB_CAPACITY, sizeof(Tab));
+  if (ws->tabs) {
+    ws->tab_capacity = INITIAL_TAB_CAPACITY;
+  }
 }
 
 void workspace_free_data(Workspace *ws) {
@@ -196,8 +284,11 @@ void workspace_free_data(Workspace *ws) {
     return;
 
   /* Free all tabs */
-  for (size_t i = 0; i < ws->num_tabs; i++) {
-    tab_free_data(&ws->tabs[i]);
+  if (ws->tabs) {
+    for (size_t i = 0; i < ws->num_tabs; i++) {
+      tab_free_data(&ws->tabs[i]);
+    }
+    free(ws->tabs);
   }
 
   memset(ws, 0, sizeof(Workspace));
@@ -212,7 +303,10 @@ Workspace *app_current_workspace(AppState *app) {
 }
 
 Workspace *app_create_workspace(AppState *app) {
-  if (!app || app->num_workspaces >= MAX_WORKSPACES)
+  if (!app)
+    return NULL;
+
+  if (!app_ensure_workspace_capacity(app))
     return NULL;
 
   size_t new_idx = app->num_workspaces;
@@ -306,7 +400,10 @@ void connection_free_data(Connection *conn) {
 
 Connection *app_add_connection(AppState *app, DbConnection *db_conn,
                                const char *connstr) {
-  if (!app || app->num_connections >= MAX_CONNECTIONS)
+  if (!app)
+    return NULL;
+
+  if (!app_ensure_connection_capacity(app))
     return NULL;
 
   size_t new_idx = app->num_connections;
@@ -401,6 +498,17 @@ void app_state_init(AppState *app) {
   app->page_size = DEFAULT_PAGE_SIZE;
   app->header_visible = true;
   app->status_visible = true;
+
+  /* Allocate initial dynamic arrays */
+  app->connections = calloc(INITIAL_CONNECTION_CAPACITY, sizeof(Connection));
+  if (app->connections) {
+    app->connection_capacity = INITIAL_CONNECTION_CAPACITY;
+  }
+
+  app->workspaces = calloc(INITIAL_WORKSPACE_CAPACITY, sizeof(Workspace));
+  if (app->workspaces) {
+    app->workspace_capacity = INITIAL_WORKSPACE_CAPACITY;
+  }
 }
 
 void app_state_cleanup(AppState *app) {
@@ -408,13 +516,19 @@ void app_state_cleanup(AppState *app) {
     return;
 
   /* Close all connections */
-  for (size_t i = 0; i < app->num_connections; i++) {
-    connection_free_data(&app->connections[i]);
+  if (app->connections) {
+    for (size_t i = 0; i < app->num_connections; i++) {
+      connection_free_data(&app->connections[i]);
+    }
+    free(app->connections);
   }
 
   /* Free all workspaces */
-  for (size_t i = 0; i < app->num_workspaces; i++) {
-    workspace_free_data(&app->workspaces[i]);
+  if (app->workspaces) {
+    for (size_t i = 0; i < app->num_workspaces; i++) {
+      workspace_free_data(&app->workspaces[i]);
+    }
+    free(app->workspaces);
   }
 
   memset(app, 0, sizeof(AppState));

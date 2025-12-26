@@ -21,6 +21,15 @@
  * ============================================================================
  */
 
+/* Helper to get VmTable, returns NULL if not valid for table navigation */
+static VmTable *get_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  if (!vm_table_valid(state->vm_table))
+    return NULL;
+  return state->vm_table;
+}
+
 /* Check if tab has active filters (filters that affect the query) */
 static bool has_active_filters(Tab *tab) {
   if (!tab || tab->filters.num_filters == 0)
@@ -548,17 +557,16 @@ void tui_draw_status(TuiState *state) {
  * ============================================================================
  */
 
-bool tui_handle_mouse_event(TuiState *state) {
-  MEVENT event;
-  if (getmouse(&event) != OK)
+bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
+  if (!event || event->type != UI_EVENT_MOUSE)
     return false;
 
-  int mouse_y = event.y;
-  int mouse_x = event.x;
-  bool is_double = (event.bstate & BUTTON1_DOUBLE_CLICKED) != 0;
-  bool is_click = (event.bstate & BUTTON1_CLICKED) != 0;
-  bool is_scroll_up = (event.bstate & BUTTON4_PRESSED) != 0;
-  bool is_scroll_down = (event.bstate & BUTTON5_PRESSED) != 0;
+  int mouse_y = event->mouse.y;
+  int mouse_x = event->mouse.x;
+  bool is_double = (event->mouse.action == UI_MOUSE_DOUBLE_CLICK);
+  bool is_click = (event->mouse.action == UI_MOUSE_CLICK);
+  bool is_scroll_up = (event->mouse.button == UI_MOUSE_SCROLL_UP);
+  bool is_scroll_down = (event->mouse.button == UI_MOUSE_SCROLL_DOWN);
 
   /* Determine click location */
   int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
@@ -593,21 +601,27 @@ bool tui_handle_mouse_event(TuiState *state) {
         }
       }
 
-      /* Handle table data scrolling */
-      if (state->data && state->data->num_rows > 0) {
+      /* Handle table data scrolling via VmTable */
+      VmTable *scroll_vm = get_vm_table(state);
+      if (scroll_vm) {
+        size_t cursor_row, cursor_col;
+        vm_table_get_cursor(scroll_vm, &cursor_row, &cursor_col);
+        size_t scroll_row, scroll_col;
+        vm_table_get_scroll(scroll_vm, &scroll_row, &scroll_col);
+        size_t loaded_rows = vm_table_row_count(scroll_vm);
+
         if (is_scroll_up) {
           /* Scroll up - move cursor up */
-          if (state->cursor_row >= (size_t)scroll_amount) {
-            state->cursor_row -= scroll_amount;
+          if (cursor_row >= (size_t)scroll_amount) {
+            cursor_row -= scroll_amount;
           } else {
-            state->cursor_row = 0;
+            cursor_row = 0;
           }
         } else {
           /* Scroll down - move cursor down */
-          state->cursor_row += scroll_amount;
-          if (state->cursor_row >= state->data->num_rows) {
-            state->cursor_row =
-                state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
+          cursor_row += scroll_amount;
+          if (cursor_row >= loaded_rows) {
+            cursor_row = loaded_rows > 0 ? loaded_rows - 1 : 0;
           }
         }
 
@@ -619,12 +633,19 @@ bool tui_handle_mouse_event(TuiState *state) {
         int visible_rows = main_rows - 3; /* Minus header rows in main window */
         if (visible_rows < 1)
           visible_rows = 1;
-        if (state->cursor_row < state->scroll_row) {
-          state->scroll_row = state->cursor_row;
-        } else if (state->cursor_row >=
-                   state->scroll_row + (size_t)visible_rows) {
-          state->scroll_row = state->cursor_row - visible_rows + 1;
+        if (cursor_row < scroll_row) {
+          scroll_row = cursor_row;
+        } else if (cursor_row >= scroll_row + (size_t)visible_rows) {
+          scroll_row = cursor_row - visible_rows + 1;
         }
+
+        /* Update via viewmodel */
+        vm_table_set_cursor(scroll_vm, cursor_row, cursor_col);
+        vm_table_set_scroll(scroll_vm, scroll_row, scroll_col);
+
+        /* Sync to compatibility layer (temporary) */
+        state->cursor_row = cursor_row;
+        state->scroll_row = scroll_row;
 
         /* Check if we need to load more rows (pagination) */
         tui_check_load_more(state);
@@ -897,8 +918,16 @@ bool tui_handle_mouse_event(TuiState *state) {
       tui_confirm_edit(state);
     }
 
-    if (!state->data || state->data->num_rows == 0) {
+    /* Use VmTable for cursor/scroll access */
+    VmTable *click_vm = get_vm_table(state);
+    if (!click_vm) {
       return true; /* No data to select, but filter is deactivated */
+    }
+
+    size_t loaded_rows = vm_table_row_count(click_vm);
+    size_t num_cols = vm_table_col_count(click_vm);
+    if (loaded_rows == 0 || num_cols == 0) {
+      return true;
     }
 
     /* Get actual main window dimensions */
@@ -916,16 +945,19 @@ bool tui_handle_mouse_event(TuiState *state) {
     int clicked_data_row = rel_y - data_start_y;
 
     if (clicked_data_row >= 0) {
-      /* Calculate which row was clicked */
-      size_t target_row = state->scroll_row + (size_t)clicked_data_row;
+      /* Get current scroll position */
+      size_t scroll_row, scroll_col;
+      vm_table_get_scroll(click_vm, &scroll_row, &scroll_col);
 
-      if (target_row < state->data->num_rows) {
+      /* Calculate which row was clicked */
+      size_t target_row = scroll_row + (size_t)clicked_data_row;
+
+      if (target_row < loaded_rows) {
         /* Calculate which column was clicked */
         int x_pos = 1; /* Data starts at x=1 */
-        size_t target_col = state->scroll_col;
+        size_t target_col = scroll_col;
 
-        for (size_t col = state->scroll_col; col < state->data->num_columns;
-             col++) {
+        for (size_t col = scroll_col; col < num_cols; col++) {
           int width = tui_get_column_width(state, col);
           if (rel_x >= x_pos && rel_x < x_pos + width) {
             target_col = col;
@@ -937,8 +969,11 @@ bool tui_handle_mouse_event(TuiState *state) {
           target_col = col + 1;
         }
 
-        if (target_col < state->data->num_columns) {
-          /* Update cursor position */
+        if (target_col < num_cols) {
+          /* Update cursor position via viewmodel */
+          vm_table_set_cursor(click_vm, target_row, target_col);
+
+          /* Sync to compatibility layer (temporary) */
           state->cursor_row = target_row;
           state->cursor_col = target_col;
           state->sidebar_focused = false;

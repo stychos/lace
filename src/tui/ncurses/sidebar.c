@@ -2,13 +2,27 @@
  * Lace
  * Sidebar rendering and input handling
  *
+ * During ViewModel migration, TuiState is the source of truth for sidebar
+ * state (filter, scroll, highlight). VmSidebar is available for future native
+ * GUI use but some state isn't fully synced yet.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
+#include "../../viewmodel/vm_sidebar.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
+
+/* Helper to get VmSidebar, returns NULL if not valid */
+static VmSidebar *get_vm_sidebar(TuiState *state) {
+  if (!state || !state->vm_sidebar)
+    return NULL;
+  if (!vm_sidebar_valid(state->vm_sidebar))
+    return NULL;
+  return state->vm_sidebar;
+}
 
 /*
  * Count filtered tables.
@@ -20,6 +34,13 @@
 size_t tui_count_filtered_tables(TuiState *state) {
   if (!state)
     return 0;
+
+  /* Try VmSidebar first (for future cross-platform consistency) */
+  VmSidebar *vm = get_vm_sidebar(state);
+  if (vm && state->sidebar_filter_len == 0) {
+    /* VmSidebar can be used when no filter is active (unfiltered count) */
+    return vm_sidebar_total_count(vm);
+  }
 
   if (state->sidebar_filter_len == 0)
     return state->num_tables;

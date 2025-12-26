@@ -2,15 +2,27 @@
  * Lace
  * Pagination and data loading
  *
+ * Uses VmTable for cursor/scroll state access where applicable.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
 #include "../../async/async.h"
+#include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Helper to get VmTable, returns NULL if not valid */
+static VmTable *get_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  if (!vm_table_valid(state->vm_table))
+    return NULL;
+  return state->vm_table;
+}
 
 /* Calculate column widths based on data */
 void tui_calculate_column_widths(TuiState *state) {
@@ -260,12 +272,27 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     tab->total_rows = state->total_rows;
     tab->loaded_offset = state->loaded_offset;
     tab->loaded_count = state->loaded_count;
+    /* Sync cursor/scroll to tab so VmTable reads correct values */
+    tab->cursor_row = state->cursor_row;
+    tab->cursor_col = state->cursor_col;
+    tab->scroll_row = state->scroll_row;
+    tab->scroll_col = state->scroll_col;
   }
 
   /* Clear any previous status message so column info is shown */
   free(state->status_msg);
   state->status_msg = NULL;
   state->status_is_error = false;
+
+  /* Bind VmTable to the current tab so navigation functions work */
+  if (tab && tab->type == TAB_TYPE_TABLE) {
+    if (!state->vm_table) {
+      state->vm_table = vm_table_create(state->app, tab, NULL);
+    } else {
+      vm_table_bind(state->vm_table, tab);
+    }
+  }
+
   return true;
 }
 
@@ -581,9 +608,31 @@ bool tui_load_prev_rows(TuiState *state) {
   state->data->rows = new_rows;
   state->data->num_rows = new_count;
 
+  /* Get current cursor/scroll from VmTable if available */
+  size_t cursor_row = state->cursor_row;
+  size_t scroll_row = state->scroll_row;
+  VmTable *vm = get_vm_table(state);
+  if (vm) {
+    vm_table_get_cursor(vm, &cursor_row, NULL);
+    vm_table_get_scroll(vm, &scroll_row, NULL);
+  }
+
   /* Adjust cursor position (it's now offset by the prepended rows) */
-  state->cursor_row += more->num_rows;
-  state->scroll_row += more->num_rows;
+  cursor_row += more->num_rows;
+  scroll_row += more->num_rows;
+
+  /* Update via viewmodel if available */
+  if (vm) {
+    size_t cursor_col, scroll_col;
+    vm_table_get_cursor(vm, NULL, &cursor_col);
+    vm_table_get_scroll(vm, NULL, &scroll_col);
+    vm_table_set_cursor(vm, cursor_row, cursor_col);
+    vm_table_set_scroll(vm, scroll_row, scroll_col);
+  }
+
+  /* Sync to compatibility layer */
+  state->cursor_row = cursor_row;
+  state->scroll_row = scroll_row;
 
   /* Update tracking */
   state->loaded_offset = new_offset;
@@ -608,8 +657,17 @@ void tui_trim_loaded_data(TuiState *state) {
   if (state->loaded_count <= max_rows)
     return;
 
+  /* Get cursor position from VmTable if available */
+  size_t cursor_row = state->cursor_row;
+  size_t scroll_row = state->scroll_row;
+  VmTable *vm = get_vm_table(state);
+  if (vm) {
+    vm_table_get_cursor(vm, &cursor_row, NULL);
+    vm_table_get_scroll(vm, &scroll_row, NULL);
+  }
+
   /* Calculate cursor's page within loaded data */
-  size_t cursor_page = state->cursor_row / PAGE_SIZE;
+  size_t cursor_page = cursor_row / PAGE_SIZE;
   size_t total_pages = (state->loaded_count + PAGE_SIZE - 1) / PAGE_SIZE;
 
   /* Determine pages to keep: TRIM_DISTANCE_PAGES on each side of cursor */
@@ -681,17 +739,30 @@ void tui_trim_loaded_data(TuiState *state) {
   state->data->num_rows = new_count;
 
   /* Adjust cursor and scroll positions */
-  if (state->cursor_row >= trim_start) {
-    state->cursor_row -= trim_start;
+  if (cursor_row >= trim_start) {
+    cursor_row -= trim_start;
   } else {
-    state->cursor_row = 0;
+    cursor_row = 0;
   }
 
-  if (state->scroll_row >= trim_start) {
-    state->scroll_row -= trim_start;
+  if (scroll_row >= trim_start) {
+    scroll_row -= trim_start;
   } else {
-    state->scroll_row = 0;
+    scroll_row = 0;
   }
+
+  /* Update via viewmodel if available */
+  if (vm) {
+    size_t cursor_col, scroll_col;
+    vm_table_get_cursor(vm, NULL, &cursor_col);
+    vm_table_get_scroll(vm, NULL, &scroll_col);
+    vm_table_set_cursor(vm, cursor_row, cursor_col);
+    vm_table_set_scroll(vm, scroll_row, scroll_col);
+  }
+
+  /* Sync to compatibility layer */
+  state->cursor_row = cursor_row;
+  state->scroll_row = scroll_row;
 
   /* Update tracking */
   state->loaded_offset += trim_start;
@@ -708,9 +779,16 @@ void tui_check_load_more(TuiState *state) {
   if (tab && tab->bg_load_op != NULL)
     return;
 
+  /* Get cursor position from VmTable if available */
+  size_t cursor_row = state->cursor_row;
+  VmTable *vm = get_vm_table(state);
+  if (vm) {
+    vm_table_get_cursor(vm, &cursor_row, NULL);
+  }
+
   /* If cursor is within LOAD_THRESHOLD of the END, load more at end */
-  size_t rows_from_end = state->data->num_rows > state->cursor_row
-                             ? state->data->num_rows - state->cursor_row
+  size_t rows_from_end = state->data->num_rows > cursor_row
+                             ? state->data->num_rows - cursor_row
                              : 0;
 
   if (rows_from_end < LOAD_THRESHOLD) {
@@ -722,7 +800,7 @@ void tui_check_load_more(TuiState *state) {
   }
 
   /* If cursor is within LOAD_THRESHOLD of the BEGINNING, load previous rows */
-  if (state->cursor_row < LOAD_THRESHOLD && state->loaded_offset > 0) {
+  if (cursor_row < LOAD_THRESHOLD && state->loaded_offset > 0) {
     tui_load_prev_rows(state);
   }
 }
@@ -787,9 +865,31 @@ static bool merge_page_result(TuiState *state, ResultSet *new_data,
     state->data->rows = new_rows;
     state->data->num_rows = new_count;
 
+    /* Get current cursor/scroll from VmTable if available */
+    size_t cursor_row = state->cursor_row;
+    size_t scroll_row = state->scroll_row;
+    VmTable *vm = get_vm_table(state);
+    if (vm) {
+      vm_table_get_cursor(vm, &cursor_row, NULL);
+      vm_table_get_scroll(vm, &scroll_row, NULL);
+    }
+
     /* Adjust cursor and scroll positions */
-    state->cursor_row += new_data->num_rows;
-    state->scroll_row += new_data->num_rows;
+    cursor_row += new_data->num_rows;
+    scroll_row += new_data->num_rows;
+
+    /* Update via viewmodel if available */
+    if (vm) {
+      size_t cursor_col, scroll_col;
+      vm_table_get_cursor(vm, NULL, &cursor_col);
+      vm_table_get_scroll(vm, NULL, &scroll_col);
+      vm_table_set_cursor(vm, cursor_row, cursor_col);
+      vm_table_set_scroll(vm, scroll_row, scroll_col);
+    }
+
+    /* Sync to compatibility layer */
+    state->cursor_row = cursor_row;
+    state->scroll_row = scroll_row;
 
     /* Update offset */
     state->loaded_offset -= new_data->num_rows;
@@ -1301,11 +1401,18 @@ void tui_check_speculative_prefetch(TuiState *state) {
   if (tab->type != TAB_TYPE_TABLE)
     return;
 
+  /* Get cursor position from VmTable if available */
+  size_t cursor_row = state->cursor_row;
+  VmTable *vm = get_vm_table(state);
+  if (vm) {
+    vm_table_get_cursor(vm, &cursor_row, NULL);
+  }
+
   /* Calculate distance from edges */
-  size_t rows_from_end = state->data->num_rows > state->cursor_row
-                             ? state->data->num_rows - state->cursor_row
+  size_t rows_from_end = state->data->num_rows > cursor_row
+                             ? state->data->num_rows - cursor_row
                              : 0;
-  size_t rows_from_start = state->cursor_row;
+  size_t rows_from_start = cursor_row;
 
   /* Prefetch forward when within PREFETCH_THRESHOLD of end */
   size_t loaded_end = state->loaded_offset + state->loaded_count;

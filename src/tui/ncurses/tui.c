@@ -17,6 +17,92 @@
 #include <time.h>
 #include <unistd.h>
 
+/* ============================================================================
+ * UITabState Dynamic Array Management
+ * ============================================================================
+ */
+
+#define INITIAL_TAB_UI_WS_CAPACITY 4
+#define INITIAL_TAB_UI_TAB_CAPACITY 8
+
+bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx) {
+  if (!state)
+    return false;
+
+  /* Ensure workspace dimension capacity */
+  if (ws_idx >= state->tab_ui_ws_capacity) {
+    size_t new_ws_cap = state->tab_ui_ws_capacity == 0
+                            ? INITIAL_TAB_UI_WS_CAPACITY
+                            : state->tab_ui_ws_capacity * 2;
+    while (new_ws_cap <= ws_idx)
+      new_ws_cap *= 2;
+
+    UITabState **new_tab_ui =
+        realloc(state->tab_ui, new_ws_cap * sizeof(UITabState *));
+    if (!new_tab_ui)
+      return false;
+
+    size_t *new_capacity =
+        realloc(state->tab_ui_capacity, new_ws_cap * sizeof(size_t));
+    if (!new_capacity) {
+      state->tab_ui = new_tab_ui; /* Keep the expanded array */
+      return false;
+    }
+
+    /* Zero new entries */
+    for (size_t i = state->tab_ui_ws_capacity; i < new_ws_cap; i++) {
+      new_tab_ui[i] = NULL;
+      new_capacity[i] = 0;
+    }
+
+    state->tab_ui = new_tab_ui;
+    state->tab_ui_capacity = new_capacity;
+    state->tab_ui_ws_capacity = new_ws_cap;
+  }
+
+  /* Ensure tab dimension capacity for this workspace */
+  if (!state->tab_ui[ws_idx] || tab_idx >= state->tab_ui_capacity[ws_idx]) {
+    size_t old_cap = state->tab_ui_capacity[ws_idx];
+    size_t new_tab_cap =
+        old_cap == 0 ? INITIAL_TAB_UI_TAB_CAPACITY : old_cap * 2;
+    while (new_tab_cap <= tab_idx)
+      new_tab_cap *= 2;
+
+    UITabState *new_tabs =
+        realloc(state->tab_ui[ws_idx], new_tab_cap * sizeof(UITabState));
+    if (!new_tabs)
+      return false;
+
+    /* Zero new entries */
+    memset(&new_tabs[old_cap], 0, (new_tab_cap - old_cap) * sizeof(UITabState));
+
+    state->tab_ui[ws_idx] = new_tabs;
+    state->tab_ui_capacity[ws_idx] = new_tab_cap;
+  }
+
+  return true;
+}
+
+/* Free all UITabState arrays */
+static void tui_free_tab_ui(TuiState *state) {
+  if (!state || !state->tab_ui)
+    return;
+
+  for (size_t ws = 0; ws < state->tab_ui_ws_capacity; ws++) {
+    if (state->tab_ui[ws]) {
+      for (size_t tab = 0; tab < state->tab_ui_capacity[ws]; tab++) {
+        free(state->tab_ui[ws][tab].query_result_edit_buf);
+      }
+      free(state->tab_ui[ws]);
+    }
+  }
+  free(state->tab_ui);
+  free(state->tab_ui_capacity);
+  state->tab_ui = NULL;
+  state->tab_ui_capacity = NULL;
+  state->tab_ui_ws_capacity = 0;
+}
+
 /*
  * Sanitize string for single-line cell display.
  * Replaces newlines, tabs, and control characters with safe alternatives.
@@ -74,6 +160,14 @@ void tui_sync_from_app(TuiState *state) {
     return;
 
   AppState *app = state->app;
+
+  /* Ensure UITabState capacity for current workspace/tab */
+  size_t ws_idx = app->current_workspace;
+  Workspace *ws = app_current_workspace(app);
+  if (ws && ws->num_tabs > 0) {
+    size_t tab_idx = ws->current_tab;
+    tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx);
+  }
 
   /* Track layout changes for window recreation */
   bool old_sidebar_visible = state->sidebar_visible;
@@ -652,13 +746,8 @@ void tui_cleanup(TuiState *state) {
   vm_app_destroy(state->vm_app);
   state->vm_app = NULL;
 
-  /* Free UITabState allocated memory */
-  for (size_t ws = 0; ws < MAX_WORKSPACES; ws++) {
-    for (size_t tab = 0; tab < MAX_TABS; tab++) {
-      free(state->tab_ui[ws][tab].query_result_edit_buf);
-      state->tab_ui[ws][tab].query_result_edit_buf = NULL;
-    }
-  }
+  /* Free UITabState dynamic arrays */
+  tui_free_tab_ui(state);
 
   /* Free status message */
   free(state->status_msg);
@@ -803,6 +892,11 @@ bool tui_connect(TuiState *state, const char *connstr) {
     const char *first_table = state->tables[0];
     Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
     if (tab) {
+      /* Ensure UITabState capacity before accessing */
+      size_t ws_idx = state->app->current_workspace;
+      size_t tab_idx = ws->current_tab;
+      tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx);
+
       /* Initialize UITabState for new tab with defaults */
       UITabState *ui = TUI_TAB_UI(state);
       if (ui) {
@@ -1136,7 +1230,7 @@ void tui_run(TuiState *state) {
 
     /* Handle mouse events first - they should work regardless of mode */
     if (event.type == UI_EVENT_MOUSE) {
-      if (tui_handle_mouse_event(state)) {
+      if (tui_handle_mouse_event(state, &event)) {
         tui_refresh(state);
       }
       continue;

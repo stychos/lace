@@ -207,8 +207,8 @@ typedef struct {
 /* Draw a result set grid (used by table view and query results) */
 void tui_draw_result_grid(TuiState *state, GridDrawParams *params);
 
-/* Handle mouse events */
-bool tui_handle_mouse_event(TuiState *state);
+/* Handle mouse events (using pre-translated UiEvent) */
+bool tui_handle_mouse_event(TuiState *state, const UiEvent *event);
 
 /* ============================================================================
  * Dialog functions (dialogs.c)

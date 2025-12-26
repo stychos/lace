@@ -55,7 +55,7 @@ STREETS = ["Main St", "Oak Ave", "Pine Rd", "Maple Dr", "Cedar Ln", "Elm St", "W
 CITIES = ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia", "San Antonio",
           "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville", "Fort Worth", "Columbus",
           "San Francisco", "Charlotte", "Indianapolis", "Seattle", "Denver", "Boston", "Portland",
-          "Moscow", "Saint Petersburg", "Kyiv", "London", "Paris", "Berlin", "Tokyo", "Sydney"]
+          "Moscow", "Saint Petersburg", "Tiraspol", "London", "Paris", "Berlin", "Tokyo", "Sydney"]
 
 COUNTRIES = ["Russia", "Greece", "Italy", "USA", "UK", "Canada", "Germany", "France", "Australia", "Japan"]
 

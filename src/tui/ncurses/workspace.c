@@ -81,6 +81,11 @@ void tab_restore(TuiState *state) {
       state->conn = conn->conn;
       state->tables = conn->tables;
       state->num_tables = conn->num_tables;
+    } else {
+      /* Connection invalid - clear stale pointers to prevent use-after-free */
+      state->conn = NULL;
+      state->tables = NULL;
+      state->num_tables = 0;
     }
   }
 
@@ -229,11 +234,6 @@ bool tab_create(TuiState *state, size_t table_index) {
       return false;
   }
 
-  if (ws->num_tabs >= MAX_TABS) {
-    tui_set_error(state, "Maximum %d tabs reached", MAX_TABS);
-    return false;
-  }
-
   /* Get connection index - use current tab's connection if available */
   size_t connection_index = 0;
   Tab *current_tab = TUI_TAB(state);
@@ -253,6 +253,10 @@ bool tab_create(TuiState *state, size_t table_index) {
     tui_set_error(state, "Failed to create tab");
     return false;
   }
+
+  /* Ensure UITabState capacity for new tab */
+  tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                             ws->current_tab);
 
   /* Initialize UITabState for new tab (now source of truth) */
   UITabState *ui = TUI_TAB_UI(state);
@@ -373,8 +377,8 @@ void tui_draw_tabs(TuiState *state) {
     }
   }
 
-  /* Show hint for new tab if space and sidebar visible */
-  if (ws->num_tabs < MAX_TABS && state->sidebar_focused) {
+  /* Show hint for new tab if sidebar visible */
+  if (state->sidebar_focused) {
     const char *hint = "[+] New tab";
     int hint_len = (int)strlen(hint);
     if (state->term_cols - x > hint_len + 2) {

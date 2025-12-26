@@ -2,6 +2,9 @@
  * Lace
  * Cell editing and row deletion
  *
+ * Uses VmTable for data access where possible.
+ * TUI-specific code remains for ncurses dialogs and confirmation UI.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
@@ -12,6 +15,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Helper to get VmTable, returns NULL if not valid for editing */
+static VmTable *get_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  if (!vm_table_valid(state->vm_table))
+    return NULL;
+  return state->vm_table;
+}
+
 /* Primary key info for database operations */
 typedef struct {
   const char **col_names; /* Array of PK column names (not owned) */
@@ -19,15 +31,23 @@ typedef struct {
   size_t count;           /* Number of PK columns */
 } PkInfo;
 
-/* Find all primary key column indices */
+/* Find all primary key column indices using VmTable */
 size_t tui_find_pk_columns(TuiState *state, size_t *pk_indices,
                            size_t max_pks) {
-  if (!state || !state->schema || !pk_indices || max_pks == 0)
+  if (!pk_indices || max_pks == 0)
+    return 0;
+
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
+    return 0;
+
+  const TableSchema *schema = vm_table_schema(vm);
+  if (!schema)
     return 0;
 
   size_t count = 0;
-  for (size_t i = 0; i < state->schema->num_columns && count < max_pks; i++) {
-    if (state->schema->columns[i].primary_key) {
+  for (size_t i = 0; i < schema->num_columns && count < max_pks; i++) {
+    if (schema->columns[i].primary_key) {
       pk_indices[count++] = i;
     }
   }
@@ -102,29 +122,24 @@ void tui_start_edit(TuiState *state) {
   if (!state || state->editing)
     return;
 
-  /*
-   * Use TuiState as source of truth during ViewModel migration.
-   * TuiState has the live cursor position; Tab/VmTable may have stale values.
-   */
-  ResultSet *data = state->data;
-  size_t cursor_row = state->cursor_row;
-  size_t cursor_col = state->cursor_col;
-
-  if (!data)
-    return;
-  if (cursor_row >= data->num_rows)
-    return;
-  if (cursor_col >= data->num_columns)
-    return;
-  if (!data->rows)
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
     return;
 
-  Row *row = &data->rows[cursor_row];
-  if (!row->cells || cursor_col >= row->num_cells)
+  /* Get cursor position from viewmodel */
+  size_t cursor_row, cursor_col;
+  vm_table_get_cursor(vm, &cursor_row, &cursor_col);
+
+  /* Validate bounds */
+  size_t num_rows = vm_table_row_count(vm);
+  size_t num_cols = vm_table_col_count(vm);
+  if (cursor_row >= num_rows || cursor_col >= num_cols)
     return;
 
-  /* Get current cell value */
-  DbValue *val = &row->cells[cursor_col];
+  /* Get current cell value via viewmodel */
+  const DbValue *val = vm_table_cell(vm, cursor_row, cursor_col);
+  if (!val)
+    return;
 
   /* Convert value to string */
   char *content = NULL;
@@ -146,8 +161,8 @@ void tui_start_edit(TuiState *state) {
 
   if (is_truncated || has_newlines) {
     /* Use modal editor for truncated or multi-line content */
-    const char *col_name = data->columns[cursor_col].name;
-    char *title = str_printf("Edit: %s", col_name);
+    const char *col_name = vm_table_column_name(vm, cursor_col);
+    char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
 
     EditorResult result =
         editor_view_show(state, title ? title : "Edit Cell", content, false);
@@ -179,28 +194,24 @@ void tui_start_modal_edit(TuiState *state) {
   if (!state || state->editing)
     return;
 
-  /*
-   * Use TuiState as source of truth during ViewModel migration.
-   */
-  ResultSet *data = state->data;
-  size_t cursor_row = state->cursor_row;
-  size_t cursor_col = state->cursor_col;
-
-  if (!data)
-    return;
-  if (cursor_row >= data->num_rows)
-    return;
-  if (cursor_col >= data->num_columns)
-    return;
-  if (!data->rows)
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
     return;
 
-  Row *row = &data->rows[cursor_row];
-  if (!row->cells || cursor_col >= row->num_cells)
+  /* Get cursor position from viewmodel */
+  size_t cursor_row, cursor_col;
+  vm_table_get_cursor(vm, &cursor_row, &cursor_col);
+
+  /* Validate bounds */
+  size_t num_rows = vm_table_row_count(vm);
+  size_t num_cols = vm_table_col_count(vm);
+  if (cursor_row >= num_rows || cursor_col >= num_cols)
     return;
 
-  /* Get current cell value */
-  DbValue *val = &row->cells[cursor_col];
+  /* Get current cell value via viewmodel */
+  const DbValue *val = vm_table_cell(vm, cursor_row, cursor_col);
+  if (!val)
+    return;
 
   /* Convert value to string */
   char *content = NULL;
@@ -213,8 +224,8 @@ void tui_start_modal_edit(TuiState *state) {
   }
 
   /* Always use modal editor */
-  const char *col_name = data->columns[cursor_col].name;
-  char *title = str_printf("Edit: %s", col_name);
+  const char *col_name = vm_table_column_name(vm, cursor_col);
+  char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
 
   EditorResult result =
       editor_view_show(state, title ? title : "Edit Cell", content, false);
@@ -247,26 +258,45 @@ void tui_cancel_edit(TuiState *state) {
 
 /* Confirm edit and update database */
 void tui_confirm_edit(TuiState *state) {
-  if (!state || !state->editing || !state->data || !state->conn) {
-    tui_cancel_edit(state);
-    return;
-  }
-  if (!state->tables || state->num_tables == 0) {
+  if (!state || !state->editing) {
     tui_cancel_edit(state);
     return;
   }
 
-  /* Build primary key info */
+  VmTable *vm = get_vm_table(state);
+  if (!vm) {
+    tui_cancel_edit(state);
+    return;
+  }
+
+  DbConnection *conn = vm_table_connection(vm);
+  const char *table = vm_table_name(vm);
+  const TableSchema *schema = vm_table_schema(vm);
+
+  if (!conn || !table || !schema) {
+    tui_cancel_edit(state);
+    return;
+  }
+
+  /* Get cursor position from viewmodel */
+  size_t cursor_row, cursor_col;
+  vm_table_get_cursor(vm, &cursor_row, &cursor_col);
+
+  /* Build primary key info - still needs direct data access for PK values */
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, state->data, state->cursor_row, state->schema)) {
+  if (!pk_info_build(&pk, state->data, cursor_row, (TableSchema *)schema)) {
     tui_set_error(state, "Cannot update: no primary key found");
     tui_cancel_edit(state);
     return;
   }
 
-  /* Get the current table name */
-  const char *table = state->tables[state->current_table];
-  const char *col_name = state->data->columns[state->cursor_col].name;
+  /* Get column name from viewmodel */
+  const char *col_name = vm_table_column_name(vm, cursor_col);
+  if (!col_name) {
+    pk_info_free(&pk);
+    tui_cancel_edit(state);
+    return;
+  }
 
   /* Create new value from edit buffer */
   DbValue new_val;
@@ -278,16 +308,21 @@ void tui_confirm_edit(TuiState *state) {
 
   /* Attempt to update */
   char *err = NULL;
-  bool success = db_update_cell(state->conn, table, pk.col_names, pk.values,
+  bool success = db_update_cell(conn, table, pk.col_names, pk.values,
                                 pk.count, col_name, &new_val, &err);
   pk_info_free(&pk);
 
   if (success) {
-    /* Update the local data */
-    DbValue *cell =
-        &state->data->rows[state->cursor_row].cells[state->cursor_col];
-    db_value_free(cell);
-    *cell = new_val;
+    /* Update the local data - still needs direct access for in-place update */
+    if (state->data && cursor_row < state->data->num_rows &&
+        state->data->rows && state->data->rows[cursor_row].cells &&
+        cursor_col < state->data->rows[cursor_row].num_cells) {
+      DbValue *cell = &state->data->rows[cursor_row].cells[cursor_col];
+      db_value_free(cell);
+      *cell = new_val;
+    } else {
+      db_value_free(&new_val);
+    }
     tui_set_status(state, "Cell updated");
   } else {
     db_value_free(&new_val);
@@ -300,47 +335,59 @@ void tui_confirm_edit(TuiState *state) {
 
 /* Set cell value directly (NULL or empty string) */
 void tui_set_cell_direct(TuiState *state, bool set_null) {
-  if (!state || !state->conn)
-    return;
-  if (!state->tables || state->num_tables == 0)
-    return;
-
-  /*
-   * Use TuiState as source of truth during ViewModel migration.
-   */
-  ResultSet *data = state->data;
-  size_t cursor_row = state->cursor_row;
-  size_t cursor_col = state->cursor_col;
-
-  if (!data)
-    return;
-  if (cursor_row >= data->num_rows)
-    return;
-  if (cursor_col >= data->num_columns)
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
     return;
 
-  /* Build primary key info */
+  DbConnection *conn = vm_table_connection(vm);
+  const char *table = vm_table_name(vm);
+  const TableSchema *schema = vm_table_schema(vm);
+
+  if (!conn || !table || !schema)
+    return;
+
+  /* Get cursor position from viewmodel */
+  size_t cursor_row, cursor_col;
+  vm_table_get_cursor(vm, &cursor_row, &cursor_col);
+
+  /* Validate bounds */
+  size_t num_rows = vm_table_row_count(vm);
+  size_t num_cols = vm_table_col_count(vm);
+  if (cursor_row >= num_rows || cursor_col >= num_cols)
+    return;
+
+  /* Build primary key info - still needs direct data access */
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, cursor_row, state->schema)) {
+  if (!pk_info_build(&pk, state->data, cursor_row, (TableSchema *)schema)) {
     tui_set_error(state, "Cannot update: no primary key found");
     return;
   }
 
-  const char *table = state->tables[state->current_table];
-  const char *col_name = data->columns[cursor_col].name;
+  const char *col_name = vm_table_column_name(vm, cursor_col);
+  if (!col_name) {
+    pk_info_free(&pk);
+    return;
+  }
+
   DbValue new_val = set_null ? db_value_null() : db_value_text("");
 
   /* Attempt to update */
   char *err = NULL;
-  bool success = db_update_cell(state->conn, table, pk.col_names, pk.values,
+  bool success = db_update_cell(conn, table, pk.col_names, pk.values,
                                 pk.count, col_name, &new_val, &err);
   pk_info_free(&pk);
 
   if (success) {
-    /* Update the local data */
-    DbValue *cell = &data->rows[cursor_row].cells[cursor_col];
-    db_value_free(cell);
-    *cell = new_val;
+    /* Update the local data - still needs direct access */
+    if (state->data && cursor_row < state->data->num_rows &&
+        state->data->rows && state->data->rows[cursor_row].cells &&
+        cursor_col < state->data->rows[cursor_row].num_cells) {
+      DbValue *cell = &state->data->rows[cursor_row].cells[cursor_col];
+      db_value_free(cell);
+      *cell = new_val;
+    } else {
+      db_value_free(&new_val);
+    }
     tui_set_status(state, set_null ? "Cell set to NULL" : "Cell set to empty");
   } else {
     db_value_free(&new_val);
@@ -351,51 +398,53 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
 
 /* Delete current row */
 void tui_delete_row(TuiState *state) {
-  if (!state || !state->conn)
-    return;
-  if (!state->tables || state->num_tables == 0)
-    return;
-
-  /*
-   * Use TuiState as source of truth during ViewModel migration.
-   */
-  ResultSet *data = state->data;
-  size_t cursor_row = state->cursor_row;
-
-  if (!data)
-    return;
-  if (cursor_row >= data->num_rows)
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
     return;
 
-  /* Build primary key info */
+  DbConnection *conn = vm_table_connection(vm);
+  const char *table = vm_table_name(vm);
+  const TableSchema *schema = vm_table_schema(vm);
+
+  if (!conn || !table || !schema)
+    return;
+
+  /* Get cursor and scroll positions from viewmodel */
+  size_t cursor_row, cursor_col;
+  vm_table_get_cursor(vm, &cursor_row, &cursor_col);
+  size_t scroll_row, scroll_col;
+  vm_table_get_scroll(vm, &scroll_row, &scroll_col);
+
+  size_t num_rows = vm_table_row_count(vm);
+  size_t num_cols = vm_table_col_count(vm);
+  if (cursor_row >= num_rows)
+    return;
+
+  /* Build primary key info - still needs direct data access */
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, cursor_row, state->schema)) {
+  if (!pk_info_build(&pk, state->data, cursor_row, (TableSchema *)schema)) {
     tui_set_error(state, "Cannot delete: no primary key found");
     return;
   }
 
-  const char *table = state->tables[state->current_table];
-
-  /* Highlight the row being deleted with danger background */
+  /* Highlight the row being deleted with danger background (TUI-specific) */
   int win_rows, win_cols;
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_rows;
 
-  /* Use TuiState scroll positions directly */
-  size_t scroll_row = state->scroll_row;
-  size_t scroll_col = state->scroll_col;
-
   int row_y = 3 + (int)(cursor_row - scroll_row);
-  Row *del_row = &data->rows[cursor_row];
   wattron(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   int x = 1;
-  for (size_t col = scroll_col;
-       col < data->num_columns && col < del_row->num_cells; col++) {
+  for (size_t col = scroll_col; col < num_cols; col++) {
     int col_width = tui_get_column_width(state, col);
     if (x + col_width + 3 > win_cols)
       break;
 
-    DbValue *val = &del_row->cells[col];
+    /* Get cell value via viewmodel */
+    const DbValue *val = vm_table_cell(vm, cursor_row, col);
+    if (!val)
+      continue;
+
     if (val->is_null) {
       mvwprintw(state->main_win, row_y, x, "%-*s", col_width, "NULL");
     } else {
@@ -414,7 +463,7 @@ void tui_delete_row(TuiState *state) {
   wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   wrefresh(state->main_win);
 
-  /* Show confirmation dialog */
+  /* Show confirmation dialog (TUI-specific) */
   int height = 7;
   int width = 50;
   int starty = (state->term_rows - height) / 2;
@@ -448,42 +497,57 @@ void tui_delete_row(TuiState *state) {
   }
 
   /* Save position info before delete */
-  size_t abs_row = state->loaded_offset + state->cursor_row;
-  size_t saved_col = state->cursor_col;
-  size_t saved_scroll_col = state->scroll_col;
-  size_t visual_offset = state->cursor_row >= state->scroll_row
-                             ? state->cursor_row - state->scroll_row
-                             : 0;
+  size_t loaded_offset = vm_table_loaded_offset(vm);
+  size_t total_rows = vm_table_total_rows(vm);
+  size_t abs_row = loaded_offset + cursor_row;
+  size_t saved_col = cursor_col;
+  size_t saved_scroll_col = scroll_col;
+  size_t visual_offset = cursor_row >= scroll_row ? cursor_row - scroll_row : 0;
 
   /* Perform the delete */
   char *err = NULL;
-  bool success = db_delete_row(state->conn, table, pk.col_names, pk.values,
-                               pk.count, &err);
+  bool success =
+      db_delete_row(conn, table, pk.col_names, pk.values, pk.count, &err);
   pk_info_free(&pk);
 
   if (success) {
     tui_set_status(state, "Row deleted");
 
-    if (state->total_rows > 0)
-      state->total_rows--;
+    if (total_rows > 0)
+      total_rows--;
 
-    if (abs_row >= state->total_rows && state->total_rows > 0)
-      abs_row = state->total_rows - 1;
+    /* Update compatibility layer total_rows (will be read by reload) */
+    state->total_rows = total_rows;
+
+    if (abs_row >= total_rows && total_rows > 0)
+      abs_row = total_rows - 1;
 
     size_t target_offset = (abs_row / PAGE_SIZE) * PAGE_SIZE;
     tui_load_rows_at(state, target_offset);
 
-    if (state->data && state->data->num_rows > 0) {
-      state->cursor_row = abs_row - state->loaded_offset;
-      if (state->cursor_row >= state->data->num_rows)
-        state->cursor_row = state->data->num_rows - 1;
-      state->cursor_col = saved_col;
-      state->scroll_col = saved_scroll_col;
+    /* Re-read state after reload */
+    num_rows = vm_table_row_count(vm);
 
-      if (state->cursor_row >= visual_offset)
-        state->scroll_row = state->cursor_row - visual_offset;
+    if (num_rows > 0) {
+      loaded_offset = vm_table_loaded_offset(vm);
+      cursor_row = abs_row - loaded_offset;
+      if (cursor_row >= num_rows)
+        cursor_row = num_rows - 1;
+
+      if (cursor_row >= visual_offset)
+        scroll_row = cursor_row - visual_offset;
       else
-        state->scroll_row = 0;
+        scroll_row = 0;
+
+      /* Update via viewmodel */
+      vm_table_set_cursor(vm, cursor_row, saved_col);
+      vm_table_set_scroll(vm, scroll_row, saved_scroll_col);
+
+      /* Sync to compatibility layer (temporary) */
+      state->cursor_row = cursor_row;
+      state->cursor_col = saved_col;
+      state->scroll_row = scroll_row;
+      state->scroll_col = saved_scroll_col;
     }
   } else {
     tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");

@@ -2,6 +2,10 @@
  * Lace
  * Query tab implementation
  *
+ * During ViewModel migration, Tab is the source of truth for query state
+ * (query_text, query_cursor, etc.). VmQuery is available for future native
+ * GUI text editor integration.
+ *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
@@ -14,6 +18,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+
+/* Helper to get VmQuery, returns NULL if not valid */
+static VmQuery *get_vm_query(TuiState *state) {
+  if (!state || !state->vm_query)
+    return NULL;
+  if (!vm_query_valid(state->vm_query))
+    return NULL;
+  return state->vm_query;
+}
 
 #define QUERY_INITIAL_CAPACITY 1024
 #define QUERY_GROWTH_FACTOR 2
@@ -60,11 +73,6 @@ bool tab_create_query(TuiState *state) {
       return false;
   }
 
-  if (ws->num_tabs >= MAX_TABS) {
-    tui_set_error(state, "Maximum %d tabs reached", MAX_TABS);
-    return false;
-  }
-
   /* Get connection index - use current tab's connection if available */
   size_t connection_index = 0;
   Tab *current_tab = TUI_TAB(state);
@@ -94,6 +102,10 @@ bool tab_create_query(TuiState *state) {
   Tab *tab = workspace_create_query_tab(ws, connection_index);
   if (!tab)
     return false;
+
+  /* Ensure UITabState capacity for new tab */
+  tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                             ws->current_tab);
 
   /* Initialize UITabState for new query tab (source of truth) */
   UITabState *ui = TUI_TAB_UI(state);
@@ -598,6 +610,11 @@ static void query_execute(TuiState *state, const char *sql) {
   UITabState *ui = TUI_TAB_UI(state);
   if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return;
+
+  /* Use VmQuery for connection if available (future cross-platform support) */
+  VmQuery *vm = get_vm_query(state);
+  DbConnection *conn = vm ? vm_query_connection(vm) : state->conn;
+  (void)conn; /* Will be used when we fully migrate to viewmodel */
 
   /* Free previous results */
   if (tab->query_results) {

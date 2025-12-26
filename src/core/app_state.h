@@ -16,10 +16,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Limits */
-#define MAX_CONNECTIONS 5
-#define MAX_WORKSPACES 10
-#define MAX_TABS 10
+/* Initial capacities for dynamic arrays */
+#define INITIAL_CONNECTION_CAPACITY 4
+#define INITIAL_WORKSPACE_CAPACITY 4
+#define INITIAL_TAB_CAPACITY 8
 
 /* ============================================================================
  * Filter Types
@@ -167,9 +167,10 @@ typedef struct {
   bool active;   /* Is this workspace active/used */
   char name[64]; /* Optional workspace name for display */
 
-  /* Tabs */
-  Tab tabs[MAX_TABS];
+  /* Tabs (dynamic array) */
+  Tab *tabs;
   size_t num_tabs;
+  size_t tab_capacity;
   size_t current_tab;
 } Workspace;
 
@@ -190,13 +191,15 @@ typedef struct {
   /* Page size for data loading */
   size_t page_size;
 
-  /* Connection pool - independent of workspaces */
-  Connection connections[MAX_CONNECTIONS];
+  /* Connection pool (dynamic array) */
+  Connection *connections;
   size_t num_connections;
+  size_t connection_capacity;
 
-  /* Workspaces - independent of connections */
-  Workspace workspaces[MAX_WORKSPACES];
+  /* Workspaces (dynamic array) */
+  Workspace *workspaces;
   size_t num_workspaces;
+  size_t workspace_capacity;
   size_t current_workspace;
 } AppState;
 
