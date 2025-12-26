@@ -27,6 +27,10 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 ### Build
 
 ```bash
+# Initialize submodules (required for first build)
+git submodule update --init --recursive
+
+# Build
 make
 ```
 
@@ -133,7 +137,7 @@ Binary will be at `build/lace`.
 ## TODO
 
 - [ ] Configuration management
-- [ ] Connection management (saved connections)
+- [x] Connection management (saved connections)
 - [ ] Data adding (insert rows)
 - [ ] Batch operations (bulk delete, export)
 - [ ] Schema management (indexes, keys)
