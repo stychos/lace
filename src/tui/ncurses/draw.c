@@ -246,9 +246,8 @@ void tui_draw_header(TuiState *state) {
   werase(state->header_win);
   wbkgd(state->header_win, COLOR_PAIR(COLOR_HEADER));
 
-  /* Draw connection info: driver://host/database [N] */
+  /* Draw connection info: driver://host:port/database */
   if (state->conn) {
-    Tab *tab = TUI_TAB(state);
     int x = 1;
 
     /* Driver name */
@@ -262,8 +261,9 @@ void tui_draw_header(TuiState *state) {
       mvwprintw(state->header_win, 0, x, "%s", state->conn->host);
       x += (int)strlen(state->conn->host);
       if (state->conn->port > 0) {
+        int port_len = snprintf(NULL, 0, ":%d", state->conn->port);
         mvwprintw(state->header_win, 0, x, ":%d", state->conn->port);
-        x += 6; /* Approximate for port */
+        x += port_len;
       }
       mvwprintw(state->header_win, 0, x, "/");
       x += 1;
@@ -272,38 +272,34 @@ void tui_draw_header(TuiState *state) {
     /* Database name */
     if (state->conn->database) {
       mvwprintw(state->header_win, 0, x, "%s", state->conn->database);
-      x += (int)strlen(state->conn->database);
-    }
-
-    /* Connection number in brackets after URI (only if multiple connections) */
-    if (tab && state->app && state->app->num_connections > 1) {
-      mvwprintw(state->header_win, 0, x, " [C%zu]", tab->connection_index + 1);
     }
   }
 
-  /* Workspace indicator centered (only if multiple workspaces) */
-  if (state->app && state->app->num_workspaces > 1) {
-    char ws_str[32];
-    snprintf(ws_str, sizeof(ws_str), "Workspace: %zu",
-             state->app->current_workspace + 1);
-    int ws_len = (int)strlen(ws_str);
-    int ws_x = (state->term_cols - ws_len) / 2;
-    if (ws_x > 0) {
-      mvwprintw(state->header_win, 0, ws_x, "%s", ws_str);
-    }
-  }
+  /* Right side: combined connection/workspace indicator */
+  if (state->app) {
+    Tab *tab = TUI_TAB(state);
+    bool multi_conn = state->app->num_connections > 1;
+    bool multi_ws = state->app->num_workspaces > 1;
 
-  /* Help hint - show workspace switching if multiple workspaces */
-  const char *help;
-  if (state->app && state->app->num_workspaces > 1) {
-    help = "q:Quit t:Sidebar []:Tabs {}:Workspaces ?:Help";
-  } else {
-    help = "q:Quit t:Sidebar /:GoTo []:Tabs -:Close ?:Help";
-  }
-  int help_len = (int)strlen(help);
-  int help_x = state->term_cols - help_len - 1;
-  if (help_x > 0) {
-    mvwprintw(state->header_win, 0, help_x, "%s", help);
+    if (multi_conn || multi_ws) {
+      char indicator[32];
+      if (multi_conn && multi_ws) {
+        snprintf(indicator, sizeof(indicator), "[C%zu W%zu]",
+                 tab ? tab->connection_index + 1 : 1,
+                 state->app->current_workspace + 1);
+      } else if (multi_conn) {
+        snprintf(indicator, sizeof(indicator), "[C%zu]",
+                 tab ? tab->connection_index + 1 : 1);
+      } else {
+        snprintf(indicator, sizeof(indicator), "[W%zu]",
+                 state->app->current_workspace + 1);
+      }
+      int ind_len = (int)strlen(indicator);
+      int ind_x = state->term_cols - ind_len - 1;
+      if (ind_x > 0) {
+        mvwprintw(state->header_win, 0, ind_x, "%s", indicator);
+      }
+    }
   }
 
   wrefresh(state->header_win);

@@ -299,6 +299,89 @@ static void query_backspace(Tab *tab) {
   query_delete_char(tab);
 }
 
+/* Find the byte boundaries of the query at cursor position.
+ * Returns true if a valid query range was found.
+ * out_start and out_end are set to the byte positions (not trimmed).
+ * If cursor is in empty space after a query, falls back to the last query. */
+static bool query_find_bounds_at_cursor(const char *text, size_t cursor,
+                                        size_t *out_start, size_t *out_end) {
+  if (!text || !*text) {
+    *out_start = 0;
+    *out_end = 0;
+    return false;
+  }
+
+  size_t len = strlen(text);
+  if (cursor > len)
+    cursor = len;
+
+  /* Scan from beginning to cursor to find query start (after last ';') */
+  size_t last_semi = 0;
+  size_t prev_semi = 0; /* Track the semicolon before last_semi */
+  bool in_string = false;
+  char quote_char = 0;
+
+  for (size_t i = 0; i < cursor; i++) {
+    char c = text[i];
+    if (in_string) {
+      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
+        in_string = false;
+      }
+    } else {
+      if (c == '\'' || c == '"') {
+        in_string = true;
+        quote_char = c;
+      } else if (c == ';') {
+        prev_semi = last_semi;
+        last_semi = i + 1;
+      }
+    }
+  }
+
+  size_t start = last_semi;
+
+  /* Scan forward from cursor to find query end (next ';' or end of text) */
+  size_t end = len;
+  in_string = false;
+  quote_char = 0;
+
+  for (size_t i = cursor; i < len; i++) {
+    char c = text[i];
+    if (in_string) {
+      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
+        in_string = false;
+      }
+    } else {
+      if (c == '\'' || c == '"') {
+        in_string = true;
+        quote_char = c;
+      } else if (c == ';') {
+        end = i + 1; /* Include the semicolon */
+        break;
+      }
+    }
+  }
+
+  /* Check if the current range is empty/whitespace only */
+  bool is_empty = true;
+  for (size_t i = start; i < end && is_empty; i++) {
+    char c = text[i];
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != ';') {
+      is_empty = false;
+    }
+  }
+
+  /* If empty and we have a previous query, use that instead */
+  if (is_empty && last_semi > 0) {
+    start = prev_semi;
+    end = last_semi; /* Include the semicolon of the previous query */
+  }
+
+  *out_start = start;
+  *out_end = end;
+  return start < end;
+}
+
 /* Find the query at cursor position (caller must free result) */
 static char *query_find_at_cursor(const char *text, size_t cursor) {
   if (!text || !*text)
@@ -1225,6 +1308,12 @@ void tui_draw_query(TuiState *state) {
     tab->query_scroll_line = cursor_line - editor_height + 2;
   }
 
+  /* Find current query bounds for highlighting */
+  size_t query_start = 0, query_end = 0;
+  bool has_query_bounds =
+      query_find_bounds_at_cursor(tab->query_text, tab->query_cursor,
+                                  &query_start, &query_end);
+
   /* Draw editor area */
   if (!ui->query_focus_results) {
     wattron(state->main_win, A_BOLD);
@@ -1242,12 +1331,29 @@ void tui_draw_query(TuiState *state) {
     size_t line_idx = tab->query_scroll_line + (size_t)(y - 1);
     QueryLineInfo *li = &lines[line_idx];
 
-    /* Line number */
-    wattron(state->main_win, A_DIM);
-    mvwprintw(state->main_win, y, 0, "%3zu", line_idx + 1);
-    wattroff(state->main_win, A_DIM);
+    /* Check if this line is within the current query bounds */
+    size_t line_start = li->start;
+    size_t line_end = li->start + li->len;
+    bool line_in_query = has_query_bounds &&
+                         line_end > query_start && line_start < query_end;
 
-    /* Line content */
+    /* Dim lines outside the current query */
+    bool is_dimmed = has_query_bounds && !line_in_query;
+
+    /* Line number - dim if outside current query, normal otherwise */
+    if (is_dimmed) {
+      wattron(state->main_win, A_DIM);
+    }
+    mvwprintw(state->main_win, y, 0, "%3zu", line_idx + 1);
+    if (is_dimmed) {
+      wattroff(state->main_win, A_DIM);
+    }
+
+    /* Line content - dim if outside current query */
+    if (is_dimmed) {
+      wattron(state->main_win, A_DIM);
+    }
+
     int x = 4;
     for (size_t i = 0; i < li->len && x < win_cols - 1; i++) {
       char c = tab->query_text[li->start + i];
@@ -1259,6 +1365,10 @@ void tui_draw_query(TuiState *state) {
       } else if (c >= 32 && c < 127) {
         mvwaddch(state->main_win, y, x++, c);
       }
+    }
+
+    if (is_dimmed) {
+      wattroff(state->main_win, A_DIM);
     }
 
     /* Draw cursor if on this line and editor focused */
