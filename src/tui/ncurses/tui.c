@@ -8,6 +8,7 @@
 
 #include "../../core/actions.h"
 #include "tui_internal.h"
+#include "../../config/session.h"
 #include <ctype.h>
 #include <locale.h>
 #include <stdarg.h>
@@ -733,6 +734,14 @@ bool tui_init(TuiState *state, AppState *app) {
 void tui_cleanup(TuiState *state) {
   if (!state)
     return;
+
+  /* Save session before cleanup */
+  char *session_err = NULL;
+  if (!session_save(state, &session_err)) {
+    /* Log error but don't block quit */
+    if (session_err)
+      free(session_err);
+  }
 
   tui_disconnect(state);
 

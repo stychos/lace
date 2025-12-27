@@ -461,21 +461,14 @@ void tab_close(TuiState *state) {
     if (ws->num_tabs > 0) {
       tab_restore(state);
     } else {
-      /* No tabs left - clear screen and show connect dialog */
-      if (state->sidebar_win) {
-        werase(state->sidebar_win);
-        wrefresh(state->sidebar_win);
-      }
-      werase(state->main_win);
-      wrefresh(state->main_win);
-      tui_refresh(state);
-      tui_show_connect_dialog(state);
+      /* No tabs left - close the workspace */
+      workspace_close(state);
     }
     return;
   }
 
   /* Closing a TABLE or QUERY tab */
-  /* Count remaining tabs FOR THIS CONNECTION (excluding the one being closed) */
+  /* Count remaining content tabs FOR THIS CONNECTION (excluding the one being closed) */
   size_t remaining_conn_content_tabs = 0;
   bool has_conn_connection_tab = false;
   for (size_t i = 0; i < ws->num_tabs; i++) {
@@ -506,8 +499,7 @@ void tab_close(TuiState *state) {
     const char *connstr = conn ? conn->connstr : NULL;
 
     /* Create connection tab */
-    Tab *conn_tab =
-        workspace_create_connection_tab(ws, conn_idx, connstr);
+    Tab *conn_tab = workspace_create_connection_tab(ws, conn_idx, connstr);
     if (conn_tab) {
       /* Switch to the new connection tab */
       ws->current_tab = ws->num_tabs - 1;
@@ -556,40 +548,97 @@ void tab_close(TuiState *state) {
     }
   }
 
+  /* If no tabs remain, close the workspace */
   if (ws->num_tabs == 0) {
-    /* Fallback: no tabs at all - shouldn't happen with connection tab logic */
-    state->data = NULL;
-    state->schema = NULL;
-    state->col_widths = NULL;
-    state->num_col_widths = 0;
-    state->cursor_row = 0;
-    state->cursor_col = 0;
-    state->scroll_row = 0;
-    state->scroll_col = 0;
-    state->total_rows = 0;
-    state->loaded_offset = 0;
-    state->loaded_count = 0;
-    state->current_table = 0;
-
-    state->sidebar_focused = true;
-    state->sidebar_highlight = 0;
-    state->sidebar_scroll = 0;
-    state->sidebar_filter[0] = '\0';
-    state->sidebar_filter_len = 0;
-    state->sidebar_filter_active = false;
-
-    state->filters_visible = false;
-    state->filters_focused = false;
-    state->filters_was_focused = false;
-    state->filters_editing = false;
-    state->filters_cursor_row = 0;
-    state->filters_cursor_col = 0;
-    state->filters_scroll = 0;
+    workspace_close(state);
   } else {
     /* Restore the now-current tab */
     tab_restore(state);
   }
 }
 
-/* Legacy wrapper */
-void workspace_close(TuiState *state) { tab_close(state); }
+/* Close the current workspace and switch to another or show connect dialog */
+void workspace_close(TuiState *state) {
+  if (!state || !state->app)
+    return;
+
+  size_t ws_idx = state->app->current_workspace;
+
+  /* Cancel any pending background load */
+  tui_cancel_background_load(state);
+
+  /* Free UITabState resources for all tabs in this workspace */
+  if (ws_idx < state->tab_ui_ws_capacity && state->tab_ui[ws_idx]) {
+    for (size_t i = 0; i < state->tab_ui_capacity[ws_idx]; i++) {
+      free(state->tab_ui[ws_idx][i].query_result_edit_buf);
+      state->tab_ui[ws_idx][i].query_result_edit_buf = NULL;
+    }
+    free(state->tab_ui[ws_idx]);
+    state->tab_ui[ws_idx] = NULL;
+    state->tab_ui_capacity[ws_idx] = 0;
+
+    /* Shift UITabState workspace entries down */
+    for (size_t i = ws_idx; i < state->tab_ui_ws_capacity - 1; i++) {
+      state->tab_ui[i] = state->tab_ui[i + 1];
+      state->tab_ui_capacity[i] = state->tab_ui_capacity[i + 1];
+    }
+    if (state->tab_ui_ws_capacity > 0) {
+      state->tab_ui[state->tab_ui_ws_capacity - 1] = NULL;
+      state->tab_ui_capacity[state->tab_ui_ws_capacity - 1] = 0;
+    }
+  }
+
+  /* Close workspace in app state (frees tabs and data) */
+  app_close_workspace(state->app, ws_idx);
+
+  /* Clear TuiState pointers */
+  state->conn = NULL;
+  state->tables = NULL;
+  state->num_tables = 0;
+  state->data = NULL;
+  state->schema = NULL;
+  state->col_widths = NULL;
+  state->num_col_widths = 0;
+  state->cursor_row = 0;
+  state->cursor_col = 0;
+  state->scroll_row = 0;
+  state->scroll_col = 0;
+  state->total_rows = 0;
+  state->loaded_offset = 0;
+  state->loaded_count = 0;
+  state->current_table = 0;
+
+  /* Reset UI state */
+  state->sidebar_visible = false;
+  state->sidebar_focused = false;
+  state->sidebar_highlight = 0;
+  state->sidebar_scroll = 0;
+  state->sidebar_filter[0] = '\0';
+  state->sidebar_filter_len = 0;
+  state->sidebar_filter_active = false;
+  state->filters_visible = false;
+  state->filters_focused = false;
+  state->filters_was_focused = false;
+  state->filters_editing = false;
+  state->filters_cursor_row = 0;
+  state->filters_cursor_col = 0;
+  state->filters_scroll = 0;
+
+  /* Check if there are other workspaces */
+  if (state->app->num_workspaces > 0) {
+    /* Switch to the new current workspace (adjusted by app_close_workspace) */
+    tui_recreate_windows(state);
+    tab_restore(state);
+  } else {
+    /* No workspaces left - show connect dialog */
+    tui_recreate_windows(state);
+    if (state->sidebar_win) {
+      werase(state->sidebar_win);
+      wrefresh(state->sidebar_win);
+    }
+    werase(state->main_win);
+    wrefresh(state->main_win);
+    tui_refresh(state);
+    tui_show_connect_dialog(state);
+  }
+}

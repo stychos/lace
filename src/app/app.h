@@ -13,10 +13,10 @@
 
 /* Application configuration */
 typedef struct {
-  char *connstr; /* Connection string */
-  bool tui_mode; /* Use TUI (default: true) */
-  bool help;     /* Show help */
-  char *query;   /* Direct query mode */
+  char *connstr;     /* Connection string */
+  bool help;         /* Show help */
+  char *query;       /* Direct query mode */
+  bool skip_session; /* --no-session flag */
 } AppConfig;
 
 /* Parse command line arguments */

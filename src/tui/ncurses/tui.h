@@ -78,7 +78,7 @@ typedef struct {
 } UITabState;
 
 /* TUI state - contains UI-specific state and reference to core AppState */
-typedef struct {
+struct TuiState {
   /* Core application state (platform-independent) */
   AppState *app;
 
@@ -202,7 +202,8 @@ typedef struct {
   UITabState **tab_ui;          /* Array of per-workspace UITabState arrays */
   size_t *tab_ui_capacity;      /* Capacity per workspace */
   size_t tab_ui_ws_capacity;    /* Capacity for workspace dimension */
-} TuiState;
+};
+typedef struct TuiState TuiState;
 
 /* Sync view cache from AppState (call after app state changes) */
 void tui_sync_from_app(TuiState *state);

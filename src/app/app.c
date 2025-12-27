@@ -11,6 +11,7 @@
 #include "../db/connstr.h"
 #include "../db/db.h"
 #include "../tui/ncurses/tui.h"
+#include "../config/session.h"
 #include "../util/str.h"
 #include <getopt.h>
 #include <stdio.h>
@@ -19,7 +20,7 @@
 
 static struct option long_options[] = {{"help", no_argument, NULL, 'h'},
                                        {"query", required_argument, NULL, 'q'},
-                                       {"no-tui", no_argument, NULL, 'n'},
+                                       {"no-session", no_argument, NULL, 's'},
                                        {NULL, 0, NULL, 0}};
 
 bool app_parse_args(int argc, char **argv, AppConfig *config) {
@@ -27,10 +28,9 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
     return false;
 
   memset(config, 0, sizeof(AppConfig));
-  config->tui_mode = true;
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "hq:n", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hq:s", long_options, NULL)) != -1) {
     switch (opt) {
     case 'h':
       config->help = true;
@@ -41,10 +41,9 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
         fprintf(stderr, "Memory allocation failed\n");
         return false;
       }
-      config->tui_mode = false;
       break;
-    case 'n':
-      config->tui_mode = false;
+    case 's':
+      config->skip_session = true;
       break;
     default:
       return false;
@@ -112,9 +111,9 @@ void app_print_usage(const char *prog) {
   printf("  ./database.db, /path/to/file.sqlite, etc.\n");
   printf("\n");
   printf("Options:\n");
-  printf("  -h, --help       Show this help message\n");
-  printf("  -q, --query SQL  Execute query and exit\n");
-  printf("  -n, --no-tui     Disable TUI mode\n");
+  printf("  -h, --help        Show this help message\n");
+  printf("  -q, --query SQL   Execute query and exit\n");
+  printf("  -s, --no-session  Don't restore previous session\n");
   printf("\n");
   printf("Examples:\n");
   printf("  %s ./data.db\n", prog);
@@ -189,37 +188,6 @@ static int run_query_mode(AppConfig *config) {
   return 0;
 }
 
-static int run_list_tables(AppConfig *config) {
-  char *err = NULL;
-  DbConnection *conn = db_connect(config->connstr, &err);
-
-  if (!conn) {
-    fprintf(stderr, "Connection failed: %s\n", err ? err : "Unknown error");
-    free(err);
-    return 1;
-  }
-
-  size_t count;
-  char **tables = db_list_tables(conn, &count, &err);
-
-  if (!tables) {
-    fprintf(stderr, "Failed to list tables: %s\n", err ? err : "Unknown error");
-    free(err);
-    db_disconnect(conn);
-    return 1;
-  }
-
-  printf("Tables in %s:\n", conn->database);
-  for (size_t i = 0; i < count; i++) {
-    printf("  %s\n", tables[i]);
-    free(tables[i]);
-  }
-  free(tables);
-
-  db_disconnect(conn);
-  return 0;
-}
-
 static int run_tui_mode(AppConfig *config) {
   AppState app;
   TuiState state = {
@@ -232,12 +200,37 @@ static int run_tui_mode(AppConfig *config) {
     return 1;
   }
 
+  bool session_restored = false;
+
   if (config->connstr) {
+    /* Explicit connection string provided - use it */
     if (!tui_connect(&state, config->connstr)) {
       /* Error message already shown in TUI */
     }
-  } else {
-    /* No connection string - show connect dialog */
+  } else if (!config->skip_session) {
+    /* No connection string - try to restore previous session */
+    char *session_err = NULL;
+    Session *session = session_load(&session_err);
+
+    if (session) {
+      char *restore_err = NULL;
+      if (session_restore(&state, session, &restore_err)) {
+        session_restored = true;
+        tui_refresh(&state);
+      } else {
+        /* Restoration failed - show error and fall through to connect dialog */
+        if (restore_err) {
+          tui_set_error(&state, "Session restore failed: %s", restore_err);
+          free(restore_err);
+        }
+      }
+      session_free(session);
+    }
+    free(session_err);
+  }
+
+  if (!config->connstr && !session_restored) {
+    /* No connection and no session - show connect dialog */
     tui_refresh(&state);
     tui_show_connect_dialog(&state);
   }
@@ -264,8 +257,6 @@ int app_run(AppConfig *config) {
 
   if (config->query && config->connstr) {
     result = run_query_mode(config);
-  } else if (!config->tui_mode && config->connstr) {
-    result = run_list_tables(config);
   } else {
     result = run_tui_mode(config);
   }

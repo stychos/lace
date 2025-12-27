@@ -143,7 +143,7 @@ Binary will be at `build/lace`.
 - [ ] Schema management (indexes, keys)
 - [ ] Table creation
 - [ ] Foreign keys (management, navigation)
-- [ ] Session persistence (save/restore tabs on restart)
+- [x] Session persistence (save/restore tabs on restart)
 
 ## License
 
