@@ -17,7 +17,6 @@
 struct TuiState;
 
 #define SESSION_FILE "session.json"
-#define SESSION_VERSION 1
 
 /* ============================================================================
  * Session Types (for loading before AppState/TuiState exist)
@@ -90,8 +89,6 @@ typedef struct {
 
 /* Full session state */
 typedef struct {
-  int version;
-
   /* Global settings */
   bool header_visible;
   bool status_visible;

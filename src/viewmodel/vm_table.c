@@ -9,6 +9,7 @@
 #include "vm_table.h"
 #include "../db/db.h"
 #include "../util/str.h"
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +52,15 @@ static void selection_add(VmSelection *sel, size_t row) {
 
   if (sel->count >= sel->capacity) {
     size_t new_cap = sel->capacity ? sel->capacity * 2 : 16;
+
+    /* Check for overflow in capacity doubling */
+    if (sel->capacity > 0 && new_cap < sel->capacity)
+      return;
+
+    /* Check for overflow in allocation size calculation */
+    if (new_cap > SIZE_MAX / sizeof(size_t))
+      return;
+
     size_t *new_rows = realloc(sel->rows, new_cap * sizeof(size_t));
     if (!new_rows)
       return;
@@ -97,8 +107,14 @@ static bool edit_ensure_capacity(VmEditState *edit, size_t needed) {
     return true;
 
   size_t new_cap = edit->buffer_cap ? edit->buffer_cap * 2 : 256;
-  while (new_cap < needed)
+  while (new_cap < needed) {
+    /* Check for overflow before doubling */
+    if (new_cap > SIZE_MAX / 2) {
+      new_cap = needed; /* Fall back to exact size */
+      break;
+    }
     new_cap *= 2;
+  }
 
   char *new_buf = realloc(edit->buffer, new_cap);
   if (!new_buf)

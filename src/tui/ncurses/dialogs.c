@@ -858,56 +858,69 @@ void tui_show_connect_dialog(TuiState *state) {
     state->tables = app_conn->tables;
     state->num_tables = app_conn->num_tables;
 
-    if (app_conn->num_tables > 0) {
-      /* Create a table tab for the first table */
-      const char *first_table = app_conn->tables[0];
-      Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
-      if (tab) {
-        /* Load the first table's data */
-        if (!tui_load_table_data(state, first_table)) {
-          /* Failed - remove the tab we just created */
-          workspace_close_tab(ws, ws->current_tab);
-          tui_set_error(state, "Failed to load table data");
-        } else {
-          /* Save loaded data to tab */
-          tab->data = state->data;
-          tab->schema = state->schema;
-          tab->col_widths = state->col_widths;
-          tab->num_col_widths = state->num_col_widths;
-          tab->total_rows = state->total_rows;
-          tab->loaded_offset = state->loaded_offset;
-          tab->loaded_count = state->loaded_count;
+    /* Check if we should auto-open the first table */
+    bool auto_open = state->app->config &&
+                     state->app->config->general.auto_open_first_table &&
+                     app_conn->num_tables > 0;
 
-          /* Show sidebar for new workspace */
-          state->sidebar_visible = true;
-          state->sidebar_focused = false;
-          tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
-                                     ws->current_tab);
-          UITabState *ui = TUI_TAB_UI(state);
-          if (ui) {
-            ui->sidebar_visible = true;
-            ui->sidebar_focused = false;
-          }
-
-          tui_set_status(state, "Connected in workspace %zu (%s)",
-                         state->app->current_workspace + 1, conn->database);
-        }
-      }
-    } else {
-      /* No tables - create query tab */
-      Tab *tab = workspace_create_query_tab(ws, conn_index);
+    if (auto_open) {
+      /* Create a table tab with the first table */
+      size_t table_idx = 0;
+      Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, app_conn->tables[table_idx]);
       if (tab) {
-        state->sidebar_visible = true;
-        state->sidebar_focused = false;
+        tab->table_index = table_idx;
         tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
                                    ws->current_tab);
+
+        /* Load table data */
+        state->current_table = table_idx;
+        tui_load_table_data(state, app_conn->tables[table_idx]);
+
+        /* Save to tab */
+        tab->data = state->data;
+        tab->schema = state->schema;
+        tab->col_widths = state->col_widths;
+        tab->num_col_widths = state->num_col_widths;
+        tab->total_rows = state->total_rows;
+        tab->loaded_offset = state->loaded_offset;
+        tab->loaded_count = state->loaded_count;
+
+        /* Initialize UI state */
         UITabState *ui = TUI_TAB_UI(state);
         if (ui) {
           ui->sidebar_visible = true;
           ui->sidebar_focused = false;
         }
-        tui_set_status(state, "Connected in workspace %zu (no tables)",
-                       state->app->current_workspace + 1);
+        state->sidebar_visible = true;
+        state->sidebar_focused = false;
+
+        tui_set_status(state, "Connected in workspace %zu - %s",
+                       state->app->current_workspace + 1, app_conn->tables[table_idx]);
+      }
+    } else {
+      /* Create a connection tab (don't auto-load any table) */
+      Tab *tab = workspace_create_connection_tab(ws, conn_index, result.connstr);
+      if (tab) {
+        /* Show sidebar for table selection */
+        state->sidebar_visible = true;
+        state->sidebar_focused = true;
+        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                   ws->current_tab);
+        UITabState *ui = TUI_TAB_UI(state);
+        if (ui) {
+          ui->sidebar_visible = true;
+          ui->sidebar_focused = true;
+          ui->sidebar_highlight = 0;
+          ui->sidebar_scroll = 0;
+        }
+
+        if (app_conn->num_tables == 0) {
+          tui_set_status(state, "Connected in workspace %zu (no tables)",
+                         state->app->current_workspace + 1);
+        } else {
+          tui_set_status(state, "Connected in workspace %zu (%s) - Select a table",
+                         state->app->current_workspace + 1, conn->database);
+        }
       }
     }
 
@@ -956,7 +969,7 @@ void tui_show_connect_dialog(TuiState *state) {
       ws = app_create_workspace(state->app);
     }
 
-    if (ws && app_conn->num_tables > 0) {
+    if (ws) {
       /* Save current tab state */
       if (ws->num_tabs > 0) {
         tab_save(state);
@@ -967,37 +980,30 @@ void tui_show_connect_dialog(TuiState *state) {
         state->num_col_widths = 0;
       }
 
-      /* Create a table tab for the first table */
-      const char *first_table = app_conn->tables[0];
-      Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
-      if (tab) {
-        /* Initialize UITabState - new connection always shows sidebar */
-        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
-                                   ws->current_tab);
-        UITabState *ui = TUI_TAB_UI(state);
-        if (ui) {
-          ui->sidebar_visible = true;
-          ui->sidebar_focused = false;
-          ui->sidebar_highlight = 0;
-          ui->sidebar_scroll = 0;
-          ui->filters_visible = false;
-          ui->filters_focused = false;
-        }
-        state->sidebar_visible = true;
-        state->sidebar_focused = false;
+      /* Update TUI state to use new connection */
+      state->conn = conn;
+      state->tables = app_conn->tables;
+      state->num_tables = app_conn->num_tables;
 
-        /* Update TUI state to use new connection */
-        state->conn = conn;
-        state->tables = app_conn->tables;
-        state->num_tables = app_conn->num_tables;
+      /* Check if we should auto-open the first table */
+      bool auto_open = state->app->config &&
+                       state->app->config->general.auto_open_first_table &&
+                       app_conn->num_tables > 0;
 
-        /* Load the first table's data */
-        if (!tui_load_table_data(state, first_table)) {
-          /* Failed - remove the tab we just created */
-          workspace_close_tab(ws, ws->current_tab);
-          tui_set_error(state, "Failed to load table data");
-        } else {
-          /* Save loaded data to tab */
+      if (auto_open) {
+        /* Create a table tab with the first table */
+        size_t table_idx = 0;
+        Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, app_conn->tables[table_idx]);
+        if (tab) {
+          tab->table_index = table_idx;
+          tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                     ws->current_tab);
+
+          /* Load table data */
+          state->current_table = table_idx;
+          tui_load_table_data(state, app_conn->tables[table_idx]);
+
+          /* Save to tab */
           tab->data = state->data;
           tab->schema = state->schema;
           tab->col_widths = state->col_widths;
@@ -1006,33 +1012,47 @@ void tui_show_connect_dialog(TuiState *state) {
           tab->loaded_offset = state->loaded_offset;
           tab->loaded_count = state->loaded_count;
 
-          tui_recreate_windows(state);
-          tui_set_status(state, "Connected in new tab (%s)", conn->database);
-        }
-      }
-    } else if (ws) {
-      /* No tables - create query tab */
-      Tab *tab = workspace_create_query_tab(ws, conn_index);
-      if (tab) {
-        /* Initialize UITabState - new connection always shows sidebar */
-        tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
-                                   ws->current_tab);
-        UITabState *ui = TUI_TAB_UI(state);
-        if (ui) {
-          ui->sidebar_visible = true;
-          ui->sidebar_focused = false;
-        }
-        state->sidebar_visible = true;
-        state->sidebar_focused = false;
+          /* Initialize UI state */
+          UITabState *ui = TUI_TAB_UI(state);
+          if (ui) {
+            ui->sidebar_visible = true;
+            ui->sidebar_focused = false;
+          }
+          state->sidebar_visible = true;
+          state->sidebar_focused = false;
 
-        state->conn = conn;
-        state->tables = app_conn->tables;
-        state->num_tables = app_conn->num_tables;
-        state->data = NULL;
-        state->schema = NULL;
-        tui_recreate_windows(state);
-        tui_set_status(state, "Connected in new tab (%s) - no tables found",
-                       conn->database);
+          tui_recreate_windows(state);
+          tui_set_status(state, "Connected in new tab - %s",
+                         app_conn->tables[table_idx]);
+        }
+      } else {
+        /* Create a connection tab (don't auto-load any table) */
+        Tab *tab = workspace_create_connection_tab(ws, conn_index, result.connstr);
+        if (tab) {
+          /* Initialize UITabState - new connection shows sidebar focused */
+          tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
+                                     ws->current_tab);
+          UITabState *ui = TUI_TAB_UI(state);
+          if (ui) {
+            ui->sidebar_visible = true;
+            ui->sidebar_focused = true;
+            ui->sidebar_highlight = 0;
+            ui->sidebar_scroll = 0;
+            ui->filters_visible = false;
+            ui->filters_focused = false;
+          }
+          state->sidebar_visible = true;
+          state->sidebar_focused = true;
+
+          tui_recreate_windows(state);
+          if (app_conn->num_tables == 0) {
+            tui_set_status(state, "Connected in new tab (%s) - no tables found",
+                           conn->database);
+          } else {
+            tui_set_status(state, "Connected in new tab (%s) - Select a table",
+                           conn->database);
+          }
+        }
       }
     }
   }

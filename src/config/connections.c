@@ -21,8 +21,6 @@
 #include <unistd.h>
 
 #define CONNECTIONS_FILE "connections.json"
-#define CONNECTIONS_VERSION 1
-#define MAX_RECENT 10
 
 /* ============================================================================
  * UUID Generation
@@ -359,11 +357,7 @@ ConnectionManager *connmgr_new(void) {
   if (!mgr)
     return NULL;
 
-  mgr->version = CONNECTIONS_VERSION;
   init_folder_item(&mgr->root, "Connections");
-  mgr->recent_ids = NULL;
-  mgr->num_recent = 0;
-  mgr->recent_capacity = 0;
   mgr->modified = false;
   mgr->file_path = get_connections_path();
 
@@ -445,10 +439,6 @@ ConnectionManager *connmgr_load(char **error) {
 
   mgr->file_path = path;
 
-  /* Parse version */
-  cJSON *version = cJSON_GetObjectItem(json, "version");
-  mgr->version = cJSON_IsNumber(version) ? version->valueint : 1;
-
   /* Parse root */
   cJSON *root = cJSON_GetObjectItem(json, "root");
   if (root && cJSON_IsObject(root)) {
@@ -461,24 +451,6 @@ ConnectionManager *connmgr_load(char **error) {
     }
   } else {
     init_folder_item(&mgr->root, "Connections");
-  }
-
-  /* Parse recent */
-  cJSON *recent = cJSON_GetObjectItem(json, "recent");
-  if (cJSON_IsArray(recent)) {
-    size_t count = (size_t)cJSON_GetArraySize(recent);
-    if (count > 0) {
-      mgr->recent_ids = calloc(count, sizeof(char *));
-      if (mgr->recent_ids) {
-        mgr->recent_capacity = count;
-        cJSON *item;
-        cJSON_ArrayForEach(item, recent) {
-          if (cJSON_IsString(item) && mgr->num_recent < count) {
-            mgr->recent_ids[mgr->num_recent++] = str_dup(item->valuestring);
-          }
-        }
-      }
-    }
   }
 
   cJSON_Delete(json);
@@ -512,8 +484,6 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
     return false;
   }
 
-  cJSON_AddNumberToObject(json, "version", mgr->version);
-
   cJSON *root = serialize_item(&mgr->root);
   if (!root) {
     cJSON_Delete(json);
@@ -521,17 +491,6 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
     return false;
   }
   cJSON_AddItemToObject(json, "root", root);
-
-  /* Add recent */
-  cJSON *recent = cJSON_CreateArray();
-  if (recent) {
-    for (size_t i = 0; i < mgr->num_recent; i++) {
-      if (mgr->recent_ids[i]) {
-        cJSON_AddItemToArray(recent, cJSON_CreateString(mgr->recent_ids[i]));
-      }
-    }
-    cJSON_AddItemToObject(json, "recent", recent);
-  }
 
   /* Write to file */
   char *content = cJSON_Print(json);
@@ -602,11 +561,6 @@ void connmgr_free(ConnectionManager *mgr) {
     return;
 
   connmgr_free_folder(&mgr->root.folder);
-
-  for (size_t i = 0; i < mgr->num_recent; i++) {
-    free(mgr->recent_ids[i]);
-  }
-  free(mgr->recent_ids);
   free(mgr->file_path);
   free(mgr);
 }
@@ -710,6 +664,179 @@ bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item) {
     parent->children[i] = parent->children[i + 1];
   }
   parent->num_children--;
+
+  mgr->modified = true;
+  return true;
+}
+
+bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
+                       ConnectionItem *new_parent, ConnectionItem *insert_after) {
+  if (!mgr || !item || !new_parent || !item->parent) {
+    return false;
+  }
+
+  /* Can't move to non-folder */
+  if (new_parent->type != CONN_ITEM_FOLDER) {
+    return false;
+  }
+
+  /* Can't move to self or descendant (for folders) */
+  if (item == new_parent) {
+    return false;
+  }
+
+  if (item->type == CONN_ITEM_FOLDER) {
+    /* Check if new_parent is a descendant of item */
+    ConnectionItem *p = new_parent;
+    while (p) {
+      if (p == item) {
+        return false;
+      }
+      p = p->parent;
+    }
+  }
+
+  ConnectionFolder *old_parent_folder = &item->parent->folder;
+  ConnectionItem *old_parent_item = item->parent;
+
+  /* Find item index in old parent */
+  size_t old_idx = 0;
+  bool found = false;
+  for (size_t i = 0; i < old_parent_folder->num_children; i++) {
+    if (&old_parent_folder->children[i] == item) {
+      old_idx = i;
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    return false;
+  }
+
+  /* Check if moving within same folder */
+  bool same_folder = (item->parent == new_parent);
+
+  /* If moving to a different folder that's in the SAME parent array as the source,
+   * we need to track its index because removing the source will shift the array */
+  size_t new_parent_idx = 0;
+  bool new_parent_in_same_array = false;
+  if (!same_folder && old_parent_item == new_parent->parent) {
+    /* new_parent is a sibling of item - find its index */
+    for (size_t i = 0; i < old_parent_folder->num_children; i++) {
+      if (&old_parent_folder->children[i] == new_parent) {
+        new_parent_idx = i;
+        new_parent_in_same_array = true;
+        break;
+      }
+    }
+  }
+
+  /* Get folder pointer - will be updated after shift if needed */
+  ConnectionFolder *new_parent_folder = &new_parent->folder;
+
+  /* Find insertion position in new parent */
+  size_t insert_idx = new_parent_folder->num_children;  /* Default: end */
+  if (insert_after == NULL) {
+    insert_idx = 0;  /* Insert at beginning */
+  } else {
+    for (size_t i = 0; i < new_parent_folder->num_children; i++) {
+      if (&new_parent_folder->children[i] == insert_after) {
+        insert_idx = i + 1;  /* Insert after this item */
+        break;
+      }
+    }
+  }
+
+  /* Make a copy of the item data */
+  ConnectionItem item_copy = *item;
+
+  if (same_folder) {
+    /* Moving within same folder - just reorder */
+    if (insert_idx > old_idx) {
+      /* Moving down: shift items up */
+      for (size_t i = old_idx; i < insert_idx - 1; i++) {
+        old_parent_folder->children[i] = old_parent_folder->children[i + 1];
+      }
+      old_parent_folder->children[insert_idx - 1] = item_copy;
+    } else if (insert_idx < old_idx) {
+      /* Moving up: shift items down */
+      for (size_t i = old_idx; i > insert_idx; i--) {
+        old_parent_folder->children[i] = old_parent_folder->children[i - 1];
+      }
+      old_parent_folder->children[insert_idx] = item_copy;
+    }
+    /* If insert_idx == old_idx, no change needed */
+
+    /* After reordering, update parent pointers for ALL folders' children
+     * because items moved to new addresses */
+    for (size_t i = 0; i < old_parent_folder->num_children; i++) {
+      ConnectionItem *child = &old_parent_folder->children[i];
+      if (child->type == CONN_ITEM_FOLDER) {
+        for (size_t j = 0; j < child->folder.num_children; j++) {
+          child->folder.children[j].parent = child;
+        }
+      }
+    }
+  } else {
+    /* Moving to different folder */
+    /* Remove from old parent (shift remaining) */
+    for (size_t i = old_idx; i < old_parent_folder->num_children - 1; i++) {
+      old_parent_folder->children[i] = old_parent_folder->children[i + 1];
+    }
+    old_parent_folder->num_children--;
+
+    /* Update parent pointers for shifted items in old folder */
+    for (size_t i = old_idx; i < old_parent_folder->num_children; i++) {
+      ConnectionItem *child = &old_parent_folder->children[i];
+      if (child->type == CONN_ITEM_FOLDER) {
+        for (size_t j = 0; j < child->folder.num_children; j++) {
+          child->folder.children[j].parent = child;
+        }
+      }
+    }
+
+    /* If new_parent was in the same array and AFTER the removed item,
+     * its position shifted - update the pointer */
+    if (new_parent_in_same_array && new_parent_idx > old_idx) {
+      new_parent_idx--;
+      new_parent = &old_parent_folder->children[new_parent_idx];
+      new_parent_folder = &new_parent->folder;
+    }
+
+    /* Ensure capacity in new parent */
+    if (!folder_ensure_capacity(new_parent_folder, 1)) {
+      /* Failed - try to restore in old parent */
+      folder_ensure_capacity(old_parent_folder, 1);
+      /* Shift to make room at old position */
+      for (size_t i = old_parent_folder->num_children; i > old_idx; i--) {
+        old_parent_folder->children[i] = old_parent_folder->children[i - 1];
+      }
+      old_parent_folder->children[old_idx] = item_copy;
+      old_parent_folder->num_children++;
+      return false;
+    }
+
+    /* Shift items to make room at insert position */
+    for (size_t i = new_parent_folder->num_children; i > insert_idx; i--) {
+      new_parent_folder->children[i] = new_parent_folder->children[i - 1];
+    }
+
+    /* Insert at position */
+    new_parent_folder->children[insert_idx] = item_copy;
+    new_parent_folder->children[insert_idx].parent = new_parent;
+    new_parent_folder->num_children++;
+
+    /* Update parent pointers for shifted items in new folder */
+    for (size_t i = insert_idx; i < new_parent_folder->num_children; i++) {
+      ConnectionItem *child = &new_parent_folder->children[i];
+      if (child->type == CONN_ITEM_FOLDER) {
+        for (size_t j = 0; j < child->folder.num_children; j++) {
+          child->folder.children[j].parent = child;
+        }
+      }
+    }
+  }
 
   mgr->modified = true;
   return true;
@@ -907,72 +1034,6 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
 
   connstr_free(cs);
   return conn;
-}
-
-/* ============================================================================
- * Recent Connections
- * ============================================================================
- */
-
-void connmgr_add_recent(ConnectionManager *mgr, const char *id) {
-  if (!mgr || !id)
-    return;
-
-  /* Remove if already in list */
-  for (size_t i = 0; i < mgr->num_recent; i++) {
-    if (mgr->recent_ids[i] && str_eq(mgr->recent_ids[i], id)) {
-      /* Move to front */
-      char *existing = mgr->recent_ids[i];
-      for (size_t j = i; j > 0; j--) {
-        mgr->recent_ids[j] = mgr->recent_ids[j - 1];
-      }
-      mgr->recent_ids[0] = existing;
-      mgr->modified = true;
-      return;
-    }
-  }
-
-  /* Ensure capacity */
-  if (mgr->num_recent >= mgr->recent_capacity) {
-    size_t new_cap = mgr->recent_capacity == 0 ? MAX_RECENT : mgr->recent_capacity + MAX_RECENT;
-    char **new_ids = realloc(mgr->recent_ids, new_cap * sizeof(char *));
-    if (!new_ids)
-      return;
-    mgr->recent_ids = new_ids;
-    mgr->recent_capacity = new_cap;
-  }
-
-  /* Add to front */
-  for (size_t i = mgr->num_recent; i > 0; i--) {
-    mgr->recent_ids[i] = mgr->recent_ids[i - 1];
-  }
-  mgr->recent_ids[0] = str_dup(id);
-  mgr->num_recent++;
-
-  /* Trim to max */
-  while (mgr->num_recent > MAX_RECENT) {
-    mgr->num_recent--;
-    free(mgr->recent_ids[mgr->num_recent]);
-    mgr->recent_ids[mgr->num_recent] = NULL;
-  }
-
-  mgr->modified = true;
-}
-
-ConnectionItem *connmgr_get_most_recent(ConnectionManager *mgr) {
-  if (!mgr || mgr->num_recent == 0)
-    return NULL;
-
-  /* Find first valid recent connection */
-  for (size_t i = 0; i < mgr->num_recent; i++) {
-    if (mgr->recent_ids[i]) {
-      ConnectionItem *item = connmgr_find_by_id(mgr, mgr->recent_ids[i]);
-      if (item)
-        return item;
-    }
-  }
-
-  return NULL;
 }
 
 /* ============================================================================

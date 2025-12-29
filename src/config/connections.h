@@ -55,11 +55,7 @@ typedef struct ConnectionItem {
 
 /* Connection manager - owns all saved connections */
 typedef struct ConnectionManager {
-  int version;                /* File format version */
   ConnectionItem root;        /* Root folder */
-  char **recent_ids;          /* Recently used connection IDs */
-  size_t num_recent;          /* Number of recent connections */
-  size_t recent_capacity;     /* Allocated capacity */
   bool modified;              /* Unsaved changes flag */
   char *file_path;            /* Path to connections.json */
 } ConnectionManager;
@@ -97,6 +93,12 @@ ConnectionItem *connmgr_find_by_id(ConnectionManager *mgr, const char *id);
 
 /* Remove an item from its parent (frees the item) */
 bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item);
+
+/* Move an item to a different folder at a specific position
+ * insert_after: item to insert after, or NULL to insert at beginning
+ *               If insert_after is not in new_parent, inserts at end */
+bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
+                       ConnectionItem *new_parent, ConnectionItem *insert_after);
 
 /* ============================================================================
  * Folder CRUD
@@ -136,17 +138,6 @@ char *connmgr_build_connstr(const SavedConnection *conn);
 
 /* Parse a connection URL into a SavedConnection (for Save to List) */
 SavedConnection *connmgr_parse_connstr(const char *url, char **error);
-
-/* ============================================================================
- * Recent Connections
- * ============================================================================
- */
-
-/* Add connection ID to recent list (moves to front if exists) */
-void connmgr_add_recent(ConnectionManager *mgr, const char *id);
-
-/* Get the most recent connection (or NULL) */
-ConnectionItem *connmgr_get_most_recent(ConnectionManager *mgr);
 
 /* ============================================================================
  * Item Helpers

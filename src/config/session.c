@@ -428,6 +428,16 @@ bool session_save(struct TuiState *state, char **error) {
     return false;
   }
 
+  /* Don't save if no connections - delete session file if it exists */
+  if (state->app->num_connections == 0) {
+    char *path = session_get_path();
+    if (path) {
+      unlink(path); /* Delete old session file */
+      free(path);
+    }
+    return true;
+  }
+
   /* Don't save if no workspaces */
   if (state->app->num_workspaces == 0) {
     return true;
@@ -465,8 +475,6 @@ bool session_save(struct TuiState *state, char **error) {
       connmgr_free(connmgr);
     return false;
   }
-
-  cJSON_AddNumberToObject(json, "version", SESSION_VERSION);
 
   /* Settings */
   cJSON *settings = cJSON_CreateObject();
@@ -814,10 +822,6 @@ Session *session_load(char **error) {
     set_error(error, "Out of memory");
     return NULL;
   }
-
-  /* Parse version */
-  cJSON *version = cJSON_GetObjectItem(json, "version");
-  session->version = cJSON_IsNumber(version) ? version->valueint : 1;
 
   /* Parse settings */
   cJSON *settings = cJSON_GetObjectItem(json, "settings");
@@ -1200,7 +1204,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   }
 
   if (session->num_workspaces == 0) {
-    return true; /* Nothing to restore */
+    return false; /* Nothing to restore - show connect dialog */
   }
 
   /* Load connection manager */

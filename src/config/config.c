@@ -91,6 +91,15 @@ static const char *def_filters_switch_focus[] = {"CTRL+W", "ESCAPE"};
 /* Sidebar */
 static const char *def_sidebar_filter[] = {"/", "f"};
 
+/* Connection Dialog */
+static const char *def_conn_test[] = {"CTRL+T"};
+static const char *def_conn_save[] = {"CTRL+S"};
+static const char *def_conn_new[] = {"n"};
+static const char *def_conn_new_folder[] = {"N"};
+static const char *def_conn_edit[] = {"e"};
+static const char *def_conn_delete[] = {"x", "DELETE"};
+static const char *def_conn_rename[] = {"r"};
+
 #define DEF_KEYS(arr) arr, sizeof(arr) / sizeof(arr[0])
 
 static const ActionMeta action_meta[HOTKEY_COUNT] = {
@@ -148,6 +157,15 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
 
     /* Sidebar */
     [HOTKEY_SIDEBAR_FILTER] = {"sidebar_filter", "Filter tables", HOTKEY_CAT_SIDEBAR, DEF_KEYS(def_sidebar_filter)},
+
+    /* Connection Dialog */
+    [HOTKEY_CONN_TEST] = {"conn_test", "Test connection", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_test)},
+    [HOTKEY_CONN_SAVE] = {"conn_save", "Save to list", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_save)},
+    [HOTKEY_CONN_NEW] = {"conn_new", "New connection", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_new)},
+    [HOTKEY_CONN_NEW_FOLDER] = {"conn_new_folder", "New folder", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_new_folder)},
+    [HOTKEY_CONN_EDIT] = {"conn_edit", "Edit", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_edit)},
+    [HOTKEY_CONN_DELETE] = {"conn_delete", "Delete", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_delete)},
+    [HOTKEY_CONN_RENAME] = {"conn_rename", "Rename", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_rename)},
 };
 
 /* Category names for display */
@@ -158,6 +176,7 @@ static const char *category_names[HOTKEY_CAT_COUNT] = {
     [HOTKEY_CAT_FILTERS] = "Filters Panel",
     [HOTKEY_CAT_SIDEBAR] = "Sidebar",
     [HOTKEY_CAT_QUERY] = "Query Tab",
+    [HOTKEY_CAT_CONNECT] = "Connect Dialog",
 };
 
 /* ============================================================================
@@ -339,8 +358,6 @@ Config *config_get_defaults(void) {
   if (!config)
     return NULL;
 
-  config->version = CONFIG_VERSION;
-
   /* General settings */
   config->general.show_header = true;
   config->general.show_status_bar = true;
@@ -349,6 +366,8 @@ Config *config_get_defaults(void) {
   config->general.restore_session = true;
   config->general.quit_confirmation = false;
   config->general.max_result_rows = CONFIG_MAX_RESULT_ROWS_DEFAULT;
+  config->general.auto_open_first_table = false;
+  config->general.close_conn_on_last_tab = false;
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -398,7 +417,6 @@ Config *config_copy(const Config *config) {
   if (!copy)
     return NULL;
 
-  copy->version = config->version;
   copy->general = config->general;
 
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -581,6 +599,14 @@ Config *config_load(char **error) {
       if (val >= CONFIG_MAX_RESULT_ROWS_MIN && val <= CONFIG_MAX_RESULT_ROWS_MAX)
         config->general.max_result_rows = val;
     }
+
+    item = cJSON_GetObjectItem(general, "auto_open_first_table");
+    if (cJSON_IsBool(item))
+      config->general.auto_open_first_table = cJSON_IsTrue(item);
+
+    item = cJSON_GetObjectItem(general, "close_conn_on_last_tab");
+    if (cJSON_IsBool(item))
+      config->general.close_conn_on_last_tab = cJSON_IsTrue(item);
   }
 
   /* Parse hotkeys */
@@ -633,8 +659,6 @@ bool config_save(const Config *config, char **error) {
     return false;
   }
 
-  cJSON_AddNumberToObject(json, "version", config->version);
-
   /* General settings */
   cJSON *general = cJSON_CreateObject();
   cJSON_AddBoolToObject(general, "show_header", config->general.show_header);
@@ -644,6 +668,8 @@ bool config_save(const Config *config, char **error) {
   cJSON_AddBoolToObject(general, "restore_session", config->general.restore_session);
   cJSON_AddBoolToObject(general, "quit_confirmation", config->general.quit_confirmation);
   cJSON_AddNumberToObject(general, "max_result_rows", config->general.max_result_rows);
+  cJSON_AddBoolToObject(general, "auto_open_first_table", config->general.auto_open_first_table);
+  cJSON_AddBoolToObject(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */

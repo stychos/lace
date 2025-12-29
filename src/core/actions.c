@@ -235,6 +235,11 @@ static ChangeFlags handle_sidebar_toggle(AppState *app, const UICallbacks *ui) {
   if (!tab)
     return CHANGED_NONE;
 
+  /* Connection tab requires sidebar to stay visible and focused */
+  if (tab->type == TAB_TYPE_CONNECTION) {
+    return CHANGED_NONE;
+  }
+
   if (UI_CALL_RET(ui, is_sidebar_visible, false)) {
     UI_CALL(ui, set_sidebar_visible, false);
     UI_CALL(ui, set_sidebar_focused, false);
@@ -271,6 +276,11 @@ static ChangeFlags handle_sidebar_unfocus(AppState *app,
   Tab *tab = app_current_tab(app);
   if (!tab)
     return CHANGED_NONE;
+
+  /* Connection tab requires sidebar to stay focused */
+  if (tab->type == TAB_TYPE_CONNECTION) {
+    return CHANGED_NONE;
+  }
 
   UI_CALL(ui, set_sidebar_focused, false);
   /* Restore filters focus if it was focused before */

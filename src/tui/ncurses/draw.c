@@ -976,6 +976,44 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
                   tab_create(state, actual_idx);
                 }
                 state->sidebar_focused = false;
+              } else if (curr_tab->type == TAB_TYPE_CONNECTION) {
+                /* Connection tab active - convert to table tab */
+                free(curr_tab->table_name);
+                curr_tab->table_name = str_dup(state->tables[actual_idx]);
+                curr_tab->type = TAB_TYPE_TABLE;
+                curr_tab->table_index = actual_idx;
+
+                /* Clear state and load table */
+                state->data = NULL;
+                state->schema = NULL;
+                state->col_widths = NULL;
+                state->num_col_widths = 0;
+                state->current_table = actual_idx;
+                state->sidebar_highlight = actual_idx;
+
+                /* Update UITabState sidebar state too */
+                UITabState *ui = TUI_TAB_UI(state);
+                if (ui) {
+                  ui->sidebar_highlight = actual_idx;
+                  ui->sidebar_last_position = actual_idx;
+                }
+                state->sidebar_last_position = actual_idx;
+
+                tui_load_table_data(state, state->tables[actual_idx]);
+
+                /* Save to tab */
+                curr_tab->data = state->data;
+                curr_tab->schema = state->schema;
+                curr_tab->col_widths = state->col_widths;
+                curr_tab->num_col_widths = state->num_col_widths;
+                curr_tab->total_rows = state->total_rows;
+                curr_tab->loaded_offset = state->loaded_offset;
+                curr_tab->loaded_count = state->loaded_count;
+                curr_tab->cursor_row = state->cursor_row;
+                curr_tab->cursor_col = state->cursor_col;
+                curr_tab->scroll_row = state->scroll_row;
+                curr_tab->scroll_col = state->scroll_col;
+                state->sidebar_focused = false;
               } else if (state->current_table != actual_idx) {
                 /* Table tab - update current tab with new table */
                 state->current_table = actual_idx;
@@ -1116,6 +1154,12 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
   /* Check if click is in main table area */
   if (mouse_x >= sidebar_width) {
+    /* Connection tab: clicking main area should not unfocus sidebar */
+    Tab *main_click_tab = TUI_TAB(state);
+    if (main_click_tab && main_click_tab->type == TAB_TYPE_CONNECTION) {
+      return true; /* Ignore clicks in connection tab main area */
+    }
+
     /* Clicking in main area deactivates sidebar filter and unfocuses panels */
     state->sidebar_filter_active = false;
     state->sidebar_focused = false;

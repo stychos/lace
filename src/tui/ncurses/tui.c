@@ -912,81 +912,106 @@ bool tui_connect(TuiState *state, const char *connstr) {
   /* Find connection index */
   size_t conn_index = app_find_connection_index(state->app, conn);
 
-  /* If we have tables, create a tab for the first one automatically */
-  if (state->num_tables > 0) {
-    const char *first_table = state->tables[0];
-    Tab *tab = workspace_create_table_tab(ws, conn_index, 0, first_table);
+  /* Check if we should auto-open the first table */
+  bool auto_open = state->app->config &&
+                   state->app->config->general.auto_open_first_table &&
+                   state->num_tables > 0;
+
+  if (auto_open) {
+    /* Create a table tab with the first table */
+    size_t table_idx = 0;
+    Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, state->tables[table_idx]);
+    if (tab) {
+      tab->table_index = table_idx;
+
+      /* Ensure UITabState capacity before accessing */
+      size_t ws_idx = state->app->current_workspace;
+      size_t tab_idx_ui = ws->current_tab;
+      tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx_ui);
+
+      /* Load table data */
+      state->current_table = table_idx;
+      tui_load_table_data(state, state->tables[table_idx]);
+
+      /* Save to tab */
+      tab->data = state->data;
+      tab->schema = state->schema;
+      tab->col_widths = state->col_widths;
+      tab->num_col_widths = state->num_col_widths;
+      tab->total_rows = state->total_rows;
+      tab->loaded_offset = state->loaded_offset;
+      tab->loaded_count = state->loaded_count;
+
+      /* Initialize UI state */
+      UITabState *ui = TUI_TAB_UI(state);
+      if (ui) {
+        ui->sidebar_visible = true;
+        ui->sidebar_focused = false;
+      }
+      state->sidebar_visible = true;
+      state->sidebar_focused = false;
+
+      /* Sync workspace cache */
+      state->workspaces = state->app->workspaces;
+      state->num_workspaces = state->app->num_workspaces;
+      state->current_workspace = state->app->current_workspace;
+
+      tui_recreate_windows(state);
+      tui_set_status(state, "Connected to %s - %s", conn->database,
+                     state->tables[table_idx]);
+      return true;
+    }
+  } else {
+    /* Create a connection tab (don't auto-load any table) */
+    Tab *tab = workspace_create_connection_tab(ws, conn_index, connstr);
     if (tab) {
       /* Ensure UITabState capacity before accessing */
       size_t ws_idx = state->app->current_workspace;
       size_t tab_idx = ws->current_tab;
       tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx);
 
-      /* Initialize UITabState for new tab with defaults */
+      /* Initialize UITabState for new tab - show sidebar for table selection */
       UITabState *ui = TUI_TAB_UI(state);
       if (ui) {
         ui->sidebar_visible = true;
-        ui->sidebar_focused = false;
+        ui->sidebar_focused = true; /* Focus sidebar to select a table */
         ui->sidebar_highlight = 0;
         ui->sidebar_scroll = 0;
         ui->filters_visible = false;
         ui->filters_focused = false;
       }
 
-      /* Load the first table's data */
-      if (tui_load_table_data(state, first_table)) {
-        /* Save loaded data to tab */
-        tab->data = state->data;
-        tab->schema = state->schema;
-        tab->col_widths = state->col_widths;
-        tab->num_col_widths = state->num_col_widths;
-        tab->total_rows = state->total_rows;
-        tab->loaded_offset = state->loaded_offset;
-        tab->loaded_count = state->loaded_count;
-        state->current_table = 0;
+      /* Apply UITabState to TUI cache */
+      state->sidebar_visible = true;
+      state->sidebar_focused = true;
+      state->sidebar_highlight = 0;
+      state->sidebar_scroll = 0;
 
-        /* Apply UITabState to TUI cache */
-        state->sidebar_visible = ui ? ui->sidebar_visible : true;
-        state->sidebar_focused = ui ? ui->sidebar_focused : false;
-        state->sidebar_highlight = ui ? ui->sidebar_highlight : 0;
-        state->sidebar_scroll = ui ? ui->sidebar_scroll : 0;
+      /* Clear data pointers - connection tab has no table data */
+      state->data = NULL;
+      state->schema = NULL;
+      state->col_widths = NULL;
+      state->num_col_widths = 0;
 
-        /* Sync workspace cache */
-        state->workspaces = state->app->workspaces;
-        state->num_workspaces = state->app->num_workspaces;
-        state->current_workspace = state->app->current_workspace;
+      /* Sync workspace cache */
+      state->workspaces = state->app->workspaces;
+      state->num_workspaces = state->app->num_workspaces;
+      state->current_workspace = state->app->current_workspace;
 
-        tui_recreate_windows(state);
-        tui_calculate_column_widths(state);
-        tui_set_status(state, "Connected to %s", conn->database);
-        return true;
+      tui_recreate_windows(state);
+
+      if (state->num_tables == 0) {
+        tui_set_status(state, "Connected to %s - No tables found", conn->database);
       } else {
-        /* Data loading failed - remove the tab we just created */
-        workspace_close_tab(ws, ws->current_tab);
+        tui_set_status(state, "Connected to %s - Select a table from sidebar",
+                       conn->database);
       }
+      return true;
     }
   }
 
-  /* No tables or failed to load - show sidebar to select/create */
-  state->sidebar_visible = true;
-  state->sidebar_focused = true;
-  state->sidebar_highlight = 0;
-  state->sidebar_scroll = 0;
-
-  /* Sync workspace cache */
-  state->workspaces = state->app->workspaces;
-  state->num_workspaces = state->app->num_workspaces;
-  state->current_workspace = state->app->current_workspace;
-
-  tui_recreate_windows(state);
-  tui_calculate_column_widths(state);
-
-  if (state->num_tables == 0) {
-    tui_set_status(state, "Connected to %s - No tables found", conn->database);
-  } else {
-    tui_set_status(state, "Connected to %s - Select a table", conn->database);
-  }
-  return true;
+  tui_set_error(state, "Failed to create tab");
+  return false;
 }
 
 void tui_disconnect(TuiState *state) {

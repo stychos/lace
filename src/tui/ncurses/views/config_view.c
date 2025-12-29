@@ -36,6 +36,8 @@ typedef enum {
   FIELD_PAGE_SIZE,
   FIELD_PREFETCH_PAGES,
   FIELD_MAX_RESULT_ROWS,
+  FIELD_AUTO_OPEN_TABLE,
+  FIELD_CLOSE_CONN_LAST_TAB,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
   FIELD_COUNT
@@ -262,6 +264,22 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
 
   y++;
 
+  /* Section: Connections */
+  wattron(win, A_BOLD | A_UNDERLINE);
+  mvwprintw(win, y++, start_x, "Connections");
+  wattroff(win, A_BOLD | A_UNDERLINE);
+  y++;
+
+  draw_checkbox(win, y++, start_x + 2, "Open first table when a new connection is opened",
+                ds->config->general.auto_open_first_table,
+                ds->selected_field == FIELD_AUTO_OPEN_TABLE, focused);
+
+  draw_checkbox(win, y++, start_x + 2, "Close connection when last connection tab is closed",
+                ds->config->general.close_conn_on_last_tab,
+                ds->selected_field == FIELD_CLOSE_CONN_LAST_TAB, focused);
+
+  y++;
+
   /* Section: Session */
   wattron(win, A_BOLD | A_UNDERLINE);
   mvwprintw(win, y++, start_x, "Session");
@@ -300,7 +318,7 @@ typedef struct {
 static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_items) {
   size_t count = 0;
 
-  /* Display order: General, Navigation, Table, Query, Filters, Sidebar */
+  /* Display order: General, Navigation, Table, Query, Filters, Sidebar, Connect */
   static const HotkeyCategory display_order[] = {
       HOTKEY_CAT_GENERAL,
       HOTKEY_CAT_NAVIGATION,
@@ -308,6 +326,7 @@ static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_ite
       HOTKEY_CAT_QUERY,
       HOTKEY_CAT_FILTERS,
       HOTKEY_CAT_SIDEBAR,
+      HOTKEY_CAT_CONNECT,
   };
 
   for (size_t c = 0; c < sizeof(display_order) / sizeof(display_order[0]); c++) {
@@ -692,7 +711,7 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
     /* Help */
     y = dlg_height - 4;
     wattron(dlg, A_DIM);
-    mvwprintw(dlg, y++, 2, "a: Add key  d: Delete key  r: Reset");
+    mvwprintw(dlg, y++, 2, "a: Add key  x/Del: Delete  r: Reset");
     mvwprintw(dlg, y++, 2, "Enter/Esc: Close");
     wattroff(dlg, A_DIM);
 
@@ -770,10 +789,8 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
             snprintf(key_str + pos, sizeof(key_str) - pos, "%s", key_name);
           }
         } else {
+          /* Regular character - preserve case (n and N are different keys) */
           char c = (char)new_event.key.key;
-          if (c >= 'a' && c <= 'z') {
-            c = (char)(c - 'a' + 'A'); /* Uppercase */
-          }
           if (c >= 32 && c < 127 && pos < sizeof(key_str) - 1) {
             key_str[pos] = c;
             key_str[pos + 1] = '\0';
@@ -800,7 +817,8 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
           }
         }
       }
-    } else if (render_event_get_char(&event) == 'd') {
+    } else if (render_event_get_char(&event) == 'x' ||
+               render_event_is_special(&event, UI_KEY_DELETE)) {
       /* Delete selected key */
       if (binding->num_keys > 0 && highlight < binding->num_keys) {
         hotkey_remove_key(config, action, highlight);
@@ -900,6 +918,14 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_QUIT_CONFIRM:
       ds->config->general.quit_confirmation =
           !ds->config->general.quit_confirmation;
+      break;
+    case FIELD_AUTO_OPEN_TABLE:
+      ds->config->general.auto_open_first_table =
+          !ds->config->general.auto_open_first_table;
+      break;
+    case FIELD_CLOSE_CONN_LAST_TAB:
+      ds->config->general.close_conn_on_last_tab =
+          !ds->config->general.close_conn_on_last_tab;
       break;
     default:
       break;

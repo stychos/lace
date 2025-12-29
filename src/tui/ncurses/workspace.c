@@ -415,8 +415,18 @@ void tab_close(TuiState *state) {
     ui->query_result_edit_buf = NULL;
   }
 
-  /* If closing a CONNECTION tab, close the actual database connection */
+  /* If closing a CONNECTION tab, check if other tabs use this connection */
   if (closing_type == TAB_TYPE_CONNECTION) {
+    /* Count other tabs using this connection */
+    size_t other_tabs_same_conn = 0;
+    for (size_t i = 0; i < ws->num_tabs; i++) {
+      if (i == tab_idx)
+        continue;
+      if (ws->tabs[i].connection_index == conn_idx) {
+        other_tabs_same_conn++;
+      }
+    }
+
     /* Close the tab first */
     workspace_close_tab(ws, tab_idx);
 
@@ -426,6 +436,15 @@ void tab_close(TuiState *state) {
     }
     memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
+    if (other_tabs_same_conn > 0) {
+      /* Other tabs still use this connection - just restore the next tab */
+      if (ws->num_tabs > 0) {
+        tab_restore(state);
+      }
+      return;
+    }
+
+    /* No other tabs use this connection - close it */
     /*
      * Clear TuiState pointers BEFORE calling app_close_connection.
      * These point to the same memory as Connection->conn/tables,
@@ -492,60 +511,68 @@ void tab_close(TuiState *state) {
   }
   memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
-  /* If this was the last content tab for this connection, create a connection tab */
+  /* If this was the last content tab for this connection, create a connection tab
+   * (unless close_conn_on_last_tab is enabled, in which case close the connection) */
   if (remaining_conn_content_tabs == 0 && !has_conn_connection_tab) {
-    /* Get connection string for display */
-    Connection *conn = app_get_connection(state->app, conn_idx);
-    const char *connstr = conn ? conn->connstr : NULL;
+    /* Check if we should close connection instead of creating connection tab */
+    bool close_conn = state->app->config &&
+                      state->app->config->general.close_conn_on_last_tab;
 
-    /* Create connection tab */
-    Tab *conn_tab = workspace_create_connection_tab(ws, conn_idx, connstr);
-    if (conn_tab) {
-      /* Switch to the new connection tab */
-      ws->current_tab = ws->num_tabs - 1;
+    if (!close_conn) {
+      /* Get connection string for display */
+      Connection *conn = app_get_connection(state->app, conn_idx);
+      const char *connstr = conn ? conn->connstr : NULL;
 
-      /* Update TuiState to point to this connection's data */
-      Connection *app_conn = app_get_connection(state->app, conn_idx);
-      if (app_conn) {
-        state->conn = app_conn->conn;
-        state->tables = app_conn->tables;
-        state->num_tables = app_conn->num_tables;
+      /* Create connection tab */
+      Tab *conn_tab = workspace_create_connection_tab(ws, conn_idx, connstr);
+      if (conn_tab) {
+        /* Switch to the new connection tab */
+        ws->current_tab = ws->num_tabs - 1;
+
+        /* Update TuiState to point to this connection's data */
+        Connection *app_conn = app_get_connection(state->app, conn_idx);
+        if (app_conn) {
+          state->conn = app_conn->conn;
+          state->tables = app_conn->tables;
+          state->num_tables = app_conn->num_tables;
+        }
+
+        /* Clear data state but keep connection */
+        state->data = NULL;
+        state->schema = NULL;
+        state->col_widths = NULL;
+        state->num_col_widths = 0;
+        state->cursor_row = 0;
+        state->cursor_col = 0;
+        state->scroll_row = 0;
+        state->scroll_col = 0;
+        state->total_rows = 0;
+        state->loaded_offset = 0;
+        state->loaded_count = 0;
+        state->current_table = 0;
+
+        /* Focus sidebar to select a new table */
+        state->sidebar_visible = true;
+        state->sidebar_focused = true;
+        state->sidebar_highlight = 0;
+        state->sidebar_scroll = 0;
+        state->sidebar_filter[0] = '\0';
+        state->sidebar_filter_len = 0;
+        state->sidebar_filter_active = false;
+        tui_recreate_windows(state);
+
+        /* Reset filters state */
+        state->filters_visible = false;
+        state->filters_focused = false;
+        state->filters_was_focused = false;
+        state->filters_editing = false;
+        state->filters_cursor_row = 0;
+        state->filters_cursor_col = 0;
+        state->filters_scroll = 0;
+        return;
       }
-
-      /* Clear data state but keep connection */
-      state->data = NULL;
-      state->schema = NULL;
-      state->col_widths = NULL;
-      state->num_col_widths = 0;
-      state->cursor_row = 0;
-      state->cursor_col = 0;
-      state->scroll_row = 0;
-      state->scroll_col = 0;
-      state->total_rows = 0;
-      state->loaded_offset = 0;
-      state->loaded_count = 0;
-      state->current_table = 0;
-
-      /* Focus sidebar to select a new table */
-      state->sidebar_visible = true;
-      state->sidebar_focused = true;
-      state->sidebar_highlight = 0;
-      state->sidebar_scroll = 0;
-      state->sidebar_filter[0] = '\0';
-      state->sidebar_filter_len = 0;
-      state->sidebar_filter_active = false;
-      tui_recreate_windows(state);
-
-      /* Reset filters state */
-      state->filters_visible = false;
-      state->filters_focused = false;
-      state->filters_was_focused = false;
-      state->filters_editing = false;
-      state->filters_cursor_row = 0;
-      state->filters_cursor_col = 0;
-      state->filters_scroll = 0;
-      return;
     }
+    /* If close_conn is true, fall through to close workspace/connection */
   }
 
   /* If no tabs remain, close the workspace */

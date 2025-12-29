@@ -13,7 +13,6 @@
 #include <stddef.h>
 
 #define CONFIG_FILE "config.json"
-#define CONFIG_VERSION 1
 
 /* Validation limits */
 #define CONFIG_PAGE_SIZE_MIN 10
@@ -38,6 +37,7 @@ typedef enum {
   HOTKEY_CAT_FILTERS,    /* Filter panel operations */
   HOTKEY_CAT_SIDEBAR,    /* Sidebar operations */
   HOTKEY_CAT_QUERY,      /* Query tab operations */
+  HOTKEY_CAT_CONNECT,    /* Connection dialog operations */
   HOTKEY_CAT_COUNT
 } HotkeyCategory;
 
@@ -102,6 +102,15 @@ typedef enum {
   /* Sidebar (HOTKEY_CAT_SIDEBAR) */
   HOTKEY_SIDEBAR_FILTER,
 
+  /* Connection Dialog (HOTKEY_CAT_CONNECT) */
+  HOTKEY_CONN_TEST,
+  HOTKEY_CONN_SAVE,
+  HOTKEY_CONN_NEW,
+  HOTKEY_CONN_NEW_FOLDER,
+  HOTKEY_CONN_EDIT,
+  HOTKEY_CONN_DELETE,
+  HOTKEY_CONN_RENAME,
+
   HOTKEY_COUNT
 } HotkeyAction;
 
@@ -118,7 +127,9 @@ typedef struct {
   int prefetch_pages;
   bool restore_session;
   bool quit_confirmation;
-  int max_result_rows;  /* Maximum rows returned by raw SQL queries */
+  int max_result_rows;           /* Maximum rows returned by raw SQL queries */
+  bool auto_open_first_table;    /* Open first table instead of connection tab */
+  bool close_conn_on_last_tab;   /* Close connection when last tab closes */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */
@@ -129,7 +140,6 @@ typedef struct {
 
 /* Full configuration */
 typedef struct {
-  int version;
   GeneralConfig general;
   HotkeyBinding hotkeys[HOTKEY_COUNT];
 } Config;

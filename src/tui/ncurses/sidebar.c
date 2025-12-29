@@ -215,6 +215,11 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       state->sidebar_highlight++;
     }
   } else if (hotkey_matches(cfg, event, HOTKEY_MOVE_RIGHT)) {
+    /* Connection tab requires sidebar to stay focused */
+    Tab *right_tab = TUI_TAB(state);
+    if (right_tab && right_tab->type == TAB_TYPE_CONNECTION) {
+      return true; /* Consume event but don't unfocus */
+    }
     /* Save sidebar position and move focus back to filters or table view */
     state->sidebar_last_position = state->sidebar_highlight;
     state->sidebar_focused = false;
@@ -352,6 +357,11 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       state->sidebar_filter_len = 0;
       /* Don't reset highlight - user may want to stay at current position */
     } else {
+      /* Connection tab requires sidebar to stay focused */
+      Tab *esc_tab = TUI_TAB(state);
+      if (esc_tab && esc_tab->type == TAB_TYPE_CONNECTION) {
+        return true; /* Consume event but don't unfocus */
+      }
       /* Save position before leaving sidebar */
       state->sidebar_last_position = state->sidebar_highlight;
       state->sidebar_focused = false;
@@ -359,6 +369,11 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
   }
   /* Toggle sidebar (close) */
   else if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_SIDEBAR)) {
+    /* Connection tab requires sidebar to stay visible */
+    Tab *toggle_tab = TUI_TAB(state);
+    if (toggle_tab && toggle_tab->type == TAB_TYPE_CONNECTION) {
+      return true; /* Consume event but don't hide */
+    }
     state->sidebar_visible = false;
     state->sidebar_focused = false;
     state->sidebar_filter[0] = '\0';
