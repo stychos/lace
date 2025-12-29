@@ -59,7 +59,7 @@ Binary will be at `build/lace`.
 # MySQL/MariaDB
 ./build/lace mysql://user:pass@host/database
 
-# Or start without arguments for connection dialog
+# Or start without arguments for connection dialog or to restore previous session (optionally)
 ./build/lace
 ```
 
