@@ -202,6 +202,8 @@ typedef struct {
   char *edit_buffer;     /* Edit buffer content */
   size_t edit_pos;       /* Cursor position in edit buffer */
   bool show_header_line; /* Whether to draw top border line */
+  SortEntry *sort_entries;  /* Array of sort columns (NULL if none) */
+  size_t num_sort_entries;  /* Number of sort columns */
 } GridDrawParams;
 
 /* Draw a result set grid (used by table view and query results) */

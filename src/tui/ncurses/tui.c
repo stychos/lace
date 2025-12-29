@@ -39,16 +39,25 @@ bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx) 
     while (new_ws_cap <= ws_idx)
       new_ws_cap *= 2;
 
-    UITabState **new_tab_ui =
-        realloc(state->tab_ui, new_ws_cap * sizeof(UITabState *));
+    /* Use malloc+memcpy+free for atomic all-or-nothing allocation */
+    UITabState **new_tab_ui = malloc(new_ws_cap * sizeof(UITabState *));
     if (!new_tab_ui)
       return false;
 
-    size_t *new_capacity =
-        realloc(state->tab_ui_capacity, new_ws_cap * sizeof(size_t));
+    size_t *new_capacity = malloc(new_ws_cap * sizeof(size_t));
     if (!new_capacity) {
-      state->tab_ui = new_tab_ui; /* Keep the expanded array */
+      free(new_tab_ui);
       return false;
+    }
+
+    /* Copy existing data */
+    if (state->tab_ui && state->tab_ui_ws_capacity > 0) {
+      memcpy(new_tab_ui, state->tab_ui,
+             state->tab_ui_ws_capacity * sizeof(UITabState *));
+    }
+    if (state->tab_ui_capacity && state->tab_ui_ws_capacity > 0) {
+      memcpy(new_capacity, state->tab_ui_capacity,
+             state->tab_ui_ws_capacity * sizeof(size_t));
     }
 
     /* Zero new entries */
@@ -57,6 +66,9 @@ bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx) 
       new_capacity[i] = 0;
     }
 
+    /* Free old and assign new atomically */
+    free(state->tab_ui);
+    free(state->tab_ui_capacity);
     state->tab_ui = new_tab_ui;
     state->tab_ui_capacity = new_capacity;
     state->tab_ui_ws_capacity = new_ws_cap;
@@ -1297,8 +1309,8 @@ void tui_run(TuiState *state) {
 
     /* ========== Application ========== */
     if (hotkey_matches(state->app->config, &event, HOTKEY_QUIT)) {
-      /* Quit with confirmation if configured or connected */
-      bool needs_confirm = state->conn != NULL;
+      /* Quit with confirmation only if configured */
+      bool needs_confirm = false;
       if (state->app && state->app->config &&
           state->app->config->general.quit_confirmation) {
         needs_confirm = true;
@@ -1420,6 +1432,42 @@ void tui_run(TuiState *state) {
       Tab *refresh_tab = TUI_TAB(state);
       if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
         tui_refresh_table(state);
+      }
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CYCLE_SORT)) {
+      /* Cycle sort on current column: not in list -> asc -> desc -> remove */
+      Tab *sort_tab = TUI_TAB(state);
+      if (sort_tab && sort_tab->type == TAB_TYPE_TABLE && sort_tab->schema) {
+        size_t col = state->cursor_col;
+        if (col < sort_tab->schema->num_columns) {
+          /* Find if column is already in sort list */
+          size_t existing_idx = SIZE_MAX;
+          for (size_t i = 0; i < sort_tab->num_sort_entries; i++) {
+            if (sort_tab->sort_entries[i].column == col) {
+              existing_idx = i;
+              break;
+            }
+          }
+
+          if (existing_idx == SIZE_MAX) {
+            /* Column not in list - add with ASC if room */
+            if (sort_tab->num_sort_entries < MAX_SORT_COLUMNS) {
+              sort_tab->sort_entries[sort_tab->num_sort_entries].column = col;
+              sort_tab->sort_entries[sort_tab->num_sort_entries].direction = SORT_ASC;
+              sort_tab->num_sort_entries++;
+            }
+          } else if (sort_tab->sort_entries[existing_idx].direction == SORT_ASC) {
+            /* Was ascending -> descending */
+            sort_tab->sort_entries[existing_idx].direction = SORT_DESC;
+          } else {
+            /* Was descending -> remove from list */
+            for (size_t i = existing_idx; i < sort_tab->num_sort_entries - 1; i++) {
+              sort_tab->sort_entries[i] = sort_tab->sort_entries[i + 1];
+            }
+            sort_tab->num_sort_entries--;
+          }
+          /* Reload table with new sort order */
+          tui_refresh_table(state);
+        }
       }
     }
     /* ========== Dialogs (handled directly by TUI) ========== */

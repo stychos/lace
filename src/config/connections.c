@@ -12,6 +12,7 @@
 #include "../util/str.h"
 #include <cJSON.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,21 +29,42 @@
  * ============================================================================
  */
 
+/* Get cryptographically secure random bytes */
+static bool secure_random_bytes(unsigned char *buf, size_t len) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+  /* Use arc4random_buf on BSD/macOS - always available, no seeding needed */
+  arc4random_buf(buf, len);
+  return true;
+#else
+  /* Fallback to /dev/urandom */
+  int fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0)
+    return false;
+
+  ssize_t bytes_read = read(fd, buf, len);
+  close(fd);
+
+  return bytes_read == (ssize_t)len;
+#endif
+}
+
 /* Generate a simple UUID v4 string */
 static char *generate_uuid(void) {
-  static bool seeded = false;
-  if (!seeded) {
-    srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
-    seeded = true;
-  }
-
   char *uuid = malloc(37);
   if (!uuid)
     return NULL;
 
   unsigned char bytes[16];
-  for (int i = 0; i < 16; i++) {
-    bytes[i] = (unsigned char)(rand() & 0xff);
+  if (!secure_random_bytes(bytes, sizeof(bytes))) {
+    /* Fallback to weak RNG if secure random fails */
+    static bool seeded = false;
+    if (!seeded) {
+      srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
+      seeded = true;
+    }
+    for (int i = 0; i < 16; i++) {
+      bytes[i] = (unsigned char)(rand() & 0xff);
+    }
   }
 
   /* Set version (4) and variant bits */
@@ -127,18 +149,60 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
   cJSON *port = cJSON_GetObjectItem(json, "port");
   cJSON *save_password = cJSON_GetObjectItem(json, "save_password");
 
-  conn->id = str_dup(cJSON_IsString(id) ? id->valuestring : "");
-  conn->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
-  conn->driver = str_dup(cJSON_IsString(driver) ? driver->valuestring : "");
-  conn->host = str_dup(cJSON_IsString(host) ? host->valuestring : "");
-  conn->database = str_dup(cJSON_IsString(database) ? database->valuestring : "");
-  conn->user = str_dup(cJSON_IsString(user) ? user->valuestring : "");
-  conn->password = str_dup(cJSON_IsString(password) ? password->valuestring : "");
+  /* Initialize all pointers to NULL for safe cleanup on failure */
+  conn->id = NULL;
+  conn->name = NULL;
+  conn->driver = NULL;
+  conn->host = NULL;
+  conn->database = NULL;
+  conn->user = NULL;
+  conn->password = NULL;
   conn->port = cJSON_IsNumber(port) ? port->valueint : 0;
-  conn->save_password = cJSON_IsBool(save_password) ? cJSON_IsTrue(save_password) : false;
+  conn->save_password =
+      cJSON_IsBool(save_password) ? cJSON_IsTrue(save_password) : false;
 
-  return conn->id && conn->name && conn->driver && conn->host &&
-         conn->database && conn->user && conn->password;
+  conn->id = str_dup(cJSON_IsString(id) ? id->valuestring : "");
+  if (!conn->id)
+    goto cleanup;
+  conn->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
+  if (!conn->name)
+    goto cleanup;
+  conn->driver = str_dup(cJSON_IsString(driver) ? driver->valuestring : "");
+  if (!conn->driver)
+    goto cleanup;
+  conn->host = str_dup(cJSON_IsString(host) ? host->valuestring : "");
+  if (!conn->host)
+    goto cleanup;
+  conn->database =
+      str_dup(cJSON_IsString(database) ? database->valuestring : "");
+  if (!conn->database)
+    goto cleanup;
+  conn->user = str_dup(cJSON_IsString(user) ? user->valuestring : "");
+  if (!conn->user)
+    goto cleanup;
+  conn->password =
+      str_dup(cJSON_IsString(password) ? password->valuestring : "");
+  if (!conn->password)
+    goto cleanup;
+
+  return true;
+
+cleanup:
+  free(conn->id);
+  conn->id = NULL;
+  free(conn->name);
+  conn->name = NULL;
+  free(conn->driver);
+  conn->driver = NULL;
+  free(conn->host);
+  conn->host = NULL;
+  free(conn->database);
+  conn->database = NULL;
+  free(conn->user);
+  conn->user = NULL;
+  str_secure_free(conn->password);
+  conn->password = NULL;
+  return false;
 }
 
 static bool parse_item(cJSON *json, ConnectionItem *item, ConnectionItem *parent);

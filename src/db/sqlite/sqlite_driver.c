@@ -112,32 +112,35 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
 
   case SQLITE_TEXT: {
     const char *text = (const char *)sqlite3_column_text(stmt, col);
-    int len = sqlite3_column_bytes(stmt, col);
-    if (!text || len < 0) {
+    int raw_len = sqlite3_column_bytes(stmt, col);
+    if (!text || raw_len < 0) {
       val.type = DB_TYPE_NULL;
       val.is_null = true;
-    } else if ((size_t)len > MAX_FIELD_SIZE) {
-      /* Oversized field - show placeholder */
-      char placeholder[64];
-      snprintf(placeholder, sizeof(placeholder), "[TEXT: %d bytes]", len);
-      val.text.data = str_dup(placeholder);
-      if (val.text.data) {
-        val.type = DB_TYPE_TEXT;
-        val.text.len = strlen(val.text.data);
-      } else {
-        val.type = DB_TYPE_NULL;
-        val.is_null = true;
-      }
     } else {
-      val.text.data = malloc(len + 1);
-      if (val.text.data) {
-        memcpy(val.text.data, text, len);
-        val.text.data[len] = '\0';
-        val.text.len = len;
-        val.type = DB_TYPE_TEXT;
+      size_t len = (size_t)raw_len;
+      if (len > MAX_FIELD_SIZE) {
+        /* Oversized field - show placeholder */
+        char placeholder[64];
+        snprintf(placeholder, sizeof(placeholder), "[TEXT: %zu bytes]", len);
+        val.text.data = str_dup(placeholder);
+        if (val.text.data) {
+          val.type = DB_TYPE_TEXT;
+          val.text.len = strlen(val.text.data);
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
       } else {
-        val.type = DB_TYPE_NULL;
-        val.is_null = true;
+        val.text.data = malloc(len + 1);
+        if (val.text.data) {
+          memcpy(val.text.data, text, len);
+          val.text.data[len] = '\0';
+          val.text.len = len;
+          val.type = DB_TYPE_TEXT;
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
       }
     }
     break;
@@ -145,31 +148,34 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
 
   case SQLITE_BLOB: {
     const void *blob = sqlite3_column_blob(stmt, col);
-    int len = sqlite3_column_bytes(stmt, col);
-    if (!blob || len <= 0) {
+    int raw_len = sqlite3_column_bytes(stmt, col);
+    if (!blob || raw_len <= 0) {
       val.type = DB_TYPE_NULL;
       val.is_null = true;
-    } else if ((size_t)len > MAX_FIELD_SIZE) {
-      /* Oversized field - show placeholder */
-      char placeholder[64];
-      snprintf(placeholder, sizeof(placeholder), "[BLOB: %d bytes]", len);
-      val.text.data = str_dup(placeholder);
-      if (val.text.data) {
-        val.type = DB_TYPE_TEXT;
-        val.text.len = strlen(val.text.data);
-      } else {
-        val.type = DB_TYPE_NULL;
-        val.is_null = true;
-      }
     } else {
-      val.blob.data = malloc(len);
-      if (val.blob.data) {
-        memcpy(val.blob.data, blob, len);
-        val.blob.len = len;
-        val.type = DB_TYPE_BLOB;
+      size_t len = (size_t)raw_len;
+      if (len > MAX_FIELD_SIZE) {
+        /* Oversized field - show placeholder */
+        char placeholder[64];
+        snprintf(placeholder, sizeof(placeholder), "[BLOB: %zu bytes]", len);
+        val.text.data = str_dup(placeholder);
+        if (val.text.data) {
+          val.type = DB_TYPE_TEXT;
+          val.text.len = strlen(val.text.data);
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
       } else {
-        val.type = DB_TYPE_NULL;
-        val.is_null = true;
+        val.blob.data = malloc(len);
+        if (val.blob.data) {
+          memcpy(val.blob.data, blob, len);
+          val.blob.len = len;
+          val.type = DB_TYPE_BLOB;
+        } else {
+          val.type = DB_TYPE_NULL;
+          val.is_null = true;
+        }
       }
     }
     break;
@@ -716,14 +722,19 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
   int num_cols = sqlite3_column_count(stmt);
   if (num_cols > 0) {
     rs->columns = calloc(num_cols, sizeof(ColumnDef));
-    if (rs->columns) {
-      rs->num_columns = num_cols;
-      for (int i = 0; i < num_cols; i++) {
-        rs->columns[i].name = str_dup(sqlite3_column_name(stmt, i));
-        const char *type = sqlite3_column_decltype(stmt, i);
-        if (type)
-          rs->columns[i].type_name = str_dup(type);
-      }
+    if (!rs->columns) {
+      free(rs);
+      sqlite3_finalize(stmt);
+      if (err)
+        *err = str_dup("Memory allocation failed for columns");
+      return NULL;
+    }
+    rs->num_columns = num_cols;
+    for (int i = 0; i < num_cols; i++) {
+      rs->columns[i].name = str_dup(sqlite3_column_name(stmt, i));
+      const char *type = sqlite3_column_decltype(stmt, i);
+      if (type)
+        rs->columns[i].type_name = str_dup(type);
     }
   }
 
@@ -838,17 +849,27 @@ static ResultSet *sqlite_query_page(DbConnection *conn, const char *table,
 
   char *sql;
   if (order_by) {
-    char *escaped_order = str_escape_identifier_dquote(order_by);
-    if (!escaped_order) {
-      free(escaped_table);
-      if (err)
-        *err = str_dup("Memory allocation failed");
-      return NULL;
+    /* Check if this is a pre-built clause (contains ASC or DESC or comma) */
+    if (strstr(order_by, " ASC") || strstr(order_by, " DESC") ||
+        strstr(order_by, " asc") || strstr(order_by, " desc") ||
+        strchr(order_by, ',')) {
+      /* Pre-built clause - use directly */
+      sql = str_printf("SELECT * FROM %s ORDER BY %s LIMIT %zu OFFSET %zu",
+                       escaped_table, order_by, limit, offset);
+    } else {
+      /* Single column - escape and add direction */
+      char *escaped_order = str_escape_identifier_dquote(order_by);
+      if (!escaped_order) {
+        free(escaped_table);
+        if (err)
+          *err = str_dup("Memory allocation failed");
+        return NULL;
+      }
+      sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
+                       escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
+                       offset);
+      free(escaped_order);
     }
-    sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                     escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
-                     offset);
-    free(escaped_order);
   } else {
     sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table,
                      limit, offset);

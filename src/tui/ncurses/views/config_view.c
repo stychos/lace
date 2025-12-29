@@ -729,99 +729,54 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
       render_translate_key(new_ch, &new_event);
 
       if (!render_event_is_special(&new_event, UI_KEY_ESCAPE)) {
-        /* Build key string from event */
+        /* Build key string from event using safe string operations */
         char key_str[32] = {0};
+        size_t pos = 0;
 
         if (new_event.key.mods & UI_MOD_CTRL) {
-          strcat(key_str, "CTRL+");
+          pos += (size_t)snprintf(key_str + pos, sizeof(key_str) - pos, "CTRL+");
         }
 
         if (new_event.key.is_special) {
+          const char *key_name = NULL;
           switch (new_event.key.key) {
-          case UI_KEY_UP:
-            strcat(key_str, "UP");
-            break;
-          case UI_KEY_DOWN:
-            strcat(key_str, "DOWN");
-            break;
-          case UI_KEY_LEFT:
-            strcat(key_str, "LEFT");
-            break;
-          case UI_KEY_RIGHT:
-            strcat(key_str, "RIGHT");
-            break;
-          case UI_KEY_HOME:
-            strcat(key_str, "HOME");
-            break;
-          case UI_KEY_END:
-            strcat(key_str, "END");
-            break;
-          case UI_KEY_PAGEUP:
-            strcat(key_str, "PGUP");
-            break;
-          case UI_KEY_PAGEDOWN:
-            strcat(key_str, "PGDN");
-            break;
-          case UI_KEY_ENTER:
-            strcat(key_str, "ENTER");
-            break;
-          case UI_KEY_TAB:
-            strcat(key_str, "TAB");
-            break;
-          case UI_KEY_BACKSPACE:
-            strcat(key_str, "BACKSPACE");
-            break;
-          case UI_KEY_DELETE:
-            strcat(key_str, "DELETE");
-            break;
-          case UI_KEY_F1:
-            strcat(key_str, "F1");
-            break;
-          case UI_KEY_F2:
-            strcat(key_str, "F2");
-            break;
-          case UI_KEY_F3:
-            strcat(key_str, "F3");
-            break;
-          case UI_KEY_F4:
-            strcat(key_str, "F4");
-            break;
-          case UI_KEY_F5:
-            strcat(key_str, "F5");
-            break;
-          case UI_KEY_F6:
-            strcat(key_str, "F6");
-            break;
-          case UI_KEY_F7:
-            strcat(key_str, "F7");
-            break;
-          case UI_KEY_F8:
-            strcat(key_str, "F8");
-            break;
-          case UI_KEY_F9:
-            strcat(key_str, "F9");
-            break;
-          case UI_KEY_F10:
-            strcat(key_str, "F10");
-            break;
-          case UI_KEY_F11:
-            strcat(key_str, "F11");
-            break;
-          case UI_KEY_F12:
-            strcat(key_str, "F12");
-            break;
-          default:
-            break;
+          case UI_KEY_UP: key_name = "UP"; break;
+          case UI_KEY_DOWN: key_name = "DOWN"; break;
+          case UI_KEY_LEFT: key_name = "LEFT"; break;
+          case UI_KEY_RIGHT: key_name = "RIGHT"; break;
+          case UI_KEY_HOME: key_name = "HOME"; break;
+          case UI_KEY_END: key_name = "END"; break;
+          case UI_KEY_PAGEUP: key_name = "PGUP"; break;
+          case UI_KEY_PAGEDOWN: key_name = "PGDN"; break;
+          case UI_KEY_ENTER: key_name = "ENTER"; break;
+          case UI_KEY_TAB: key_name = "TAB"; break;
+          case UI_KEY_BACKSPACE: key_name = "BACKSPACE"; break;
+          case UI_KEY_DELETE: key_name = "DELETE"; break;
+          case UI_KEY_F1: key_name = "F1"; break;
+          case UI_KEY_F2: key_name = "F2"; break;
+          case UI_KEY_F3: key_name = "F3"; break;
+          case UI_KEY_F4: key_name = "F4"; break;
+          case UI_KEY_F5: key_name = "F5"; break;
+          case UI_KEY_F6: key_name = "F6"; break;
+          case UI_KEY_F7: key_name = "F7"; break;
+          case UI_KEY_F8: key_name = "F8"; break;
+          case UI_KEY_F9: key_name = "F9"; break;
+          case UI_KEY_F10: key_name = "F10"; break;
+          case UI_KEY_F11: key_name = "F11"; break;
+          case UI_KEY_F12: key_name = "F12"; break;
+          default: break;
+          }
+          if (key_name && pos < sizeof(key_str) - 1) {
+            snprintf(key_str + pos, sizeof(key_str) - pos, "%s", key_name);
           }
         } else {
           char c = (char)new_event.key.key;
           if (c >= 'a' && c <= 'z') {
             c = (char)(c - 'a' + 'A'); /* Uppercase */
           }
-          if (c >= 32 && c < 127) {
-            size_t len = strlen(key_str);
-            key_str[len] = c;
-            key_str[len + 1] = '\0';
+          if (c >= 32 && c < 127 && pos < sizeof(key_str) - 1) {
+            key_str[pos] = c;
+            key_str[pos + 1] = '\0';
           }
         }
 

@@ -118,6 +118,8 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
     }
 
     const char *name = data->columns[col].name;
+
+    /* Draw column name at full width */
     mvwprintw(win, y, x, "%-*.*s", width, width, name ? name : "");
 
     if (col == params->cursor_col && params->is_focused) {
@@ -132,6 +134,45 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 
   if (y >= max_y)
     return;
+
+  /* Second header row for sort indicators (only if sorting is active) */
+  if (params->num_sort_entries > 0 && params->sort_entries) {
+    x = x_base + 1;
+    for (size_t col = params->scroll_col; col < data->num_columns; col++) {
+      int width = grid_get_col_width(params, col);
+      if (x + width + 3 > max_x)
+        break;
+
+      /* Check if this column is sorted */
+      bool found = false;
+      for (size_t i = 0; i < params->num_sort_entries; i++) {
+        /* Bounds check: skip invalid column indices */
+        if (params->sort_entries[i].column >= data->num_columns)
+          continue;
+        if (params->sort_entries[i].column == col) {
+          /* Show: priority + arrow + direction text (e.g., "1^ asc") */
+          char indicator = (params->sort_entries[i].direction == SORT_ASC) ? '^' : 'v';
+          const char *dir_text = (params->sort_entries[i].direction == SORT_ASC) ? "asc" : "desc";
+          char sort_info[16];
+          snprintf(sort_info, sizeof(sort_info), "%d%c %s", (int)(i + 1), indicator, dir_text);
+          mvwprintw(win, y, x, "%-*.*s", width, width, sort_info);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        /* Empty cell for non-sorted columns */
+        mvwprintw(win, y, x, "%-*s", width, "");
+      }
+
+      x += width + 1;
+      mvwaddch(win, y, x - 1, ACS_VLINE);
+    }
+    y++;
+
+    if (y >= max_y)
+      return;
+  }
 
   /* Header separator */
   wattron(win, COLOR_PAIR(COLOR_BORDER));
@@ -378,6 +419,9 @@ void tui_draw_table(TuiState *state) {
     return;
   }
 
+  /* Get sort state from tab */
+  Tab *tab = TUI_TAB(state);
+
   /* Use the shared grid drawing function */
   GridDrawParams params = {.win = state->main_win,
                            .start_y = filters_height,
@@ -396,7 +440,9 @@ void tui_draw_table(TuiState *state) {
                            .is_editing = is_editing,
                            .edit_buffer = edit_buffer,
                            .edit_pos = edit_pos,
-                           .show_header_line = true};
+                           .show_header_line = true,
+                           .sort_entries = tab ? tab->sort_entries : NULL,
+                           .num_sort_entries = tab ? tab->num_sort_entries : 0};
 
   tui_draw_result_grid(state, &params);
   wrefresh(state->main_win);

@@ -10,7 +10,7 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 - Classic & vim-like, spatial & configurable navigation with mouse support
 - Multi-tabs & workspaces
 - SQL editor tabs that remember content between restarts
-- Column-based data filtering
+- Multi-column data filtering and sorting, RAW SQL filters
 - Inline data editing with live updates
 - Linux & macOS compatible
 - Works over SSH

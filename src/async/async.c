@@ -33,6 +33,7 @@ static void *async_worker_thread(void *arg) {
     break;
 
   case ASYNC_OP_LIST_TABLES:
+    op->result_count = 0; /* Initialize in case db_list_tables fails early */
     op->result = db_list_tables(op->conn, &op->result_count, &err);
     break;
 
@@ -93,15 +94,15 @@ static void *async_worker_thread(void *arg) {
     break;
   }
 
-  /* Clean up cancel handle */
+  /* Update state and signal completion */
+  lace_mutex_lock(&op->mutex);
+
+  /* Clean up cancel handle INSIDE mutex to prevent race with async_cancel */
   if (op->cancel_handle && op->conn && op->conn->driver &&
       op->conn->driver->free_cancel_handle) {
     op->conn->driver->free_cancel_handle(op->cancel_handle);
     op->cancel_handle = NULL;
   }
-
-  /* Update state and signal completion */
-  lace_mutex_lock(&op->mutex);
   if (op->cancel_requested) {
     op->state = ASYNC_STATE_CANCELLED;
     /* Free any partial result on cancellation */
@@ -115,15 +116,14 @@ static void *async_worker_thread(void *arg) {
       case ASYNC_OP_GET_SCHEMA:
         db_schema_free(op->result);
         break;
-      case ASYNC_OP_LIST_TABLES:
-        if (op->result) {
-          char **tables = (char **)op->result;
-          for (size_t i = 0; i < op->result_count; i++) {
-            free(tables[i]);
-          }
-          free(tables);
+      case ASYNC_OP_LIST_TABLES: {
+        char **tables = (char **)op->result;
+        for (size_t i = 0; i < op->result_count; i++) {
+          free(tables[i]);
         }
+        free(tables);
         break;
+      }
       case ASYNC_OP_CONNECT:
         if (op->result) {
           db_disconnect(op->result);

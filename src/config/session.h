@@ -31,6 +31,12 @@ typedef struct {
   char *value;        /* Filter value */
 } SessionFilter;
 
+/* Serialized sort entry (uses column name, not index) */
+typedef struct {
+  char *column_name;  /* Column name (resolved at restore) */
+  int direction;      /* SortDirection enum value */
+} SessionSortEntry;
+
 /* Serialized tab UI state */
 typedef struct {
   bool sidebar_visible;
@@ -55,6 +61,10 @@ typedef struct {
   size_t cursor_col;
   size_t scroll_row;
   size_t scroll_col;
+
+  /* Sort state (multi-column) */
+  SessionSortEntry *sort_entries;  /* Array of sort columns (by name) */
+  size_t num_sort_entries;         /* Number of sort columns */
 
   /* Filters */
   SessionFilter *filters;

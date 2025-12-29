@@ -441,21 +441,39 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
     return NULL;
   }
 
-  sb_printf(sb, "SELECT * FROM %s", escaped_table);
+  bool ok = sb_printf(sb, "SELECT * FROM %s", escaped_table);
 
-  if (where_clause && *where_clause) {
-    sb_printf(sb, " WHERE %s", where_clause);
+  if (ok && where_clause && *where_clause) {
+    ok = sb_printf(sb, " WHERE %s", where_clause);
   }
 
-  if (order_by && *order_by) {
-    char *escaped_order = escape_identifier(conn, order_by);
-    if (escaped_order) {
-      sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
-      free(escaped_order);
+  if (ok && order_by && *order_by) {
+    /* Check if this is a pre-built clause (contains ASC or DESC or comma) */
+    if (strstr(order_by, " ASC") || strstr(order_by, " DESC") ||
+        strstr(order_by, " asc") || strstr(order_by, " desc") ||
+        strchr(order_by, ',')) {
+      /* Pre-built clause - use directly */
+      ok = sb_printf(sb, " ORDER BY %s", order_by);
+    } else {
+      /* Single column - escape and add direction */
+      char *escaped_order = escape_identifier(conn, order_by);
+      if (escaped_order) {
+        ok = sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
+        free(escaped_order);
+      }
     }
   }
 
-  sb_printf(sb, " LIMIT %zu OFFSET %zu", limit, offset);
+  if (ok) {
+    ok = sb_printf(sb, " LIMIT %zu OFFSET %zu", limit, offset);
+  }
+
+  if (!ok) {
+    sb_free(sb);
+    free(escaped_table);
+    SET_ERROR(err, "Out of memory building query");
+    return NULL;
+  }
 
   char *sql = sb_to_string(sb);
   free(escaped_table);

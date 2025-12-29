@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Maximum number of primary key columns we support.
+ * Composite PKs with more than 16 columns are extremely rare in practice. */
+#define MAX_PK_COLUMNS 16
+
 /* Helper to get VmTable, returns NULL if not valid for editing */
 static VmTable *get_vm_table(TuiState *state) {
   if (!state || !state->vm_table)
@@ -60,17 +64,29 @@ static bool pk_info_build(PkInfo *pk, ResultSet *data, size_t row_idx,
   if (!pk || !data || !schema || row_idx >= data->num_rows)
     return false;
 
+  /* Count total PK columns first */
+  size_t total_pk = 0;
+  for (size_t i = 0; i < schema->num_columns; i++) {
+    if (schema->columns[i].primary_key) {
+      total_pk++;
+    }
+  }
+
+  if (total_pk == 0)
+    return false;
+
+  /* Check for tables with too many PK columns (extremely rare) */
+  if (total_pk > MAX_PK_COLUMNS)
+    return false;
+
   /* Find PK column indices */
-  size_t pk_indices[16];
+  size_t pk_indices[MAX_PK_COLUMNS];
   size_t num_pk = 0;
-  for (size_t i = 0; i < schema->num_columns && num_pk < 16; i++) {
+  for (size_t i = 0; i < schema->num_columns && num_pk < MAX_PK_COLUMNS; i++) {
     if (schema->columns[i].primary_key) {
       pk_indices[num_pk++] = i;
     }
   }
-
-  if (num_pk == 0)
-    return false;
 
   /* Verify indices are within bounds */
   Row *row = &data->rows[row_idx];

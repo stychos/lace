@@ -13,6 +13,7 @@
 #include "../util/str.h"
 #include <cJSON.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,17 @@
  * ============================================================================
  */
 
+/* Safely convert JSON number to size_t (returns 0 on invalid input) */
+static size_t json_to_size_t(cJSON *num) {
+  if (!cJSON_IsNumber(num))
+    return 0;
+  double val = num->valuedouble;
+  /* Validate: must be finite, non-negative, and within size_t range */
+  if (!isfinite(val) || val < 0 || val > (double)SIZE_MAX)
+    return 0;
+  return (size_t)val;
+}
+
 static void set_error(char **err, const char *fmt, ...) {
   if (!err)
     return;
@@ -35,6 +47,60 @@ static void set_error(char **err, const char *fmt, ...) {
   va_start(args, fmt);
   *err = str_vprintf(fmt, args);
   va_end(args);
+}
+
+/* Column width constants (from tui_internal.h) */
+#define SESSION_MIN_COL_WIDTH 4
+#define SESSION_MAX_COL_WIDTH 40
+
+/* Calculate column widths for a Tab based on its data */
+static void calculate_tab_column_widths(Tab *tab) {
+  if (!tab || !tab->data)
+    return;
+
+  ResultSet *data = tab->data;
+  if (!data->columns || data->num_columns == 0)
+    return;
+
+  free(tab->col_widths);
+  tab->num_col_widths = data->num_columns;
+  tab->col_widths = calloc(tab->num_col_widths, sizeof(int));
+
+  if (!tab->col_widths) {
+    tab->num_col_widths = 0;
+    return;
+  }
+
+  /* Start with column name widths */
+  for (size_t i = 0; i < data->num_columns; i++) {
+    const char *name = data->columns[i].name;
+    int len = name ? (int)strlen(name) : 0;
+    tab->col_widths[i] = len < SESSION_MIN_COL_WIDTH ? SESSION_MIN_COL_WIDTH : len;
+  }
+
+  /* Check data widths (first 100 rows) */
+  for (size_t row = 0; row < data->num_rows && row < 100; row++) {
+    Row *r = &data->rows[row];
+    if (!r->cells)
+      continue;
+    for (size_t col = 0; col < data->num_columns && col < r->num_cells; col++) {
+      char *str = db_value_to_string(&r->cells[col]);
+      if (str) {
+        int len = (int)strlen(str);
+        if (len > tab->col_widths[col]) {
+          tab->col_widths[col] = len;
+        }
+        free(str);
+      }
+    }
+  }
+
+  /* Apply max width */
+  for (size_t i = 0; i < tab->num_col_widths; i++) {
+    if (tab->col_widths[i] > SESSION_MAX_COL_WIDTH) {
+      tab->col_widths[i] = SESSION_MAX_COL_WIDTH;
+    }
+  }
 }
 
 char *session_get_path(void) {
@@ -70,6 +136,54 @@ static const char *find_connection_id_by_connstr(ConnectionManager *mgr,
   return NULL;
 }
 
+/* Build ORDER BY clause from tab's sort entries (caller must free) */
+static char *build_tab_order_clause(Tab *tab, TableSchema *schema,
+                                     const char *driver_name) {
+  if (!tab || tab->num_sort_entries == 0 || !schema || !driver_name)
+    return NULL;
+
+  /* Determine quote character based on driver */
+  bool use_backtick = (strcmp(driver_name, "mysql") == 0 ||
+                       strcmp(driver_name, "mariadb") == 0);
+
+  /* Build ORDER BY clause */
+  StringBuilder *sb = sb_new(128);
+  if (!sb)
+    return NULL;
+
+  bool first_added = false;
+  for (size_t i = 0; i < tab->num_sort_entries; i++) {
+    SortEntry *entry = &tab->sort_entries[i];
+    if (entry->column >= schema->num_columns)
+      continue;
+
+    const char *col_name = schema->columns[entry->column].name;
+    if (!col_name)
+      continue;
+
+    /* Escape column name */
+    char *escaped = use_backtick ? str_escape_identifier_backtick(col_name)
+                                 : str_escape_identifier_dquote(col_name);
+    if (!escaped) {
+      sb_free(sb);
+      return NULL;
+    }
+
+    /* Add separator if not first valid entry */
+    if (first_added) {
+      sb_append(sb, ", ");
+    }
+    first_added = true;
+
+    /* Add column with direction */
+    sb_printf(sb, "%s %s", escaped, entry->direction == SORT_ASC ? "ASC" : "DESC");
+    free(escaped);
+  }
+
+  char *result = sb_to_string(sb);
+  return result;
+}
+
 /* ============================================================================
  * Session Free
  * ============================================================================
@@ -89,6 +203,12 @@ static void session_tab_free(SessionTab *tab) {
   free(tab->connection_id);
   free(tab->table_name);
   free(tab->query_text);
+
+  /* Free sort entry column names */
+  for (size_t i = 0; i < tab->num_sort_entries; i++) {
+    free(tab->sort_entries[i].column_name);
+  }
+  free(tab->sort_entries);
 
   for (size_t i = 0; i < tab->num_filters; i++) {
     session_filter_free(&tab->filters[i]);
@@ -221,6 +341,24 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
   cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)abs_scroll_row));
   cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)tab->scroll_col));
   cJSON_AddItemToObject(json, "scroll", scroll);
+
+  /* Sort state (for TABLE tabs) - save column names, not indices */
+  if (tab->type == TAB_TYPE_TABLE && tab->num_sort_entries > 0 && tab->schema) {
+    cJSON *sort_arr = cJSON_CreateArray();
+    for (size_t i = 0; i < tab->num_sort_entries; i++) {
+      size_t col_idx = tab->sort_entries[i].column;
+      if (col_idx >= tab->schema->num_columns)
+        continue;  /* Skip invalid column indices */
+      const char *col_name = tab->schema->columns[col_idx].name;
+      if (!col_name)
+        continue;
+      cJSON *entry = cJSON_CreateObject();
+      cJSON_AddStringToObject(entry, "column", col_name);
+      cJSON_AddNumberToObject(entry, "direction", tab->sort_entries[i].direction);
+      cJSON_AddItemToArray(sort_arr, entry);
+    }
+    cJSON_AddItemToObject(json, "sort", sort_arr);
+  }
 
   /* Filters (for TABLE tabs) */
   if (tab->type == TAB_TYPE_TABLE && tab->filters.num_filters > 0) {
@@ -490,25 +628,43 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   cJSON *table_name = cJSON_GetObjectItem(json, "table_name");
   tab->table_name = str_dup(cJSON_IsString(table_name) ? table_name->valuestring : "");
 
-  /* Cursor/scroll - use valuedouble for large row numbers */
+  /* Cursor/scroll - safely convert to size_t (validates finite, non-negative) */
   cJSON *cursor = cJSON_GetObjectItem(json, "cursor");
   if (cJSON_IsArray(cursor) && cJSON_GetArraySize(cursor) >= 2) {
-    cJSON *cursor_row = cJSON_GetArrayItem(cursor, 0);
-    cJSON *cursor_col = cJSON_GetArrayItem(cursor, 1);
-    if (cJSON_IsNumber(cursor_row) && cursor_row->valuedouble >= 0)
-      tab->cursor_row = (size_t)cursor_row->valuedouble;
-    if (cJSON_IsNumber(cursor_col) && cursor_col->valuedouble >= 0)
-      tab->cursor_col = (size_t)cursor_col->valuedouble;
+    tab->cursor_row = json_to_size_t(cJSON_GetArrayItem(cursor, 0));
+    tab->cursor_col = json_to_size_t(cJSON_GetArrayItem(cursor, 1));
   }
 
   cJSON *scroll = cJSON_GetObjectItem(json, "scroll");
   if (cJSON_IsArray(scroll) && cJSON_GetArraySize(scroll) >= 2) {
-    cJSON *scroll_row = cJSON_GetArrayItem(scroll, 0);
-    cJSON *scroll_col = cJSON_GetArrayItem(scroll, 1);
-    if (cJSON_IsNumber(scroll_row) && scroll_row->valuedouble >= 0)
-      tab->scroll_row = (size_t)scroll_row->valuedouble;
-    if (cJSON_IsNumber(scroll_col) && scroll_col->valuedouble >= 0)
-      tab->scroll_col = (size_t)scroll_col->valuedouble;
+    tab->scroll_row = json_to_size_t(cJSON_GetArrayItem(scroll, 0));
+    tab->scroll_col = json_to_size_t(cJSON_GetArrayItem(scroll, 1));
+  }
+
+  /* Sort state (multi-column) - loads column names */
+  cJSON *sort_arr = cJSON_GetObjectItem(json, "sort");
+  if (cJSON_IsArray(sort_arr)) {
+    size_t count = (size_t)cJSON_GetArraySize(sort_arr);
+    if (count > 0 && count <= MAX_SORT_COLUMNS) {
+      tab->sort_entries = calloc(count, sizeof(SessionSortEntry));
+      if (tab->sort_entries) {
+        cJSON *entry;
+        cJSON_ArrayForEach(entry, sort_arr) {
+          if (tab->num_sort_entries >= count)
+            break;
+          cJSON *col = cJSON_GetObjectItem(entry, "column");
+          cJSON *dir = cJSON_GetObjectItem(entry, "direction");
+          if (cJSON_IsString(col) && cJSON_IsNumber(dir)) {
+            char *col_name = str_dup(col->valuestring);
+            if (!col_name)
+              continue;  /* Skip on allocation failure */
+            tab->sort_entries[tab->num_sort_entries].column_name = col_name;
+            tab->sort_entries[tab->num_sort_entries].direction = dir->valueint;
+            tab->num_sort_entries++;
+          }
+        }
+      }
+    }
   }
 
   /* Filters */
@@ -832,6 +988,8 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
   tab->cursor_col = stab->cursor_col;
   tab->scroll_col = stab->scroll_col;
 
+  /* Note: Sort state is restored later, after schema is loaded */
+
   /* Restore query text for QUERY tabs */
   if (stab->type == TAB_TYPE_QUERY && stab->query_text && stab->query_text[0]) {
     free(tab->query_text);
@@ -865,6 +1023,24 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
         if (col_idx != (size_t)-1) {
           filters_add(&tab->filters, col_idx, (FilterOperator)sf->op, sf->value);
         }
+      }
+    }
+
+    /* Restore sort state (need schema to resolve column names) */
+    if (tab->schema && stab->num_sort_entries > 0 && stab->sort_entries) {
+      for (size_t i = 0; i < stab->num_sort_entries; i++) {
+        if (tab->num_sort_entries >= MAX_SORT_COLUMNS)
+          break;
+        SessionSortEntry *se = &stab->sort_entries[i];
+        if (!se->column_name)
+          continue;
+        size_t col_idx = find_column_index(tab->schema, se->column_name);
+        if (col_idx != (size_t)-1) {
+          tab->sort_entries[tab->num_sort_entries].column = col_idx;
+          tab->sort_entries[tab->num_sort_entries].direction = se->direction;
+          tab->num_sort_entries++;
+        }
+        /* Columns that no longer exist are silently skipped */
       }
     }
 
@@ -931,14 +1107,21 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       }
     }
 
+    /* Build ORDER BY clause from restored sort entries */
+    char *order_by = NULL;
+    if (tab->schema && conn->conn->driver) {
+      order_by = build_tab_order_clause(tab, tab->schema, conn->conn->driver->name);
+    }
+
     /* Load data at the calculated offset (near saved cursor position) */
     if (where) {
       tab->data = db_query_page_where(conn->conn, stab->table_name, load_offset,
-                                       page_size, where, NULL, false, &err);
+                                       page_size, where, order_by, false, &err);
     } else {
       tab->data = db_query_page(conn->conn, stab->table_name, load_offset,
-                                 page_size, NULL, false, &err);
+                                 page_size, order_by, false, &err);
     }
+    free(order_by);
     free(where);
     if (err) {
       free(err);
@@ -947,6 +1130,9 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     if (tab->data) {
       tab->loaded_offset = load_offset;
       tab->loaded_count = tab->data->num_rows;
+
+      /* Calculate column widths based on loaded data */
+      calculate_tab_column_widths(tab);
 
       /* Convert absolute positions to relative (within loaded window) */
       if (abs_cursor_row >= load_offset) {

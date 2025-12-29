@@ -184,6 +184,10 @@ char *filters_parse_in_values(const char *input, char **err) {
   if (*p == '(')
     p++;
 
+  /* Limit number of values to prevent DoS */
+  #define MAX_IN_VALUES 1000
+  size_t value_count = 0;
+
   bool first = true;
   while (*p) {
     /* Skip whitespace */
@@ -191,6 +195,15 @@ char *filters_parse_in_values(const char *input, char **err) {
       p++;
     if (!*p || *p == ')')
       break;
+
+    /* Check value limit */
+    if (value_count >= MAX_IN_VALUES) {
+      sb_free(sb);
+      if (err)
+        *err = str_dup("Too many values in IN clause (max 1000)");
+      return NULL;
+    }
+    value_count++;
 
     if (!first)
       sb_append(sb, ", ");

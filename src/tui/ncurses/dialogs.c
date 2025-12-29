@@ -646,8 +646,11 @@ void tui_show_schema(TuiState *state) {
               written = snprintf(cols + pos, sizeof(cols) - pos, "%s",
                                  idx->columns[j] ? idx->columns[j] : "");
             }
-            if (written > 0)
-              pos += written;
+            if (written > 0) {
+              pos += (size_t)written;
+              if (pos >= sizeof(cols))
+                pos = sizeof(cols) - 1; /* Cap to prevent overflow */
+            }
             if (pos >= sizeof(cols) - 1)
               break;
           }
@@ -685,8 +688,11 @@ void tui_show_schema(TuiState *state) {
               written = snprintf(src_cols + pos, sizeof(src_cols) - pos, "%s",
                                  fk->columns[j] ? fk->columns[j] : "");
             }
-            if (written > 0)
-              pos += written;
+            if (written > 0) {
+              pos += (size_t)written;
+              if (pos >= sizeof(src_cols))
+                pos = sizeof(src_cols) - 1;
+            }
             if (pos >= sizeof(src_cols) - 1)
               break;
           }
@@ -702,8 +708,11 @@ void tui_show_schema(TuiState *state) {
               written = snprintf(ref_cols + pos, sizeof(ref_cols) - pos, "%s",
                                  fk->ref_columns[j] ? fk->ref_columns[j] : "");
             }
-            if (written > 0)
-              pos += written;
+            if (written > 0) {
+              pos += (size_t)written;
+              if (pos >= sizeof(ref_cols))
+                pos = sizeof(ref_cols) - 1;
+            }
             if (pos >= sizeof(ref_cols) - 1)
               break;
           }

@@ -59,6 +59,7 @@ static const char *def_toggle_filters[] = {"f", "/"};
 static const char *def_toggle_sidebar[] = {"t", "F9"};
 static const char *def_show_schema[] = {"s", "F3"};
 static const char *def_refresh[] = {"r"};
+static const char *def_cycle_sort[] = {"o"};
 
 /* General */
 static const char *def_prev_tab[] = {"[", "F7"};
@@ -116,6 +117,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_TOGGLE_SIDEBAR] = {"toggle_sidebar", "Toggle sidebar", HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_sidebar)},
     [HOTKEY_SHOW_SCHEMA] = {"show_schema", "Show schema", HOTKEY_CAT_TABLE, DEF_KEYS(def_show_schema)},
     [HOTKEY_REFRESH] = {"refresh", "Refresh", HOTKEY_CAT_TABLE, DEF_KEYS(def_refresh)},
+    [HOTKEY_CYCLE_SORT] = {"cycle_sort", "Cycle sort", HOTKEY_CAT_TABLE, DEF_KEYS(def_cycle_sort)},
 
     /* General */
     [HOTKEY_PREV_TAB] = {"prev_tab", "Previous tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_tab)},
@@ -284,7 +286,7 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
 static char *key_to_display(int key_code, UiKeyMod mods) {
   char prefix[16] = "";
   if (mods & UI_MOD_CTRL)
-    strcat(prefix, "Ctrl+");
+    snprintf(prefix, sizeof(prefix), "Ctrl+");
 
   /* Special keys */
   if (key_code >= UI_KEY_UP) {

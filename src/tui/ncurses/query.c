@@ -20,6 +20,10 @@
 #include <string.h>
 #include <strings.h>
 
+/* Maximum number of primary key columns we support.
+ * Composite PKs with more than 16 columns are extremely rare in practice. */
+#define MAX_PK_COLUMNS 16
+
 /* Helper to get VmQuery, returns NULL if not valid */
 static VmQuery *get_vm_query(TuiState *state) {
   if (!state || !state->vm_query)
@@ -1423,7 +1427,9 @@ void tui_draw_query(TuiState *state) {
                              .is_editing = ui->query_result_editing,
                              .edit_buffer = ui->query_result_edit_buf,
                              .edit_pos = ui->query_result_edit_pos,
-                             .show_header_line = false};
+                             .show_header_line = false,
+                             .sort_entries = NULL,
+                             .num_sort_entries = 0};
 
     tui_draw_result_grid(state, &params);
   } else if (tab->query_affected > 0) {
@@ -1721,8 +1727,8 @@ static bool query_pk_info_build(QueryPkInfo *pk, Tab *tab, size_t row_idx) {
       row_idx >= tab->query_results->num_rows)
     return false;
 
-  size_t pk_indices[16];
-  size_t num_pk = query_find_pk_columns(tab, pk_indices, 16);
+  size_t pk_indices[MAX_PK_COLUMNS];
+  size_t num_pk = query_find_pk_columns(tab, pk_indices, MAX_PK_COLUMNS);
   if (num_pk == 0)
     return false;
 

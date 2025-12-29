@@ -161,6 +161,11 @@ ConnString *connstr_parse(const char *str, char **err) {
         const char *bracket_end = strchr(bracket, ']');
         if (bracket_end && bracket_end < host_end) {
           cs->host = str_ndup(bracket + 1, bracket_end - bracket - 1);
+          if (!cs->host) {
+            set_error(err, "Out of memory");
+            connstr_free(cs);
+            return NULL;
+          }
           if (bracket_end + 1 < host_end && bracket_end[1] == ':') {
             port_start = bracket_end + 2;
           }
@@ -179,6 +184,11 @@ ConnString *connstr_parse(const char *str, char **err) {
           port_start = colon + 1;
         } else {
           cs->host = str_ndup(p, host_end - p);
+        }
+        if (!cs->host) {
+          set_error(err, "Out of memory");
+          connstr_free(cs);
+          return NULL;
         }
       }
 
@@ -210,6 +220,11 @@ ConnString *connstr_parse(const char *str, char **err) {
       } else {
         cs->database = str_url_decode(p);
         p = p + strlen(p);
+      }
+      if (!cs->database) {
+        set_error(err, "Out of memory");
+        connstr_free(cs);
+        return NULL;
       }
     }
   }

@@ -97,6 +97,59 @@ static char *build_filter_where(TuiState *state) {
   return where;
 }
 
+/* Build multi-column ORDER BY clause for current tab (NULL if no sorting)
+ * Caller must free the returned string */
+static char *build_order_clause(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->num_sort_entries == 0)
+    return NULL;
+
+  if (!state->schema || !state->conn)
+    return NULL;
+
+  /* Determine quote character based on driver */
+  bool use_backtick = state->conn->driver &&
+                      (strcmp(state->conn->driver->name, "mysql") == 0 ||
+                       strcmp(state->conn->driver->name, "mariadb") == 0);
+
+  /* Build ORDER BY clause */
+  StringBuilder *sb = sb_new(128);
+  if (!sb)
+    return NULL;
+
+  bool first_added = false;
+  for (size_t i = 0; i < tab->num_sort_entries; i++) {
+    SortEntry *entry = &tab->sort_entries[i];
+    if (entry->column >= state->schema->num_columns)
+      continue;
+
+    const char *col_name = state->schema->columns[entry->column].name;
+    if (!col_name)
+      continue;
+
+    /* Escape column name */
+    char *escaped = use_backtick ? str_escape_identifier_backtick(col_name)
+                                 : str_escape_identifier_dquote(col_name);
+    if (!escaped) {
+      sb_free(sb);
+      return NULL;
+    }
+
+    /* Add separator if not first valid entry */
+    if (first_added) {
+      sb_append(sb, ", ");
+    }
+    first_added = true;
+
+    /* Add column with direction */
+    sb_printf(sb, "%s %s", escaped, entry->direction == SORT_ASC ? "ASC" : "DESC");
+    free(escaped);
+  }
+
+  char *result = sb_to_string(sb);
+  return result;
+}
+
 /* Load table data */
 bool tui_load_table_data(TuiState *state, const char *table) {
   if (!state || !state->conn || !table)
@@ -196,8 +249,8 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   data_op.table_name = str_dup(table);
   data_op.offset = 0;
   data_op.limit = PAGE_SIZE * PREFETCH_PAGES;
-  data_op.order_by = NULL;
-  data_op.desc = false;
+  data_op.order_by = build_order_clause(state);
+  data_op.desc = false; /* Direction is in the clause */
 
   if (where_clause) {
     data_op.op_type = ASYNC_OP_QUERY_PAGE_WHERE;
@@ -398,17 +451,19 @@ bool tui_load_more_rows(TuiState *state) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   char *err = NULL;
   ResultSet *more;
   if (where_clause) {
     more = db_query_page_where(state->conn, table, new_offset, PAGE_SIZE,
-                               where_clause, NULL, false, &err);
+                               where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE, NULL, false,
-                         &err);
+    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE, order_clause,
+                         false, &err);
   }
   free(where_clause);
+  free(order_clause);
   if (!more || more->num_rows == 0) {
     if (more)
       db_result_free(more);
@@ -478,17 +533,19 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   char *err = NULL;
   ResultSet *data;
   if (where_clause) {
     data = db_query_page_where(state->conn, table, offset, PAGE_SIZE,
-                               where_clause, NULL, false, &err);
+                               where_clause, order_clause, false, &err);
   } else {
-    data =
-        db_query_page(state->conn, table, offset, PAGE_SIZE, NULL, false, &err);
+    data = db_query_page(state->conn, table, offset, PAGE_SIZE, order_clause,
+                         false, &err);
   }
   free(where_clause);
+  free(order_clause);
   if (!data) {
     tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
     free(err);
@@ -555,17 +612,19 @@ bool tui_load_prev_rows(TuiState *state) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   char *err = NULL;
   ResultSet *more;
   if (where_clause) {
     more = db_query_page_where(state->conn, table, new_offset, load_count,
-                               where_clause, NULL, false, &err);
+                               where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, load_count, NULL,
+    more = db_query_page(state->conn, table, new_offset, load_count, order_clause,
                          false, &err);
   }
   free(where_clause);
+  free(order_clause);
   if (!more || more->num_rows == 0) {
     if (more)
       db_result_free(more);
@@ -933,6 +992,7 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   /* Setup async operation */
   AsyncOperation op;
@@ -941,7 +1001,7 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
   op.table_name = str_dup(table);
   op.offset = offset;
   op.limit = PAGE_SIZE * PREFETCH_PAGES;
-  op.order_by = NULL;
+  op.order_by = order_clause; /* Takes ownership */
   op.desc = false;
 
   if (where_clause) {
@@ -1146,6 +1206,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   /* Setup async operation */
   AsyncOperation op;
@@ -1154,7 +1215,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   op.table_name = str_dup(table);
   op.offset = target_offset;
   op.limit = PAGE_SIZE * PREFETCH_PAGES;
-  op.order_by = NULL;
+  op.order_by = order_clause; /* Takes ownership */
   op.desc = false;
 
   if (where_clause) {
@@ -1252,11 +1313,13 @@ bool tui_start_background_load(TuiState *state, bool forward) {
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
+  char *order_clause = build_order_clause(state);
 
   /* Allocate and setup async operation */
   AsyncOperation *op = malloc(sizeof(AsyncOperation));
   if (!op) {
     free(where_clause);
+    free(order_clause);
     return false;
   }
 
@@ -1265,7 +1328,7 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   op->table_name = str_dup(table);
   op->offset = target_offset;
   op->limit = PAGE_SIZE * PREFETCH_PAGES;
-  op->order_by = NULL;
+  op->order_by = order_clause; /* Takes ownership */
   op->desc = false;
 
   if (where_clause) {
@@ -1372,11 +1435,13 @@ void tui_cancel_background_load(TuiState *state) {
     nanosleep(&ts, NULL);
   }
 
-  /* Free result if any */
+  /* Free result if any - worker may have already freed on cancel, check under mutex */
+  lace_mutex_lock(&op->mutex);
   if (op->result) {
     db_result_free((ResultSet *)op->result);
     op->result = NULL;
   }
+  lace_mutex_unlock(&op->mutex);
 
   async_free(op);
   free(op);

@@ -993,7 +993,15 @@ static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
     return tables;
   }
 
-  char **tables = malloc(num_rows * sizeof(char *));
+  /* Check for integer overflow before allocation */
+  if ((size_t)num_rows > SIZE_MAX / sizeof(char *)) {
+    PQclear(res);
+    if (err)
+      *err = str_dup("Too many tables to allocate");
+    return NULL;
+  }
+
+  char **tables = malloc((size_t)num_rows * sizeof(char *));
   if (!tables) {
     PQclear(res);
     if (err)
@@ -1314,17 +1322,27 @@ static ResultSet *pg_query_page(DbConnection *conn, const char *table,
   /* Build query */
   char *sql;
   if (order_by) {
-    char *escaped_order = str_escape_identifier_dquote(order_by);
-    if (!escaped_order) {
-      free(escaped_table);
-      if (err)
-        *err = str_dup("Memory allocation failed");
-      return NULL;
+    /* Check if this is a pre-built clause (contains ASC or DESC or comma) */
+    if (strstr(order_by, " ASC") || strstr(order_by, " DESC") ||
+        strstr(order_by, " asc") || strstr(order_by, " desc") ||
+        strchr(order_by, ',')) {
+      /* Pre-built clause - use directly */
+      sql = str_printf("SELECT * FROM %s ORDER BY %s LIMIT %zu OFFSET %zu",
+                       escaped_table, order_by, limit, offset);
+    } else {
+      /* Single column - escape and add direction */
+      char *escaped_order = str_escape_identifier_dquote(order_by);
+      if (!escaped_order) {
+        free(escaped_table);
+        if (err)
+          *err = str_dup("Memory allocation failed");
+        return NULL;
+      }
+      sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
+                       escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
+                       offset);
+      free(escaped_order);
     }
-    sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                     escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
-                     offset);
-    free(escaped_order);
   } else {
     sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", escaped_table,
                      limit, offset);

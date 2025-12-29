@@ -62,6 +62,25 @@ typedef struct {
 } TableFilters;
 
 /* ============================================================================
+ * Sort Direction
+ * ============================================================================
+ */
+
+typedef enum {
+  SORT_NONE,  /* No sorting (default order) */
+  SORT_ASC,   /* Ascending */
+  SORT_DESC   /* Descending */
+} SortDirection;
+
+/* Single sort entry for multi-column sorting */
+typedef struct {
+  size_t column;         /* Column index */
+  SortDirection direction;  /* Sort direction */
+} SortEntry;
+
+#define MAX_SORT_COLUMNS 8  /* Maximum columns for multi-column sort */
+
+/* ============================================================================
  * Connection - Database connection (pool entry)
  * ============================================================================
  */
@@ -124,6 +143,10 @@ typedef struct {
 
   /* Filters (per-table) */
   TableFilters filters;
+
+  /* Sort state (per-table) - multi-column sorting */
+  SortEntry sort_entries[MAX_SORT_COLUMNS];  /* Sort columns in priority order */
+  size_t num_sort_entries;  /* Number of active sort columns */
 
   /* Query mode fields */
   char *query_text;
