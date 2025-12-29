@@ -438,9 +438,11 @@ void connection_free_data(Connection *conn) {
   }
   conn->num_tables = 0;
 
-  /* Free connection string */
+  /* Free connection string and saved connection ID */
   free(conn->connstr);
   conn->connstr = NULL;
+  free(conn->saved_conn_id);
+  conn->saved_conn_id = NULL;
 
   /* Disconnect database */
   if (conn->conn) {

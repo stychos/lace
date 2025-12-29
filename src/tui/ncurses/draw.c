@@ -10,6 +10,7 @@
  */
 
 #include "../../core/app_state.h"
+#include "../../db/connstr.h"
 #include "../../viewmodel/vm_table.h"
 #include "render_helpers.h"
 #include "tui_internal.h"
@@ -467,10 +468,13 @@ void tui_draw_connection_tab(TuiState *state) {
   Tab *tab = TUI_TAB(state);
   /* Get full connection string from connection object */
   const char *connstr = NULL;
+  char *masked_connstr = NULL;
   if (tab) {
     Connection *conn = app_get_connection(state->app, tab->connection_index);
     if (conn) {
-      connstr = conn->connstr;
+      /* Mask password for display */
+      masked_connstr = connstr_mask_password(conn->connstr);
+      connstr = masked_connstr;
     }
   }
   if (!connstr) {
@@ -503,6 +507,8 @@ void tui_draw_connection_tab(TuiState *state) {
             connstr);
   wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
 
+  free(masked_connstr);
+
   /* Show instruction */
   wattron(state->main_win, A_DIM);
   const char *hint = "Select a table from the sidebar to view data";
@@ -533,7 +539,9 @@ void tui_draw_status(TuiState *state) {
   werase(state->status_win);
 
   if (state->status_is_error) {
-    wbkgd(state->status_win, COLOR_PAIR(COLOR_ERROR));
+    /* Error: default background with red text for better contrast */
+    wbkgd(state->status_win, A_NORMAL);
+    wattron(state->status_win, COLOR_PAIR(COLOR_ERROR_TEXT));
   } else {
     wbkgd(state->status_win, COLOR_PAIR(COLOR_STATUS));
   }
@@ -687,6 +695,10 @@ void tui_draw_status(TuiState *state) {
     }
     int pos_len = (int)strlen(pos);
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
+  }
+
+  if (state->status_is_error) {
+    wattroff(state->status_win, COLOR_PAIR(COLOR_ERROR_TEXT));
   }
 
   wrefresh(state->status_win);

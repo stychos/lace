@@ -738,13 +738,15 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor
 
   /* Error/success messages */
   int msg_y = ds->height - 3;
+  int msg_max_len = ds->width - 4;  /* Leave margin on both sides */
+  if (msg_max_len < 10) msg_max_len = 10;
   if (ds->error_msg && ds->error_msg[0]) {
     wattron(win, COLOR_PAIR(COLOR_ERROR));
-    mvwprintw(win, msg_y, 2, "%.60s", ds->error_msg);
+    mvwprintw(win, msg_y, 2, "%.*s", msg_max_len, ds->error_msg);
     wattroff(win, COLOR_PAIR(COLOR_ERROR));
   } else if (ds->success_msg && ds->success_msg[0]) {
     wattron(win, COLOR_PAIR(COLOR_NUMBER));
-    mvwprintw(win, msg_y, 2, "%.60s", ds->success_msg);
+    mvwprintw(win, msg_y, 2, "%.*s", msg_max_len, ds->success_msg);
     wattroff(win, COLOR_PAIR(COLOR_NUMBER));
   }
 
@@ -864,6 +866,224 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
         if (len > 0) {
           result = str_dup(buf);
         }
+        running = false;
+      }
+    } else if (focus == 0) {
+      /* Input field handling */
+      if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
+        if (cursor > 0 && cursor <= len) {
+          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
+          cursor--;
+          len--;
+        }
+      } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (cursor > 0) cursor--;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (cursor < len) cursor++;
+      } else if (render_event_is_special(&event, UI_KEY_HOME)) {
+        cursor = 0;
+      } else if (render_event_is_special(&event, UI_KEY_END)) {
+        cursor = len;
+      } else {
+        int key_char = render_event_get_char(&event);
+        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
+            len < sizeof(buf) - 1) {
+          memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
+          buf[cursor] = (char)key_char;
+          cursor++;
+          len++;
+        }
+      }
+    } else {
+      /* Button navigation with left/right */
+      if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (focus == 2) focus = 1;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (focus == 1) focus = 2;
+      }
+    }
+  }
+
+  curs_set(0);
+  delwin(dlg);
+  return result;
+}
+
+/* Confirmation dialog - returns true if user confirms */
+static bool show_confirm_dialog(WINDOW *parent, const char *title,
+                                const char *message) {
+  int parent_h, parent_w;
+  getmaxyx(parent, parent_h, parent_w);
+  (void)parent_h;
+
+  int dlg_height = 7;
+  int dlg_width = 50;
+  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+
+  int dlg_y = 5;
+  int dlg_x = (parent_w - dlg_width) / 2;
+
+  WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
+  if (!dlg) return false;
+
+  keypad(dlg, TRUE);
+
+  /* Focus: 0 = Yes, 1 = No */
+  int focus = 1;  /* Default to No for safety */
+
+  bool result = false;
+  bool running = true;
+
+  while (running) {
+    werase(dlg);
+    box(dlg, 0, 0);
+
+    int title_len = (int)strlen(title) + 2;
+    wattron(dlg, A_BOLD);
+    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
+    wattroff(dlg, A_BOLD);
+
+    /* Message */
+    int msg_x = (dlg_width - (int)strlen(message)) / 2;
+    if (msg_x < 2) msg_x = 2;
+    mvwprintw(dlg, 2, msg_x, "%s", message);
+
+    /* Buttons */
+    int btn_x = dlg_width / 2 - 10;
+    if (focus == 0) wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 5, btn_x, "[ Yes ]");
+    if (focus == 0) wattroff(dlg, A_REVERSE);
+    if (focus == 1) wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 5, btn_x + 9, "[ No ]");
+    if (focus == 1) wattroff(dlg, A_REVERSE);
+
+    curs_set(0);
+    wrefresh(dlg);
+
+    int ch = wgetch(dlg);
+    UiEvent event;
+    render_translate_key(ch, &event);
+
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+      running = false;
+    } else if (render_event_is_special(&event, UI_KEY_TAB) ||
+               render_event_is_special(&event, UI_KEY_LEFT) ||
+               render_event_is_special(&event, UI_KEY_RIGHT) ||
+               render_event_get_char(&event) == 'h' ||
+               render_event_get_char(&event) == 'l') {
+      focus = 1 - focus;  /* Toggle between 0 and 1 */
+    } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
+      result = (focus == 0);
+      running = false;
+    } else if (render_event_get_char(&event) == 'y' ||
+               render_event_get_char(&event) == 'Y') {
+      result = true;
+      running = false;
+    } else if (render_event_get_char(&event) == 'n' ||
+               render_event_get_char(&event) == 'N') {
+      result = false;
+      running = false;
+    }
+  }
+
+  delwin(dlg);
+  return result;
+}
+
+/* Password input dialog (masks input with asterisks) */
+static char *show_password_dialog(WINDOW *parent, const char *title,
+                                  const char *label) {
+  int parent_h, parent_w;
+  getmaxyx(parent, parent_h, parent_w);
+  (void)parent_h;
+
+  int dlg_height = 8;
+  int dlg_width = 50;
+  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+
+  int dlg_y = 5;
+  int dlg_x = (parent_w - dlg_width) / 2;
+
+  WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
+  if (!dlg) return NULL;
+
+  keypad(dlg, TRUE);
+
+  char buf[128];
+  size_t len = 0;
+  size_t cursor = 0;
+  buf[0] = '\0';
+
+  /* Focus: 0 = input, 1 = OK button, 2 = Cancel button */
+  int focus = 0;
+
+  char *result = NULL;
+  bool running = true;
+
+  while (running) {
+    werase(dlg);
+    box(dlg, 0, 0);
+
+    int title_len = (int)strlen(title) + 2;
+    wattron(dlg, A_BOLD);
+    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
+    wattroff(dlg, A_BOLD);
+
+    mvwprintw(dlg, 2, 2, "%s", label);
+
+    if (focus == 0) {
+      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+    mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
+    /* Show asterisks instead of actual password */
+    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
+      mvwaddch(dlg, 3, 2 + (int)i, '*');
+    }
+    if (focus == 0) {
+      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+
+    wattron(dlg, A_DIM);
+    mvwaddch(dlg, 4, 0, ACS_LTEE);
+    mvwhline(dlg, 4, 1, ACS_HLINE, dlg_width - 2);
+    mvwaddch(dlg, 4, dlg_width - 1, ACS_RTEE);
+    wattroff(dlg, A_DIM);
+
+    /* Buttons */
+    int btn_x = dlg_width / 2 - 10;
+    if (focus == 1) wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 6, btn_x, "[ OK ]");
+    if (focus == 1) wattroff(dlg, A_REVERSE);
+    if (focus == 2) wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 6, btn_x + 8, "[ Cancel ]");
+    if (focus == 2) wattroff(dlg, A_REVERSE);
+
+    if (focus == 0) {
+      wmove(dlg, 3, 2 + (int)cursor);
+      curs_set(1);
+    } else {
+      curs_set(0);
+    }
+    wrefresh(dlg);
+
+    int ch = wgetch(dlg);
+    UiEvent event;
+    render_translate_key(ch, &event);
+
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+      running = false;
+    } else if (render_event_is_special(&event, UI_KEY_TAB) ||
+               render_event_is_special(&event, UI_KEY_DOWN)) {
+      focus = (focus + 1) % 3;
+    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+      focus = (focus + 2) % 3;
+    } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
+      if (focus == 2) {
+        /* Cancel */
+        running = false;
+      } else {
+        /* OK - return even if empty (user might want empty password) */
+        result = str_dup(buf);
         running = false;
       }
     } else if (focus == 0) {
@@ -1518,9 +1738,32 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
  * ============================================================================
  */
 
+/* Check if error message indicates authentication failure */
+static bool is_auth_error(const char *err) {
+  if (!err)
+    return false;
+
+  /* PostgreSQL auth errors */
+  if (strstr(err, "password authentication failed"))
+    return true;
+  if (strstr(err, "authentication failed"))
+    return true;
+  if (strstr(err, "no password supplied"))
+    return true;
+  if (strstr(err, "FATAL:  password"))
+    return true;
+
+  /* MySQL/MariaDB auth errors */
+  if (strstr(err, "Access denied"))
+    return true;
+
+  return false;
+}
+
 static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
   char *connstr = NULL;
   char *err = NULL;
+  SavedConnection *saved_conn = NULL;
 
   /* Determine source: tree selection or URL */
   if (ds->focus == FOCUS_TREE || (ds->focus == FOCUS_BUTTONS && ds->url_input.len == 0)) {
@@ -1530,7 +1773,8 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
       ds->error_msg = str_dup("Select a connection first");
       return NULL;
     }
-    connstr = connmgr_build_connstr(&item->connection);
+    saved_conn = &item->connection;
+    connstr = connmgr_build_connstr(saved_conn);
     if (!connstr) {
       ds->error_msg = str_dup("Failed to build connection string");
       return NULL;
@@ -1557,9 +1801,42 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
   /* Test connection */
   DbConnection *conn = db_connect(connstr, &err);
   if (!conn) {
-    ds->error_msg = err ? err : str_dup("Connection failed");
-    free(connstr);
-    return NULL;
+    /* Connection failed - only prompt for password if it's an auth error */
+    if (saved_conn && saved_conn->driver &&
+        strcmp(saved_conn->driver, "sqlite") != 0 &&
+        is_auth_error(err)) {
+      /* Prompt for password */
+      char *password = show_password_dialog(ds->dialog_win, "Password Required",
+                                            "Enter password:");
+      if (password) {
+        /* Rebuild connection string with password */
+        free(connstr);
+        free(err);
+        err = NULL;
+
+        connstr = connstr_build(
+            saved_conn->driver,
+            (saved_conn->user && saved_conn->user[0]) ? saved_conn->user : NULL,
+            password,
+            (saved_conn->host && saved_conn->host[0]) ? saved_conn->host : NULL,
+            saved_conn->port,
+            (saved_conn->database && saved_conn->database[0]) ? saved_conn->database : NULL,
+            NULL, NULL, 0);
+
+        str_secure_free(password);
+
+        if (connstr) {
+          /* Retry connection */
+          conn = db_connect(connstr, &err);
+        }
+      }
+    }
+
+    if (!conn) {
+      ds->error_msg = err ? err : str_dup("Connection failed");
+      free(connstr);
+      return NULL;
+    }
   }
 
   db_disconnect(conn);
@@ -1893,9 +2170,15 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
   if (ds->config && hotkey_matches(ds->config, event, HOTKEY_CONN_DELETE)) {
     ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item && item->parent) {
-      connmgr_remove_item(ds->mgr, item);
-      if (ds->tree_highlight > 0) {
-        ds->tree_highlight--;
+      const char *name = connmgr_item_name(item);
+      char msg[128];
+      snprintf(msg, sizeof(msg), "Delete '%s'?", name ? name : "item");
+
+      if (show_confirm_dialog(ds->dialog_win, "Confirm Delete", msg)) {
+        connmgr_remove_item(ds->mgr, item);
+        if (ds->tree_highlight > 0) {
+          ds->tree_highlight--;
+        }
       }
     }
     return true;
@@ -1990,9 +2273,15 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
     case BTN_DELETE: {
       ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
       if (item && item->parent) {
-        connmgr_remove_item(ds->mgr, item);
-        if (ds->tree_highlight > 0) {
-          ds->tree_highlight--;
+        const char *name = connmgr_item_name(item);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Delete '%s'?", name ? name : "item");
+
+        if (show_confirm_dialog(ds->dialog_win, "Confirm Delete", msg)) {
+          connmgr_remove_item(ds->mgr, item);
+          if (ds->tree_highlight > 0) {
+            ds->tree_highlight--;
+          }
         }
       }
       break;
@@ -2019,7 +2308,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
  */
 
 ConnectResult connect_view_show(TuiState *state) {
-  ConnectResult result = {NULL, CONNECT_MODE_CANCELLED};
+  ConnectResult result = {NULL, NULL, CONNECT_MODE_CANCELLED};
 
   int term_rows, term_cols;
   getmaxyx(stdscr, term_rows, term_cols);
@@ -2209,6 +2498,7 @@ ConnectResult connect_view_show(TuiState *state) {
             char *connstr = try_connect(&ds, false, &mode);
             if (connstr) {
               result.connstr = connstr;
+              result.saved_conn_id = str_dup(item->connection.id);
               result.mode = mode;
               running = false;
             }

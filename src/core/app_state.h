@@ -90,6 +90,7 @@ typedef struct {
   bool active;        /* Is this connection slot used */
   DbConnection *conn; /* Database connection handle */
   char *connstr;      /* Connection string (for display/reconnect) */
+  char *saved_conn_id; /* UUID of saved connection (for session persistence) */
 
   /* Tables list (from this connection) */
   char **tables;

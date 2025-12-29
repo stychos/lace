@@ -699,6 +699,7 @@ bool tui_init(TuiState *state, AppState *app) {
     init_pair(COLOR_NULL, COLOR_MAGENTA, -1);
     init_pair(COLOR_NUMBER, COLOR_CYAN, -1);
     init_pair(COLOR_EDIT, COLOR_BLACK, COLOR_YELLOW);
+    init_pair(COLOR_ERROR_TEXT, COLOR_RED, -1);
   }
 
   /* Get terminal dimensions */

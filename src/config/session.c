@@ -7,8 +7,10 @@
  */
 
 #include "../tui/ncurses/tui.h"
+#include "../tui/ncurses/render_helpers.h"
 #include "session.h"
 #include "connections.h"
+#include "../db/connstr.h"
 #include "../platform/platform.h"
 #include "../util/str.h"
 #include <cJSON.h>
@@ -319,7 +321,11 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
   /* Connection ID - find saved connection matching this tab's connection */
   Connection *conn = app_get_connection(state->app, tab->connection_index);
   const char *conn_id = NULL;
-  if (conn && conn->connstr && connmgr) {
+  if (conn && conn->saved_conn_id) {
+    /* Use stored connection ID directly */
+    conn_id = conn->saved_conn_id;
+  } else if (conn && conn->connstr && connmgr) {
+    /* Fallback: try to match by connection string */
     conn_id = find_connection_id_by_connstr(connmgr, conn->connstr);
   }
   cJSON_AddStringToObject(json, "connection_id", conn_id ? conn_id : "");
@@ -866,6 +872,211 @@ Session *session_load(char **error) {
 }
 
 /* ============================================================================
+ * Authentication Helpers
+ * ============================================================================
+ */
+
+/* Check if error message indicates authentication failure */
+static bool is_auth_error(const char *err) {
+  if (!err)
+    return false;
+
+  /* PostgreSQL auth errors */
+  if (strstr(err, "password authentication failed"))
+    return true;
+  if (strstr(err, "authentication failed"))
+    return true;
+  if (strstr(err, "no password supplied"))
+    return true;
+  if (strstr(err, "FATAL:  password"))
+    return true;
+
+  /* MySQL/MariaDB auth errors */
+  if (strstr(err, "Access denied"))
+    return true;
+
+  return false;
+}
+
+/* Password input dialog (masks input with asterisks) */
+static char *show_password_dialog(TuiState *state, const char *title,
+                                  const char *label, const char *error_msg) {
+  (void)state;
+
+  int screen_h, screen_w;
+  getmaxyx(stdscr, screen_h, screen_w);
+
+  /* Ensure minimum usable size */
+  if (screen_h < 12 || screen_w < 40)
+    return NULL;
+
+  /* Clear screen for clean dialog display */
+  clear();
+  refresh();
+
+  int dlg_height = 9;
+  int dlg_width = 55;
+  if (dlg_width > screen_w - 4)
+    dlg_width = screen_w - 4;
+
+  int dlg_y = (screen_h - dlg_height) / 2;
+  int dlg_x = (screen_w - dlg_width) / 2;
+  if (dlg_y < 0)
+    dlg_y = 0;
+  if (dlg_x < 0)
+    dlg_x = 0;
+
+  /* Create dialog window */
+  WINDOW *dlg = newwin(dlg_height, dlg_width, dlg_y, dlg_x);
+  if (!dlg)
+    return NULL;
+
+  keypad(dlg, TRUE);
+
+  char buf[128];
+  size_t len = 0;
+  size_t cursor = 0;
+  buf[0] = '\0';
+
+  /* Focus: 0 = input, 1 = OK button, 2 = Cancel button */
+  int focus = 0;
+
+  char *result = NULL;
+  bool running = true;
+
+  while (running) {
+    werase(dlg);
+    box(dlg, 0, 0);
+
+    /* Title */
+    int title_len = (int)strlen(title) + 2;
+    wattron(dlg, A_BOLD);
+    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
+    wattroff(dlg, A_BOLD);
+
+    /* Label */
+    mvwprintw(dlg, 2, 2, "%s", label);
+
+    /* Password input field */
+    if (focus == 0) {
+      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+    mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
+    /* Show asterisks instead of actual password */
+    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
+      mvwaddch(dlg, 3, 2 + (int)i, '*');
+    }
+    if (focus == 0) {
+      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+
+    /* Error message */
+    if (error_msg && error_msg[0]) {
+      wattron(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
+      int max_err_len = dlg_width - 4;
+      mvwprintw(dlg, 4, 2, "%.*s", max_err_len, error_msg);
+      wattroff(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
+    }
+
+    /* Separator line */
+    wattron(dlg, A_DIM);
+    mvwaddch(dlg, 5, 0, ACS_LTEE);
+    mvwhline(dlg, 5, 1, ACS_HLINE, dlg_width - 2);
+    mvwaddch(dlg, 5, dlg_width - 1, ACS_RTEE);
+    wattroff(dlg, A_DIM);
+
+    /* Buttons */
+    int btn_x = dlg_width / 2 - 10;
+    if (focus == 1)
+      wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 7, btn_x, "[ OK ]");
+    if (focus == 1)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 7, btn_x + 8, "[ Cancel ]");
+    if (focus == 2)
+      wattroff(dlg, A_REVERSE);
+
+    if (focus == 0) {
+      wmove(dlg, 3, 2 + (int)cursor);
+      curs_set(1);
+    } else {
+      curs_set(0);
+    }
+    wrefresh(dlg);
+
+    int ch = wgetch(dlg);
+    UiEvent event;
+    render_translate_key(ch, &event);
+
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+      running = false;
+    } else if (render_event_is_special(&event, UI_KEY_TAB) ||
+               render_event_is_special(&event, UI_KEY_DOWN)) {
+      focus = (focus + 1) % 3;
+    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+      focus = (focus + 2) % 3;
+    } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
+      if (focus == 2) {
+        /* Cancel */
+        running = false;
+      } else {
+        /* OK - return even if empty (user might want empty password) */
+        result = str_dup(buf);
+        running = false;
+      }
+    } else if (focus == 0) {
+      /* Input field handling */
+      if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
+        if (cursor > 0 && cursor <= len) {
+          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
+          cursor--;
+          len--;
+        }
+      } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (cursor > 0)
+          cursor--;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (cursor < len)
+          cursor++;
+      } else if (render_event_is_special(&event, UI_KEY_HOME)) {
+        cursor = 0;
+      } else if (render_event_is_special(&event, UI_KEY_END)) {
+        cursor = len;
+      } else {
+        int key_char = render_event_get_char(&event);
+        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
+            len < sizeof(buf) - 1) {
+          memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
+          buf[cursor] = (char)key_char;
+          cursor++;
+          len++;
+        }
+      }
+    } else {
+      /* Button navigation with left/right */
+      if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (focus == 2)
+          focus = 1;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (focus == 1)
+          focus = 2;
+      }
+    }
+  }
+
+  curs_set(0);
+  delwin(dlg);
+
+  /* Force screen refresh to clear dialog remnants */
+  touchwin(stdscr);
+  refresh();
+
+  return result;
+}
+
+/* ============================================================================
  * Restore Session
  * ============================================================================
  */
@@ -873,6 +1084,7 @@ Session *session_load(char **error) {
 /* Find or create connection by saved connection ID */
 static size_t restore_connection(TuiState *state, const char *conn_id,
                                   ConnectionManager *connmgr, char **error) {
+
   if (!conn_id || !conn_id[0]) {
     set_error(error, "Empty connection ID");
     return (size_t)-1;
@@ -892,6 +1104,7 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     return (size_t)-1;
   }
 
+
   /* Check if we already have this connection in the pool */
   for (size_t i = 0; i < state->app->num_connections; i++) {
     Connection *conn = &state->app->connections[i];
@@ -903,9 +1116,59 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
 
   /* Need to establish new connection */
   char *conn_err = NULL;
+  SavedConnection *saved = &item->connection;
+
   DbConnection *db_conn = db_connect(connstr, &conn_err);
+
+  /*
+   * Handle connection failures for network databases:
+   * - Auth error: prompt for password, retry, loop until success or cancel
+   * - Other errors: fail immediately
+   */
+  bool is_network_db = saved->driver && saved->driver[0] &&
+                       strcmp(saved->driver, "sqlite") != 0;
+
+  while (!db_conn && is_network_db && is_auth_error(conn_err)) {
+    /* Auth error - prompt for password */
+    char title[128];
+    snprintf(title, sizeof(title), "Password for %s",
+             saved->name && saved->name[0] ? saved->name : "connection");
+
+    char *password = show_password_dialog(state, title, "Enter password:", conn_err);
+    if (!password) {
+      /* User cancelled - stop trying */
+      break;
+    }
+
+    /* Rebuild connection string with password */
+    free(connstr);
+    free(conn_err);
+    conn_err = NULL;
+
+    connstr = connstr_build(
+        saved->driver,
+        (saved->user && saved->user[0]) ? saved->user : NULL,
+        password,
+        (saved->host && saved->host[0]) ? saved->host : NULL,
+        saved->port,
+        (saved->database && saved->database[0]) ? saved->database : NULL,
+        NULL, NULL, 0);
+
+    str_secure_free(password);
+
+    if (!connstr) {
+      set_error(error, "Failed to build connection string");
+      return (size_t)-1;
+    }
+
+    /* Retry connection */
+    db_conn = db_connect(connstr, &conn_err);
+    /* Loop continues if this also fails with auth error */
+  }
+
   if (!db_conn) {
-    set_error(error, "Connection failed: %s", conn_err ? conn_err : "Unknown error");
+    set_error(error, "Connection failed: %s",
+              conn_err ? conn_err : "Unknown error");
     free(conn_err);
     free(connstr);
     return (size_t)-1;
@@ -927,10 +1190,14 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     return (size_t)-1;
   }
 
+  /* Store saved connection ID for session persistence */
+  conn->saved_conn_id = str_dup(conn_id);
+
   /* Load tables for this connection */
   char *tables_err = NULL;
   conn->tables = db_list_tables(db_conn, &conn->num_tables, &tables_err);
   free(tables_err);
+
 
   return app_find_connection_index(state->app, db_conn);
 }
@@ -1198,10 +1465,12 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
 }
 
 bool session_restore(struct TuiState *state, Session *session, char **error) {
+
   if (!state || !session) {
     set_error(error, "Invalid arguments");
     return false;
   }
+
 
   if (session->num_workspaces == 0) {
     return false; /* Nothing to restore - show connect dialog */
@@ -1214,6 +1483,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     return false;
   }
 
+
   /* Restore settings */
   state->app->header_visible = session->header_visible;
   state->app->status_visible = session->status_visible;
@@ -1223,9 +1493,11 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
 
   size_t restored_workspaces = 0;
 
+
   /* Restore each workspace */
   for (size_t ws_i = 0; ws_i < session->num_workspaces; ws_i++) {
     SessionWorkspace *sws = &session->workspaces[ws_i];
+
 
     if (sws->num_tabs == 0) {
       continue; /* Skip empty workspaces */
@@ -1245,6 +1517,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     }
 
     size_t restored_tabs = 0;
+
 
     /* Restore each tab */
     for (size_t tab_i = 0; tab_i < sws->num_tabs; tab_i++) {

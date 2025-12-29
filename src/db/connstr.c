@@ -530,3 +530,30 @@ char *connstr_from_path(const char *path, char **err) {
   /* Build sqlite:// connection string */
   return str_printf("sqlite://%s", abs_path);
 }
+
+char *connstr_mask_password(const char *connstr) {
+  if (!connstr)
+    return NULL;
+
+  /* Parse to get components */
+  ConnString *cs = connstr_parse(connstr, NULL);
+  if (!cs) {
+    /* Can't parse - return copy of original */
+    return str_dup(connstr);
+  }
+
+  /* Rebuild without password */
+  char *result = connstr_build(
+      cs->driver,
+      cs->user,
+      NULL,  /* Remove password from display */
+      cs->host,
+      cs->port,
+      cs->database,
+      (const char **)cs->option_keys,
+      (const char **)cs->option_values,
+      cs->num_options);
+
+  connstr_free(cs);
+  return result;
+}

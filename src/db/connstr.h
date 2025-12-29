@@ -91,4 +91,10 @@ bool connstr_is_sqlite_file(const char *path);
  */
 char *connstr_from_path(const char *path, char **err);
 
+/*
+ * Create a display-safe version of a connection string with password removed.
+ * Returns allocated string or NULL on error. Caller must free().
+ */
+char *connstr_mask_password(const char *connstr);
+
 #endif /* LACE_CONNSTR_H */

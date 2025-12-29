@@ -21,8 +21,9 @@ typedef enum {
 
 /* Connection dialog result */
 typedef struct {
-  char *connstr;    /* Connection string (caller must free) */
-  ConnectMode mode; /* How to open the connection */
+  char *connstr;       /* Connection string (caller must free) */
+  char *saved_conn_id; /* Saved connection ID (caller must free, may be NULL) */
+  ConnectMode mode;    /* How to open the connection */
 } ConnectResult;
 
 /* Show connection dialog and return connection result */

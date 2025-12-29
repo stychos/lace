@@ -777,6 +777,7 @@ void tui_show_connect_dialog(TuiState *state) {
 
   if (result.mode == CONNECT_MODE_QUIT) {
     free(result.connstr);
+    free(result.saved_conn_id);
     state->running = false;
     state->app->running = false;
     return;
@@ -784,6 +785,7 @@ void tui_show_connect_dialog(TuiState *state) {
 
   if (result.mode == CONNECT_MODE_CANCELLED || !result.connstr) {
     free(result.connstr);
+    free(result.saved_conn_id);
     tui_refresh(state);
     return;
   }
@@ -795,6 +797,7 @@ void tui_show_connect_dialog(TuiState *state) {
     if (!conn) {
       /* Error already shown */
       free(result.connstr);
+      free(result.saved_conn_id);
       tui_refresh(state);
       return;
     }
@@ -805,9 +808,14 @@ void tui_show_connect_dialog(TuiState *state) {
       db_disconnect(conn);
       tui_set_error(state, "Failed to add connection");
       free(result.connstr);
+      free(result.saved_conn_id);
       tui_refresh(state);
       return;
     }
+
+    /* Store saved connection ID for session persistence */
+    app_conn->saved_conn_id = result.saved_conn_id;
+    result.saved_conn_id = NULL; /* Ownership transferred */
 
     /* Load tables for this connection */
     size_t num_tables = 0;
@@ -935,6 +943,7 @@ void tui_show_connect_dialog(TuiState *state) {
                     err ? err : "Unknown error");
       free(err);
       free(result.connstr);
+      free(result.saved_conn_id);
       tui_refresh(state);
       return;
     }
@@ -945,9 +954,14 @@ void tui_show_connect_dialog(TuiState *state) {
       db_disconnect(conn);
       tui_set_error(state, "Failed to add connection");
       free(result.connstr);
+      free(result.saved_conn_id);
       tui_refresh(state);
       return;
     }
+
+    /* Store saved connection ID for session persistence */
+    app_conn->saved_conn_id = result.saved_conn_id;
+    result.saved_conn_id = NULL; /* Ownership transferred */
 
     /* Load tables for this connection */
     size_t num_tables = 0;
