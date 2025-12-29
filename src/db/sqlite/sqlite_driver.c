@@ -582,8 +582,12 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
                 while (sqlite3_step(idx_stmt) == SQLITE_ROW && c < ncols) {
                   const char *col_name =
                       (const char *)sqlite3_column_text(idx_stmt, 2);
-                  index->columns[c] = str_dup(col_name ? col_name : "");
-                  c++;
+                  char *dup = str_dup(col_name ? col_name : "");
+                  if (dup) {
+                    index->columns[c] = dup;
+                    c++;
+                  }
+                  /* On str_dup failure, skip this column rather than storing NULL */
                 }
                 index->num_columns = c;
               }
@@ -735,7 +739,13 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
   }
 
   bool oom = false;
+  size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
+                                               : (size_t)MAX_RESULT_ROWS;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    /* Limit result set size to prevent unbounded memory growth */
+    if (rs->num_rows >= max_rows) {
+      break;
+    }
     if (rs->num_rows >= row_cap) {
       /* Check for overflow BEFORE doubling */
       if (row_cap > SIZE_MAX / 2 || row_cap > SIZE_MAX / sizeof(Row) / 2) {

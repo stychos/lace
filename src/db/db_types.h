@@ -17,6 +17,10 @@
  * Fields exceeding this are displayed as placeholder text. */
 #define MAX_FIELD_SIZE (1024 * 1024)
 
+/* Maximum rows for a result set (1M rows) to prevent unbounded memory growth.
+ * Queries returning more rows will be truncated. */
+#define MAX_RESULT_ROWS (1024 * 1024)
+
 /* Database value types */
 typedef enum {
   DB_TYPE_NULL,

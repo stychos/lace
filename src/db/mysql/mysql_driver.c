@@ -1135,6 +1135,12 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
 
   /* Get rows */
   size_t num_rows = mysql_num_rows(result);
+  /* Limit result set size to prevent unbounded memory growth */
+  size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
+                                               : (size_t)MAX_RESULT_ROWS;
+  if (num_rows > max_rows) {
+    num_rows = max_rows;
+  }
   if (num_rows > 0) {
     rs->rows = calloc(num_rows, sizeof(Row));
     if (!rs->rows) {
@@ -1149,6 +1155,10 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   MYSQL_ROW row;
   size_t allocated_rows = num_rows;
   while ((row = mysql_fetch_row(result))) {
+    /* Stop if we've reached the maximum result set size */
+    if (rs->num_rows >= max_rows) {
+      break;
+    }
     /* Check if we need to expand the rows array */
     if (rs->num_rows >= allocated_rows) {
       size_t new_size;

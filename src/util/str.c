@@ -215,6 +215,12 @@ void sb_free(StringBuilder *sb) {
 }
 
 static bool sb_grow(StringBuilder *sb, size_t min_cap) {
+  /* Sanity check - refuse to allocate more than 1GB for a string builder */
+  static const size_t MAX_SB_SIZE = 1024UL * 1024UL * 1024UL;
+  if (min_cap > MAX_SB_SIZE) {
+    return false;
+  }
+
   size_t new_cap = sb->cap;
   while (new_cap < min_cap) {
     /* Check for overflow before multiplying */
@@ -314,10 +320,16 @@ bool sb_printf(StringBuilder *sb, const char *fmt, ...) {
   return true;
 }
 
+/*
+ * Consumes the StringBuilder and transfers ownership of the string to caller.
+ * The StringBuilder struct is freed; caller must free the returned string.
+ * See header for full documentation.
+ */
 char *sb_to_string(StringBuilder *sb) {
   if (!sb)
     return NULL;
   char *result = sb->data;
+  /* Intentionally don't NULL out sb->data - we're transferring ownership */
   free(sb);
   return result;
 }

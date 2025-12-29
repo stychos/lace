@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifndef LACE_OS_WINDOWS
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 /* ============================================================================
  * Internal Helpers
@@ -205,14 +209,16 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
     cJSON_AddStringToObject(json, "table_name", tab->table_name);
   }
 
-  /* Cursor/scroll state */
+  /* Cursor/scroll state - save as absolute positions (loaded_offset + relative) */
   cJSON *cursor = cJSON_CreateArray();
-  cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)tab->cursor_row));
+  size_t abs_cursor_row = tab->loaded_offset + tab->cursor_row;
+  cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)abs_cursor_row));
   cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)tab->cursor_col));
   cJSON_AddItemToObject(json, "cursor", cursor);
 
   cJSON *scroll = cJSON_CreateArray();
-  cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)tab->scroll_row));
+  size_t abs_scroll_row = tab->loaded_offset + tab->scroll_row;
+  cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)abs_scroll_row));
   cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)tab->scroll_col));
   cJSON_AddItemToObject(json, "scroll", scroll);
 
@@ -364,17 +370,32 @@ bool session_save(struct TuiState *state, char **error) {
     return false;
   }
 
-  FILE *f = fopen(path, "w");
+  /* Open file with secure permissions atomically (0600 = owner read/write only) */
+  FILE *f = NULL;
+#ifndef LACE_OS_WINDOWS
+  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) {
+    free(content);
+    set_error(error, "Failed to open %s for writing: %s", path, strerror(errno));
+    free(path);
+    return false;
+  }
+  f = fdopen(fd, "w");
+  if (!f) {
+    close(fd);
+    free(content);
+    set_error(error, "Failed to open %s for writing: %s", path, strerror(errno));
+    free(path);
+    return false;
+  }
+#else
+  f = fopen(path, "w");
   if (!f) {
     free(content);
     set_error(error, "Failed to open %s for writing: %s", path, strerror(errno));
     free(path);
     return false;
   }
-
-  /* Set file permissions to 0600 (owner read/write only) */
-#ifndef LACE_OS_WINDOWS
-  chmod(path, 0600);
 #endif
 
   size_t len = strlen(content);
@@ -402,7 +423,7 @@ static bool parse_filter(cJSON *json, SessionFilter *f) {
   cJSON *value = cJSON_GetObjectItem(json, "value");
 
   f->column_name = str_dup(cJSON_IsString(column) ? column->valuestring : "");
-  f->op = cJSON_IsNumber(op) ? op->valueint : 0;
+  f->op = (cJSON_IsNumber(op) && op->valueint >= 0) ? op->valueint : 0;
   f->value = str_dup(cJSON_IsString(value) ? value->valuestring : "");
 
   return f->column_name && f->value;
@@ -435,12 +456,16 @@ static bool parse_tab_ui(cJSON *json, SessionTabUI *ui) {
 
   ui->sidebar_visible = cJSON_IsBool(sidebar_visible) ? cJSON_IsTrue(sidebar_visible) : true;
   ui->sidebar_focused = cJSON_IsBool(sidebar_focused) ? cJSON_IsTrue(sidebar_focused) : false;
-  ui->sidebar_highlight = cJSON_IsNumber(sidebar_highlight) ? (size_t)sidebar_highlight->valueint : 0;
+  ui->sidebar_highlight = (cJSON_IsNumber(sidebar_highlight) && sidebar_highlight->valueint >= 0)
+                              ? (size_t)sidebar_highlight->valueint : 0;
   ui->filters_visible = cJSON_IsBool(filters_visible) ? cJSON_IsTrue(filters_visible) : false;
   ui->filters_focused = cJSON_IsBool(filters_focused) ? cJSON_IsTrue(filters_focused) : false;
-  ui->filters_cursor_row = cJSON_IsNumber(filters_cursor_row) ? (size_t)filters_cursor_row->valueint : 0;
-  ui->filters_cursor_col = cJSON_IsNumber(filters_cursor_col) ? (size_t)filters_cursor_col->valueint : 0;
-  ui->filters_scroll = cJSON_IsNumber(filters_scroll) ? (size_t)filters_scroll->valueint : 0;
+  ui->filters_cursor_row = (cJSON_IsNumber(filters_cursor_row) && filters_cursor_row->valueint >= 0)
+                               ? (size_t)filters_cursor_row->valueint : 0;
+  ui->filters_cursor_col = (cJSON_IsNumber(filters_cursor_col) && filters_cursor_col->valueint >= 0)
+                               ? (size_t)filters_cursor_col->valueint : 0;
+  ui->filters_scroll = (cJSON_IsNumber(filters_scroll) && filters_scroll->valueint >= 0)
+                           ? (size_t)filters_scroll->valueint : 0;
   ui->query_focus_results = cJSON_IsBool(query_focus_results) ? cJSON_IsTrue(query_focus_results) : false;
 
   return true;
@@ -465,17 +490,25 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   cJSON *table_name = cJSON_GetObjectItem(json, "table_name");
   tab->table_name = str_dup(cJSON_IsString(table_name) ? table_name->valuestring : "");
 
-  /* Cursor/scroll */
+  /* Cursor/scroll - use valuedouble for large row numbers */
   cJSON *cursor = cJSON_GetObjectItem(json, "cursor");
   if (cJSON_IsArray(cursor) && cJSON_GetArraySize(cursor) >= 2) {
-    tab->cursor_row = (size_t)cJSON_GetArrayItem(cursor, 0)->valueint;
-    tab->cursor_col = (size_t)cJSON_GetArrayItem(cursor, 1)->valueint;
+    cJSON *cursor_row = cJSON_GetArrayItem(cursor, 0);
+    cJSON *cursor_col = cJSON_GetArrayItem(cursor, 1);
+    if (cJSON_IsNumber(cursor_row) && cursor_row->valuedouble >= 0)
+      tab->cursor_row = (size_t)cursor_row->valuedouble;
+    if (cJSON_IsNumber(cursor_col) && cursor_col->valuedouble >= 0)
+      tab->cursor_col = (size_t)cursor_col->valuedouble;
   }
 
   cJSON *scroll = cJSON_GetObjectItem(json, "scroll");
   if (cJSON_IsArray(scroll) && cJSON_GetArraySize(scroll) >= 2) {
-    tab->scroll_row = (size_t)cJSON_GetArrayItem(scroll, 0)->valueint;
-    tab->scroll_col = (size_t)cJSON_GetArrayItem(scroll, 1)->valueint;
+    cJSON *scroll_row = cJSON_GetArrayItem(scroll, 0);
+    cJSON *scroll_col = cJSON_GetArrayItem(scroll, 1);
+    if (cJSON_IsNumber(scroll_row) && scroll_row->valuedouble >= 0)
+      tab->scroll_row = (size_t)scroll_row->valuedouble;
+    if (cJSON_IsNumber(scroll_col) && scroll_col->valuedouble >= 0)
+      tab->scroll_col = (size_t)scroll_col->valuedouble;
   }
 
   /* Filters */
@@ -500,19 +533,23 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   tab->query_text = str_dup(cJSON_IsString(query_text) ? query_text->valuestring : "");
 
   cJSON *query_cursor = cJSON_GetObjectItem(json, "query_cursor");
-  tab->query_cursor = cJSON_IsNumber(query_cursor) ? (size_t)query_cursor->valueint : 0;
+  tab->query_cursor = (cJSON_IsNumber(query_cursor) && query_cursor->valueint >= 0)
+                          ? (size_t)query_cursor->valueint : 0;
 
   cJSON *query_scroll_line = cJSON_GetObjectItem(json, "query_scroll_line");
-  tab->query_scroll_line = cJSON_IsNumber(query_scroll_line) ? (size_t)query_scroll_line->valueint : 0;
+  tab->query_scroll_line = (cJSON_IsNumber(query_scroll_line) && query_scroll_line->valueint >= 0)
+                               ? (size_t)query_scroll_line->valueint : 0;
 
   cJSON *query_scroll_col = cJSON_GetObjectItem(json, "query_scroll_col");
-  tab->query_scroll_col = cJSON_IsNumber(query_scroll_col) ? (size_t)query_scroll_col->valueint : 0;
+  tab->query_scroll_col = (cJSON_IsNumber(query_scroll_col) && query_scroll_col->valueint >= 0)
+                              ? (size_t)query_scroll_col->valueint : 0;
 
   /* UI state */
   cJSON *ui = cJSON_GetObjectItem(json, "ui");
   parse_tab_ui(ui, &tab->ui);
 
-  return tab->connection_id != NULL;
+  /* Require non-empty connection_id for valid tab */
+  return tab->connection_id != NULL && tab->connection_id[0] != '\0';
 }
 
 static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
@@ -522,7 +559,8 @@ static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
   ws->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
 
   cJSON *current_tab = cJSON_GetObjectItem(json, "current_tab");
-  ws->current_tab = cJSON_IsNumber(current_tab) ? (size_t)current_tab->valueint : 0;
+  ws->current_tab = (cJSON_IsNumber(current_tab) && current_tab->valueint >= 0)
+                        ? (size_t)current_tab->valueint : 0;
 
   cJSON *tabs = cJSON_GetObjectItem(json, "tabs");
   if (cJSON_IsArray(tabs)) {
@@ -591,6 +629,15 @@ Session *session_load(char **error) {
 
   size_t read_bytes = fread(content, 1, (size_t)size, f);
   fclose(f);
+
+  if (read_bytes != (size_t)size) {
+    free(content);
+    set_error(error, "Failed to read complete file (got %zu of %ld bytes)",
+              read_bytes, size);
+    free(path);
+    return NULL;
+  }
+
   content[read_bytes] = '\0';
   free(path);
 
@@ -625,7 +672,8 @@ Session *session_load(char **error) {
 
     session->header_visible = cJSON_IsBool(header) ? cJSON_IsTrue(header) : true;
     session->status_visible = cJSON_IsBool(status) ? cJSON_IsTrue(status) : true;
-    session->page_size = cJSON_IsNumber(page_size) ? (size_t)page_size->valueint : 500;
+    session->page_size = (cJSON_IsNumber(page_size) && page_size->valueint > 0)
+                             ? (size_t)page_size->valueint : 500;
   } else {
     session->header_visible = true;
     session->status_visible = true;
@@ -650,7 +698,8 @@ Session *session_load(char **error) {
   }
 
   cJSON *current_ws = cJSON_GetObjectItem(json, "current_workspace");
-  session->current_workspace = cJSON_IsNumber(current_ws) ? (size_t)current_ws->valueint : 0;
+  session->current_workspace = (cJSON_IsNumber(current_ws) && current_ws->valueint >= 0)
+                                   ? (size_t)current_ws->valueint : 0;
 
   cJSON_Delete(json);
   return session;
@@ -700,6 +749,12 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     free(conn_err);
     free(connstr);
     return (size_t)-1;
+  }
+
+  /* Apply config limits to the new connection */
+  if (state->app && state->app->config) {
+    db_conn->max_result_rows =
+        (size_t)state->app->config->general.max_result_rows;
   }
 
   /* Add to connection pool */
@@ -771,10 +826,10 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     return false;
   }
 
-  /* Restore cursor/scroll state */
-  tab->cursor_row = stab->cursor_row;
+  /* Store absolute cursor/scroll positions - will convert to relative after loading */
+  size_t abs_cursor_row = stab->cursor_row;  /* These are absolute positions from session */
+  size_t abs_scroll_row = stab->scroll_row;
   tab->cursor_col = stab->cursor_col;
-  tab->scroll_row = stab->scroll_row;
   tab->scroll_col = stab->scroll_col;
 
   /* Restore query text for QUERY tabs */
@@ -783,7 +838,10 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     tab->query_text = str_dup(stab->query_text);
     tab->query_len = tab->query_text ? strlen(tab->query_text) : 0;
     tab->query_capacity = tab->query_len + 1;
-    tab->query_cursor = stab->query_cursor;
+
+    /* Clamp query cursor to text length */
+    tab->query_cursor = (stab->query_cursor <= tab->query_len)
+                            ? stab->query_cursor : tab->query_len;
     tab->query_scroll_line = stab->query_scroll_line;
     tab->query_scroll_col = stab->query_scroll_col;
   }
@@ -816,34 +874,70 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       char *filter_err = NULL;
       where = filters_build_where(&tab->filters, tab->schema,
                                    conn->conn->driver->name, &filter_err);
-      if (filter_err) {
+      if (!where && filter_err) {
+        /* Filter build failed - clear filters to avoid inconsistent state */
+        filters_clear(&tab->filters);
         free(filter_err);
       }
     }
 
-    /* Get row count */
+    /* Get unfiltered row count first */
     bool is_approx = false;
-    int64_t count;
-    if (where) {
-      count = db_count_rows_where(conn->conn, stab->table_name, where, &err);
-    } else {
-      count = db_count_rows_fast(conn->conn, stab->table_name, true, &is_approx, &err);
-    }
+    int64_t unfiltered_count = db_count_rows_fast(conn->conn, stab->table_name,
+                                                   true, &is_approx, &err);
     if (err) {
       free(err);
       err = NULL;
     }
+    tab->unfiltered_total_rows = unfiltered_count > 0 ? (size_t)unfiltered_count : 0;
+
+    /* Get filtered row count if we have filters */
+    int64_t count;
+    if (where) {
+      count = db_count_rows_where(conn->conn, stab->table_name, where, &err);
+      if (err) {
+        free(err);
+        err = NULL;
+      }
+    } else {
+      count = unfiltered_count;
+    }
     tab->total_rows = count > 0 ? (size_t)count : 0;
     tab->row_count_approximate = is_approx;
-    tab->unfiltered_total_rows = tab->total_rows;
 
-    /* Load first page of data */
-    if (where) {
-      tab->data = db_query_page_where(conn->conn, stab->table_name, 0,
-                                       state->app->page_size, where, NULL, false, &err);
+    /* Clamp absolute positions to total_rows (table may have shrunk) */
+    if (tab->total_rows > 0) {
+      if (abs_cursor_row >= tab->total_rows)
+        abs_cursor_row = tab->total_rows - 1;
+      if (abs_scroll_row >= tab->total_rows)
+        abs_scroll_row = tab->total_rows - 1;
     } else {
-      tab->data = db_query_page(conn->conn, stab->table_name, 0,
-                                 state->app->page_size, NULL, false, &err);
+      abs_cursor_row = 0;
+      abs_scroll_row = 0;
+    }
+
+    /* Calculate offset to load - center data window around cursor position */
+    size_t page_size = state->app->page_size;
+    size_t load_offset = 0;
+    if (abs_cursor_row >= page_size / 2) {
+      load_offset = abs_cursor_row - page_size / 2;
+    }
+    /* Ensure we don't load past end of data */
+    if (tab->total_rows > 0 && load_offset + page_size > tab->total_rows) {
+      if (tab->total_rows > page_size) {
+        load_offset = tab->total_rows - page_size;
+      } else {
+        load_offset = 0;
+      }
+    }
+
+    /* Load data at the calculated offset (near saved cursor position) */
+    if (where) {
+      tab->data = db_query_page_where(conn->conn, stab->table_name, load_offset,
+                                       page_size, where, NULL, false, &err);
+    } else {
+      tab->data = db_query_page(conn->conn, stab->table_name, load_offset,
+                                 page_size, NULL, false, &err);
     }
     free(where);
     if (err) {
@@ -851,8 +945,44 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
 
     if (tab->data) {
-      tab->loaded_offset = 0;
+      tab->loaded_offset = load_offset;
       tab->loaded_count = tab->data->num_rows;
+
+      /* Convert absolute positions to relative (within loaded window) */
+      if (abs_cursor_row >= load_offset) {
+        tab->cursor_row = abs_cursor_row - load_offset;
+        /* Clamp to loaded data if somehow beyond */
+        if (tab->cursor_row >= tab->loaded_count && tab->loaded_count > 0) {
+          tab->cursor_row = tab->loaded_count - 1;
+        }
+      } else {
+        tab->cursor_row = 0;
+      }
+
+      if (abs_scroll_row >= load_offset) {
+        tab->scroll_row = abs_scroll_row - load_offset;
+        if (tab->scroll_row >= tab->loaded_count && tab->loaded_count > 0) {
+          tab->scroll_row = tab->loaded_count - 1;
+        }
+      } else {
+        tab->scroll_row = 0;
+      }
+    } else {
+      /* Load failed - reset to beginning */
+      tab->loaded_offset = 0;
+      tab->loaded_count = 0;
+      tab->cursor_row = 0;
+      tab->scroll_row = 0;
+    }
+
+    if (tab->schema && tab->schema->num_columns > 0) {
+      if (tab->cursor_col >= tab->schema->num_columns)
+        tab->cursor_col = tab->schema->num_columns - 1;
+      if (tab->scroll_col >= tab->schema->num_columns)
+        tab->scroll_col = tab->schema->num_columns - 1;
+    } else {
+      tab->cursor_col = 0;
+      tab->scroll_col = 0;
     }
   }
 

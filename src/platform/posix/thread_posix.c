@@ -10,6 +10,7 @@
 
 #ifdef LACE_PLATFORM_POSIX
 
+#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -78,13 +79,19 @@ void lace_mutex_destroy(lace_mutex_t *mutex) {
 
 void lace_mutex_lock(lace_mutex_t *mutex) {
   if (mutex) {
-    pthread_mutex_lock(mutex);
+    int rc = pthread_mutex_lock(mutex);
+    /* Assert in debug builds to catch mutex errors */
+    assert(rc == 0 && "pthread_mutex_lock failed");
+    (void)rc; /* Suppress unused variable warning in release */
   }
 }
 
 void lace_mutex_unlock(lace_mutex_t *mutex) {
   if (mutex) {
-    pthread_mutex_unlock(mutex);
+    int rc = pthread_mutex_unlock(mutex);
+    /* Assert in debug builds to catch mutex errors */
+    assert(rc == 0 && "pthread_mutex_unlock failed");
+    (void)rc; /* Suppress unused variable warning in release */
   }
 }
 

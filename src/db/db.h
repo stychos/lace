@@ -92,6 +92,9 @@ struct DbConnection {
   /* Transaction state tracking */
   bool in_transaction;   /* True if transaction is active */
   int transaction_depth; /* Nesting depth (for savepoints, future use) */
+
+  /* Query limits */
+  size_t max_result_rows; /* Maximum rows to return from queries (0 = use default) */
 };
 
 /* Driver registration */

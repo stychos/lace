@@ -12,6 +12,7 @@
 #ifndef LACE_APP_STATE_H
 #define LACE_APP_STATE_H
 
+#include "../config/config.h"
 #include "../db/db.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -182,6 +183,9 @@ typedef struct {
 
 /* Core application state (platform-independent) */
 typedef struct {
+  /* Configuration (loaded from config.json) */
+  Config *config;
+
   /* Global UI state */
   bool header_visible;
   bool status_visible;

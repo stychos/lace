@@ -10,8 +10,10 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/config.h"
 #include "../../viewmodel/vm_sidebar.h"
 #include "tui_internal.h"
+#include "views/config_view.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -167,7 +169,6 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     return false;
 
   int key_char = render_event_get_char(event);
-  int fkey = render_event_get_fkey(event);
 
   /* Handle filter input mode */
   if (state->sidebar_filter_active) {
@@ -199,20 +200,21 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
   }
 
   size_t filtered_count = tui_count_filtered_tables(state);
+  const Config *cfg = state->app ? state->app->config : NULL;
 
   /* Navigation */
-  if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+  if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
     if (state->sidebar_highlight > 0) {
       state->sidebar_highlight--;
     } else {
       /* At top of list, move to filter field */
       state->sidebar_filter_active = true;
     }
-  } else if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
+  } else if (hotkey_matches(cfg, event, HOTKEY_MOVE_DOWN)) {
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count - 1) {
       state->sidebar_highlight++;
     }
-  } else if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
+  } else if (hotkey_matches(cfg, event, HOTKEY_MOVE_RIGHT)) {
     /* Save sidebar position and move focus back to filters or table view */
     state->sidebar_last_position = state->sidebar_highlight;
     state->sidebar_focused = false;
@@ -328,7 +330,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Open in new tab */
-  else if (key_char == '+' || key_char == '=') {
+  else if (hotkey_matches(cfg, event, HOTKEY_NEW_TAB)) {
     if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
       size_t actual_idx =
           tui_get_filtered_table_index(state, state->sidebar_highlight);
@@ -339,7 +341,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Activate filter */
-  else if (key_char == 'f' || key_char == 'F' || key_char == '/') {
+  else if (hotkey_matches(cfg, event, HOTKEY_SIDEBAR_FILTER)) {
     state->sidebar_filter_active = true;
   }
   /* Escape - clear filter or unfocus */
@@ -356,7 +358,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Toggle sidebar (close) */
-  else if (key_char == 't' || key_char == 'T' || fkey == 9) {
+  else if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_SIDEBAR)) {
     state->sidebar_visible = false;
     state->sidebar_focused = false;
     state->sidebar_filter[0] = '\0';
@@ -364,21 +366,26 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     tui_recreate_windows(state);
     tui_calculate_column_widths(state);
   }
-  /* Help */
-  else if (key_char == '?' || fkey == 1) {
-    tui_show_help(state);
+  /* Help opens config dialog on hotkeys tab */
+  else if (hotkey_matches(cfg, event, HOTKEY_HELP)) {
+    config_view_show_tab(state, CONFIG_TAB_HOTKEYS);
+    tui_refresh(state);
   }
   /* Pass through global hotkeys to main handler */
-  else if (key_char == 'q' || key_char == 'Q' || key_char == 'p' ||
-           key_char == 'P' || key_char == 'r' || key_char == 'R' ||
-           key_char == '[' || key_char == ']' || key_char == '{' ||
-           key_char == '}' || key_char == '-' || key_char == '_' ||
-           key_char == 's' || key_char == 'S' || key_char == 'c' ||
-           key_char == 'C' || key_char == 'm' || key_char == 'M' ||
-           key_char == 'b' || key_char == 'B' ||
-           render_event_is_ctrl(event, 'G') || render_event_is_ctrl(event, 'X') ||
-           fkey == 2 || fkey == 3 || fkey == 5 || fkey == 6 || fkey == 7 ||
-           fkey == 10) {
+  else if (hotkey_matches(cfg, event, HOTKEY_QUIT) ||
+           hotkey_matches(cfg, event, HOTKEY_OPEN_QUERY) ||
+           hotkey_matches(cfg, event, HOTKEY_REFRESH) ||
+           hotkey_matches(cfg, event, HOTKEY_PREV_TAB) ||
+           hotkey_matches(cfg, event, HOTKEY_NEXT_TAB) ||
+           hotkey_matches(cfg, event, HOTKEY_PREV_WORKSPACE) ||
+           hotkey_matches(cfg, event, HOTKEY_NEXT_WORKSPACE) ||
+           hotkey_matches(cfg, event, HOTKEY_CLOSE_TAB) ||
+           hotkey_matches(cfg, event, HOTKEY_SHOW_SCHEMA) ||
+           hotkey_matches(cfg, event, HOTKEY_CONNECT_DIALOG) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_HEADER) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
+           hotkey_matches(cfg, event, HOTKEY_GOTO_ROW) ||
+           hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false;
   }
 

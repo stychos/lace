@@ -18,12 +18,11 @@ static void *async_worker_thread(void *arg) {
 
   lace_mutex_lock(&op->mutex);
   op->state = ASYNC_STATE_RUNNING;
-  lace_mutex_unlock(&op->mutex);
-
-  /* Prepare cancellation handle before starting operation */
+  /* Prepare cancellation handle while holding mutex to prevent race with async_cancel */
   if (op->conn && op->conn->driver && op->conn->driver->prepare_cancel) {
     op->cancel_handle = op->conn->driver->prepare_cancel(op->conn);
   }
+  lace_mutex_unlock(&op->mutex);
 
   /* Execute the operation */
   char *err = NULL;

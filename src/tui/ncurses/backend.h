@@ -124,7 +124,7 @@ typedef enum {
 } UiMouseAction;
 
 /* Input event structure */
-typedef struct {
+struct UiEvent {
   UiEventType type;
 
   union {
@@ -148,7 +148,8 @@ typedef struct {
       int width, height;
     } resize;
   };
-} UiEvent;
+};
+typedef struct UiEvent UiEvent;
 
 /* ============================================================================
  * Render Context (opaque, backend-specific)

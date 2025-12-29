@@ -9,6 +9,7 @@
 #include "../../core/actions.h"
 #include "tui_internal.h"
 #include "../../config/session.h"
+#include "views/config_view.h"
 #include <ctype.h>
 #include <locale.h>
 #include <stdarg.h>
@@ -735,12 +736,15 @@ void tui_cleanup(TuiState *state) {
   if (!state)
     return;
 
-  /* Save session before cleanup */
-  char *session_err = NULL;
-  if (!session_save(state, &session_err)) {
-    /* Log error but don't block quit */
-    if (session_err)
-      free(session_err);
+  /* Save session before cleanup (only if restore_session is enabled) */
+  if (state->app && state->app->config &&
+      state->app->config->general.restore_session) {
+    char *session_err = NULL;
+    if (!session_save(state, &session_err)) {
+      /* Log error but don't block quit */
+      if (session_err)
+        free(session_err);
+    }
   }
 
   tui_disconnect(state);
@@ -1288,19 +1292,24 @@ void tui_run(TuiState *state) {
      * All key checks use render_event_* helpers for portability. */
     Action action = {0};
     bool handled = true;
-    int key_char = render_event_get_char(&event);
-    int fkey = render_event_get_fkey(&event);
+    (void)render_event_get_char(&event); /* May be used for debugging */
+    (void)render_event_get_fkey(&event); /* May be used for debugging */
 
     /* ========== Application ========== */
-    if (key_char == 'q' || key_char == 'Q' || render_event_is_ctrl(&event, 'X') ||
-        fkey == 10) {
-      /* Quit with confirmation if connected */
-      if (!state->conn || tui_show_confirm_dialog(state, "Quit application?")) {
+    if (hotkey_matches(state->app->config, &event, HOTKEY_QUIT)) {
+      /* Quit with confirmation if configured or connected */
+      bool needs_confirm = state->conn != NULL;
+      if (state->app && state->app->config &&
+          state->app->config->general.quit_confirmation) {
+        needs_confirm = true;
+      }
+      if (!needs_confirm ||
+          tui_show_confirm_dialog(state, "Quit application?")) {
         action = action_quit_force();
       }
     }
     /* ========== Navigation ========== */
-    else if (render_event_is_special(&event, UI_KEY_UP) || key_char == 'k') {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_UP)) {
       /* At first row with filters visible - focus filters */
       if (state->cursor_row == 0 && state->filters_visible) {
         action = action_filters_focus();
@@ -1312,56 +1321,54 @@ void tui_run(TuiState *state) {
       } else {
         action = action_cursor_move(-1, 0);
       }
-    } else if (render_event_is_special(&event, UI_KEY_DOWN) || key_char == 'j') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_DOWN)) {
       action = action_cursor_move(1, 0);
-    } else if (render_event_is_special(&event, UI_KEY_LEFT) || key_char == 'h') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_LEFT)) {
       /* At leftmost column with sidebar visible - focus sidebar */
       if (state->cursor_col == 0 && state->sidebar_visible) {
         action = action_sidebar_focus();
       } else {
         action = action_cursor_move(0, -1);
       }
-    } else if (render_event_is_special(&event, UI_KEY_RIGHT) || key_char == 'l') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_RIGHT)) {
       action = action_cursor_move(0, 1);
-    } else if (render_event_is_special(&event, UI_KEY_PAGEUP)) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PAGE_UP)) {
       action = action_page_up();
-    } else if (render_event_is_special(&event, UI_KEY_PAGEDOWN)) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PAGE_DOWN)) {
       action = action_page_down();
-    } else if (render_event_is_special(&event, UI_KEY_HOME)) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FIRST_COL)) {
       action = action_column_first();
-    } else if (render_event_is_special(&event, UI_KEY_END)) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_LAST_COL)) {
       action = action_column_last();
-    } else if (key_char == 'a' || ch == KEY_F(61)) {
-      /* Ctrl+Home or 'a' - go to first row */
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FIRST_ROW)) {
       action = action_home();
-    } else if (key_char == 'z' || ch == KEY_F(62)) {
-      /* Ctrl+End or 'z' - go to last row */
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_LAST_ROW)) {
       action = action_end();
     }
     /* ========== Editing ========== */
-    else if (render_event_is_special(&event, UI_KEY_ENTER)) {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_EDIT_INLINE)) {
       action = action_edit_start();
-    } else if (key_char == 'e' || fkey == 4) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_EDIT_MODAL)) {
       action = action_edit_start_modal();
-    } else if (key_char == 'n' || render_event_is_ctrl(&event, 'N')) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_SET_NULL)) {
       action = action_cell_set_null();
-    } else if (key_char == 'd' || render_event_is_ctrl(&event, 'D')) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_SET_EMPTY)) {
       action = action_cell_set_empty();
-    } else if (key_char == 'x' || render_event_is_special(&event, UI_KEY_DELETE)) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_DELETE_ROW)) {
       action = action_row_delete();
     }
     /* ========== Workspaces ========== */
-    else if (key_char == 'p' || key_char == 'P') {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_OPEN_QUERY)) {
       workspace_create_query(state);
-    } else if (key_char == ']' || fkey == 6) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_NEXT_TAB)) {
       action = action_tab_next();
-    } else if (key_char == '[' || fkey == 7) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PREV_TAB)) {
       action = action_tab_prev();
-    } else if (key_char == '}') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_NEXT_WORKSPACE)) {
       action = action_workspace_next();
-    } else if (key_char == '{') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PREV_WORKSPACE)) {
       action = action_workspace_prev();
-    } else if (key_char == '-' || key_char == '_') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CLOSE_TAB)) {
       /* Close with confirmation for query tabs with content */
       Tab *close_tab = TUI_TAB(state);
       if (close_tab) {
@@ -1380,7 +1387,7 @@ void tui_run(TuiState *state) {
       }
     }
     /* ========== Sidebar ========== */
-    else if (key_char == 't' || key_char == 'T' || fkey == 9) {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_SIDEBAR)) {
       /* If sidebar visible but not focused, focus it; otherwise toggle */
       if (state->sidebar_visible && !state->sidebar_focused) {
         action = action_sidebar_focus();
@@ -1389,26 +1396,26 @@ void tui_run(TuiState *state) {
       }
     }
     /* ========== Filters ========== */
-    else if (key_char == '/' || key_char == 'f' || key_char == 'F') {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_FILTERS)) {
       /* If filters visible but not focused, focus them; otherwise toggle */
       if (state->filters_visible && !state->filters_focused) {
         action = action_filters_focus();
       } else {
         action = action_filters_toggle();
       }
-    } else if (render_event_is_ctrl(&event, 'W')) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FILTERS_SWITCH_FOCUS)) {
       if (state->filters_visible) {
         action = action_filters_focus();
       }
     }
     /* ========== UI Toggles ========== */
-    else if (key_char == 'm' || key_char == 'M') {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_HEADER)) {
       action = action_toggle_header();
-    } else if (key_char == 'b' || key_char == 'B') {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_STATUS)) {
       action = action_toggle_status();
     }
     /* ========== Table Operations ========== */
-    else if (key_char == 'r' || key_char == 'R' || render_event_is_ctrl(&event, 'R')) {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_REFRESH)) {
       /* Refresh table (only for table tabs, not query) */
       Tab *refresh_tab = TUI_TAB(state);
       if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
@@ -1416,15 +1423,18 @@ void tui_run(TuiState *state) {
       }
     }
     /* ========== Dialogs (handled directly by TUI) ========== */
-    else if (key_char == 's' || key_char == 'S' || fkey == 3) {
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_SHOW_SCHEMA)) {
       tui_show_schema(state);
-    } else if (key_char == 'g' || key_char == 'G' ||
-               render_event_is_ctrl(&event, 'G') || fkey == 5) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_GOTO_ROW)) {
       tui_show_goto_dialog(state);
-    } else if (key_char == 'c' || key_char == 'C' || fkey == 2) {
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CONNECT_DIALOG)) {
       tui_show_connect_dialog(state);
-    } else if (key_char == '?' || fkey == 1) {
-      tui_show_help(state);
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_HELP)) {
+      /* Help opens config dialog on hotkeys tab */
+      config_view_show_tab(state, CONFIG_TAB_HOTKEYS);
+      tui_refresh(state);
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CONFIG)) {
+      tui_show_config(state);
     }
     /* ========== Unhandled ========== */
     else {

@@ -222,6 +222,6 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message);
 void tui_show_goto_dialog(TuiState *state);
 
 /* Note: tui_show_schema, tui_show_connect_dialog, tui_show_table_selector,
- * tui_show_help are declared in tui.h as public API */
+ * tui_show_config are declared in tui.h as public API */
 
 #endif /* LACE_TUI_INTERNAL_H */

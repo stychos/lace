@@ -548,9 +548,20 @@ void app_state_init(AppState *app) {
 
   memset(app, 0, sizeof(AppState));
   app->running = true; /* App is running after init */
-  app->page_size = DEFAULT_PAGE_SIZE;
-  app->header_visible = true;
-  app->status_visible = true;
+
+  /* Load configuration */
+  app->config = config_load(NULL);
+  if (app->config) {
+    /* Apply config values */
+    app->page_size = (size_t)app->config->general.page_size;
+    app->header_visible = app->config->general.show_header;
+    app->status_visible = app->config->general.show_status_bar;
+  } else {
+    /* Fallback defaults if config failed to load */
+    app->page_size = DEFAULT_PAGE_SIZE;
+    app->header_visible = true;
+    app->status_visible = true;
+  }
 
   /* Allocate initial dynamic arrays */
   app->connections = calloc(INITIAL_CONNECTION_CAPACITY, sizeof(Connection));
@@ -567,6 +578,12 @@ void app_state_init(AppState *app) {
 void app_state_cleanup(AppState *app) {
   if (!app)
     return;
+
+  /* Free configuration */
+  if (app->config) {
+    config_free(app->config);
+    app->config = NULL;
+  }
 
   /* Close all connections */
   if (app->connections) {

@@ -10,6 +10,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/config.h"
 #include "../../viewmodel/vm_query.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
@@ -122,6 +123,9 @@ bool tab_create_query(TuiState *state) {
     /* Query tab has no filters panel */
     ui->filters_visible = false;
     ui->filters_focused = false;
+
+    /* Query starts with focus on editor, not results */
+    ui->query_focus_results = false;
   }
 
   /* Update tab name (free the default "Query" name set by workspace_create_query_tab) */
@@ -143,7 +147,6 @@ bool tab_create_query(TuiState *state) {
   tab->query_cursor = 0;
   tab->query_scroll_line = 0;
   tab->query_scroll_col = 0;
-  ui->query_focus_results = false;
 
   /* Clear convenience pointers (query mode doesn't use them) */
   state->data = NULL;
@@ -2097,25 +2100,16 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     return false;
 
   int key_char = render_event_get_char(event);
-  int fkey = render_event_get_fkey(event);
+  const Config *cfg = state->app ? state->app->config : NULL;
 
   /* Handle edit mode first if active */
   if (ui->query_result_editing) {
     return query_result_handle_edit_input(state, tab, event);
   }
 
-  /* Ctrl+W or Esc switches focus (only when not editing) */
-  if (render_event_is_ctrl(event, 'W') ||
-      render_event_is_special(event, UI_KEY_ESCAPE)) {
-    if (ui->query_focus_results) {
-      /* Always allow switching from results to editor */
-      ui->query_focus_results = false;
-    } else {
-      /* Only switch to results if there are results to show */
-      if (tab->query_results && tab->query_results->num_rows > 0) {
-        ui->query_focus_results = true;
-      }
-    }
+  /* Ctrl+W or Esc toggles focus between editor and results */
+  if (hotkey_matches(cfg, event, HOTKEY_QUERY_SWITCH_FOCUS)) {
+    ui->query_focus_results = !ui->query_focus_results;
     return true;
   }
 
@@ -2125,37 +2119,38 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       return false;
 
     /* Enter - start editing */
-    if (render_event_is_special(event, UI_KEY_ENTER)) {
+    if (hotkey_matches(cfg, event, HOTKEY_EDIT_INLINE)) {
       query_result_start_edit(state, tab);
       return true;
     }
 
     /* e or F4 - start modal editing */
-    if (key_char == 'e' || fkey == 4) {
+    if (hotkey_matches(cfg, event, HOTKEY_EDIT_MODAL)) {
       query_result_start_modal_edit(state, tab);
       return true;
     }
 
     /* Ctrl+N or n - set cell to NULL */
-    if (render_event_is_ctrl(event, 'N') || key_char == 'n') {
+    if (hotkey_matches(cfg, event, HOTKEY_SET_NULL)) {
       query_result_set_cell_direct(state, tab, true);
       return true;
     }
 
     /* Ctrl+D or d - set cell to empty string */
-    if (render_event_is_ctrl(event, 'D') || key_char == 'd') {
+    if (hotkey_matches(cfg, event, HOTKEY_SET_EMPTY)) {
       query_result_set_cell_direct(state, tab, false);
       return true;
     }
 
     /* x or Delete - delete row */
-    if (key_char == 'x' || render_event_is_special(event, UI_KEY_DELETE)) {
+    if (hotkey_matches(cfg, event, HOTKEY_DELETE_ROW)) {
       query_result_delete_row(state, tab);
       return true;
     }
 
     /* r/R or Ctrl+R - refresh query results */
-    if (key_char == 'r' || key_char == 'R' || render_event_is_ctrl(event, 'R')) {
+    if (hotkey_matches(cfg, event, HOTKEY_REFRESH) ||
+        hotkey_matches(cfg, event, HOTKEY_EXECUTE_QUERY)) {
       /* Re-execute the base SQL if available, otherwise find query at cursor.
        * IMPORTANT: Must copy the SQL before calling query_execute because
        * query_execute frees tab->query_base_sql before re-using it. */
@@ -2174,7 +2169,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Up / k - move cursor up */
-    if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+    if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
       if (tab->query_result_row > 0) {
         tab->query_result_row--;
         /* Adjust scroll */
@@ -2190,7 +2185,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Down / j - move cursor down */
-    if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
+    if (hotkey_matches(cfg, event, HOTKEY_MOVE_DOWN)) {
       if (tab->query_results->num_rows > 0 &&
           tab->query_result_row < tab->query_results->num_rows - 1) {
         tab->query_result_row++;
@@ -2214,7 +2209,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Left / h - move cursor left */
-    if (render_event_is_special(event, UI_KEY_LEFT) || key_char == 'h') {
+    if (hotkey_matches(cfg, event, HOTKEY_MOVE_LEFT)) {
       if (tab->query_result_col > 0) {
         tab->query_result_col--;
         /* Adjust horizontal scroll */
@@ -2231,7 +2226,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Right / l - move cursor right */
-    if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
+    if (hotkey_matches(cfg, event, HOTKEY_MOVE_RIGHT)) {
       if (tab->query_result_col < tab->query_results->num_columns - 1) {
         tab->query_result_col++;
         /* Adjust horizontal scroll to keep cursor visible using actual main
@@ -2274,14 +2269,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Home */
-    if (render_event_is_special(event, UI_KEY_HOME)) {
+    if (hotkey_matches(cfg, event, HOTKEY_FIRST_COL)) {
       tab->query_result_col = 0;
       tab->query_result_scroll_col = 0;
       return true;
     }
 
     /* End */
-    if (render_event_is_special(event, UI_KEY_END)) {
+    if (hotkey_matches(cfg, event, HOTKEY_LAST_COL)) {
       if (tab->query_results->num_columns > 0) {
         tab->query_result_col = tab->query_results->num_columns - 1;
         /* Adjust horizontal scroll to show last column using actual main window
@@ -2310,7 +2305,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Page Up */
-    if (render_event_is_special(event, UI_KEY_PAGEUP)) {
+    if (hotkey_matches(cfg, event, HOTKEY_PAGE_UP)) {
       /* Calculate visible rows in results area using actual main window */
       int ppage_rows, ppage_cols;
       getmaxyx(state->main_win, ppage_rows, ppage_cols);
@@ -2337,7 +2332,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* Page Down */
-    if (render_event_is_special(event, UI_KEY_PAGEDOWN)) {
+    if (hotkey_matches(cfg, event, HOTKEY_PAGE_DOWN)) {
       /* Calculate visible rows in results area using actual main window */
       int npage_rows, npage_cols;
       getmaxyx(state->main_win, npage_rows, npage_cols);
@@ -2365,7 +2360,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* g or a - go to first row */
-    if (key_char == 'g' || key_char == 'a') {
+    if (hotkey_matches(cfg, event, HOTKEY_FIRST_ROW)) {
       tab->query_result_row = 0;
       tab->query_result_scroll_row = 0;
       query_check_load_more(state, tab);
@@ -2373,7 +2368,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     }
 
     /* G or z - go to last row */
-    if (key_char == 'G' || key_char == 'z') {
+    if (hotkey_matches(cfg, event, HOTKEY_LAST_ROW)) {
       if (tab->query_results->num_rows > 0) {
         tab->query_result_row = tab->query_results->num_rows - 1;
       }
@@ -2387,7 +2382,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   /* Handle editor input */
 
   /* Ctrl+R - run query under cursor */
-  if (render_event_is_ctrl(event, 'R')) {
+  if (hotkey_matches(cfg, event, HOTKEY_EXECUTE_QUERY)) {
     char *query = query_find_at_cursor(tab->query_text, tab->query_cursor);
     if (query && *query) {
       query_execute(state, query);
@@ -2399,7 +2394,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Ctrl+A - run all queries */
-  if (render_event_is_ctrl(event, 'A')) {
+  if (hotkey_matches(cfg, event, HOTKEY_EXECUTE_ALL)) {
     if (!tab->query_text || !*tab->query_text) {
       tui_set_error(state, "No queries to execute");
       return true;
@@ -2479,7 +2474,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Ctrl+T - run all queries in a transaction */
-  if (render_event_is_ctrl(event, 'T')) {
+  if (hotkey_matches(cfg, event, HOTKEY_EXECUTE_TRANSACTION)) {
     if (!tab->query_text || !*tab->query_text) {
       tui_set_error(state, "No queries to execute");
       return true;

@@ -333,7 +333,14 @@ ConnectionManager *connmgr_load(char **error) {
   long size = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  if (size <= 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
+  if (size < 0) {
+    fclose(f);
+    set_error(error, "Failed to determine file size: %s", strerror(errno));
+    free(path);
+    return NULL;
+  }
+
+  if (size == 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
     fclose(f);
     set_error(error, "Invalid file size");
     free(path);

@@ -11,6 +11,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/config.h"
 #include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include <ctype.h>
@@ -569,11 +570,11 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Navigation mode */
-  int fkey = render_event_get_fkey(event);
+  const Config *cfg = state->app ? state->app->config : NULL;
 
-  /* Escape, f, / - close panel */
-  if (render_event_is_special(event, UI_KEY_ESCAPE) || key_char == 'f' ||
-      key_char == '/') {
+  /* Escape, f, / - close panel (toggle filters or escape to close) */
+  if (render_event_is_special(event, UI_KEY_ESCAPE) ||
+      hotkey_matches(cfg, event, HOTKEY_TOGGLE_FILTERS)) {
     /* Save cursor position to UITabState before closing */
     UITabState *ui = TUI_TAB_UI(state);
     if (ui) {
@@ -584,7 +585,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     state->filters_focused = false;
   }
   /* Up / k - move cursor up */
-  else if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+  else if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
     if (state->filters_cursor_row > 0) {
       state->filters_cursor_row--;
       /* Adjust scroll if cursor moved above visible area */
@@ -594,7 +595,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Down / j - move cursor down */
-  else if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
+  else if (hotkey_matches(cfg, event, HOTKEY_MOVE_DOWN)) {
     if (state->filters_cursor_row < f->num_filters - 1) {
       state->filters_cursor_row++;
       /* Adjust scroll if cursor moved below visible area */
@@ -609,7 +610,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Left / h - move cursor left */
-  else if (render_event_is_special(event, UI_KEY_LEFT) || key_char == 'h') {
+  else if (hotkey_matches(cfg, event, HOTKEY_MOVE_LEFT)) {
     size_t idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
@@ -632,7 +633,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Right / l - move cursor right */
-  else if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
+  else if (hotkey_matches(cfg, event, HOTKEY_MOVE_RIGHT)) {
     size_t idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
@@ -727,7 +728,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* + or = - add new filter */
-  else if (key_char == '+' || key_char == '=') {
+  else if (hotkey_matches(cfg, event, HOTKEY_ADD_FILTER)) {
     if (state->schema && state->schema->num_columns > 0) {
       filters_add(f, 0, FILTER_OP_EQ, "");
       state->filters_cursor_row = f->num_filters - 1;
@@ -741,7 +742,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* c/C - clear all filters */
-  else if (key_char == 'c' || key_char == 'C') {
+  else if (hotkey_matches(cfg, event, HOTKEY_CLEAR_FILTERS)) {
     /* Check if any filters had effect before clearing */
     bool had_effect = false;
     for (size_t i = 0; i < f->num_filters; i++) {
@@ -762,8 +763,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* - or x or Delete - delete current filter */
-  else if (key_char == '-' || key_char == 'x' ||
-           render_event_is_special(event, UI_KEY_DELETE)) {
+  else if (hotkey_matches(cfg, event, HOTKEY_REMOVE_FILTER)) {
     size_t filter_idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[filter_idx];
     /* Check if filter had an effect before deleting */
@@ -790,13 +790,18 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
   }
   /* Global keys - pass through to main loop */
-  else if (key_char == '[' || key_char == ']' || key_char == '{' ||
-           key_char == '}' || fkey == 6 || fkey == 7 || key_char == 't' ||
-           key_char == 'T' || fkey == 9 || key_char == 'm' || key_char == 'M' ||
-           key_char == 'b' || key_char == 'B' || key_char == 'p' ||
-           key_char == 'P' || key_char == 'r' || key_char == 'R' ||
-           key_char == 's' || key_char == 'S' || fkey == 3 || key_char == 'q' ||
-           key_char == 'Q' || fkey == 10 || render_event_is_ctrl(event, 'X')) {
+  else if (hotkey_matches(cfg, event, HOTKEY_PREV_TAB) ||
+           hotkey_matches(cfg, event, HOTKEY_NEXT_TAB) ||
+           hotkey_matches(cfg, event, HOTKEY_PREV_WORKSPACE) ||
+           hotkey_matches(cfg, event, HOTKEY_NEXT_WORKSPACE) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_SIDEBAR) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_HEADER) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
+           hotkey_matches(cfg, event, HOTKEY_OPEN_QUERY) ||
+           hotkey_matches(cfg, event, HOTKEY_REFRESH) ||
+           hotkey_matches(cfg, event, HOTKEY_SHOW_SCHEMA) ||
+           hotkey_matches(cfg, event, HOTKEY_QUIT) ||
+           hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false; /* Let global keys work from filters */
   }
   /* Consume all other keys when filters focused */

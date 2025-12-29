@@ -1252,6 +1252,12 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
       *err = str_dup("Invalid row count from database");
     return NULL;
   }
+  /* Limit result set size to prevent unbounded memory growth */
+  int max_rows = conn->max_result_rows > 0 ? (int)conn->max_result_rows
+                                           : MAX_RESULT_ROWS;
+  if (num_rows > max_rows) {
+    num_rows = max_rows;
+  }
   if (num_rows > 0) {
     rs->rows = calloc((size_t)num_rows, sizeof(Row));
     if (!rs->rows) {

@@ -97,6 +97,12 @@ void vm_app_connect(VmApp *vm, const char *connstr) {
     return;
   }
 
+  /* Apply config limits to the new connection */
+  if (vm->app && vm->app->config) {
+    db_conn->max_result_rows =
+        (size_t)vm->app->config->general.max_result_rows;
+  }
+
   /* Add to connection pool */
   Connection *conn = app_add_connection(vm->app, db_conn, connstr);
   if (!conn) {

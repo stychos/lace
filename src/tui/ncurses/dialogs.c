@@ -10,8 +10,10 @@
  */
 
 #include "../../async/async.h"
+#include "../../config/config.h"
 #include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
+#include "views/config_view.h"
 #include "views/connect_view.h"
 #include <errno.h>
 #include <stdlib.h>
@@ -1030,6 +1032,12 @@ void tui_show_connect_dialog(TuiState *state) {
   tui_refresh(state);
 }
 
+/* Show configuration dialog */
+void tui_show_config(TuiState *state) {
+  config_view_show(state);
+  tui_refresh(state);
+}
+
 /* Show table selector dialog */
 void tui_show_table_selector(TuiState *state) {
   if (!state || !state->tables || state->num_tables == 0) {
@@ -1166,199 +1174,6 @@ void tui_show_table_selector(TuiState *state) {
   tui_refresh(state);
 }
 
-/* Help content line */
-typedef struct {
-  const char *text;
-  bool is_header;
-} HelpLine;
-
-/* Show help dialog with scrolling support */
-void tui_show_help(TuiState *state) {
-  /* Define help content */
-  static const HelpLine help_lines[] = {
-      {"Navigation", true},
-      {"Arrow keys / hjkl  Move cursor", false},
-      {"PgUp / PgDown      Page up/down", false},
-      {"Home / End         First/last column", false},
-      {"a                  Go to first row", false},
-      {"z                  Go to last row", false},
-      {"g (or Ctrl+G, F5)  Go to row number", false},
-      {"", false},
-      {"Editing", true},
-      {"Enter              Edit cell (inline)", false},
-      {"e (or F4)          Edit cell (modal)", false},
-      {"n (or Ctrl+N)      Set cell to NULL", false},
-      {"d (or Ctrl+D)      Set cell to empty", false},
-      {"x (or Delete)      Delete row", false},
-      {"Escape             Cancel editing", false},
-      {"", false},
-      {"Tabs & Workspaces", true},
-      {"[ / ] (or F7/F6)   Previous/next tab", false},
-      {"- / _              Close current tab", false},
-      {"+                  Open table in new tab", false},
-      {"{ / }              Previous/next workspace", false},
-      {"", false},
-      {"Query Tab", true},
-      {"p                  Open query tab", false},
-      {"Ctrl+R             Execute query at cursor", false},
-      {"Ctrl+A             Execute all queries", false},
-      {"Ctrl+T             Execute all in transaction", false},
-      {"Ctrl+W / Esc       Switch editor/results", false},
-      {"", false},
-      {"Sidebar", true},
-      {"t (or F9)          Toggle sidebar", false},
-      {"/                  Filter tables (sidebar)", false},
-      {"Enter              Select table", false},
-      {"Left/Right         Focus sidebar/table", false},
-      {"", false},
-      {"Table Filters", true},
-      {"/ (or f)           Toggle filters panel", false},
-      {"Arrow keys / hjkl  Navigate (spatial)", false},
-      {"Ctrl+W             Switch filters/table focus", false},
-      {"Enter              Edit field (auto-applies)", false},
-      {"+ / =              Add new filter", false},
-      {"- / x / Delete     Remove filter", false},
-      {"c                  Clear all filters", false},
-      {"Escape             Close panel", false},
-      {"", false},
-      {"Other", true},
-      {"r                  Refresh table", false},
-      {"s (or F3)          Show table schema", false},
-      {"c (or F2)          Connect dialog", false},
-      {"m                  Toggle menu bar", false},
-      {"b                  Toggle status bar", false},
-      {"? (or F1)          This help", false},
-      {"q (or Ctrl+X, F10) Quit", false},
-      {"", false},
-      {"Mouse", true},
-      {"Click              Select cell/table", false},
-      {"Double-click       Edit cell", false},
-      {"Scroll             Navigate rows", false},
-  };
-  const int num_lines = sizeof(help_lines) / sizeof(help_lines[0]);
-
-  int width = 60;
-  int height = state->term_rows - 4;
-  if (height < 10)
-    height = 10;
-  if (height > num_lines + 6)
-    height = num_lines + 6;
-  if (width > state->term_cols - 2)
-    width = state->term_cols - 2;
-  if (width < 30)
-    width = 30;
-
-  int starty = (state->term_rows - height) / 2;
-  int startx = (state->term_cols - width) / 2;
-  if (starty < 0)
-    starty = 0;
-  if (startx < 0)
-    startx = 0;
-
-  WINDOW *help_win = newwin(height, width, starty, startx);
-  if (!help_win)
-    return;
-
-  keypad(help_win, TRUE);
-
-  int content_height = height - 4; /* Account for border, title, footer */
-  int scroll = 0;
-  int max_scroll = num_lines - content_height;
-  if (max_scroll < 0)
-    max_scroll = 0;
-
-  bool running = true;
-  while (running) {
-    werase(help_win);
-    box(help_win, 0, 0);
-
-    /* Title */
-    wattron(help_win, A_BOLD);
-    mvwprintw(help_win, 0, (width - 8) / 2, " Help ");
-    wattroff(help_win, A_BOLD);
-
-    /* Draw content */
-    for (int i = 0; i < content_height && (scroll + i) < num_lines; i++) {
-      const HelpLine *line = &help_lines[scroll + i];
-      int y = i + 1;
-
-      if (line->is_header) {
-        wattron(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-        mvwprintw(help_win, y, 2, "%s", line->text);
-        wattroff(help_win, A_BOLD | COLOR_PAIR(COLOR_HEADER));
-      } else {
-        mvwprintw(help_win, y, 4, "%s", line->text);
-      }
-    }
-
-    /* Scroll indicators */
-    if (scroll > 0) {
-      wattron(help_win, A_DIM);
-      mvwprintw(help_win, 1, width - 4, "^");
-      wattroff(help_win, A_DIM);
-    }
-    if (scroll < max_scroll) {
-      wattron(help_win, A_DIM);
-      mvwprintw(help_win, height - 3, width - 4, "v");
-      wattroff(help_win, A_DIM);
-    }
-
-    /* Footer */
-    wattron(help_win, A_DIM);
-    if (max_scroll > 0) {
-      mvwprintw(help_win, height - 2, 2, "Arrows/PgUp/PgDn to scroll");
-    }
-    wattroff(help_win, A_DIM);
-    wattron(help_win, A_REVERSE);
-    mvwprintw(help_win, height - 2, (width - 9) / 2, "[ Close ]");
-    wattroff(help_win, A_REVERSE);
-
-    wrefresh(help_win);
-
-    int ch = wgetch(help_win);
-    switch (ch) {
-    case KEY_UP:
-    case 'k':
-      if (scroll > 0)
-        scroll--;
-      break;
-    case KEY_DOWN:
-    case 'j':
-      if (scroll < max_scroll)
-        scroll++;
-      break;
-    case KEY_PPAGE:
-      scroll -= content_height;
-      if (scroll < 0)
-        scroll = 0;
-      break;
-    case KEY_NPAGE:
-    case ' ':
-      scroll += content_height;
-      if (scroll > max_scroll)
-        scroll = max_scroll;
-      break;
-    case KEY_HOME:
-    case 'g':
-      scroll = 0;
-      break;
-    case KEY_END:
-    case 'G':
-      scroll = max_scroll;
-      break;
-    case 27: /* Escape */
-    case 'q':
-    case '\n':
-    case KEY_ENTER:
-      running = false;
-      break;
-    }
-  }
-
-  delwin(help_win);
-  touchwin(stdscr);
-  tui_refresh(state);
-}
 
 /* Spinner characters for processing dialog */
 static const char SPINNER_CHARS[] = {'|', '/', '-', '\\'};
@@ -1515,6 +1330,11 @@ DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr) {
   DbConnection *result = NULL;
   if (completed && op.state == ASYNC_STATE_COMPLETED) {
     result = (DbConnection *)op.result;
+    /* Apply config limits to the new connection */
+    if (result && state->app && state->app->config) {
+      result->max_result_rows =
+          (size_t)state->app->config->general.max_result_rows;
+    }
   } else if (op.state == ASYNC_STATE_ERROR) {
     tui_set_error(state, "Connection failed: %s",
                   op.error ? op.error : "Unknown error");

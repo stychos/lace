@@ -58,6 +58,14 @@ bool sb_append(StringBuilder *sb, const char *s);
 bool sb_append_len(StringBuilder *sb, const char *s, size_t len);
 bool sb_append_char(StringBuilder *sb, char c);
 bool sb_printf(StringBuilder *sb, const char *fmt, ...);
-char *sb_to_string(StringBuilder *sb); /* Returns owned string, frees builder */
+/*
+ * Consumes the StringBuilder and returns the internal string buffer.
+ * WARNING: After calling this function:
+ *   - The StringBuilder pointer is INVALID and must not be used
+ *   - The caller owns the returned string and must free() it
+ *   - Set your sb pointer to NULL after calling to prevent accidental reuse
+ * Usage: char *str = sb_to_string(sb); sb = NULL;
+ */
+char *sb_to_string(StringBuilder *sb);
 
 #endif /* LACE_STR_H */
