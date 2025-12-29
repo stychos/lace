@@ -19,17 +19,29 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 
 ### Dependencies
 
-- ncurses
-- OpenSSL
-- SQLite3, libpq (PostgreSQL), libmariadb (MySQL)
+**macOS (Homebrew):**
+```bash
+brew install ncurses sqlite libpq mariadb cjson
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+apt install libncurses-dev libsqlite3-dev libpq-dev libmariadb-dev libcjson-dev
+```
+
+**Linux (Arch):**
+```bash
+pacman -S ncurses sqlite libpq mariadb-libs cjson
+```
+
+**Linux (Fedora/RHEL):**
+```bash
+dnf install ncurses-devel sqlite-devel libpq-devel mariadb-devel cjson-devel
+```
 
 ### Build
 
 ```bash
-# Initialize submodules (required for first build)
-git submodule update --init --recursive
-
-# Build
 make
 ```
 

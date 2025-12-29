@@ -2,8 +2,8 @@
 # Built with clang
 
 CC = clang
-CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -Ivendor/cJSON -g
-LDFLAGS = -lncursesw -lpanel -lmenu -lsqlite3 -lmariadb -lpq -lpthread
+CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -g
+LDFLAGS = -lncursesw -lpanel -lmenu -lsqlite3 -lmariadb -lpq -lpthread -lcjson
 
 # Build directory
 BUILD_DIR = build
@@ -17,6 +17,7 @@ ifeq ($(UNAME_S),Darwin)
 
     # Add Homebrew include paths
     CFLAGS += -I$(HOMEBREW_PREFIX)/include
+    CFLAGS += -I$(HOMEBREW_PREFIX)/include/cjson
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include/mysql
     CFLAGS += -I$(HOMEBREW_PREFIX)/opt/libpq/include
@@ -29,14 +30,14 @@ ifeq ($(UNAME_S),Darwin)
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/libpq/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/sqlite/lib
     LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/ncurses/lib
+else ifeq ($(UNAME_S),Linux)
+    # Linux - cJSON headers may be in /usr/include/cjson
+    CFLAGS += -I/usr/include/cjson
 endif
 
 # Source directories (common)
 SRC_DIRS_COMMON = src/app src/core src/config src/db src/db/sqlite src/db/postgres src/db/mysql \
                   src/tui/ncurses src/tui/ncurses/views src/util src/async src/viewmodel
-
-# Vendor directories
-SRC_DIRS_VENDOR = vendor/cJSON
 
 # Platform-specific source directories
 ifeq ($(UNAME_S),Windows_NT)
@@ -45,17 +46,13 @@ else
     SRC_DIRS_PLATFORM = src/platform/posix
 endif
 
-SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM) $(SRC_DIRS_VENDOR)
+SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM)
 
-# Find all C source files (exclude vendor test files)
-SRCS_ALL = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
-SRCS = $(filter-out vendor/cJSON/test.c vendor/cJSON/cJSON_Utils.c,$(SRCS_ALL))
+# Find all C source files
+SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 
 # Object files in build directory
-# Handle both src/ and vendor/ prefixes
-OBJS_SRC = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(filter src/%,$(SRCS)))
-OBJS_VENDOR = $(patsubst vendor/%.c,$(BUILD_DIR)/vendor/%.o,$(filter vendor/%,$(SRCS)))
-OBJS = $(OBJS_SRC) $(OBJS_VENDOR)
+OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
 
 TARGET = $(BUILD_DIR)/lace
@@ -69,11 +66,6 @@ $(TARGET): $(OBJS)
 
 # Compile C files with dependency generation
 $(BUILD_DIR)/%.o: src/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-
-# Compile vendor C files
-$(BUILD_DIR)/vendor/%.o: vendor/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
