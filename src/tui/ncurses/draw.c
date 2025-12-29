@@ -707,12 +707,15 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   bool is_click = (event->mouse.action == UI_MOUSE_CLICK);
   bool is_scroll_up = (event->mouse.button == UI_MOUSE_SCROLL_UP);
   bool is_scroll_down = (event->mouse.button == UI_MOUSE_SCROLL_DOWN);
+  bool is_scroll_left = (event->mouse.button == UI_MOUSE_SCROLL_LEFT);
+  bool is_scroll_right = (event->mouse.button == UI_MOUSE_SCROLL_RIGHT);
+  bool is_hscroll = (is_scroll_left || is_scroll_right);
 
   /* Determine click location */
   int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
 
   /* Handle scroll wheel - scroll relative to cursor */
-  if (is_scroll_up || is_scroll_down) {
+  if (is_scroll_up || is_scroll_down || is_hscroll) {
     /* Only scroll in main area */
     if (mouse_x >= sidebar_width) {
       int scroll_amount = 3; /* Scroll 3 rows at a time */
@@ -730,12 +733,33 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         int results_start_y = 2 + editor_height + 1;
 
         if (mouse_y >= results_start_y) {
-          /* Scroll query results using helper that handles pagination */
+          /* Scroll query results */
           UITabState *scroll_ui = TUI_TAB_UI(state);
           if (scroll_ui)
             scroll_ui->query_focus_results = true;
-          int delta = is_scroll_up ? -scroll_amount : scroll_amount;
-          tui_query_scroll_results(state, delta);
+
+          if (is_hscroll) {
+            /* Horizontal scroll - move column */
+            size_t num_cols = scroll_tab->query_results->num_columns;
+            if (is_scroll_left) {
+              if (scroll_tab->query_result_col > 0) {
+                scroll_tab->query_result_col--;
+                if (scroll_tab->query_result_col < scroll_tab->query_result_scroll_col) {
+                  scroll_tab->query_result_scroll_col = scroll_tab->query_result_col;
+                }
+              }
+            } else {
+              if (scroll_tab->query_result_col + 1 < num_cols) {
+                scroll_tab->query_result_col++;
+                /* Adjust scroll to keep cursor visible */
+                /* Simple approach: just ensure cursor is visible */
+              }
+            }
+          } else {
+            /* Vertical scroll using helper that handles pagination */
+            int delta = is_scroll_up ? -scroll_amount : scroll_amount;
+            tui_query_scroll_results(state, delta);
+          }
           state->sidebar_focused = false;
           return true;
         }
@@ -749,8 +773,24 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         size_t scroll_row, scroll_col;
         vm_table_get_scroll(scroll_vm, &scroll_row, &scroll_col);
         size_t loaded_rows = vm_table_row_count(scroll_vm);
+        size_t num_cols = vm_table_col_count(scroll_vm);
 
-        if (is_scroll_up) {
+        if (is_hscroll) {
+          /* Horizontal scroll - move cursor column */
+          if (is_scroll_left) {
+            if (cursor_col > 0) {
+              cursor_col--;
+              if (cursor_col < scroll_col) {
+                scroll_col = cursor_col;
+              }
+            }
+          } else {
+            if (cursor_col + 1 < num_cols) {
+              cursor_col++;
+              /* Scroll adjustment handled below */
+            }
+          }
+        } else if (is_scroll_up) {
           /* Scroll up - move cursor up */
           if (cursor_row >= (size_t)scroll_amount) {
             cursor_row -= scroll_amount;
@@ -785,7 +825,9 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
         /* Sync to compatibility layer (temporary) */
         state->cursor_row = cursor_row;
+        state->cursor_col = cursor_col;
         state->scroll_row = scroll_row;
+        state->scroll_col = scroll_col;
 
         /* Check if we need to load more rows (pagination) */
         tui_check_load_more(state);
@@ -995,10 +1037,11 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
     if (editor_height < 3)
       editor_height = 3;
+    /* Grid starts at results_start = editor_height + 1 (window coords)
+     * In screen coords: 2 + editor_height + 1 (main_win starts at y=2)
+     * Grid layout: column headers (1 row) + separator (1 row) + data */
     int results_start_y = 2 + editor_height + 1;  /* screen coords */
-    int results_header_y = results_start_y + 1;   /* "Results (N rows)" header */
-    int results_data_y =
-        results_header_y + 3; /* After header + col names + separator */
+    int results_data_y = results_start_y + 2;     /* After col headers + separator */
 
     if (mouse_y < results_start_y) {
       /* Clicked in editor area */

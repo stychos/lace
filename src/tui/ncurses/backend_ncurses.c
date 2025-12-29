@@ -276,13 +276,25 @@ static bool translate_mouse(MEVENT *mevent, UiEvent *event) {
     event->mouse.button = UI_MOUSE_RIGHT;
 #ifdef BUTTON4_PRESSED
   } else if (mevent->bstate & BUTTON4_PRESSED) {
-    event->mouse.button = UI_MOUSE_SCROLL_UP;
+    /* Shift + scroll up = scroll left (horizontal) */
+    if (mevent->bstate & BUTTON_SHIFT) {
+      event->mouse.button = UI_MOUSE_SCROLL_LEFT;
+      event->mouse.mods = UI_MOD_SHIFT;
+    } else {
+      event->mouse.button = UI_MOUSE_SCROLL_UP;
+    }
     event->mouse.action = UI_MOUSE_PRESS;
     return true;
 #endif
 #ifdef BUTTON5_PRESSED
   } else if (mevent->bstate & BUTTON5_PRESSED) {
-    event->mouse.button = UI_MOUSE_SCROLL_DOWN;
+    /* Shift + scroll down = scroll right (horizontal) */
+    if (mevent->bstate & BUTTON_SHIFT) {
+      event->mouse.button = UI_MOUSE_SCROLL_RIGHT;
+      event->mouse.mods = UI_MOD_SHIFT;
+    } else {
+      event->mouse.button = UI_MOUSE_SCROLL_DOWN;
+    }
     event->mouse.action = UI_MOUSE_PRESS;
     return true;
 #endif
