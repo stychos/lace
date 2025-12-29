@@ -413,6 +413,7 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset);
 
 void tui_draw_filters_panel(TuiState *state);
 bool tui_handle_filters_input(TuiState *state, const UiEvent *event);
+bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y);
 void tui_apply_filters(TuiState *state);
 int tui_get_filters_panel_height(TuiState *state);
 

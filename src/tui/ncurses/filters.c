@@ -226,8 +226,9 @@ void tui_draw_filters_panel(TuiState *state) {
   }
 }
 
-/* Show column dropdown and return selected index, or -1 if cancelled
- * Returns FILTER_COL_RAW (SIZE_MAX) if RAW is selected */
+/* Show column dropdown and return selected index, or -1 if cancelled.
+ * Returns 0 to num_cols-1 for regular columns, num_cols for RAW.
+ * Caller must check if result == schema->num_columns to detect RAW. */
 static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
                                     size_t filter_row) {
   /* Get schema via VmTable if available, fallback to state->schema */
@@ -280,6 +281,7 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
     return -1;
 
   keypad(menu_win, TRUE);
+  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
   box(menu_win, 0, 0);
 
   wattron(menu_win, A_BOLD);
@@ -309,7 +311,8 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
   }
 
   set_menu_win(menu, menu_win);
-  set_menu_sub(menu, derwin(menu_win, height - 2, width - 2, 1, 1));
+  WINDOW *menu_sub = derwin(menu_win, height - 2, width - 2, 1, 1);
+  set_menu_sub(menu, menu_sub);
   set_menu_mark(menu, "> ");
   set_menu_format(menu, height - 2, 1);
 
@@ -327,6 +330,47 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
   while (running) {
     int ch = wgetch(menu_win);
     switch (ch) {
+    case KEY_MOUSE: {
+      MEVENT mevent;
+      if (getmouse(&mevent) == OK) {
+        /* Check if click is within menu window */
+        if (wenclose(menu_win, mevent.y, mevent.x)) {
+          /* Convert to window-relative coordinates */
+          int rel_y = mevent.y - start_y;
+          int rel_x = mevent.x - start_x;
+          (void)rel_x;
+
+          /* Handle scroll wheel */
+          if (mevent.bstate & BUTTON4_PRESSED) {
+            menu_driver(menu, REQ_UP_ITEM);
+          } else if (mevent.bstate & BUTTON5_PRESSED) {
+            menu_driver(menu, REQ_DOWN_ITEM);
+          }
+          /* Handle click - select item at clicked row */
+          else if (mevent.bstate & BUTTON1_CLICKED ||
+                   mevent.bstate & BUTTON1_DOUBLE_CLICKED) {
+            int menu_row = rel_y - 1; /* -1 for border */
+            if (menu_row >= 0 && menu_row < height - 2) {
+              /* Get top row index */
+              int top_idx = top_row(menu);
+              int target_idx = top_idx + menu_row;
+              if (target_idx >= 0 && target_idx < (int)total_items) {
+                set_current_item(menu, items[target_idx]);
+                wrefresh(menu_win);
+                /* Click selects and confirms - return index directly
+                 * (num_cols = RAW, handled by caller) */
+                result = target_idx;
+                running = false;
+              }
+            }
+          }
+        } else {
+          /* Click outside menu - close */
+          running = false;
+        }
+      }
+      break;
+    }
     case KEY_DOWN:
     case 'j':
       menu_driver(menu, REQ_DOWN_ITEM);
@@ -345,11 +389,8 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
     case KEY_ENTER: {
       ITEM *cur = current_item(menu);
       if (cur) {
-        int idx = item_index(cur);
-        if (idx == (int)num_cols)
-          result = (ssize_t)FILTER_COL_RAW; /* RAW selected */
-        else
-          result = idx;
+        /* Return index directly (num_cols = RAW, handled by caller) */
+        result = item_index(cur);
       }
       running = false;
       break;
@@ -424,6 +465,7 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
     return -1;
 
   keypad(menu_win, TRUE);
+  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
   box(menu_win, 0, 0);
 
   wattron(menu_win, A_BOLD);
@@ -467,6 +509,46 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
   while (running) {
     int ch = wgetch(menu_win);
     switch (ch) {
+    case KEY_MOUSE: {
+      MEVENT mevent;
+      if (getmouse(&mevent) == OK) {
+        /* Check if click is within menu window */
+        if (wenclose(menu_win, mevent.y, mevent.x)) {
+          /* Convert to window-relative coordinates */
+          int rel_y = mevent.y - start_y;
+          int rel_x = mevent.x - start_x;
+          (void)rel_x;
+
+          /* Handle scroll wheel */
+          if (mevent.bstate & BUTTON4_PRESSED) {
+            menu_driver(menu, REQ_UP_ITEM);
+          } else if (mevent.bstate & BUTTON5_PRESSED) {
+            menu_driver(menu, REQ_DOWN_ITEM);
+          }
+          /* Handle click - select item at clicked row */
+          else if (mevent.bstate & BUTTON1_CLICKED ||
+                   mevent.bstate & BUTTON1_DOUBLE_CLICKED) {
+            int menu_row = rel_y - 1; /* -1 for border */
+            if (menu_row >= 0 && menu_row < height - 2) {
+              /* Get top row index */
+              int top_idx = top_row(menu);
+              int target_idx = top_idx + menu_row;
+              if (target_idx >= 0 && target_idx < FILTER_OP_VISIBLE) {
+                set_current_item(menu, items[target_idx]);
+                wrefresh(menu_win);
+                /* Click selects and confirms */
+                result = target_idx;
+                running = false;
+              }
+            }
+          }
+        } else {
+          /* Click outside menu - close */
+          running = false;
+        }
+      }
+      break;
+    }
     case KEY_DOWN:
     case 'j':
       menu_driver(menu, REQ_DOWN_ITEM);
@@ -670,8 +752,14 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     case 0: /* Column - show dropdown */ {
       ssize_t sel = show_column_dropdown(state, cf->column_index,
                                          state->filters_cursor_row);
-      if (sel >= 0 || sel == (ssize_t)FILTER_COL_RAW) {
-        cf->column_index = (size_t)sel;
+      if (sel >= 0) {
+        /* Check if RAW was selected (index == num_columns) */
+        size_t num_cols = state->schema ? state->schema->num_columns : 0;
+        if ((size_t)sel == num_cols) {
+          cf->column_index = FILTER_COL_RAW;
+        } else {
+          cf->column_index = (size_t)sel;
+        }
         /* Only apply if filter has a value or operator doesn't need one */
         if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
           tui_apply_filters(state);
@@ -842,4 +930,128 @@ void tui_apply_filters(TuiState *state) {
   } else {
     tui_set_status(state, "%zu rows", state->total_rows);
   }
+}
+
+/* Handle mouse click in filters panel
+ * rel_x, rel_y are coordinates relative to main_win (0,0)
+ * Returns true if click was handled */
+bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
+  if (!state || !state->filters_visible)
+    return false;
+
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_TABLE)
+    return false;
+
+  TableFilters *f = &tab->filters;
+  if (f->num_filters == 0)
+    return false;
+
+  /* Row 0 is title bar, rows 1+ are filter rows */
+  if (rel_y < 1)
+    return true; /* Clicked on title bar - just focus filters */
+
+  int filter_row_idx = rel_y - 1; /* 0-based filter row within visible area */
+
+  /* Account for scroll */
+  size_t target_filter = state->filters_scroll + (size_t)filter_row_idx;
+  if (target_filter >= f->num_filters)
+    return true; /* Clicked below filters - just focus */
+
+  /* Column positions (from tui_draw_filters_panel):
+   * Column field: x = 1, width = 14
+   * Operator field: x = 17, width = 12
+   * Value field: x = 31, width = dynamic
+   * Delete button: x = panel_width - 4, width = 3 */
+  int col_x = 1;
+  int op_x = 17;
+  int val_x = 31;
+
+  /* Get panel width for delete button position */
+  int win_cols;
+  int win_rows;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_rows;
+  int del_x = win_cols - 4;
+
+  /* Determine which field was clicked */
+  size_t target_col;
+  if (rel_x >= del_x && rel_x < del_x + 3) {
+    target_col = 3; /* Delete button */
+  } else if (rel_x >= val_x) {
+    target_col = 2; /* Value field */
+  } else if (rel_x >= op_x) {
+    target_col = 1; /* Operator field */
+  } else if (rel_x >= col_x) {
+    target_col = 0; /* Column field */
+  } else {
+    return true; /* Clicked in margin */
+  }
+
+  /* Update cursor position */
+  state->filters_cursor_row = target_filter;
+  state->filters_cursor_col = target_col;
+  state->filters_focused = true;
+  state->sidebar_focused = false;
+
+  /* Get the filter to check if RAW */
+  ColumnFilter *cf = &f->filters[target_filter];
+  bool is_raw = (cf->column_index == FILTER_COL_RAW);
+
+  /* Refresh display to show highlighted field before opening dropdown */
+  tui_refresh(state);
+
+  /* Open dropdown for column or operator fields */
+  if (target_col == 0) {
+    /* Column field - show column dropdown */
+    ssize_t sel = show_column_dropdown(state, cf->column_index, target_filter);
+    if (sel >= 0) {
+      /* Check if RAW was selected (index == num_columns) */
+      size_t num_cols = state->schema ? state->schema->num_columns : 0;
+      if ((size_t)sel == num_cols) {
+        cf->column_index = FILTER_COL_RAW;
+      } else {
+        cf->column_index = (size_t)sel;
+      }
+      if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
+        tui_apply_filters(state);
+      }
+    }
+  } else if (target_col == 1 && !is_raw) {
+    /* Operator field - show operator dropdown (not for RAW) */
+    int sel = show_operator_dropdown(state, cf->op, target_filter);
+    if (sel >= 0) {
+      FilterOperator new_op = (FilterOperator)sel;
+      bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+      bool will_have_effect = cf->value[0] != '\0' || !filter_op_needs_value(new_op);
+      cf->op = new_op;
+      if (had_effect || will_have_effect) {
+        tui_apply_filters(state);
+      }
+    }
+  } else if (target_col == 2 && (is_raw || filter_op_needs_value(cf->op))) {
+    /* Value field - start editing */
+    state->filters_editing = true;
+    strncpy(state->filters_edit_buffer, cf->value,
+            sizeof(state->filters_edit_buffer) - 1);
+    state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
+    state->filters_edit_len = strlen(state->filters_edit_buffer);
+  } else if (target_col == 3) {
+    /* Delete button - delete filter */
+    bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+    if (f->num_filters > 1) {
+      filters_remove(f, target_filter);
+      if (state->filters_cursor_row >= f->num_filters)
+        state->filters_cursor_row = f->num_filters - 1;
+    } else {
+      cf->column_index = 0;
+      cf->op = FILTER_OP_EQ;
+      cf->value[0] = '\0';
+    }
+    if (had_effect) {
+      tui_apply_filters(state);
+    }
+  }
+
+  return true;
 }

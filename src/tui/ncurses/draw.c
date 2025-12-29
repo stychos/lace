@@ -150,11 +150,13 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
         if (params->sort_entries[i].column >= data->num_columns)
           continue;
         if (params->sort_entries[i].column == col) {
-          /* Show: priority + arrow + direction text (e.g., "1^ asc") */
-          char indicator = (params->sort_entries[i].direction == SORT_ASC) ? '^' : 'v';
+          /* Show: arrow + direction + priority (e.g., "▲ asc, 1") */
+          const char *arrow = (params->sort_entries[i].direction == SORT_ASC)
+                              ? "\xE2\x96\xB2"   /* ▲ UTF-8 */
+                              : "\xE2\x96\xBC";  /* ▼ UTF-8 */
           const char *dir_text = (params->sort_entries[i].direction == SORT_ASC) ? "asc" : "desc";
-          char sort_info[16];
-          snprintf(sort_info, sizeof(sort_info), "%d%c %s", (int)(i + 1), indicator, dir_text);
+          char sort_info[24];
+          snprintf(sort_info, sizeof(sort_info), "%s %s, %d", arrow, dir_text, (int)(i + 1));
           mvwprintw(win, y, x, "%-*.*s", width, width, sort_info);
           found = true;
           break;
@@ -789,6 +791,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         tui_check_load_more(state);
 
         state->sidebar_focused = false;
+        state->filters_focused = false;
       }
     }
     return true;
@@ -840,11 +843,13 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
           }
           tab_close(state);
           state->sidebar_focused = false;
+          state->filters_focused = false;
         } else {
           /* Single click: switch to tab */
           if (i != click_ws->current_tab) {
             tab_switch(state, i);
             state->sidebar_focused = false;
+            state->filters_focused = false;
           }
         }
         return true;
@@ -878,11 +883,13 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     if (sidebar_row == 1) {
       state->sidebar_focused = true;
       state->sidebar_filter_active = true;
+      state->filters_focused = false;
       return true;
     }
 
     /* Clicking elsewhere in sidebar deactivates filter */
     state->sidebar_filter_active = false;
+    state->filters_focused = false;
 
     /* Click on table list */
     int list_start_y = 3; /* First table entry row in sidebar window */
@@ -972,6 +979,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
       query_click_tab->type == TAB_TYPE_QUERY) {
     state->sidebar_filter_active = false;
     state->sidebar_focused = false;
+    state->filters_focused = false;
 
     /* If currently editing query results, save the edit first */
     if (query_click_ui->query_result_editing) {
@@ -1046,10 +1054,29 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     return true;
   }
 
+  /* Check if click is in filters panel (TABLE tabs only, when filters visible) */
+  Tab *filters_click_tab = TUI_TAB(state);
+  if (mouse_x >= sidebar_width && state->filters_visible && filters_click_tab &&
+      filters_click_tab->type == TAB_TYPE_TABLE) {
+    /* Main window starts at screen y=2 */
+    int rel_y = mouse_y - 2;
+    int rel_x = mouse_x - sidebar_width;
+    int filters_height = tui_get_filters_panel_height(state);
+
+    if (rel_y >= 0 && rel_y < filters_height) {
+      /* Click is in filters panel area - delegate to filters handler */
+      state->sidebar_filter_active = false;
+      tui_handle_filters_click(state, rel_x, rel_y);
+      return true;
+    }
+  }
+
   /* Check if click is in main table area */
   if (mouse_x >= sidebar_width) {
-    /* Clicking in main area deactivates sidebar filter */
+    /* Clicking in main area deactivates sidebar filter and unfocuses panels */
     state->sidebar_filter_active = false;
+    state->sidebar_focused = false;
+    state->filters_focused = false;
 
     /* If currently editing, save the edit first */
     if (state->editing) {
@@ -1059,7 +1086,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     /* Use VmTable for cursor/scroll access */
     VmTable *click_vm = get_vm_table(state);
     if (!click_vm) {
-      return true; /* No data to select, but filter is deactivated */
+      return true; /* No data to select, but focus is updated */
     }
 
     size_t loaded_rows = vm_table_row_count(click_vm);
@@ -1077,9 +1104,22 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     int rel_x = mouse_x - sidebar_width;
     int rel_y = mouse_y - 2;
 
-    /* Data rows start at y=3 in main window (after header line, column names,
-     * separator) */
-    int data_start_y = 3;
+    /* Calculate data start row accounting for all header elements */
+    int filters_height = 0;
+    Tab *click_tab = TUI_TAB(state);
+    if (state->filters_visible && click_tab && click_tab->type == TAB_TYPE_TABLE) {
+      filters_height = tui_get_filters_panel_height(state);
+    }
+
+    /* Data rows start after: filters panel + header line + column names +
+     * sort indicator row (if sorting) + separator */
+    int data_start_y = filters_height + 3; /* +3 = header line + col names + separator */
+
+    /* Add extra row if sorting is active (sort indicator row) */
+    if (click_tab && click_tab->num_sort_entries > 0) {
+      data_start_y += 1;
+    }
+
     int clicked_data_row = rel_y - data_start_y;
 
     if (clicked_data_row >= 0) {
@@ -1115,6 +1155,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
           state->cursor_row = target_row;
           state->cursor_col = target_col;
           state->sidebar_focused = false;
+          state->filters_focused = false;
 
           /* Check if we need to load more rows (pagination) */
           tui_check_load_more(state);
