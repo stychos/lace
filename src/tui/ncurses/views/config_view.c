@@ -40,6 +40,7 @@ typedef enum {
   FIELD_CLOSE_CONN_LAST_TAB,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
+  FIELD_DELETE_CONFIRM,
   FIELD_COUNT
 } GeneralField;
 
@@ -294,6 +295,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                 ds->config->general.quit_confirmation,
                 ds->selected_field == FIELD_QUIT_CONFIRM, focused);
 
+  draw_checkbox(win, y++, start_x + 2, "Confirm before delete",
+                ds->config->general.delete_confirmation,
+                ds->selected_field == FIELD_DELETE_CONFIRM, focused);
+
   y += 2;
 
   /* Help text */
@@ -318,11 +323,12 @@ typedef struct {
 static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_items) {
   size_t count = 0;
 
-  /* Display order: General, Navigation, Table, Query, Filters, Sidebar, Connect */
+  /* Display order: General, Navigation, Table, Editor, Query, Filters, Sidebar, Connect */
   static const HotkeyCategory display_order[] = {
       HOTKEY_CAT_GENERAL,
       HOTKEY_CAT_NAVIGATION,
       HOTKEY_CAT_TABLE,
+      HOTKEY_CAT_EDITOR,
       HOTKEY_CAT_QUERY,
       HOTKEY_CAT_FILTERS,
       HOTKEY_CAT_SIDEBAR,
@@ -489,12 +495,18 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
     wattroff(win, A_DIM);
   }
 
-  /* Help text */
+  /* Help text with configurable keys */
   y = start_y + height - 4;
+  char *reset_key = hotkey_get_display(ds->config, HOTKEY_CONFIG_RESET);
+  char *reset_all_key = hotkey_get_display(ds->config, HOTKEY_CONFIG_RESET_ALL);
   wattron(win, A_DIM);
-  mvwprintw(win, y++, start_x, "Enter: Edit keys  r: Reset to default");
-  mvwprintw(win, y++, start_x, "R: Reset all hotkeys to defaults");
+  mvwprintw(win, y++, start_x, "Enter: Edit keys  %s: Reset to default",
+            reset_key && reset_key[0] ? reset_key : "r");
+  mvwprintw(win, y++, start_x, "%s: Reset all hotkeys to defaults",
+            reset_all_key && reset_all_key[0] ? reset_all_key : "R");
   wattroff(win, A_DIM);
+  free(reset_key);
+  free(reset_all_key);
 }
 
 /* ============================================================================
@@ -532,9 +544,9 @@ static void draw_tab_bar(WINDOW *win, DialogState *ds, int y, int width) {
   }
 
   /* Underline */
-  wattron(win, A_DIM);
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   mvwhline(win, y + 1, 1, ACS_HLINE, width - 2);
-  wattroff(win, A_DIM);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 }
 
 /* ============================================================================
@@ -579,7 +591,9 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
 static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
                         int *cursor_x) {
   werase(win);
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   box(win, 0, 0);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Title */
   wattron(win, A_BOLD);
@@ -622,9 +636,11 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
 
   /* Horizontal line above buttons */
   int btn_line_y = ds->height - 3;
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   mvwaddch(win, btn_line_y, 0, ACS_LTEE);
   mvwhline(win, btn_line_y, 1, ACS_HLINE, ds->width - 2);
   mvwaddch(win, btn_line_y, ds->width - 1, ACS_RTEE);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Buttons */
   draw_buttons(win, ds, ds->height - 2, ds->width);
@@ -673,7 +689,9 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     /* Title */
     wattron(dlg, A_BOLD);
@@ -733,7 +751,9 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
     } else if (render_event_get_char(&event) == 'a') {
       /* Add key - show capture dialog */
       werase(dlg);
+      wattron(dlg, COLOR_PAIR(COLOR_BORDER));
       box(dlg, 0, 0);
+      wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
       wattron(dlg, A_BOLD);
       mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key ");
       wattroff(dlg, A_BOLD);
@@ -804,7 +824,9 @@ static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
           if (conflict != HOTKEY_COUNT) {
             /* Show conflict warning */
             werase(dlg);
+            wattron(dlg, COLOR_PAIR(COLOR_BORDER));
             box(dlg, 0, 0);
+            wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
             wattron(dlg, COLOR_PAIR(COLOR_ERROR));
             mvwprintw(dlg, dlg_height / 2, 2, "Key '%s' conflicts with '%s'",
                       key_str, hotkey_action_name(conflict));
@@ -919,6 +941,10 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->config->general.quit_confirmation =
           !ds->config->general.quit_confirmation;
       break;
+    case FIELD_DELETE_CONFIRM:
+      ds->config->general.delete_confirmation =
+          !ds->config->general.delete_confirmation;
+      break;
     case FIELD_AUTO_OPEN_TABLE:
       ds->config->general.auto_open_first_table =
           !ds->config->general.auto_open_first_table;
@@ -999,8 +1025,8 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  /* Reset single hotkey - only for action rows */
-  if (key_char == 'r') {
+  /* Reset single hotkey - only for action rows (uses configurable hotkey) */
+  if (hotkey_matches(ds->config, event, HOTKEY_CONFIG_RESET)) {
     HotkeyAction action = get_action_at_display_index(ds->hotkey_highlight);
     if (action < HOTKEY_COUNT) {
       config_reset_hotkey(ds->config, action);
@@ -1010,8 +1036,8 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  /* Reset all hotkeys */
-  if (key_char == 'R') {
+  /* Reset all hotkeys (uses configurable hotkey) */
+  if (hotkey_matches(ds->config, event, HOTKEY_CONFIG_RESET_ALL)) {
     config_reset_all_hotkeys(ds->config);
     free(ds->success_msg);
     ds->success_msg = str_dup("All hotkeys reset to defaults");
@@ -1197,6 +1223,28 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
     if (render_event_is_special(&event, UI_KEY_ESCAPE) && !ds.editing_number) {
       running = false;
       continue;
+    }
+
+    /* Tab switch hotkeys (work from any focus) */
+    if (!ds.editing_number) {
+      if (hotkey_matches(ds.config, &event, HOTKEY_PREV_TAB)) {
+        if (ds.current_tab > 0) {
+          ds.current_tab--;
+          ds.selected_field = 0;
+          ds.hotkey_highlight = 1;
+          ds.hotkey_scroll = 0;
+        }
+        continue;
+      }
+      if (hotkey_matches(ds.config, &event, HOTKEY_NEXT_TAB)) {
+        if (ds.current_tab < TAB_COUNT - 1) {
+          ds.current_tab++;
+          ds.selected_field = 0;
+          ds.hotkey_highlight = 1;
+          ds.hotkey_scroll = 0;
+        }
+        continue;
+      }
     }
 
     /* Handle focus-specific input */

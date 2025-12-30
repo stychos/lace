@@ -7,6 +7,7 @@
  */
 
 #include "../tui/ncurses/tui.h"
+#include "../tui/ncurses/tui_internal.h"
 #include "../tui/ncurses/render_helpers.h"
 #include "session.h"
 #include "connections.h"
@@ -1281,6 +1282,11 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
 
     /* Get schema first */
     tab->schema = db_get_table_schema(conn->conn, stab->table_name, &err);
+    if (!tab->schema) {
+      /* Table doesn't exist or can't be accessed - store error for display */
+      tab->table_error = err ? err : str_dup("Table does not exist");
+      return true; /* Tab created but shows error */
+    }
     if (err) {
       free(err);
       err = NULL;
@@ -1394,6 +1400,12 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
     free(order_by);
     free(where);
+
+    if (!tab->data && err) {
+      /* Query failed - store error for display */
+      tab->table_error = err;
+      return true; /* Tab created but shows error */
+    }
     if (err) {
       free(err);
     }
@@ -1567,6 +1579,16 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
 
   /* Sync TUI state from restored app state */
   tui_sync_from_app(state);
+
+  /* If current tab has a table error, show and focus sidebar */
+  Tab *current_tab = app_current_tab(state->app);
+  if (current_tab && current_tab->table_error) {
+    if (!state->sidebar_visible) {
+      state->sidebar_visible = true;
+      tui_recreate_windows(state);
+    }
+    state->sidebar_focused = true;
+  }
 
   return true;
 }

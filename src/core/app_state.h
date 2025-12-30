@@ -120,6 +120,7 @@ typedef struct {
   /* Table identification */
   size_t table_index; /* Index into connection's tables array */
   char *table_name;   /* Table name (for display) */
+  char *table_error;  /* Error message if table failed to load */
 
   /* Table data */
   ResultSet *data;
@@ -158,6 +159,7 @@ typedef struct {
   size_t query_scroll_col;
   ResultSet *query_results;
   int64_t query_affected;
+  bool query_exec_success;  /* True if last exec (non-SELECT) succeeded */
   char *query_error;
   size_t query_result_row;
   size_t query_result_col;
@@ -181,6 +183,14 @@ typedef struct {
   void *bg_load_op;             /* AsyncOperation* - current background load */
   bool bg_load_forward;         /* Direction: true=forward, false=backward */
   size_t bg_load_target_offset; /* Target offset being loaded */
+
+  /* Row selection (for bulk operations) */
+  size_t *selected_rows;   /* Array of selected global row indices */
+  size_t num_selected;     /* Number of selected rows */
+  size_t selected_capacity; /* Capacity of selected_rows array */
+
+  /* Data change tracking */
+  bool needs_refresh;  /* True if data was modified in another tab */
 } Tab;
 
 /* ============================================================================
@@ -301,5 +311,31 @@ bool filter_op_needs_value(FilterOperator op);
 char *filters_parse_in_values(const char *input, char **err);
 char *filters_build_where(TableFilters *f, TableSchema *schema,
                           const char *driver_name, char **err);
+
+/* ============================================================================
+ * Row Selection Operations
+ * ============================================================================
+ */
+
+/* Toggle selection of a row by global index */
+bool tab_toggle_selection(Tab *tab, size_t global_row);
+
+/* Check if a row is selected */
+bool tab_is_row_selected(Tab *tab, size_t global_row);
+
+/* Clear all selections */
+void tab_clear_selections(Tab *tab);
+
+/* Get selected row indices (returns array, caller should not free) */
+const size_t *tab_get_selections(Tab *tab, size_t *count);
+
+/* ============================================================================
+ * Data Change Tracking
+ * ============================================================================
+ */
+
+/* Mark all tabs with the same table as needing refresh (except current tab) */
+void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
+                               const char *table_name, Tab *exclude_tab);
 
 #endif /* LACE_APP_STATE_H */

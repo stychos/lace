@@ -157,6 +157,12 @@ void tab_restore(TuiState *state) {
       status_was_visible != state->status_visible) {
     tui_recreate_windows(state);
   }
+
+  /* Check if tab needs refresh due to changes in another tab */
+  if (tab->needs_refresh && tab->type == TAB_TYPE_TABLE && tab->table_name) {
+    tab->needs_refresh = false;
+    tui_refresh_table(state);
+  }
 }
 
 /* Legacy wrapper for compatibility */
@@ -373,7 +379,9 @@ void tui_draw_tabs(TuiState *state) {
 
     /* Tab separator */
     if (i < ws->num_tabs - 1 && x < state->term_cols) {
+      wattron(state->tab_win, COLOR_PAIR(COLOR_BORDER));
       mvwaddch(state->tab_win, 0, x - 1, ACS_VLINE);
+      wattroff(state->tab_win, COLOR_PAIR(COLOR_BORDER));
     }
   }
 

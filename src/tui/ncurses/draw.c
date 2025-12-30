@@ -9,6 +9,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/config.h"
 #include "../../core/app_state.h"
 #include "../../db/connstr.h"
 #include "../../viewmodel/vm_table.h"
@@ -128,7 +129,9 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
     }
 
     x += width + 1;
+    wattron(win, COLOR_PAIR(COLOR_BORDER));
     mvwaddch(win, y, x - 1, ACS_VLINE);
+    wattroff(win, COLOR_PAIR(COLOR_BORDER));
   }
   wattroff(win, A_BOLD);
   y++;
@@ -169,7 +172,9 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       }
 
       x += width + 1;
+      wattron(win, COLOR_PAIR(COLOR_BORDER));
       mvwaddch(win, y, x - 1, ACS_VLINE);
+      wattroff(win, COLOR_PAIR(COLOR_BORDER));
     }
     y++;
 
@@ -200,9 +205,26 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       continue;
 
     x = x_base + 1;
-    bool is_selected_row = (row == params->cursor_row) && params->is_focused;
+    bool is_cursor_row = (row == params->cursor_row) && params->is_focused;
 
-    if (is_selected_row) {
+    /* Check if row is in selection set (for bulk operations) */
+    bool is_marked_row = false;
+    Tab *tab = state ? TUI_TAB(state) : NULL;
+    if (tab) {
+      size_t global_row = params->selection_offset + row;
+      is_marked_row = tab_is_row_selected(tab, global_row);
+    }
+
+    /* Determine effective schema for PK detection */
+    TableSchema *effective_schema = NULL;
+    if (tab && tab->type == TAB_TYPE_QUERY && tab->query_source_schema) {
+      effective_schema = tab->query_source_schema;
+    } else if (state) {
+      effective_schema = state->schema;
+    }
+
+    /* Apply row-level styling */
+    if (is_marked_row || is_cursor_row) {
       wattron(win, A_BOLD);
     }
 
@@ -212,7 +234,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       if (x + width + 3 > max_x)
         break;
 
-      bool is_selected = is_selected_row && (col == params->cursor_col);
+      bool is_selected = is_cursor_row && (col == params->cursor_col);
       bool is_editing_cell = is_selected && params->is_editing;
 
       if (is_editing_cell) {
@@ -251,7 +273,18 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           wmove(win, y, cursor_x);
         }
       } else if (is_selected) {
-        wattron(win, COLOR_PAIR(COLOR_SELECTED));
+        /* Check if this column is a primary key */
+        bool is_pk_col = false;
+        if (effective_schema && col < effective_schema->num_columns) {
+          is_pk_col = effective_schema->columns[col].primary_key;
+        }
+
+        /* Use reverse video for PK on marked row to show white text */
+        if (is_pk_col && is_marked_row) {
+          wattron(win, A_REVERSE);
+        } else {
+          wattron(win, COLOR_PAIR(COLOR_SELECTED));
+        }
 
         DbValue *val = &r->cells[col];
         if (val->is_null) {
@@ -266,9 +299,19 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           }
         }
 
-        wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+        if (is_pk_col && is_marked_row) {
+          wattroff(win, A_REVERSE);
+        } else {
+          wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+        }
       } else {
         DbValue *val = &r->cells[col];
+        /* Check if this column is a primary key */
+        bool is_pk_col = false;
+        if (effective_schema && col < effective_schema->num_columns) {
+          is_pk_col = effective_schema->columns[col].primary_key;
+        }
+
         if (val->is_null) {
           wattron(win, COLOR_PAIR(COLOR_NULL));
           mvwprintw(win, y, x, "%-*s", width, "NULL");
@@ -277,11 +320,23 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           char *str = db_value_to_string(val);
           if (str) {
             char *safe = tui_sanitize_for_display(str);
-            if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
+            if (is_pk_col && is_marked_row && is_cursor_row) {
+              /* White text for PK on cursor row - no color attr needed */
+            } else if (is_pk_col && is_marked_row) {
+              wattron(win, COLOR_PAIR(COLOR_ERROR_TEXT));
+            } else if (is_pk_col) {
+              wattron(win, COLOR_PAIR(COLOR_PK));
+            } else if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
               wattron(win, COLOR_PAIR(COLOR_NUMBER));
             }
             mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
-            if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
+            if (is_pk_col && is_marked_row && is_cursor_row) {
+              /* White text for PK on cursor row - no color attr needed */
+            } else if (is_pk_col && is_marked_row) {
+              wattroff(win, COLOR_PAIR(COLOR_ERROR_TEXT));
+            } else if (is_pk_col) {
+              wattroff(win, COLOR_PAIR(COLOR_PK));
+            } else if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
               wattroff(win, COLOR_PAIR(COLOR_NUMBER));
             }
             free(safe);
@@ -291,16 +346,18 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       }
 
       x += width + 1;
+      wattron(win, COLOR_PAIR(COLOR_BORDER));
       mvwaddch(win, y, x - 1, ACS_VLINE);
+      wattroff(win, COLOR_PAIR(COLOR_BORDER));
     }
 
-    if (is_selected_row) {
+    /* Remove row-level styling */
+    if (is_marked_row || is_cursor_row) {
       wattroff(win, A_BOLD);
     }
 
     y++;
   }
-  (void)state; /* May be used for future enhancements */
 }
 
 /* ============================================================================
@@ -415,15 +472,40 @@ void tui_draw_table(TuiState *state) {
   char *edit_buffer = state->edit_buffer;
   size_t edit_pos = state->edit_pos;
 
+  /* Get tab for error checking */
+  Tab *tab = TUI_TAB(state);
+
+  /* Check if there's a table error (e.g., table doesn't exist) */
+  if (tab && tab->table_error) {
+    int center_y = filters_height + (win_rows - filters_height) / 2;
+    wattron(state->main_win, COLOR_PAIR(COLOR_ERROR_TEXT) | A_BOLD);
+    const char *msg1 = "Table does not exist:";
+    mvwprintw(state->main_win, center_y - 1, (win_cols - (int)strlen(msg1)) / 2,
+              "%s", msg1);
+    wattroff(state->main_win, A_BOLD);
+    mvwprintw(state->main_win, center_y, (win_cols - (int)strlen(tab->table_name)) / 2,
+              "%s", tab->table_name ? tab->table_name : "(unknown)");
+    wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR_TEXT));
+
+    wattron(state->main_win, A_DIM);
+    char *close_key = hotkey_get_display(state->app->config, HOTKEY_CLOSE_TAB);
+    char hint[128];
+    snprintf(hint, sizeof(hint), "Press [%s] to close this tab",
+             close_key ? close_key : "-");
+    free(close_key);
+    mvwprintw(state->main_win, center_y + 2, (win_cols - (int)strlen(hint)) / 2,
+              "%s", hint);
+    wattroff(state->main_win, A_DIM);
+    wrefresh(state->main_win);
+    return;
+  }
+
   if (!data || data->num_columns == 0 || !data->columns) {
     int msg_y = filters_height + (win_rows - filters_height) / 2;
     mvwprintw(state->main_win, msg_y, (win_cols - 7) / 2, "No data");
     wrefresh(state->main_win);
     return;
   }
-
-  /* Get sort state from tab */
-  Tab *tab = TUI_TAB(state);
 
   /* Use the shared grid drawing function */
   GridDrawParams params = {.win = state->main_win,
@@ -438,6 +520,7 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = cursor_col,
                            .scroll_row = scroll_row,
                            .scroll_col = scroll_col,
+                           .selection_offset = tab ? tab->loaded_offset : 0,
                            .is_focused = !state->sidebar_focused &&
                                          !state->filters_focused,
                            .is_editing = is_editing,
@@ -517,7 +600,11 @@ void tui_draw_connection_tab(TuiState *state) {
     hint_x = 0;
   mvwprintw(state->main_win, center_y + 4, hint_x, "%s", hint);
 
-  const char *hint2 = "Press '-' to close this connection";
+  char *close_key = hotkey_get_display(state->app->config, HOTKEY_CLOSE_TAB);
+  char hint2[128];
+  snprintf(hint2, sizeof(hint2), "Press [%s] to close this connection",
+           close_key ? close_key : "-");
+  free(close_key);
   int hint2_x = (win_cols - (int)strlen(hint2)) / 2;
   if (hint2_x < 0)
     hint2_x = 0;

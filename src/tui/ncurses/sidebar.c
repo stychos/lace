@@ -442,9 +442,11 @@ void tui_draw_sidebar(TuiState *state) {
   y++;
 
   /* Separator with T-junctions connecting to borders */
+  wattron(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
   mvwaddch(state->sidebar_win, y, 0, ACS_LTEE);
   mvwhline(state->sidebar_win, y, 1, ACS_HLINE, SIDEBAR_WIDTH - 2);
   mvwaddch(state->sidebar_win, y, SIDEBAR_WIDTH - 1, ACS_RTEE);
+  wattroff(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
   y++;
 
   if (!state->tables || state->num_tables == 0) {

@@ -38,6 +38,7 @@ typedef enum {
   HOTKEY_CAT_SIDEBAR,    /* Sidebar operations */
   HOTKEY_CAT_QUERY,      /* Query tab operations */
   HOTKEY_CAT_CONNECT,    /* Connection dialog operations */
+  HOTKEY_CAT_EDITOR,     /* Modal editor operations */
   HOTKEY_CAT_COUNT
 } HotkeyCategory;
 
@@ -110,6 +111,21 @@ typedef enum {
   HOTKEY_CONN_EDIT,
   HOTKEY_CONN_DELETE,
   HOTKEY_CONN_RENAME,
+  HOTKEY_CONN_MOVE,
+
+  /* Row Selection (HOTKEY_CAT_TABLE) */
+  HOTKEY_TOGGLE_SELECTION,
+  HOTKEY_CLEAR_SELECTIONS,
+
+  /* Modal Editor (HOTKEY_CAT_EDITOR) */
+  HOTKEY_EDITOR_SAVE,
+  HOTKEY_EDITOR_NULL,
+  HOTKEY_EDITOR_EMPTY,
+  HOTKEY_EDITOR_CANCEL,
+
+  /* Config Editor (HOTKEY_CAT_GENERAL) */
+  HOTKEY_CONFIG_RESET,
+  HOTKEY_CONFIG_RESET_ALL,
 
   HOTKEY_COUNT
 } HotkeyAction;
@@ -127,6 +143,7 @@ typedef struct {
   int prefetch_pages;
   bool restore_session;
   bool quit_confirmation;
+  bool delete_confirmation;      /* Ask for confirmation before deleting rows */
   int max_result_rows;           /* Maximum rows returned by raw SQL queries */
   bool auto_open_first_table;    /* Open first table instead of connection tab */
   bool close_conn_on_last_tab;   /* Close connection when last tab closes */

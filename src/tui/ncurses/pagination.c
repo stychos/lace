@@ -155,6 +155,13 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   if (!state || !state->conn || !table)
     return false;
 
+  /* Clear any previous error */
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    free(tab->table_error);
+    tab->table_error = NULL;
+  }
+
   /* Free old data */
   if (state->data) {
     db_result_free(state->data);
@@ -188,7 +195,6 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   async_free(&schema_op);
 
   /* Update tab schema pointer for filter building */
-  Tab *tab = TUI_TAB(state);
   if (tab) {
     tab->schema = state->schema;
   }
@@ -276,8 +282,13 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   }
 
   if (data_op.state == ASYNC_STATE_ERROR) {
-    tui_set_error(state, "Query failed: %s",
-                  data_op.error ? data_op.error : "Unknown error");
+    const char *err_msg = data_op.error ? data_op.error : "Unknown error";
+    tui_set_error(state, "Query failed: %s", err_msg);
+    /* Store error in tab for display */
+    if (tab) {
+      free(tab->table_error);
+      tab->table_error = str_dup(err_msg);
+    }
     async_free(&data_op);
     return false;
   }

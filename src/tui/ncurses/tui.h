@@ -31,6 +31,7 @@
 #define COLOR_NUMBER 8
 #define COLOR_EDIT 9
 #define COLOR_ERROR_TEXT 10
+#define COLOR_PK 11
 
 /* Sidebar width */
 #define SIDEBAR_WIDTH 20

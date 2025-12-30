@@ -7,6 +7,7 @@
  */
 
 #include "editor_view.h"
+#include "../../../config/config.h"
 #include "../../../util/str.h"
 #include "../render_helpers.h"
 #include <ctype.h>
@@ -335,9 +336,11 @@ static void editor_backspace(EditorState *state) {
 }
 
 static void draw_editor(WINDOW *win, EditorState *state, const char *title,
-                        int height, int width) {
+                        int height, int width, const Config *config) {
   werase(win);
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   box(win, 0, 0);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Title */
   wattron(win, A_BOLD);
@@ -407,6 +410,7 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
   }
 
   /* Redraw right border */
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   for (int row = 1; row < height - 1; row++) {
     mvwaddch(win, row, width - 1, ACS_VLINE);
   }
@@ -416,18 +420,38 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
   mvwaddch(win, status_y - 1, 0, ACS_LTEE);
   mvwhline(win, status_y - 1, 1, ACS_HLINE, width - 2);
   mvwaddch(win, status_y - 1, width - 1, ACS_RTEE);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Status text */
   if (state->readonly) {
     mvwprintw(win, status_y, 2, "[Read-only] Line %zu/%zu  Col %zu",
               state->cursor_line + 1, state->num_lines, state->cursor_col + 1);
-    mvwprintw(win, status_y, width - 13, "[Esc] Close");
+    char *cancel_key = hotkey_get_display(config, HOTKEY_EDITOR_CANCEL);
+    char close_hint[32];
+    snprintf(close_hint, sizeof(close_hint), "[%s] Close",
+             cancel_key ? cancel_key : "Esc");
+    free(cancel_key);
+    mvwprintw(win, status_y, width - (int)strlen(close_hint) - 2, "%s", close_hint);
   } else {
     mvwprintw(win, status_y, 2, "L%zu/%zu C%zu", state->cursor_line + 1,
               state->num_lines, state->cursor_col + 1);
-    /* "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel" = 43 chars */
-    mvwprintw(win, status_y, width - 45,
-              "[F2] Save [^N] NULL [^D] Empty [Esc] Cancel");
+    /* Build status hint from configurable keys */
+    char *save_key = hotkey_get_display(config, HOTKEY_EDITOR_SAVE);
+    char *null_key = hotkey_get_display(config, HOTKEY_EDITOR_NULL);
+    char *empty_key = hotkey_get_display(config, HOTKEY_EDITOR_EMPTY);
+    char *cancel_key = hotkey_get_display(config, HOTKEY_EDITOR_CANCEL);
+    char status_hint[128];
+    snprintf(status_hint, sizeof(status_hint), "[%s] Save [%s] NULL [%s] Empty [%s] Cancel",
+             save_key ? save_key : "F2",
+             null_key ? null_key : "^N",
+             empty_key ? empty_key : "^D",
+             cancel_key ? cancel_key : "Esc");
+    free(save_key);
+    free(null_key);
+    free(empty_key);
+    free(cancel_key);
+    int hint_len = (int)strlen(status_hint);
+    mvwprintw(win, status_y, width - hint_len - 2, "%s", status_hint);
   }
 
   /* Position cursor - ensure no underflow from size_t subtraction */
@@ -494,9 +518,11 @@ EditorResult editor_view_show(TuiState *state, const char *title,
   editor_rebuild_lines(&editor);
   editor_update_cursor_pos(&editor);
 
+  const Config *config = state->app ? state->app->config : NULL;
+
   bool running = true;
   while (running) {
-    draw_editor(win, &editor, title, height, width);
+    draw_editor(win, &editor, title, height, width, config);
 
     int ch = wgetch(win);
 
@@ -548,14 +574,13 @@ EditorResult editor_view_show(TuiState *state, const char *title,
     UiEvent event;
     render_translate_key(ch, &event);
     int key_char = render_event_get_char(&event);
-    int fkey = render_event_get_fkey(&event);
 
-    /* Escape - cancel */
-    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+    /* Cancel - configurable (default: Escape) */
+    if (hotkey_matches(config, &event, HOTKEY_EDITOR_CANCEL)) {
       running = false;
     }
-    /* F2 - save */
-    else if (fkey == 2 && !readonly) {
+    /* Save - configurable (default: F2) */
+    else if (hotkey_matches(config, &event, HOTKEY_EDITOR_SAVE) && !readonly) {
       result.saved = true;
       result.content = str_dup(editor.buf.data);
       running = false;
@@ -602,15 +627,15 @@ EditorResult editor_view_show(TuiState *state, const char *title,
     else if (render_event_is_special(&event, UI_KEY_DELETE)) {
       editor_delete_char(&editor);
     }
-    /* Ctrl+N - set to NULL */
-    else if (render_event_is_ctrl(&event, 'N') && !readonly) {
+    /* Set NULL - configurable (default: Ctrl+N) */
+    else if (hotkey_matches(config, &event, HOTKEY_EDITOR_NULL) && !readonly) {
       result.saved = true;
       result.set_null = true;
       result.content = NULL;
       running = false;
     }
-    /* Ctrl+D - set to empty string */
-    else if (render_event_is_ctrl(&event, 'D') && !readonly) {
+    /* Set empty - configurable (default: Ctrl+D) */
+    else if (hotkey_matches(config, &event, HOTKEY_EDITOR_EMPTY) && !readonly) {
       result.saved = true;
       result.content = str_dup("");
       running = false;

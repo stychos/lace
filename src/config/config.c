@@ -100,6 +100,23 @@ static const char *def_conn_edit[] = {"e"};
 static const char *def_conn_delete[] = {"x", "DELETE"};
 static const char *def_conn_rename[] = {"r"};
 
+/* Row Selection */
+static const char *def_toggle_selection[] = {"SPACE"};
+static const char *def_clear_selections[] = {"ESCAPE"};
+
+/* Connection Move */
+static const char *def_conn_move[] = {"SPACE"};
+
+/* Modal Editor */
+static const char *def_editor_save[] = {"F2"};
+static const char *def_editor_null[] = {"CTRL+N"};
+static const char *def_editor_empty[] = {"CTRL+D"};
+static const char *def_editor_cancel[] = {"ESCAPE"};
+
+/* Config Editor */
+static const char *def_config_reset[] = {"r"};
+static const char *def_config_reset_all[] = {"R"};
+
 #define DEF_KEYS(arr) arr, sizeof(arr) / sizeof(arr[0])
 
 static const ActionMeta action_meta[HOTKEY_COUNT] = {
@@ -138,7 +155,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_TOGGLE_HEADER] = {"toggle_header", "Toggle header", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_header)},
     [HOTKEY_TOGGLE_STATUS] = {"toggle_status", "Toggle status bar", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_status)},
     [HOTKEY_CONNECT_DIALOG] = {"connect_dialog", "Connect dialog", HOTKEY_CAT_GENERAL, DEF_KEYS(def_connect_dialog)},
-    [HOTKEY_HELP] = {"help", "Help", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help)},
+    [HOTKEY_HELP] = {"help", "Hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help)},
     [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit)},
     [HOTKEY_CONFIG] = {"config", "Configuration", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config)},
 
@@ -166,6 +183,21 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_CONN_EDIT] = {"conn_edit", "Edit", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_edit)},
     [HOTKEY_CONN_DELETE] = {"conn_delete", "Delete", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_delete)},
     [HOTKEY_CONN_RENAME] = {"conn_rename", "Rename", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_rename)},
+    [HOTKEY_CONN_MOVE] = {"conn_move", "Move item", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_move)},
+
+    /* Row Selection (Table category) */
+    [HOTKEY_TOGGLE_SELECTION] = {"toggle_selection", "Toggle selection", HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_selection)},
+    [HOTKEY_CLEAR_SELECTIONS] = {"clear_selections", "Clear selections", HOTKEY_CAT_TABLE, DEF_KEYS(def_clear_selections)},
+
+    /* Modal Editor */
+    [HOTKEY_EDITOR_SAVE] = {"editor_save", "Save", HOTKEY_CAT_EDITOR, DEF_KEYS(def_editor_save)},
+    [HOTKEY_EDITOR_NULL] = {"editor_null", "Set NULL", HOTKEY_CAT_EDITOR, DEF_KEYS(def_editor_null)},
+    [HOTKEY_EDITOR_EMPTY] = {"editor_empty", "Set empty", HOTKEY_CAT_EDITOR, DEF_KEYS(def_editor_empty)},
+    [HOTKEY_EDITOR_CANCEL] = {"editor_cancel", "Cancel", HOTKEY_CAT_EDITOR, DEF_KEYS(def_editor_cancel)},
+
+    /* Config Editor */
+    [HOTKEY_CONFIG_RESET] = {"config_reset", "Reset hotkey", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config_reset)},
+    [HOTKEY_CONFIG_RESET_ALL] = {"config_reset_all", "Reset all hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config_reset_all)},
 };
 
 /* Category names for display */
@@ -177,6 +209,7 @@ static const char *category_names[HOTKEY_CAT_COUNT] = {
     [HOTKEY_CAT_SIDEBAR] = "Sidebar",
     [HOTKEY_CAT_QUERY] = "Query Tab",
     [HOTKEY_CAT_CONNECT] = "Connect Dialog",
+    [HOTKEY_CAT_EDITOR] = "Modal Editor",
 };
 
 /* ============================================================================
@@ -281,6 +314,8 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
     *key_code = UI_KEY_BACKSPACE;
   } else if (strcmp(str, "TAB") == 0) {
     *key_code = UI_KEY_TAB;
+  } else if (strcmp(str, "SPACE") == 0) {
+    *key_code = ' ';
   } else if (strcmp(str, "COMMA") == 0) {
     *key_code = ',';
   } else if (str[0] == 'F' && str[1] >= '1' && str[1] <= '9') {
@@ -345,6 +380,9 @@ static char *key_to_display(int key_code, UiKeyMod mods) {
   if (key_code == ',') {
     return str_printf("%s,", prefix);
   }
+  if (key_code == ' ') {
+    return str_printf("%sSpace", prefix);
+  }
   return str_printf("%s%c", prefix, key_code);
 }
 
@@ -365,6 +403,7 @@ Config *config_get_defaults(void) {
   config->general.prefetch_pages = CONFIG_PREFETCH_PAGES_DEFAULT;
   config->general.restore_session = true;
   config->general.quit_confirmation = false;
+  config->general.delete_confirmation = true;  /* Default: ask before delete */
   config->general.max_result_rows = CONFIG_MAX_RESULT_ROWS_DEFAULT;
   config->general.auto_open_first_table = false;
   config->general.close_conn_on_last_tab = false;
@@ -593,6 +632,10 @@ Config *config_load(char **error) {
     if (cJSON_IsBool(item))
       config->general.quit_confirmation = cJSON_IsTrue(item);
 
+    item = cJSON_GetObjectItem(general, "delete_confirmation");
+    if (cJSON_IsBool(item))
+      config->general.delete_confirmation = cJSON_IsTrue(item);
+
     item = cJSON_GetObjectItem(general, "max_result_rows");
     if (cJSON_IsNumber(item)) {
       int val = item->valueint;
@@ -667,6 +710,7 @@ bool config_save(const Config *config, char **error) {
   cJSON_AddNumberToObject(general, "prefetch_pages", config->general.prefetch_pages);
   cJSON_AddBoolToObject(general, "restore_session", config->general.restore_session);
   cJSON_AddBoolToObject(general, "quit_confirmation", config->general.quit_confirmation);
+  cJSON_AddBoolToObject(general, "delete_confirmation", config->general.delete_confirmation);
   cJSON_AddNumberToObject(general, "max_result_rows", config->general.max_result_rows);
   cJSON_AddBoolToObject(general, "auto_open_first_table", config->general.auto_open_first_table);
   cJSON_AddBoolToObject(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);

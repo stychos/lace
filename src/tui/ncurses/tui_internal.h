@@ -197,6 +197,7 @@ typedef struct {
   size_t cursor_col;     /* Current cursor column */
   size_t scroll_row;     /* Vertical scroll offset */
   size_t scroll_col;     /* Horizontal scroll offset */
+  size_t selection_offset; /* Offset for selection calculation (global row) */
   bool is_focused;       /* Whether this grid has focus */
   bool is_editing;       /* Whether editing is active */
   char *edit_buffer;     /* Edit buffer content */

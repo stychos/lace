@@ -604,10 +604,14 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
   int hint_y = start_y + height - 2;
   wattron(win, A_DIM);
   if (ds->move.active) {
-    mvwprintw(win, hint_y, start_x, "Space:drop Esc:cancel");
+    char move_key[16];
+    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE), sizeof(move_key) - 1);
+    move_key[sizeof(move_key) - 1] = '\0';
+    mvwprintw(win, hint_y, start_x, "%s:drop Esc:cancel",
+              move_key[0] ? move_key : "Space");
   } else {
     /* Build hints from configured hotkeys (copy to avoid static buffer reuse) */
-    char new_key[16], folder_key[16], edit_key[16], del_key[16], rename_key[16];
+    char new_key[16], folder_key[16], edit_key[16], del_key[16], rename_key[16], move_key[16];
     strncpy(new_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW), sizeof(new_key) - 1);
     new_key[sizeof(new_key) - 1] = '\0';
     strncpy(folder_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW_FOLDER), sizeof(folder_key) - 1);
@@ -618,12 +622,15 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
     del_key[sizeof(del_key) - 1] = '\0';
     strncpy(rename_key, get_first_key_hint(ds->config, HOTKEY_CONN_RENAME), sizeof(rename_key) - 1);
     rename_key[sizeof(rename_key) - 1] = '\0';
+    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE), sizeof(move_key) - 1);
+    move_key[sizeof(move_key) - 1] = '\0';
 
     mvwprintw(win, hint_y, start_x, "%s:new %s:folder %s:edit",
               new_key[0] ? new_key : "n",
               folder_key[0] ? folder_key : "N",
               edit_key[0] ? edit_key : "e");
-    mvwprintw(win, hint_y + 1, start_x, "Space:move %s:del %s:rename",
+    mvwprintw(win, hint_y + 1, start_x, "%s:move %s:del %s:rename",
+              move_key[0] ? move_key : "Space",
               del_key[0] ? del_key : "d",
               rename_key[0] ? rename_key : "r");
   }
@@ -705,7 +712,9 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
 
 static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor_x) {
   werase(win);
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   box(win, 0, 0);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Title */
   wattron(win, A_BOLD);
@@ -717,10 +726,12 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor
 
   /* Vertical divider between panels - stop at button bar */
   int divider_x = TREE_PANEL_WIDTH + 2;
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   for (int i = 1; i < btn_line_y; i++) {
     mvwaddch(win, i, divider_x, ACS_VLINE);
   }
   mvwaddch(win, 0, divider_x, ACS_TTEE);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Left panel: Saved connections tree */
   draw_tree_panel(win, ds, 2, 2, ds->tree_height, TREE_PANEL_WIDTH);
@@ -731,10 +742,12 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor
   draw_url_panel(win, ds, 2, url_panel_x, url_panel_width, cursor_y, cursor_x);
 
   /* Horizontal line above buttons */
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
   mvwaddch(win, btn_line_y, 0, ACS_LTEE);
   mvwhline(win, btn_line_y, 1, ACS_HLINE, ds->width - 2);
   mvwaddch(win, btn_line_y, ds->width - 1, ACS_RTEE);
   mvwaddch(win, btn_line_y, divider_x, ACS_BTEE);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
   /* Error/success messages */
   int msg_y = ds->height - 3;
@@ -805,7 +818,9 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     int title_len = (int)strlen(title) + 2;
     wattron(dlg, A_BOLD);
@@ -936,7 +951,9 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     int title_len = (int)strlen(title) + 2;
     wattron(dlg, A_BOLD);
@@ -1022,7 +1039,9 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     int title_len = (int)strlen(title) + 2;
     wattron(dlg, A_BOLD);
@@ -1257,7 +1276,9 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     wattron(dlg, A_BOLD);
     mvwprintw(dlg, 0, (dlg_width - 18) / 2, " Save Connection ");
@@ -1507,7 +1528,9 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
 
   while (running) {
     werase(dlg);
+    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
     box(dlg, 0, 0);
+    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
 
     const char *title = edit_item ? " Edit Connection " : " New Connection ";
     wattron(dlg, A_BOLD);
@@ -1939,8 +1962,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  /* Space: select item for move or drop item at current location */
-  if (key_char == ' ') {
+  /* Move item: select item for move or drop item at current location */
+  if (hotkey_matches(ds->config, event, HOTKEY_CONN_MOVE)) {
     if (ds->move.active) {
       /* Drop the item at target position */
       ConnectionItem *target = ds->move.target_folder;

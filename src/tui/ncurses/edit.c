@@ -9,6 +9,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/config.h"
 #include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
@@ -340,6 +341,12 @@ void tui_confirm_edit(TuiState *state) {
       db_value_free(&new_val);
     }
     tui_set_status(state, "Cell updated");
+
+    /* Mark other tabs with the same table as needing refresh */
+    Tab *tab = TUI_TAB(state);
+    if (tab) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
+    }
   } else {
     db_value_free(&new_val);
     tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
@@ -405,6 +412,12 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
       db_value_free(&new_val);
     }
     tui_set_status(state, set_null ? "Cell set to NULL" : "Cell set to empty");
+
+    /* Mark other tabs with the same table as needing refresh */
+    Tab *tab = TUI_TAB(state);
+    if (tab) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
+    }
   } else {
     db_value_free(&new_val);
     tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
@@ -412,7 +425,33 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
   }
 }
 
-/* Delete current row */
+/* Delete a single row by its local index in current data */
+static bool delete_single_row(TuiState *state, size_t local_row, char **err) {
+  VmTable *vm = state->vm_table;
+  if (!vm)
+    return false;
+
+  DbConnection *conn = vm_table_connection(vm);
+  const char *table = vm_table_name(vm);
+  const TableSchema *schema = vm_table_schema(vm);
+
+  if (!conn || !table || !schema)
+    return false;
+
+  PkInfo pk = {0};
+  if (!pk_info_build(&pk, state->data, local_row, (TableSchema *)schema)) {
+    if (err)
+      *err = str_dup("No primary key found");
+    return false;
+  }
+
+  bool success =
+      db_delete_row(conn, table, pk.col_names, pk.values, pk.count, err);
+  pk_info_free(&pk);
+  return success;
+}
+
+/* Delete current row or selected rows */
 void tui_delete_row(TuiState *state) {
   VmTable *vm = get_vm_table(state);
   if (!vm)
@@ -425,6 +464,10 @@ void tui_delete_row(TuiState *state) {
   if (!conn || !table || !schema)
     return;
 
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
+    return;
+
   /* Get cursor and scroll positions from viewmodel */
   size_t cursor_row, cursor_col;
   vm_table_get_cursor(vm, &cursor_row, &cursor_col);
@@ -432,109 +475,120 @@ void tui_delete_row(TuiState *state) {
   vm_table_get_scroll(vm, &scroll_row, &scroll_col);
 
   size_t num_rows = vm_table_row_count(vm);
-  size_t num_cols = vm_table_col_count(vm);
   if (cursor_row >= num_rows)
     return;
 
-  /* Build primary key info - still needs direct data access */
-  PkInfo pk = {0};
-  if (!pk_info_build(&pk, state->data, cursor_row, (TableSchema *)schema)) {
-    tui_set_error(state, "Cannot delete: no primary key found");
-    return;
-  }
+  /* Check if we have selected rows for bulk delete */
+  size_t num_selected = tab->num_selected;
+  bool bulk_delete = (num_selected > 0);
+  size_t rows_to_delete = bulk_delete ? num_selected : 1;
 
-  /* Highlight the row being deleted with danger background (TUI-specific) */
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_rows;
+  /* Check if confirmation is required */
+  bool need_confirmation =
+      state->app && state->app->config &&
+      state->app->config->general.delete_confirmation;
 
-  int row_y = 3 + (int)(cursor_row - scroll_row);
-  wattron(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
-  int x = 1;
-  for (size_t col = scroll_col; col < num_cols; col++) {
-    int col_width = tui_get_column_width(state, col);
-    if (x + col_width + 3 > win_cols)
-      break;
-
-    /* Get cell value via viewmodel */
-    const DbValue *val = vm_table_cell(vm, cursor_row, col);
-    if (!val)
-      continue;
-
-    if (val->is_null) {
-      mvwprintw(state->main_win, row_y, x, "%-*s", col_width, "NULL");
+  /* Show confirmation if needed */
+  if (need_confirmation) {
+    char msg[64];
+    if (rows_to_delete == 1) {
+      snprintf(msg, sizeof(msg), "Delete this row?");
     } else {
-      char *str = db_value_to_string(val);
-      if (str) {
-        char *safe = tui_sanitize_for_display(str);
-        mvwprintw(state->main_win, row_y, x, "%-*.*s", col_width, col_width,
-                  safe ? safe : str);
-        free(safe);
-        free(str);
-      }
+      snprintf(msg, sizeof(msg), "Delete %zu selected rows?", rows_to_delete);
     }
-    x += col_width + 1;
-    mvwaddch(state->main_win, row_y, x - 1, ACS_VLINE);
-  }
-  wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
-  wrefresh(state->main_win);
-
-  /* Show confirmation dialog (TUI-specific) */
-  int height = 7;
-  int width = 50;
-  int starty = (state->term_rows - height) / 2;
-  int startx = (state->term_cols - width) / 2;
-
-  WINDOW *confirm_win = newwin(height, width, starty, startx);
-  if (!confirm_win) {
-    pk_info_free(&pk);
-    return;
+    if (!tui_show_confirm_dialog(state, msg)) {
+      tui_set_status(state, "Delete cancelled");
+      return;
+    }
   }
 
-  box(confirm_win, 0, 0);
-  wattron(confirm_win, A_BOLD | COLOR_PAIR(COLOR_ERROR));
-  mvwprintw(confirm_win, 0, (width - 18) / 2, " Delete Row ");
-  wattroff(confirm_win, A_BOLD | COLOR_PAIR(COLOR_ERROR));
-
-  mvwprintw(confirm_win, 2, 2, "Are you sure you want to delete this row?");
-  mvwprintw(confirm_win, 4, 2, "[Enter/y] Delete    [n/Esc] Cancel");
-
-  wrefresh(confirm_win);
-
-  int ch = wgetch(confirm_win);
-  delwin(confirm_win);
-  touchwin(stdscr);
-  tui_refresh(state);
-
-  if (ch != 'y' && ch != 'Y' && ch != '\n' && ch != KEY_ENTER) {
-    tui_set_status(state, "Delete cancelled");
-    pk_info_free(&pk);
-    return;
-  }
-
-  /* Save position info before delete */
   size_t loaded_offset = vm_table_loaded_offset(vm);
   size_t total_rows = vm_table_total_rows(vm);
-  size_t abs_row = loaded_offset + cursor_row;
-  size_t saved_col = cursor_col;
-  size_t saved_scroll_col = scroll_col;
-  size_t visual_offset = cursor_row >= scroll_row ? cursor_row - scroll_row : 0;
+  size_t deleted_count = 0;
+  size_t failed_count = 0;
 
-  /* Perform the delete */
-  char *err = NULL;
-  bool success =
-      db_delete_row(conn, table, pk.col_names, pk.values, pk.count, &err);
-  pk_info_free(&pk);
+  if (bulk_delete) {
+    /* Delete selected rows - iterate in reverse to avoid index shifting issues */
+    /* First, collect global indices and sort in descending order */
+    size_t *to_delete = malloc(num_selected * sizeof(size_t));
+    if (!to_delete) {
+      tui_set_error(state, "Out of memory");
+      return;
+    }
+    memcpy(to_delete, tab->selected_rows, num_selected * sizeof(size_t));
 
-  if (success) {
-    tui_set_status(state, "Row deleted");
+    /* Sort descending so we delete from highest index first */
+    for (size_t i = 0; i < num_selected - 1; i++) {
+      for (size_t j = i + 1; j < num_selected; j++) {
+        if (to_delete[j] > to_delete[i]) {
+          size_t tmp = to_delete[i];
+          to_delete[i] = to_delete[j];
+          to_delete[j] = tmp;
+        }
+      }
+    }
 
-    if (total_rows > 0)
-      total_rows--;
+    /* Delete each selected row */
+    for (size_t i = 0; i < num_selected; i++) {
+      size_t global_row = to_delete[i];
 
-    /* Update compatibility layer total_rows (will be read by reload) */
+      /* Check if this row is in the currently loaded data */
+      if (global_row < loaded_offset ||
+          global_row >= loaded_offset + num_rows) {
+        /* Row not loaded - would need to load it first, skip for now */
+        failed_count++;
+        continue;
+      }
+
+      size_t local_row = global_row - loaded_offset;
+      char *err = NULL;
+      if (delete_single_row(state, local_row, &err)) {
+        deleted_count++;
+        if (total_rows > 0)
+          total_rows--;
+      } else {
+        failed_count++;
+        free(err);
+      }
+    }
+
+    free(to_delete);
+
+    /* Clear selections after bulk delete */
+    tab_clear_selections(tab);
+  } else {
+    /* Delete single row at cursor */
+    char *err = NULL;
+    if (delete_single_row(state, cursor_row, &err)) {
+      deleted_count = 1;
+      if (total_rows > 0)
+        total_rows--;
+    } else {
+      tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");
+      free(err);
+      return;
+    }
+  }
+
+  /* Show result message */
+  if (deleted_count > 0) {
+    if (failed_count > 0) {
+      tui_set_status(state, "%zu row(s) deleted, %zu failed",
+                     deleted_count, failed_count);
+    } else if (deleted_count == 1) {
+      tui_set_status(state, "Row deleted");
+    } else {
+      tui_set_status(state, "%zu rows deleted", deleted_count);
+    }
+
+    /* Mark other tabs with the same table as needing refresh */
+    app_mark_table_tabs_dirty(state->app, tab->connection_index,
+                              vm_table_name(vm), tab);
+
+    /* Update state and reload data */
     state->total_rows = total_rows;
 
+    size_t abs_row = loaded_offset + cursor_row;
     if (abs_row >= total_rows && total_rows > 0)
       abs_row = total_rows - 1;
 
@@ -550,24 +604,25 @@ void tui_delete_row(TuiState *state) {
       if (cursor_row >= num_rows)
         cursor_row = num_rows - 1;
 
+      size_t visual_offset =
+          cursor_row >= scroll_row ? cursor_row - scroll_row : 0;
       if (cursor_row >= visual_offset)
         scroll_row = cursor_row - visual_offset;
       else
         scroll_row = 0;
 
       /* Update via viewmodel */
-      vm_table_set_cursor(vm, cursor_row, saved_col);
-      vm_table_set_scroll(vm, scroll_row, saved_scroll_col);
+      vm_table_set_cursor(vm, cursor_row, cursor_col);
+      vm_table_set_scroll(vm, scroll_row, scroll_col);
 
-      /* Sync to compatibility layer (temporary) */
+      /* Sync to compatibility layer */
       state->cursor_row = cursor_row;
-      state->cursor_col = saved_col;
+      state->cursor_col = cursor_col;
       state->scroll_row = scroll_row;
-      state->scroll_col = saved_scroll_col;
+      state->scroll_col = scroll_col;
     }
-  } else {
-    tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");
-    free(err);
+  } else if (failed_count > 0) {
+    tui_set_error(state, "Failed to delete %zu row(s)", failed_count);
   }
 }
 
@@ -651,8 +706,9 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Ctrl+N - set to NULL */
-  if (render_event_is_ctrl(event, 'N')) {
+  /* Set to NULL - uses configurable hotkey */
+  if (state->app && state->app->config &&
+      hotkey_matches(state->app->config, event, HOTKEY_EDITOR_NULL)) {
     free(state->edit_buffer);
     state->edit_buffer = NULL;
     state->edit_pos = 0;
@@ -660,8 +716,9 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Ctrl+D - set to empty string */
-  if (render_event_is_ctrl(event, 'D')) {
+  /* Set to empty string - uses configurable hotkey */
+  if (state->app && state->app->config &&
+      hotkey_matches(state->app->config, event, HOTKEY_EDITOR_EMPTY)) {
     free(state->edit_buffer);
     state->edit_buffer = str_dup("");
     state->edit_pos = 0;

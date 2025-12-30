@@ -109,6 +109,8 @@ void tab_free_data(Tab *tab) {
   /* Free table data */
   free(tab->table_name);
   tab->table_name = NULL;
+  free(tab->table_error);
+  tab->table_error = NULL;
 
   db_result_free(tab->data);
   tab->data = NULL;
@@ -145,6 +147,12 @@ void tab_free_data(Tab *tab) {
 
   free(tab->query_base_sql);
   tab->query_base_sql = NULL;
+
+  /* Free row selections */
+  free(tab->selected_rows);
+  tab->selected_rows = NULL;
+  tab->num_selected = 0;
+  tab->selected_capacity = 0;
 }
 
 Tab *workspace_current_tab(Workspace *ws) {
@@ -629,4 +637,116 @@ Connection *app_current_tab_connection(AppState *app) {
   if (!tab)
     return NULL;
   return app_get_tab_connection(app, tab);
+}
+
+/* ============================================================================
+ * Row Selection Operations
+ * ============================================================================
+ */
+
+/* Initial capacity for selections array */
+#define INITIAL_SELECTION_CAPACITY 16
+
+/* Toggle selection of a row by global index */
+bool tab_toggle_selection(Tab *tab, size_t global_row) {
+  if (!tab)
+    return false;
+
+  /* Check if already selected - if so, remove */
+  for (size_t i = 0; i < tab->num_selected; i++) {
+    if (tab->selected_rows[i] == global_row) {
+      /* Remove by shifting remaining elements */
+      for (size_t j = i; j < tab->num_selected - 1; j++) {
+        tab->selected_rows[j] = tab->selected_rows[j + 1];
+      }
+      tab->num_selected--;
+      return true;
+    }
+  }
+
+  /* Not selected - add it */
+  /* Ensure capacity */
+  if (tab->num_selected >= tab->selected_capacity) {
+    size_t new_cap = tab->selected_capacity == 0 ? INITIAL_SELECTION_CAPACITY
+                                                  : tab->selected_capacity * 2;
+    size_t *new_arr = realloc(tab->selected_rows, new_cap * sizeof(size_t));
+    if (!new_arr)
+      return false;
+    tab->selected_rows = new_arr;
+    tab->selected_capacity = new_cap;
+  }
+
+  tab->selected_rows[tab->num_selected++] = global_row;
+  return true;
+}
+
+/* Check if a row is selected */
+bool tab_is_row_selected(Tab *tab, size_t global_row) {
+  if (!tab || !tab->selected_rows)
+    return false;
+
+  for (size_t i = 0; i < tab->num_selected; i++) {
+    if (tab->selected_rows[i] == global_row)
+      return true;
+  }
+  return false;
+}
+
+/* Clear all selections */
+void tab_clear_selections(Tab *tab) {
+  if (!tab)
+    return;
+  tab->num_selected = 0;
+  /* Keep the array allocated for reuse */
+}
+
+/* Get selected row indices */
+const size_t *tab_get_selections(Tab *tab, size_t *count) {
+  if (!tab) {
+    if (count)
+      *count = 0;
+    return NULL;
+  }
+  if (count)
+    *count = tab->num_selected;
+  return tab->selected_rows;
+}
+
+/* ============================================================================
+ * Data Change Tracking
+ * ============================================================================
+ */
+
+/* Mark all tabs with the same table as needing refresh (except current tab) */
+void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
+                               const char *table_name, Tab *exclude_tab) {
+  if (!app || !table_name)
+    return;
+
+  /* Iterate through all workspaces and tabs */
+  for (size_t ws_idx = 0; ws_idx < app->num_workspaces; ws_idx++) {
+    Workspace *ws = &app->workspaces[ws_idx];
+    if (!ws->active)
+      continue;
+
+    for (size_t tab_idx = 0; tab_idx < ws->num_tabs; tab_idx++) {
+      Tab *tab = &ws->tabs[tab_idx];
+      if (!tab->active || tab == exclude_tab)
+        continue;
+
+      /* Check if this is a table tab for the same table */
+      if (tab->type == TAB_TYPE_TABLE && tab->table_name &&
+          tab->connection_index == connection_index &&
+          strcmp(tab->table_name, table_name) == 0) {
+        tab->needs_refresh = true;
+      }
+
+      /* Also check query tabs that have results from this table */
+      if (tab->type == TAB_TYPE_QUERY && tab->query_source_table &&
+          tab->connection_index == connection_index &&
+          strcmp(tab->query_source_table, table_name) == 0) {
+        tab->needs_refresh = true;
+      }
+    }
+  }
 }

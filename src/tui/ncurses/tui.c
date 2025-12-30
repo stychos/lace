@@ -336,6 +336,14 @@ void tui_sync_from_app(TuiState *state) {
   if (old_sidebar_visible != state->sidebar_visible) {
     tui_recreate_windows(state);
   }
+
+  /* Check if tab needs refresh due to changes in another tab */
+  Tab *refresh_tab = app_current_tab(app);
+  if (refresh_tab && refresh_tab->needs_refresh &&
+      refresh_tab->type == TAB_TYPE_TABLE && refresh_tab->table_name) {
+    refresh_tab->needs_refresh = false;
+    tui_refresh_table(state);
+  }
 }
 
 /* Sync current tab/workspace from view cache - call before tab/workspace switch
@@ -700,6 +708,7 @@ bool tui_init(TuiState *state, AppState *app) {
     init_pair(COLOR_NUMBER, COLOR_CYAN, -1);
     init_pair(COLOR_EDIT, COLOR_BLACK, COLOR_YELLOW);
     init_pair(COLOR_ERROR_TEXT, COLOR_RED, -1);
+    init_pair(COLOR_PK, COLOR_YELLOW, -1);
   }
 
   /* Get terminal dimensions */
@@ -1394,6 +1403,17 @@ void tui_run(TuiState *state) {
       action = action_cell_set_empty();
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_DELETE_ROW)) {
       action = action_row_delete();
+    }
+    /* ========== Row Selection ========== */
+    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_SELECTION) &&
+             !state->sidebar_focused && !state->filters_focused) {
+      action = action_row_toggle_select();
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CLEAR_SELECTIONS) &&
+               !state->sidebar_focused && !state->filters_focused) {
+      Tab *tab = TUI_TAB(state);
+      if (tab && tab->num_selected > 0) {
+        action = action_rows_clear_select();
+      }
     }
     /* ========== Workspaces ========== */
     else if (hotkey_matches(state->app->config, &event, HOTKEY_OPEN_QUERY)) {

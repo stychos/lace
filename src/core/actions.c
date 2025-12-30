@@ -167,6 +167,31 @@ static ChangeFlags handle_row_delete(AppState *app, const UICallbacks *ui) {
   return CHANGED_DATA | CHANGED_CURSOR | CHANGED_STATUS;
 }
 
+static ChangeFlags handle_row_toggle_select(AppState *app,
+                                            const UICallbacks *ui) {
+  Tab *tab = app_current_tab(app);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
+    return CHANGED_NONE;
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))
+    return CHANGED_NONE;
+
+  /* Calculate global row index */
+  size_t global_row = tab->loaded_offset + tab->cursor_row;
+  tab_toggle_selection(tab, global_row);
+  return CHANGED_DATA; /* Need to redraw to show selection */
+}
+
+static ChangeFlags handle_rows_clear_select(AppState *app,
+                                            const UICallbacks *ui) {
+  (void)ui;
+  Tab *tab = app_current_tab(app);
+  if (!tab)
+    return CHANGED_NONE;
+
+  tab_clear_selections(tab);
+  return CHANGED_DATA;
+}
+
 /* ============================================================================
  * Tab Actions (switch tabs within current workspace)
  * ============================================================================
@@ -464,6 +489,10 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
     return handle_cell_set_empty(app, ui);
   case ACTION_ROW_DELETE:
     return handle_row_delete(app, ui);
+  case ACTION_ROW_TOGGLE_SELECT:
+    return handle_row_toggle_select(app, ui);
+  case ACTION_ROWS_CLEAR_SELECT:
+    return handle_rows_clear_select(app, ui);
 
   /* Tabs - switch within current workspace */
   case ACTION_TAB_NEXT:

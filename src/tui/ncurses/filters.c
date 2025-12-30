@@ -108,14 +108,26 @@ void tui_draw_filters_panel(TuiState *state) {
 
   /* Title bar with hotkeys (like SQL editor) */
   wattron(state->main_win, A_BOLD);
+  char *add_key = hotkey_get_display(state->app->config, HOTKEY_ADD_FILTER);
+  char *rem_key = hotkey_get_display(state->app->config, HOTKEY_REMOVE_FILTER);
+  char *clr_key = hotkey_get_display(state->app->config, HOTKEY_CLEAR_FILTERS);
+  char *sw_key = hotkey_get_display(state->app->config, HOTKEY_FILTERS_SWITCH_FOCUS);
   if (active_count > 0) {
     mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%zu) (+/-:add/del, c:clear, ^W:switch, Esc)",
-              active_count);
+              "Filters (%zu) (%s/%s:add/del, %s:clear, %s:switch, Esc)",
+              active_count,
+              add_key ? add_key : "+", rem_key ? rem_key : "-",
+              clr_key ? clr_key : "c", sw_key ? sw_key : "^W");
   } else {
     mvwprintw(state->main_win, start_y, col_x,
-              "Filters (+/-:add/del, c:clear, ^W:switch, Esc)");
+              "Filters (%s/%s:add/del, %s:clear, %s:switch, Esc)",
+              add_key ? add_key : "+", rem_key ? rem_key : "-",
+              clr_key ? clr_key : "c", sw_key ? sw_key : "^W");
   }
+  free(add_key);
+  free(rem_key);
+  free(clr_key);
+  free(sw_key);
   wattroff(state->main_win, A_BOLD);
 
   /* Position indicator - right-aligned with delete button */
@@ -282,7 +294,9 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
 
   keypad(menu_win, TRUE);
   mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
   box(menu_win, 0, 0);
+  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
 
   wattron(menu_win, A_BOLD);
   mvwprintw(menu_win, 0, 2, " Column ");
@@ -466,7 +480,9 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
 
   keypad(menu_win, TRUE);
   mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
+  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
   box(menu_win, 0, 0);
+  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
 
   wattron(menu_win, A_BOLD);
   mvwprintw(menu_win, 0, 2, " Operator ");

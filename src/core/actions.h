@@ -80,9 +80,11 @@ typedef enum {
   ACTION_EDIT_CURSOR_END,   /* Move edit cursor to end */
 
   /* Cell Operations */
-  ACTION_CELL_SET_NULL,  /* Set current cell to NULL */
-  ACTION_CELL_SET_EMPTY, /* Set current cell to empty string */
-  ACTION_ROW_DELETE,     /* Delete current row */
+  ACTION_CELL_SET_NULL,     /* Set current cell to NULL */
+  ACTION_CELL_SET_EMPTY,    /* Set current cell to empty string */
+  ACTION_ROW_DELETE,        /* Delete current row */
+  ACTION_ROW_TOGGLE_SELECT, /* Toggle selection of current row */
+  ACTION_ROWS_CLEAR_SELECT, /* Clear all row selections */
 
   /* Tab Management (within current workspace) */
   ACTION_TAB_NEXT,         /* Switch to next tab */
@@ -431,6 +433,14 @@ static inline Action action_cell_set_empty(void) {
 
 static inline Action action_row_delete(void) {
   return (Action){.type = ACTION_ROW_DELETE};
+}
+
+static inline Action action_row_toggle_select(void) {
+  return (Action){.type = ACTION_ROW_TOGGLE_SELECT};
+}
+
+static inline Action action_rows_clear_select(void) {
+  return (Action){.type = ACTION_ROWS_CLEAR_SELECT};
 }
 
 /* Tabs (within workspace) */

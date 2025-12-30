@@ -168,7 +168,12 @@ bool tab_create_query(TuiState *state) {
   state->filters_cursor_col = 0;
   state->filters_scroll = 0;
 
-  tui_set_status(state, "Query tab opened. Ctrl+R to run, Ctrl+A to run all");
+  char *run_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
+  char *all_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_ALL);
+  tui_set_status(state, "Query tab opened. %s to run, %s to run all",
+                 run_key ? run_key : "Ctrl+R", all_key ? all_key : "Ctrl+A");
+  free(run_key);
+  free(all_key);
   return true;
 }
 
@@ -714,6 +719,7 @@ static void query_execute(TuiState *state, const char *sql) {
   free(tab->query_error);
   tab->query_error = NULL;
   tab->query_affected = 0;
+  tab->query_exec_success = false;
   free(tab->query_result_col_widths);
   tab->query_result_col_widths = NULL;
   tab->query_result_num_cols = 0;
@@ -727,6 +733,9 @@ static void query_execute(TuiState *state, const char *sql) {
   tab->query_loaded_offset = 0;
   tab->query_loaded_count = 0;
   tab->query_paginated = false;
+
+  /* Clear any row selections */
+  tab_clear_selections(tab);
 
   /* Reset result cursor */
   tab->query_result_row = 0;
@@ -855,6 +864,7 @@ static void query_execute(TuiState *state, const char *sql) {
           tui_show_processing_dialog(state, &op, "Executing statement...");
       if (completed && op.state == ASYNC_STATE_COMPLETED) {
         tab->query_affected = op.count;
+        tab->query_exec_success = true;
         tui_set_status(state, "%lld rows affected", (long long)op.count);
       } else if (op.state == ASYNC_STATE_ERROR) {
         err = op.error ? str_dup(op.error) : str_dup("Statement failed");
@@ -1395,6 +1405,25 @@ void tui_draw_query(TuiState *state) {
     }
   }
 
+  /* Draw scrollbar if content exceeds visible area */
+  int visible_rows = editor_height - 1; /* Minus header line */
+  if (num_lines > (size_t)visible_rows && visible_rows > 0) {
+    int scroll_x = win_cols - 1;
+    int thumb_pos =
+        (int)(tab->query_scroll_line * (size_t)visible_rows / num_lines);
+    int thumb_size = (visible_rows * visible_rows) / (int)num_lines;
+    if (thumb_size < 1)
+      thumb_size = 1;
+
+    wattron(state->main_win, A_DIM);
+    for (int i = 0; i < visible_rows; i++) {
+      mvwaddch(state->main_win, 1 + i, scroll_x,
+               (i >= thumb_pos && i < thumb_pos + thumb_size) ? ACS_CKBOARD
+                                                              : ACS_VLINE);
+    }
+    wattroff(state->main_win, A_DIM);
+  }
+
   free(lines);
 
   /* Draw separator */
@@ -1423,6 +1452,7 @@ void tui_draw_query(TuiState *state) {
                              .cursor_col = tab->query_result_col,
                              .scroll_row = tab->query_result_scroll_row,
                              .scroll_col = tab->query_result_scroll_col,
+                             .selection_offset = tab->query_loaded_offset,
                              .is_focused = ui->query_focus_results,
                              .is_editing = ui->query_result_editing,
                              .edit_buffer = ui->query_result_edit_buf,
@@ -1432,15 +1462,25 @@ void tui_draw_query(TuiState *state) {
                              .num_sort_entries = 0};
 
     tui_draw_result_grid(state, &params);
-  } else if (tab->query_affected > 0) {
-    /* Show affected rows */
-    mvwprintw(state->main_win, results_start + 1, 1, "%lld rows affected",
-              (long long)tab->query_affected);
+  } else if (tab->query_exec_success) {
+    /* Show success message for non-SELECT queries */
+    wattron(state->main_win, COLOR_PAIR(COLOR_STATUS));
+    if (tab->query_affected > 0) {
+      mvwprintw(state->main_win, results_start + 1, 1, "%lld rows affected",
+                (long long)tab->query_affected);
+    } else {
+      mvwprintw(state->main_win, results_start + 1, 1,
+                "Statement executed successfully");
+    }
+    wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
   } else {
     /* No results yet */
     wattron(state->main_win, A_DIM);
+    char *exec_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
     mvwprintw(state->main_win, results_start + 1, 1,
-              "Enter SQL and press Ctrl+R to execute");
+              "Enter SQL and press %s to execute",
+              exec_key ? exec_key : "Ctrl+R");
+    free(exec_key);
     wattroff(state->main_win, A_DIM);
   }
 
@@ -1839,6 +1879,12 @@ static void query_result_confirm_edit(TuiState *state, Tab *tab) {
 
   if (db_updated) {
     tui_set_status(state, "Cell updated");
+
+    /* Mark other tabs with the same table as needing refresh */
+    if (tab->query_source_table) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index,
+                                tab->query_source_table, tab);
+    }
   } else if (!state->conn) {
     tui_set_status(state, "Cell updated (not connected)");
   } else if (!tab->query_source_table) {
@@ -1872,7 +1918,45 @@ static void query_result_set_cell_direct(TuiState *state, Tab *tab,
   query_result_confirm_edit(state, tab);
 }
 
-/* Delete row from query results */
+/* Delete a single row from query results by local index */
+static bool query_result_delete_single_row(TuiState *state, Tab *tab,
+                                           size_t local_row, char **err) {
+  if (local_row >= tab->query_results->num_rows)
+    return false;
+
+  QueryPkInfo pk = {0};
+  if (!query_pk_info_build(&pk, tab, local_row)) {
+    *err = str_dup("No primary key found");
+    return false;
+  }
+
+  bool success = db_delete_row(state->conn, tab->query_source_table,
+                               pk.col_names, pk.values, pk.count, err);
+  query_pk_info_free(&pk);
+  return success;
+}
+
+/* Remove a row from local results by index */
+static void query_result_remove_local_row(Tab *tab, size_t local_row) {
+  if (local_row >= tab->query_results->num_rows)
+    return;
+
+  Row *row = &tab->query_results->rows[local_row];
+  for (size_t j = 0; j < row->num_cells; j++) {
+    db_value_free(&row->cells[j]);
+  }
+  free(row->cells);
+
+  for (size_t i = local_row; i < tab->query_results->num_rows - 1; i++) {
+    tab->query_results->rows[i] = tab->query_results->rows[i + 1];
+  }
+  tab->query_results->num_rows--;
+  tab->query_loaded_count--;
+  if (tab->query_total_rows > 0)
+    tab->query_total_rows--;
+}
+
+/* Delete row(s) from query results - bulk if selections exist */
 static void query_result_delete_row(TuiState *state, Tab *tab) {
   if (!tab || !tab->query_results || !state->conn)
     return;
@@ -1884,6 +1968,108 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
     return;
   }
 
+  /* Check if we have selections for bulk delete */
+  size_t num_selected = tab->num_selected;
+
+  if (num_selected > 0) {
+    /* Bulk delete of selected rows */
+    /* Verify all selected rows can be deleted (have PKs) */
+    for (size_t i = 0; i < num_selected; i++) {
+      size_t global_row = tab->selected_rows[i];
+      if (global_row < tab->query_loaded_offset)
+        continue;
+      size_t local_row = global_row - tab->query_loaded_offset;
+      if (local_row >= tab->query_results->num_rows)
+        continue;
+
+      QueryPkInfo pk = {0};
+      if (!query_pk_info_build(&pk, tab, local_row)) {
+        tui_set_error(state, "Cannot delete: row %zu has no primary key",
+                      global_row + 1);
+        return;
+      }
+      query_pk_info_free(&pk);
+    }
+
+    /* Show confirmation */
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Delete %zu selected rows?", num_selected);
+    if (!tui_show_confirm_dialog(state, msg)) {
+      tui_set_status(state, "Delete cancelled");
+      return;
+    }
+
+    /* Delete rows from database (in reverse order to preserve indices) */
+    size_t deleted = 0;
+    size_t errors = 0;
+
+    /* Sort selections in descending order by local index for safe removal */
+    size_t *sorted = malloc(num_selected * sizeof(size_t));
+    if (!sorted) {
+      tui_set_error(state, "Memory allocation failed");
+      return;
+    }
+    memcpy(sorted, tab->selected_rows, num_selected * sizeof(size_t));
+
+    /* Simple bubble sort (selections are typically small) */
+    for (size_t i = 0; i < num_selected; i++) {
+      for (size_t j = i + 1; j < num_selected; j++) {
+        if (sorted[i] < sorted[j]) {
+          size_t tmp = sorted[i];
+          sorted[i] = sorted[j];
+          sorted[j] = tmp;
+        }
+      }
+    }
+
+    /* Delete in descending order */
+    for (size_t i = 0; i < num_selected; i++) {
+      size_t global_row = sorted[i];
+      if (global_row < tab->query_loaded_offset)
+        continue;
+      size_t local_row = global_row - tab->query_loaded_offset;
+      if (local_row >= tab->query_results->num_rows)
+        continue;
+
+      char *err = NULL;
+      if (query_result_delete_single_row(state, tab, local_row, &err)) {
+        query_result_remove_local_row(tab, local_row);
+        deleted++;
+      } else {
+        errors++;
+        free(err);
+      }
+    }
+
+    free(sorted);
+    tab_clear_selections(tab);
+
+    /* Adjust cursor position */
+    if (tab->query_result_row >= tab->query_results->num_rows &&
+        tab->query_results->num_rows > 0)
+      tab->query_result_row = tab->query_results->num_rows - 1;
+
+    if (tab->query_result_scroll_row > 0 &&
+        tab->query_result_scroll_row >= tab->query_results->num_rows)
+      tab->query_result_scroll_row = tab->query_results->num_rows > 0
+                                         ? tab->query_results->num_rows - 1
+                                         : 0;
+
+    if (errors > 0) {
+      tui_set_error(state, "Deleted %zu rows, %zu errors", deleted, errors);
+    } else {
+      tui_set_status(state, "Deleted %zu rows", deleted);
+    }
+
+    /* Mark other tabs with the same table as needing refresh */
+    if (deleted > 0 && tab->query_source_table) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index,
+                                tab->query_source_table, tab);
+    }
+    return;
+  }
+
+  /* Single row delete (no selections) */
   QueryPkInfo pk = {0};
   if (!query_pk_info_build(&pk, tab, tab->query_result_row)) {
     tui_set_error(state, "Cannot delete: no primary key found");
@@ -1927,12 +2113,20 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
       }
     }
     x += col_width + 1;
+    wattron(state->main_win, COLOR_PAIR(COLOR_BORDER));
     mvwaddch(state->main_win, row_y, x - 1, ACS_VLINE);
+    wattroff(state->main_win, COLOR_PAIR(COLOR_BORDER));
   }
   wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR) | A_BOLD);
   wrefresh(state->main_win);
 
-  if (!tui_show_confirm_dialog(state, "Delete this row?")) {
+  /* Check delete confirmation setting */
+  bool needs_confirm = true;
+  if (state->app && state->app->config) {
+    needs_confirm = state->app->config->general.delete_confirmation;
+  }
+
+  if (needs_confirm && !tui_show_confirm_dialog(state, "Delete this row?")) {
     tui_set_status(state, "Delete cancelled");
     query_pk_info_free(&pk);
     return;
@@ -1946,20 +2140,13 @@ static void query_result_delete_row(TuiState *state, Tab *tab) {
   if (success) {
     tui_set_status(state, "Row deleted");
 
-    /* Remove row from local results */
-    for (size_t j = 0; j < row->num_cells; j++) {
-      db_value_free(&row->cells[j]);
+    /* Mark other tabs with the same table as needing refresh */
+    if (tab->query_source_table) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index,
+                                tab->query_source_table, tab);
     }
-    free(row->cells);
 
-    for (size_t i = tab->query_result_row; i < tab->query_results->num_rows - 1;
-         i++) {
-      tab->query_results->rows[i] = tab->query_results->rows[i + 1];
-    }
-    tab->query_results->num_rows--;
-    tab->query_loaded_count--;
-    if (tab->query_total_rows > 0)
-      tab->query_total_rows--;
+    query_result_remove_local_row(tab, tab->query_result_row);
 
     if (tab->query_result_row >= tab->query_results->num_rows &&
         tab->query_results->num_rows > 0)
@@ -2121,8 +2308,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
   /* Handle results navigation when focused on results */
   if (ui->query_focus_results) {
-    if (!tab->query_results)
+    if (!tab->query_results) {
+      /* No results yet - up arrow switches to editor */
+      if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
+        ui->query_focus_results = false;
+        return true;
+      }
       return false;
+    }
 
     /* Enter - start editing */
     if (hotkey_matches(cfg, event, HOTKEY_EDIT_INLINE)) {
@@ -2148,10 +2341,26 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       return true;
     }
 
-    /* x or Delete - delete row */
+    /* x or Delete - delete row(s) */
     if (hotkey_matches(cfg, event, HOTKEY_DELETE_ROW)) {
       query_result_delete_row(state, tab);
       return true;
+    }
+
+    /* Space - toggle row selection */
+    if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_SELECTION)) {
+      size_t global_row = tab->query_loaded_offset + tab->query_result_row;
+      tab_toggle_selection(tab, global_row);
+      return true;
+    }
+
+    /* Escape - clear selections (only if there are selections) */
+    if (hotkey_matches(cfg, event, HOTKEY_CLEAR_SELECTIONS)) {
+      if (tab->num_selected > 0) {
+        tab_clear_selections(tab);
+        return true;
+      }
+      /* If no selections, let Escape switch focus to editor */
     }
 
     /* r/R or Ctrl+R - refresh query results */

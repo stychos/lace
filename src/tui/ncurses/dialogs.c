@@ -64,7 +64,9 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
 
   while (1) {
     werase(dialog);
+    wattron(dialog, COLOR_PAIR(COLOR_BORDER));
     box(dialog, 0, 0);
+    wattroff(dialog, COLOR_PAIR(COLOR_BORDER));
 
     /* Title */
     wattron(dialog, A_BOLD);
@@ -183,7 +185,9 @@ void tui_show_goto_dialog(TuiState *state) {
   bool running = true;
   while (running) {
     werase(win);
+    wattron(win, COLOR_PAIR(COLOR_BORDER));
     box(win, 0, 0);
+    wattroff(win, COLOR_PAIR(COLOR_BORDER));
 
     wattron(win, A_BOLD);
     mvwprintw(win, 0, (width - 14) / 2, " Go to Row ");
@@ -562,7 +566,9 @@ void tui_show_schema(TuiState *state) {
 
   while (running) {
     werase(schema_win);
+    wattron(schema_win, COLOR_PAIR(COLOR_BORDER));
     box(schema_win, 0, 0);
+    wattroff(schema_win, COLOR_PAIR(COLOR_BORDER));
     wattron(schema_win, A_BOLD);
     mvwprintw(schema_win, 0, 2, " Schema: %s ", schema->name);
     wattroff(schema_win, A_BOLD);
@@ -728,18 +734,16 @@ void tui_show_schema(TuiState *state) {
     /* Footer */
     if (max_scroll > 0) {
       mvwprintw(schema_win, height - 2, 2,
-                "[Up/Down] Scroll  [q/Esc] Close  (%d/%d)", scroll_offset + 1,
+                "[Up/Down] Scroll  [Esc] Close  (%d/%d)", scroll_offset + 1,
                 max_scroll + 1);
     } else {
-      mvwprintw(schema_win, height - 2, 2, "[q/Esc] Close");
+      mvwprintw(schema_win, height - 2, 2, "[Esc] Close");
     }
 
     wrefresh(schema_win);
 
     int ch = wgetch(schema_win);
     switch (ch) {
-    case 'q':
-    case 'Q':
     case 27: /* Escape */
       running = false;
       break;
@@ -1110,7 +1114,9 @@ void tui_show_table_selector(TuiState *state) {
     return;
 
   keypad(menu_win, TRUE);
+  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
   box(menu_win, 0, 0);
+  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
 
   wattron(menu_win, A_BOLD);
   mvwprintw(menu_win, 0, 2, " Select Table ");
@@ -1294,7 +1300,9 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
     if (dialog) {
       /* Draw dialog */
       werase(dialog);
+      wattron(dialog, COLOR_PAIR(COLOR_BORDER));
       box(dialog, 0, 0);
+      wattroff(dialog, COLOR_PAIR(COLOR_BORDER));
 
       /* Title */
       wattron(dialog, A_BOLD);
