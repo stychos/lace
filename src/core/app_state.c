@@ -8,10 +8,12 @@
 
 #include "app_state.h"
 #include "history.h"
+#include "../async/async.h"
 #include "../db/db.h"
 #include "../util/str.h"
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Default page size for data loading */
 #define DEFAULT_PAGE_SIZE 500
@@ -131,6 +133,33 @@ void tab_init(Tab *tab) {
 void tab_free_data(Tab *tab) {
   if (!tab)
     return;
+
+  /* Cancel any pending background operation first to prevent use-after-free */
+  if (tab->bg_load_op) {
+    AsyncOperation *op = (AsyncOperation *)tab->bg_load_op;
+    async_cancel(op);
+
+    /* Wait for operation to complete - important for connection safety */
+    async_wait(op, 500);
+
+    /* Spin-wait if still running (shouldn't happen often) */
+    while (async_poll(op) == ASYNC_STATE_RUNNING) {
+      struct timespec ts = {0, 10000000L}; /* 10ms */
+      nanosleep(&ts, NULL);
+    }
+
+    /* Free result if any */
+    lace_mutex_lock(&op->mutex);
+    if (op->result) {
+      db_result_free((ResultSet *)op->result);
+      op->result = NULL;
+    }
+    lace_mutex_unlock(&op->mutex);
+
+    async_free(op);
+    free(op);
+    tab->bg_load_op = NULL;
+  }
 
   /* Free table data */
   free(tab->table_name);
@@ -484,10 +513,12 @@ void connection_free_data(Connection *conn) {
 
   /* Free history callback context and disconnect database */
   if (conn->conn) {
-    /* Free the history callback context before disconnecting */
+    /* Disable callback FIRST to prevent calls with freed context */
+    conn->conn->history_callback = NULL;
+
+    /* Now safe to free the context */
     free(conn->conn->history_context);
     conn->conn->history_context = NULL;
-    conn->conn->history_callback = NULL;
 
     db_disconnect(conn->conn);
     conn->conn = NULL;

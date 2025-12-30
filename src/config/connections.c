@@ -22,6 +22,11 @@
 
 #define CONNECTIONS_FILE "connections.json"
 
+/* Maximum folder nesting depth to prevent stack overflow in recursive functions.
+ * TODO: Revise this limit after testing with the connections editor to ensure
+ * it works well with deeply nested folder structures created by users. */
+#define MAX_FOLDER_DEPTH 100
+
 /* ============================================================================
  * UUID Generation
  * ============================================================================
@@ -611,14 +616,19 @@ bool connmgr_add_connection(ConnectionItem *folder, SavedConnection *conn) {
   return true;
 }
 
-static ConnectionItem *find_by_id_recursive(ConnectionItem *item, const char *id) {
+static ConnectionItem *find_by_id_recursive(ConnectionItem *item, const char *id,
+                                             int depth) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return NULL; /* Prevent stack overflow */
+
   if (item->type == CONN_ITEM_CONNECTION) {
     if (item->connection.id && str_eq(item->connection.id, id)) {
       return item;
     }
   } else {
     for (size_t i = 0; i < item->folder.num_children; i++) {
-      ConnectionItem *found = find_by_id_recursive(&item->folder.children[i], id);
+      ConnectionItem *found =
+          find_by_id_recursive(&item->folder.children[i], id, depth + 1);
       if (found)
         return found;
     }
@@ -629,7 +639,7 @@ static ConnectionItem *find_by_id_recursive(ConnectionItem *item, const char *id
 ConnectionItem *connmgr_find_by_id(ConnectionManager *mgr, const char *id) {
   if (!mgr || !id)
     return NULL;
-  return find_by_id_recursive(&mgr->root, id);
+  return find_by_id_recursive(&mgr->root, id, 0);
 }
 
 bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item) {
@@ -887,12 +897,15 @@ bool connmgr_add_folder(ConnectionItem *parent, ConnectionFolder *folder) {
  * ============================================================================
  */
 
-static size_t count_visible_recursive(ConnectionItem *item) {
+static size_t count_visible_recursive(ConnectionItem *item, int depth) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return 0; /* Prevent stack overflow */
+
   size_t count = 1; /* Count self */
 
   if (item->type == CONN_ITEM_FOLDER && item->folder.expanded) {
     for (size_t i = 0; i < item->folder.num_children; i++) {
-      count += count_visible_recursive(&item->folder.children[i]);
+      count += count_visible_recursive(&item->folder.children[i], depth + 1);
     }
   }
 
@@ -907,20 +920,26 @@ size_t connmgr_count_visible(ConnectionManager *mgr) {
   size_t count = 0;
   if (mgr->root.folder.expanded) {
     for (size_t i = 0; i < mgr->root.folder.num_children; i++) {
-      count += count_visible_recursive(&mgr->root.folder.children[i]);
+      count += count_visible_recursive(&mgr->root.folder.children[i], 0);
     }
   }
   return count;
 }
 
-static ConnectionItem *get_visible_item_recursive(ConnectionItem *item, size_t *idx, size_t target) {
+static ConnectionItem *get_visible_item_recursive(ConnectionItem *item,
+                                                   size_t *idx, size_t target,
+                                                   int depth) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return NULL; /* Prevent stack overflow */
+
   if (*idx == target)
     return item;
   (*idx)++;
 
   if (item->type == CONN_ITEM_FOLDER && item->folder.expanded) {
     for (size_t i = 0; i < item->folder.num_children; i++) {
-      ConnectionItem *found = get_visible_item_recursive(&item->folder.children[i], idx, target);
+      ConnectionItem *found = get_visible_item_recursive(
+          &item->folder.children[i], idx, target, depth + 1);
       if (found)
         return found;
     }
@@ -937,7 +956,8 @@ ConnectionItem *connmgr_get_visible_item(ConnectionManager *mgr, size_t target) 
   size_t idx = 0;
   if (mgr->root.folder.expanded) {
     for (size_t i = 0; i < mgr->root.folder.num_children; i++) {
-      ConnectionItem *found = get_visible_item_recursive(&mgr->root.folder.children[i], &idx, target);
+      ConnectionItem *found =
+          get_visible_item_recursive(&mgr->root.folder.children[i], &idx, target, 0);
       if (found)
         return found;
     }

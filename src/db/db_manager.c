@@ -11,6 +11,7 @@
 #include "db.h"
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -343,8 +344,17 @@ static int64_t extract_count_from_result(ResultSet *rs) {
     char *endptr;
     errno = 0;
     long long parsed = strtoll(val->text.data, &endptr, 10);
-    if (errno == 0 && endptr != val->text.data && *endptr == '\0')
-      return parsed;
+
+    /* Check for parsing errors and overflow */
+    if (errno == ERANGE || endptr == val->text.data || *endptr != '\0')
+      return -1;
+
+    /* Validate result fits in int64_t (should always be true for long long,
+     * but be defensive for portability) */
+    if (parsed < INT64_MIN || parsed > INT64_MAX)
+      return -1;
+
+    return (int64_t)parsed;
   }
   return -1;
 }
