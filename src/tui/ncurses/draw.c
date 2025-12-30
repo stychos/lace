@@ -719,15 +719,12 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   bool is_click = (event->mouse.action == UI_MOUSE_CLICK);
   bool is_scroll_up = (event->mouse.button == UI_MOUSE_SCROLL_UP);
   bool is_scroll_down = (event->mouse.button == UI_MOUSE_SCROLL_DOWN);
-  bool is_scroll_left = (event->mouse.button == UI_MOUSE_SCROLL_LEFT);
-  bool is_scroll_right = (event->mouse.button == UI_MOUSE_SCROLL_RIGHT);
-  bool is_hscroll = (is_scroll_left || is_scroll_right);
 
   /* Determine click location */
   int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
 
   /* Handle scroll wheel - scroll relative to cursor */
-  if (is_scroll_up || is_scroll_down || is_hscroll) {
+  if (is_scroll_up || is_scroll_down) {
     /* Only scroll in main area */
     if (mouse_x >= sidebar_width) {
       int scroll_amount = 3; /* Scroll 3 rows at a time */
@@ -745,33 +742,12 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         int results_start_y = 2 + editor_height + 1;
 
         if (mouse_y >= results_start_y) {
-          /* Scroll query results */
+          /* Scroll query results using helper that handles pagination */
           UITabState *scroll_ui = TUI_TAB_UI(state);
           if (scroll_ui)
             scroll_ui->query_focus_results = true;
-
-          if (is_hscroll) {
-            /* Horizontal scroll - move column */
-            size_t num_cols = scroll_tab->query_results->num_columns;
-            if (is_scroll_left) {
-              if (scroll_tab->query_result_col > 0) {
-                scroll_tab->query_result_col--;
-                if (scroll_tab->query_result_col < scroll_tab->query_result_scroll_col) {
-                  scroll_tab->query_result_scroll_col = scroll_tab->query_result_col;
-                }
-              }
-            } else {
-              if (scroll_tab->query_result_col + 1 < num_cols) {
-                scroll_tab->query_result_col++;
-                /* Adjust scroll to keep cursor visible */
-                /* Simple approach: just ensure cursor is visible */
-              }
-            }
-          } else {
-            /* Vertical scroll using helper that handles pagination */
-            int delta = is_scroll_up ? -scroll_amount : scroll_amount;
-            tui_query_scroll_results(state, delta);
-          }
+          int delta = is_scroll_up ? -scroll_amount : scroll_amount;
+          tui_query_scroll_results(state, delta);
           state->sidebar_focused = false;
           return true;
         }
@@ -785,24 +761,8 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         size_t scroll_row, scroll_col;
         vm_table_get_scroll(scroll_vm, &scroll_row, &scroll_col);
         size_t loaded_rows = vm_table_row_count(scroll_vm);
-        size_t num_cols = vm_table_col_count(scroll_vm);
 
-        if (is_hscroll) {
-          /* Horizontal scroll - move cursor column */
-          if (is_scroll_left) {
-            if (cursor_col > 0) {
-              cursor_col--;
-              if (cursor_col < scroll_col) {
-                scroll_col = cursor_col;
-              }
-            }
-          } else {
-            if (cursor_col + 1 < num_cols) {
-              cursor_col++;
-              /* Scroll adjustment handled below */
-            }
-          }
-        } else if (is_scroll_up) {
+        if (is_scroll_up) {
           /* Scroll up - move cursor up */
           if (cursor_row >= (size_t)scroll_amount) {
             cursor_row -= scroll_amount;
@@ -837,9 +797,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
         /* Sync to compatibility layer (temporary) */
         state->cursor_row = cursor_row;
-        state->cursor_col = cursor_col;
         state->scroll_row = scroll_row;
-        state->scroll_col = scroll_col;
 
         /* Check if we need to load more rows (pagination) */
         tui_check_load_more(state);

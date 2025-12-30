@@ -112,8 +112,6 @@ typedef enum {
   UI_MOUSE_RIGHT,
   UI_MOUSE_SCROLL_UP,
   UI_MOUSE_SCROLL_DOWN,
-  UI_MOUSE_SCROLL_LEFT,   /* Shift + scroll up */
-  UI_MOUSE_SCROLL_RIGHT,  /* Shift + scroll down */
 } UiMouseButton;
 
 /* Mouse action */
