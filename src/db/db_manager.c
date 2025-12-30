@@ -26,6 +26,14 @@
     }                                                                          \
   } while (0)
 
+/* Helper to invoke history callback if set */
+static inline void db_record_history(DbConnection *conn, const char *sql,
+                                     int type) {
+  if (conn && conn->history_callback && sql) {
+    conn->history_callback(conn->history_context, sql, type);
+  }
+}
+
 /* Global driver registry */
 static DbDriver *g_drivers[MAX_DRIVERS];
 static size_t g_num_drivers = 0;
@@ -272,7 +280,11 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
     SET_ERROR(err, "Not supported");
     return NULL;
   }
-  return conn->driver->query(conn, sql, err);
+  ResultSet *rs = conn->driver->query(conn, sql, err);
+  if (rs) {
+    db_record_history(conn, sql, DB_HISTORY_AUTO);
+  }
+  return rs;
 }
 
 int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
@@ -280,7 +292,11 @@ int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
     SET_ERROR(err, "Not supported");
     return -1;
   }
-  return conn->driver->exec(conn, sql, err);
+  int64_t affected = conn->driver->exec(conn, sql, err);
+  if (affected >= 0) {
+    db_record_history(conn, sql, DB_HISTORY_AUTO);
+  }
+  return affected;
 }
 
 ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
@@ -293,11 +309,22 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
 
   /* Use driver-specific implementation if available */
   if (conn->driver->query_page) {
-    return conn->driver->query_page(conn, table, offset, limit, order_by, desc,
-                                    err);
+    ResultSet *rs =
+        conn->driver->query_page(conn, table, offset, limit, order_by, desc,
+                                 err);
+    /* Record history for driver-specific query_page */
+    if (rs && conn->history_callback) {
+      char *sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu",
+                             table, limit, offset);
+      if (sql) {
+        db_record_history(conn, sql, DB_HISTORY_SELECT);
+        free(sql);
+      }
+    }
+    return rs;
   }
 
-  /* Fall back to generic implementation */
+  /* Fall back to generic implementation (db_query handles history) */
   return db_query_page_where(conn, table, offset, limit, NULL, order_by, desc,
                              err);
 }

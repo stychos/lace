@@ -29,6 +29,9 @@ static VmTable *get_vm_table(TuiState *state) {
   return state->vm_table;
 }
 
+/* Note: History recording is now handled automatically by the database layer
+ * via the history callback set up in app_add_connection(). */
+
 /* Primary key info for database operations */
 typedef struct {
   const char **col_names; /* Array of PK column names (not owned) */
@@ -327,9 +330,11 @@ void tui_confirm_edit(TuiState *state) {
   char *err = NULL;
   bool success = db_update_cell(conn, table, pk.col_names, pk.values,
                                 pk.count, col_name, &new_val, &err);
-  pk_info_free(&pk);
 
   if (success) {
+    /* History is recorded automatically by database layer */
+    pk_info_free(&pk);
+
     /* Update the local data - still needs direct access for in-place update */
     if (state->data && cursor_row < state->data->num_rows &&
         state->data->rows && state->data->rows[cursor_row].cells &&
@@ -348,6 +353,7 @@ void tui_confirm_edit(TuiState *state) {
       app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
     }
   } else {
+    pk_info_free(&pk);
     db_value_free(&new_val);
     tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
     free(err);
@@ -398,9 +404,11 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
   char *err = NULL;
   bool success = db_update_cell(conn, table, pk.col_names, pk.values,
                                 pk.count, col_name, &new_val, &err);
-  pk_info_free(&pk);
 
   if (success) {
+    /* History is recorded automatically by database layer */
+    pk_info_free(&pk);
+
     /* Update the local data - still needs direct access */
     if (state->data && cursor_row < state->data->num_rows &&
         state->data->rows && state->data->rows[cursor_row].cells &&
@@ -419,6 +427,7 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
       app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
     }
   } else {
+    pk_info_free(&pk);
     db_value_free(&new_val);
     tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
     free(err);
@@ -447,6 +456,8 @@ static bool delete_single_row(TuiState *state, size_t local_row, char **err) {
 
   bool success =
       db_delete_row(conn, table, pk.col_names, pk.values, pk.count, err);
+
+  /* History is recorded automatically by database layer */
   pk_info_free(&pk);
   return success;
 }

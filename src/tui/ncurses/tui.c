@@ -1523,6 +1523,9 @@ void tui_run(TuiState *state) {
       tui_show_goto_dialog(state);
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_CONNECT_DIALOG)) {
       tui_show_connect_dialog(state);
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_HISTORY)) {
+      tui_show_history_dialog(state);
+      tui_refresh(state);
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_HELP)) {
       /* Help opens config dialog on hotkeys tab */
       config_view_show_tab(state, CONFIG_TAB_HOTKEYS);

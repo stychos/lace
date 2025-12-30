@@ -95,7 +95,21 @@ struct DbConnection {
 
   /* Query limits */
   size_t max_result_rows; /* Maximum rows to return from queries (0 = use default) */
+
+  /* History recording callback (called after each successful query/exec)
+   * type values: 0=auto-detect, or HistoryEntryType from history.h */
+  void (*history_callback)(void *context, const char *sql, int type);
+  void *history_context;
 };
+
+/* History type hint for callback (matches HistoryEntryType) */
+#define DB_HISTORY_AUTO 0   /* Auto-detect from SQL */
+#define DB_HISTORY_QUERY 0  /* Manual query */
+#define DB_HISTORY_SELECT 1 /* Table open/refresh */
+#define DB_HISTORY_UPDATE 2 /* Cell edit */
+#define DB_HISTORY_DELETE 3 /* Row delete */
+#define DB_HISTORY_INSERT 4 /* Row insert */
+#define DB_HISTORY_DDL 5    /* CREATE/ALTER/DROP */
 
 /* Driver registration */
 void db_register_driver(DbDriver *driver);

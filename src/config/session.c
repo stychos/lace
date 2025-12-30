@@ -11,6 +11,7 @@
 #include "../tui/ncurses/render_helpers.h"
 #include "session.h"
 #include "connections.h"
+#include "../core/history.h"
 #include "../db/connstr.h"
 #include "../platform/platform.h"
 #include "../util/str.h"
@@ -51,6 +52,9 @@ static void set_error(char **err, const char *fmt, ...) {
   *err = str_vprintf(fmt, args);
   va_end(args);
 }
+
+/* Note: History recording is now handled automatically by the database layer
+ * via the history callback set up in app_add_connection(). */
 
 /* Column width constants (from tui_internal.h) */
 #define SESSION_MIN_COL_WIDTH 4
@@ -1194,6 +1198,20 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
   /* Store saved connection ID for session persistence */
   conn->saved_conn_id = str_dup(conn_id);
 
+  /* Load history from file if persistent mode is enabled */
+  if (state->app->config &&
+      state->app->config->general.history_mode == HISTORY_MODE_PERSISTENT &&
+      conn->history) {
+    /* Set connection ID in history */
+    if (!conn->history->connection_id) {
+      conn->history->connection_id = str_dup(conn_id);
+    }
+    /* Load existing history from file */
+    char *hist_err = NULL;
+    history_load(conn->history, &hist_err);
+    free(hist_err);  /* Ignore errors - file may not exist */
+  }
+
   /* Load tables for this connection */
   char *tables_err = NULL;
   conn->tables = db_list_tables(db_conn, &conn->num_tables, &tables_err);
@@ -1398,6 +1416,8 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       tab->data = db_query_page(conn->conn, stab->table_name, load_offset,
                                  page_size, order_by, false, &err);
     }
+    /* History is recorded automatically by database layer */
+
     free(order_by);
     free(where);
 

@@ -11,6 +11,7 @@
 
 #include "../../async/async.h"
 #include "../../config/config.h"
+#include "../../core/history.h"
 #include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include "views/config_view.h"
@@ -19,6 +20,36 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* Load history for a connection if in persistent mode */
+static void load_connection_history(TuiState *state, Connection *conn) {
+  if (!state || !state->app || !conn || !conn->saved_conn_id)
+    return;
+
+  /* Only load from file if persistent mode is enabled */
+  Config *config = state->app->config;
+  if (!config || config->general.history_mode != HISTORY_MODE_PERSISTENT)
+    return;
+
+  /* If history already exists (created in app_add_connection), just set the ID */
+  if (conn->history) {
+    if (!conn->history->connection_id) {
+      conn->history->connection_id = str_dup(conn->saved_conn_id);
+    }
+  } else {
+    /* Create history object with connection ID */
+    conn->history = history_create(conn->saved_conn_id);
+    if (!conn->history)
+      return;
+  }
+
+  /* Load from file (ignore errors - empty history is fine) */
+  char *err = NULL;
+  if (!history_load(conn->history, &err)) {
+    free(err);
+    /* History file may not exist yet - that's fine */
+  }
+}
 
 /* Helper to get VmTable, returns NULL if not valid */
 static VmTable *get_vm_table(TuiState *state) {
@@ -821,6 +852,9 @@ void tui_show_connect_dialog(TuiState *state) {
     app_conn->saved_conn_id = result.saved_conn_id;
     result.saved_conn_id = NULL; /* Ownership transferred */
 
+    /* Load query history if persistent mode enabled */
+    load_connection_history(state, app_conn);
+
     /* Load tables for this connection */
     size_t num_tables = 0;
     char **tables = db_list_tables(conn, &num_tables, &err);
@@ -966,6 +1000,9 @@ void tui_show_connect_dialog(TuiState *state) {
     /* Store saved connection ID for session persistence */
     app_conn->saved_conn_id = result.saved_conn_id;
     result.saved_conn_id = NULL; /* Ownership transferred */
+
+    /* Load query history if persistent mode enabled */
+    load_connection_history(state, app_conn);
 
     /* Load tables for this connection */
     size_t num_tables = 0;

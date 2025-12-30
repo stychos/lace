@@ -17,6 +17,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+/* Forward declaration for query history */
+typedef struct QueryHistory QueryHistory;
+
 /* Initial capacities for dynamic arrays */
 #define INITIAL_CONNECTION_CAPACITY 4
 #define INITIAL_WORKSPACE_CAPACITY 4
@@ -95,6 +98,9 @@ typedef struct {
   /* Tables list (from this connection) */
   char **tables;
   size_t num_tables;
+
+  /* Query history for this connection */
+  QueryHistory *history;
 } Connection;
 
 /* ============================================================================

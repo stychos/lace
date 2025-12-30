@@ -376,6 +376,7 @@ void tui_next_table(TuiState *state);
 void tui_prev_table(TuiState *state);
 void tui_show_schema(TuiState *state);
 void tui_show_connect_dialog(TuiState *state);
+void tui_show_history_dialog(TuiState *state);
 void tui_show_table_selector(TuiState *state);
 void tui_show_config(TuiState *state);
 

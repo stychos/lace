@@ -7,6 +7,7 @@
  */
 
 #include "config.h"
+#include "../core/history.h"
 #include "../platform/platform.h"
 #include "../tui/ncurses/backend.h"
 #include "../util/str.h"
@@ -74,6 +75,7 @@ static const char *def_connect_dialog[] = {"c", "F2"};
 static const char *def_help[] = {"?", "F1"};
 static const char *def_quit[] = {"q", "CTRL+X", "F10"};
 static const char *def_config[] = {"COMMA", "F11"};
+static const char *def_toggle_history[] = {"i"};
 
 /* Query Tab */
 static const char *def_open_query[] = {"p"};
@@ -117,6 +119,12 @@ static const char *def_editor_cancel[] = {"ESCAPE"};
 static const char *def_config_reset[] = {"r"};
 static const char *def_config_reset_all[] = {"R"};
 
+/* History Dialog */
+static const char *def_history_copy[] = {"ENTER"};
+static const char *def_history_delete[] = {"x", "DELETE"};
+static const char *def_history_clear[] = {"c"};
+static const char *def_history_close[] = {"ESCAPE", "q"};
+
 #define DEF_KEYS(arr) arr, sizeof(arr) / sizeof(arr[0])
 
 static const ActionMeta action_meta[HOTKEY_COUNT] = {
@@ -155,6 +163,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_TOGGLE_HEADER] = {"toggle_header", "Toggle header", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_header)},
     [HOTKEY_TOGGLE_STATUS] = {"toggle_status", "Toggle status bar", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_status)},
     [HOTKEY_CONNECT_DIALOG] = {"connect_dialog", "Connect dialog", HOTKEY_CAT_GENERAL, DEF_KEYS(def_connect_dialog)},
+    [HOTKEY_TOGGLE_HISTORY] = {"toggle_history", "Query history", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_history)},
     [HOTKEY_HELP] = {"help", "Hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help)},
     [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit)},
     [HOTKEY_CONFIG] = {"config", "Configuration", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config)},
@@ -198,6 +207,12 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     /* Config Editor */
     [HOTKEY_CONFIG_RESET] = {"config_reset", "Reset hotkey", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config_reset)},
     [HOTKEY_CONFIG_RESET_ALL] = {"config_reset_all", "Reset all hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config_reset_all)},
+
+    /* History Dialog */
+    [HOTKEY_HISTORY_COPY] = {"history_copy", "Copy to clipboard", HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_copy)},
+    [HOTKEY_HISTORY_DELETE] = {"history_delete", "Delete entry", HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_delete)},
+    [HOTKEY_HISTORY_CLEAR] = {"history_clear", "Clear all", HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_clear)},
+    [HOTKEY_HISTORY_CLOSE] = {"history_close", "Close dialog", HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close)},
 };
 
 /* Category names for display */
@@ -210,6 +225,7 @@ static const char *category_names[HOTKEY_CAT_COUNT] = {
     [HOTKEY_CAT_QUERY] = "Query Tab",
     [HOTKEY_CAT_CONNECT] = "Connect Dialog",
     [HOTKEY_CAT_EDITOR] = "Modal Editor",
+    [HOTKEY_CAT_HISTORY] = "Query History",
 };
 
 /* ============================================================================
@@ -327,8 +343,13 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
       return false;
     }
   } else if (strlen(str) == 1) {
-    /* Single character */
-    *key_code = (unsigned char)str[0];
+    /* Single character - convert to uppercase for CTRL combinations
+     * since render_translate_key returns uppercase for Ctrl+key */
+    char c = str[0];
+    if ((*mods & UI_MOD_CTRL) && c >= 'a' && c <= 'z') {
+      c = (char)(c - ('a' - 'A'));
+    }
+    *key_code = (unsigned char)c;
   } else {
     return false;
   }
@@ -407,6 +428,8 @@ Config *config_get_defaults(void) {
   config->general.max_result_rows = CONFIG_MAX_RESULT_ROWS_DEFAULT;
   config->general.auto_open_first_table = false;
   config->general.close_conn_on_last_tab = false;
+  config->general.history_mode = HISTORY_MODE_SESSION;  /* Default: session only */
+  config->general.history_max_size = HISTORY_SIZE_DEFAULT;
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -650,6 +673,20 @@ Config *config_load(char **error) {
     item = cJSON_GetObjectItem(general, "close_conn_on_last_tab");
     if (cJSON_IsBool(item))
       config->general.close_conn_on_last_tab = cJSON_IsTrue(item);
+
+    item = cJSON_GetObjectItem(general, "history_mode");
+    if (cJSON_IsNumber(item)) {
+      int val = item->valueint;
+      if (val >= HISTORY_MODE_OFF && val <= HISTORY_MODE_PERSISTENT)
+        config->general.history_mode = val;
+    }
+
+    item = cJSON_GetObjectItem(general, "history_max_size");
+    if (cJSON_IsNumber(item)) {
+      int val = item->valueint;
+      if (val >= HISTORY_SIZE_MIN && val <= HISTORY_SIZE_MAX)
+        config->general.history_max_size = val;
+    }
   }
 
   /* Parse hotkeys */
@@ -714,6 +751,8 @@ bool config_save(const Config *config, char **error) {
   cJSON_AddNumberToObject(general, "max_result_rows", config->general.max_result_rows);
   cJSON_AddBoolToObject(general, "auto_open_first_table", config->general.auto_open_first_table);
   cJSON_AddBoolToObject(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
+  cJSON_AddNumberToObject(general, "history_mode", config->general.history_mode);
+  cJSON_AddNumberToObject(general, "history_max_size", config->general.history_max_size);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */

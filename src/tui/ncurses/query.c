@@ -65,6 +65,9 @@ static bool query_load_prev_rows(TuiState *state, Tab *tab);
 static void query_trim_loaded_data(TuiState *state, Tab *tab);
 static void query_check_load_more(TuiState *state, Tab *tab);
 
+/* Note: History recording is now handled automatically by the database layer
+ * via the history callback set up in app_add_connection(). */
+
 /* Create a new query tab */
 bool tab_create_query(TuiState *state) {
   if (!state || !state->app)
@@ -850,6 +853,7 @@ static void query_execute(TuiState *state, const char *sql) {
         tui_set_status(state, "%zu rows returned",
                        tab->query_results->num_rows);
       }
+      /* History is recorded automatically by database layer */
     }
   } else {
     /* Execute non-SELECT query using async operation */
@@ -866,6 +870,7 @@ static void query_execute(TuiState *state, const char *sql) {
         tab->query_affected = op.count;
         tab->query_exec_success = true;
         tui_set_status(state, "%lld rows affected", (long long)op.count);
+        /* History is recorded automatically by database layer */
       } else if (op.state == ASYNC_STATE_ERROR) {
         err = op.error ? str_dup(op.error) : str_dup("Statement failed");
         tab->query_error = err;

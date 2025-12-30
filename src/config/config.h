@@ -39,6 +39,7 @@ typedef enum {
   HOTKEY_CAT_QUERY,      /* Query tab operations */
   HOTKEY_CAT_CONNECT,    /* Connection dialog operations */
   HOTKEY_CAT_EDITOR,     /* Modal editor operations */
+  HOTKEY_CAT_HISTORY,    /* History dialog operations */
   HOTKEY_CAT_COUNT
 } HotkeyCategory;
 
@@ -83,6 +84,7 @@ typedef enum {
   HOTKEY_TOGGLE_HEADER,
   HOTKEY_TOGGLE_STATUS,
   HOTKEY_CONNECT_DIALOG,
+  HOTKEY_TOGGLE_HISTORY,
   HOTKEY_HELP,
   HOTKEY_QUIT,
   HOTKEY_CONFIG,
@@ -127,6 +129,12 @@ typedef enum {
   HOTKEY_CONFIG_RESET,
   HOTKEY_CONFIG_RESET_ALL,
 
+  /* History Dialog (HOTKEY_CAT_HISTORY) */
+  HOTKEY_HISTORY_COPY,
+  HOTKEY_HISTORY_DELETE,
+  HOTKEY_HISTORY_CLEAR,
+  HOTKEY_HISTORY_CLOSE,
+
   HOTKEY_COUNT
 } HotkeyAction;
 
@@ -147,6 +155,8 @@ typedef struct {
   int max_result_rows;           /* Maximum rows returned by raw SQL queries */
   bool auto_open_first_table;    /* Open first table instead of connection tab */
   bool close_conn_on_last_tab;   /* Close connection when last tab closes */
+  int history_mode;              /* 0=off, 1=session, 2=persistent */
+  int history_max_size;          /* Max history entries per connection */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */

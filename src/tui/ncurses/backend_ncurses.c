@@ -131,7 +131,7 @@ static void translate_key(int ch, UiEvent *event) {
   /* Check for control keys (1-26 = Ctrl+A through Ctrl+Z) */
   if (ch >= 1 && ch <= 26) {
     event->key.mods = UI_MOD_CTRL;
-    event->key.key = 'a' + ch - 1;
+    event->key.key = 'A' + ch - 1;  /* Uppercase to match render_translate_key */
     return;
   }
 

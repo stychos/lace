@@ -7,12 +7,38 @@
  */
 
 #include "app_state.h"
+#include "history.h"
+#include "../db/db.h"
 #include "../util/str.h"
 #include <stdlib.h>
 #include <string.h>
 
 /* Default page size for data loading */
 #define DEFAULT_PAGE_SIZE 500
+
+/* ============================================================================
+ * History Callback for Database Layer
+ * ============================================================================
+ */
+
+/* Context for history callback - stored per connection */
+typedef struct {
+  Connection *conn;   /* App-level connection (owns history) */
+  int max_size;       /* Max history entries from config */
+} HistoryCallbackContext;
+
+/* Callback function invoked by db_query/db_exec after successful queries */
+static void history_callback(void *context, const char *sql, int type) {
+  HistoryCallbackContext *ctx = (HistoryCallbackContext *)context;
+  if (!ctx || !ctx->conn || !ctx->conn->history || !sql || !sql[0])
+    return;
+
+  /* Use auto-detect if type is DB_HISTORY_AUTO */
+  HistoryEntryType entry_type =
+      (type == DB_HISTORY_AUTO) ? history_detect_type(sql) : (HistoryEntryType)type;
+
+  history_add(ctx->conn->history, sql, entry_type, ctx->max_size);
+}
 
 /* ============================================================================
  * Dynamic Array Helpers
@@ -452,8 +478,17 @@ void connection_free_data(Connection *conn) {
   free(conn->saved_conn_id);
   conn->saved_conn_id = NULL;
 
-  /* Disconnect database */
+  /* Free query history */
+  history_free(conn->history);
+  conn->history = NULL;
+
+  /* Free history callback context and disconnect database */
   if (conn->conn) {
+    /* Free the history callback context before disconnecting */
+    free(conn->conn->history_context);
+    conn->conn->history_context = NULL;
+    conn->conn->history_callback = NULL;
+
     db_disconnect(conn->conn);
     conn->conn = NULL;
   }
@@ -477,6 +512,22 @@ Connection *app_add_connection(AppState *app, DbConnection *db_conn,
   conn->conn = db_conn;
   conn->connstr = str_dup(connstr);
 
+  /* Create history object and set up callback if history tracking is enabled */
+  if (app->config && app->config->general.history_mode != HISTORY_MODE_OFF) {
+    conn->history = history_create(NULL);  /* ID set later when known */
+
+    /* Set up history callback in the database connection */
+    if (conn->history && db_conn) {
+      HistoryCallbackContext *ctx = malloc(sizeof(HistoryCallbackContext));
+      if (ctx) {
+        ctx->conn = conn;
+        ctx->max_size = app->config->general.history_max_size;
+        db_conn->history_callback = history_callback;
+        db_conn->history_context = ctx;
+      }
+    }
+  }
+
   app->num_connections++;
 
   return conn;
@@ -495,6 +546,20 @@ bool app_close_connection(AppState *app, size_t index) {
     return false;
 
   Connection *conn = &app->connections[index];
+
+  /* Save history before closing if in persistent mode */
+  if (app->config && app->config->general.history_mode == HISTORY_MODE_PERSISTENT &&
+      conn->history && conn->saved_conn_id) {
+    /* Update connection ID in history before saving */
+    if (!conn->history->connection_id && conn->saved_conn_id) {
+      conn->history->connection_id = str_dup(conn->saved_conn_id);
+    }
+    char *err = NULL;
+    if (!history_save(conn->history, &err)) {
+      /* Log error but don't fail the close */
+      free(err);
+    }
+  }
 
   /* First, close all tabs that reference this connection.
    * Iterate backwards to avoid index shifting issues when closing tabs. */

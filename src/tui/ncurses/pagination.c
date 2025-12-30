@@ -9,6 +9,7 @@
  */
 
 #include "../../async/async.h"
+#include "../../config/config.h"
 #include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 #include <stdlib.h>
@@ -23,6 +24,9 @@ static VmTable *get_vm_table(TuiState *state) {
     return NULL;
   return state->vm_table;
 }
+
+/* Note: History recording is now handled automatically by the database layer
+ * via the history callback set up in app_add_connection(). */
 
 /* Calculate column widths based on data */
 void tui_calculate_column_widths(TuiState *state) {
@@ -357,6 +361,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     }
   }
 
+  /* History is recorded automatically by database layer */
   return true;
 }
 

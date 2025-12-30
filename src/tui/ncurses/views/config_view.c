@@ -8,6 +8,7 @@
 
 #include "config_view.h"
 #include "../../../config/config.h"
+#include "../../../core/history.h"
 #include "../../../util/str.h"
 #include "../render_helpers.h"
 #include <ctype.h>
@@ -36,11 +37,13 @@ typedef enum {
   FIELD_PAGE_SIZE,
   FIELD_PREFETCH_PAGES,
   FIELD_MAX_RESULT_ROWS,
+  FIELD_DELETE_CONFIRM,
+  FIELD_HISTORY_MODE,
+  FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
   FIELD_CLOSE_CONN_LAST_TAB,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
-  FIELD_DELETE_CONFIRM,
   FIELD_COUNT
 } GeneralField;
 
@@ -201,6 +204,37 @@ static void draw_number_field(WINDOW *win, int y, int x, const char *label,
   }
 }
 
+/* Draw an option selector (cycles through options) */
+static void draw_option(WINDOW *win, int y, int x, const char *label,
+                        const char *value, bool selected, bool focused) {
+  mvwprintw(win, y, x, "%s: ", label);
+  int val_x = x + (int)strlen(label) + 2;
+
+  if (selected && focused) {
+    wattron(win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
+  }
+
+  mvwprintw(win, y, val_x, "< %s >", value);
+
+  if (selected && focused) {
+    wattroff(win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
+  }
+}
+
+/* Get history mode name */
+static const char *history_mode_name(int mode) {
+  switch (mode) {
+  case HISTORY_MODE_OFF:
+    return "Off";
+  case HISTORY_MODE_SESSION:
+    return "Session only";
+  case HISTORY_MODE_PERSISTENT:
+    return "Persistent";
+  default:
+    return "Unknown";
+  }
+}
+
 /* ============================================================================
  * General Tab Drawing
  * ============================================================================
@@ -229,9 +263,9 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
 
   y++;
 
-  /* Section: Data Loading */
+  /* Section: Data Handling */
   wattron(win, A_BOLD | A_UNDERLINE);
-  mvwprintw(win, y++, start_x, "Data Loading");
+  mvwprintw(win, y++, start_x, "Data Handling");
   wattroff(win, A_BOLD | A_UNDERLINE);
   y++;
 
@@ -259,6 +293,31 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                     ds->selected_field == FIELD_MAX_RESULT_ROWS, focused,
                     ds->editing_number, &ds->num_input, &cursor_x_temp);
   if (ds->selected_field == FIELD_MAX_RESULT_ROWS && ds->editing_number) {
+    *cursor_y = y - 1;
+    *cursor_x = cursor_x_temp;
+  }
+
+  draw_checkbox(win, y++, start_x + 2, "Confirm before delete",
+                ds->config->general.delete_confirmation,
+                ds->selected_field == FIELD_DELETE_CONFIRM, focused);
+
+  y++;
+
+  /* Section: Query History */
+  wattron(win, A_BOLD | A_UNDERLINE);
+  mvwprintw(win, y++, start_x, "Query History");
+  wattroff(win, A_BOLD | A_UNDERLINE);
+  y++;
+
+  draw_option(win, y++, start_x + 2, "History mode",
+              history_mode_name(ds->config->general.history_mode),
+              ds->selected_field == FIELD_HISTORY_MODE, focused);
+
+  draw_number_field(win, y++, start_x + 2, "Max entries",
+                    ds->config->general.history_max_size,
+                    ds->selected_field == FIELD_HISTORY_MAX_SIZE, focused,
+                    ds->editing_number, &ds->num_input, &cursor_x_temp);
+  if (ds->selected_field == FIELD_HISTORY_MAX_SIZE && ds->editing_number) {
     *cursor_y = y - 1;
     *cursor_x = cursor_x_temp;
   }
@@ -295,10 +354,6 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                 ds->config->general.quit_confirmation,
                 ds->selected_field == FIELD_QUIT_CONFIRM, focused);
 
-  draw_checkbox(win, y++, start_x + 2, "Confirm before delete",
-                ds->config->general.delete_confirmation,
-                ds->selected_field == FIELD_DELETE_CONFIRM, focused);
-
   y += 2;
 
   /* Help text */
@@ -323,13 +378,14 @@ typedef struct {
 static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_items) {
   size_t count = 0;
 
-  /* Display order: General, Navigation, Table, Editor, Query, Filters, Sidebar, Connect */
+  /* Display order: General, Navigation, Table, Editor, Query, History, Filters, Sidebar, Connect */
   static const HotkeyCategory display_order[] = {
       HOTKEY_CAT_GENERAL,
       HOTKEY_CAT_NAVIGATION,
       HOTKEY_CAT_TABLE,
       HOTKEY_CAT_EDITOR,
       HOTKEY_CAT_QUERY,
+      HOTKEY_CAT_HISTORY,
       HOTKEY_CAT_FILTERS,
       HOTKEY_CAT_SIDEBAR,
       HOTKEY_CAT_CONNECT,
@@ -346,8 +402,12 @@ static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_ite
       count++;
     }
 
-    /* Add actions in this category */
+    /* Add actions in this category (exclude non-configurable actions) */
     for (HotkeyAction a = 0; a < HOTKEY_COUNT; a++) {
+      /* Skip config reset actions - they're not user-configurable */
+      if (a == HOTKEY_CONFIG_RESET || a == HOTKEY_CONFIG_RESET_ALL)
+        continue;
+
       if (hotkey_get_category(a) == cat && count < max_items) {
         items[count].is_header = false;
         items[count].category = cat;
@@ -423,8 +483,8 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
   size_t total_items = build_hotkey_display_list(items,
                                                   HOTKEY_COUNT + HOTKEY_CAT_COUNT);
 
-  /* Calculate visible range */
-  int visible_rows = height - 4;
+  /* Calculate visible range (leave 2 lines: 1 empty + 1 for help text) */
+  int visible_rows = height - 2;
   if (visible_rows < 1)
     visible_rows = 1;
 
@@ -495,18 +555,12 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
     wattroff(win, A_DIM);
   }
 
-  /* Help text with configurable keys */
-  y = start_y + height - 4;
-  char *reset_key = hotkey_get_display(ds->config, HOTKEY_CONFIG_RESET);
-  char *reset_all_key = hotkey_get_display(ds->config, HOTKEY_CONFIG_RESET_ALL);
+  /* Help text (hardcoded keys - not configurable) */
+  /* Empty line is naturally created by visible_rows = height - 2 */
   wattron(win, A_DIM);
-  mvwprintw(win, y++, start_x, "Enter: Edit keys  %s: Reset to default",
-            reset_key && reset_key[0] ? reset_key : "r");
-  mvwprintw(win, y++, start_x, "%s: Reset all hotkeys to defaults",
-            reset_all_key && reset_all_key[0] ? reset_all_key : "R");
+  mvwprintw(win, start_y + height - 1, start_x,
+            "+/=: Add key  -/x/Del: Remove key  r/Bksp: Reset");
   wattroff(win, A_DIM);
-  free(reset_key);
-  free(reset_all_key);
 }
 
 /* ============================================================================
@@ -654,210 +708,109 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
 }
 
 /* ============================================================================
- * Hotkey Edit Dialog
+ * Hotkey Capture Helper
  * ============================================================================
  */
 
-static bool show_hotkey_edit_dialog(WINDOW *parent, Config *config,
-                                    HotkeyAction action) {
+/* Capture a single key and return the key string. Returns NULL if cancelled.
+ * Caller must free the returned string. */
+static char *capture_hotkey(WINDOW *parent) {
   int parent_h, parent_w;
   getmaxyx(parent, parent_h, parent_w);
   (void)parent_h;
 
-  const char *action_name = hotkey_action_name(action);
-  HotkeyBinding *binding = &config->hotkeys[action];
-
-  int dlg_height = 12 + (int)binding->num_keys;
-  if (dlg_height > 20)
-    dlg_height = 20;
-  int dlg_width = 50;
-  if (dlg_width > parent_w - 10)
-    dlg_width = parent_w - 10;
-
-  int dlg_y = 3;
+  int dlg_width = 40;
+  int dlg_height = 7;
+  int dlg_y = 5;
   int dlg_x = (parent_w - dlg_width) / 2;
 
   WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
   if (!dlg)
-    return false;
+    return NULL;
 
   keypad(dlg, TRUE);
 
-  size_t highlight = 0;
-  bool modified = false;
-  bool running = true;
+  werase(dlg);
+  wattron(dlg, COLOR_PAIR(COLOR_BORDER));
+  box(dlg, 0, 0);
+  wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+  wattron(dlg, A_BOLD);
+  mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key ");
+  wattroff(dlg, A_BOLD);
+  mvwprintw(dlg, 3, (dlg_width - 20) / 2, "Press a key to add...");
+  mvwprintw(dlg, 4, (dlg_width - 18) / 2, "(Esc to cancel)");
+  wrefresh(dlg);
 
-  while (running) {
-    werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+  int ch = wgetch(dlg);
+  UiEvent event;
+  render_translate_key(ch, &event);
 
-    /* Title */
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - 12) / 2, " Edit Keys ");
-    wattroff(dlg, A_BOLD);
+  delwin(dlg);
+  touchwin(parent);
+  wrefresh(parent);
 
-    /* Action name */
-    mvwprintw(dlg, 2, 2, "Action: %s", action_name);
+  if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+    return NULL;
+  }
 
-    /* Current keys */
-    mvwprintw(dlg, 4, 2, "Current bindings:");
+  /* Build key string from event */
+  char key_str[32] = {0};
+  size_t pos = 0;
 
-    int y = 5;
-    for (size_t i = 0; i < binding->num_keys && y < dlg_height - 5; i++) {
-      bool selected = (i == highlight);
+  if (event.key.mods & UI_MOD_CTRL) {
+    pos += (size_t)snprintf(key_str + pos, sizeof(key_str) - pos, "CTRL+");
+  }
 
-      if (selected) {
-        wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
-      }
-
-      mvwprintw(dlg, y, 4, "%-30s", binding->keys[i] ? binding->keys[i] : "");
-
-      if (selected) {
-        wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
-      }
-      y++;
+  if (event.key.is_special) {
+    const char *key_name = NULL;
+    switch (event.key.key) {
+    case UI_KEY_UP: key_name = "UP"; break;
+    case UI_KEY_DOWN: key_name = "DOWN"; break;
+    case UI_KEY_LEFT: key_name = "LEFT"; break;
+    case UI_KEY_RIGHT: key_name = "RIGHT"; break;
+    case UI_KEY_HOME: key_name = "HOME"; break;
+    case UI_KEY_END: key_name = "END"; break;
+    case UI_KEY_PAGEUP: key_name = "PGUP"; break;
+    case UI_KEY_PAGEDOWN: key_name = "PGDN"; break;
+    case UI_KEY_ENTER: key_name = "ENTER"; break;
+    case UI_KEY_TAB: key_name = "TAB"; break;
+    case UI_KEY_BACKSPACE: key_name = "BACKSPACE"; break;
+    case UI_KEY_DELETE: key_name = "DELETE"; break;
+    case UI_KEY_F1: key_name = "F1"; break;
+    case UI_KEY_F2: key_name = "F2"; break;
+    case UI_KEY_F3: key_name = "F3"; break;
+    case UI_KEY_F4: key_name = "F4"; break;
+    case UI_KEY_F5: key_name = "F5"; break;
+    case UI_KEY_F6: key_name = "F6"; break;
+    case UI_KEY_F7: key_name = "F7"; break;
+    case UI_KEY_F8: key_name = "F8"; break;
+    case UI_KEY_F9: key_name = "F9"; break;
+    case UI_KEY_F10: key_name = "F10"; break;
+    case UI_KEY_F11: key_name = "F11"; break;
+    case UI_KEY_F12: key_name = "F12"; break;
+    default: break;
     }
-
-    if (binding->num_keys == 0) {
-      wattron(dlg, A_DIM);
-      mvwprintw(dlg, y++, 4, "(no bindings)");
-      wattroff(dlg, A_DIM);
+    if (key_name) {
+      snprintf(key_str + pos, sizeof(key_str) - pos, "%s", key_name);
     }
-
-    /* Help */
-    y = dlg_height - 4;
-    wattron(dlg, A_DIM);
-    mvwprintw(dlg, y++, 2, "a: Add key  x/Del: Delete  r: Reset");
-    mvwprintw(dlg, y++, 2, "Enter/Esc: Close");
-    wattroff(dlg, A_DIM);
-
-    wrefresh(dlg);
-
-    int ch = wgetch(dlg);
-    UiEvent event;
-    render_translate_key(ch, &event);
-
-    if (render_event_is_special(&event, UI_KEY_ESCAPE) ||
-        render_event_is_special(&event, UI_KEY_ENTER)) {
-      running = false;
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      if (highlight > 0)
-        highlight--;
-    } else if (render_event_is_special(&event, UI_KEY_DOWN)) {
-      if (binding->num_keys > 0 && highlight < binding->num_keys - 1)
-        highlight++;
-    } else if (render_event_get_char(&event) == 'a') {
-      /* Add key - show capture dialog */
-      werase(dlg);
-      wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-      box(dlg, 0, 0);
-      wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
-      wattron(dlg, A_BOLD);
-      mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key ");
-      wattroff(dlg, A_BOLD);
-      mvwprintw(dlg, dlg_height / 2, (dlg_width - 20) / 2,
-                "Press a key to add...");
-      mvwprintw(dlg, dlg_height / 2 + 2, (dlg_width - 18) / 2,
-                "(Esc to cancel)");
-      wrefresh(dlg);
-
-      int new_ch = wgetch(dlg);
-      UiEvent new_event;
-      render_translate_key(new_ch, &new_event);
-
-      if (!render_event_is_special(&new_event, UI_KEY_ESCAPE)) {
-        /* Build key string from event using safe string operations */
-        char key_str[32] = {0};
-        size_t pos = 0;
-
-        if (new_event.key.mods & UI_MOD_CTRL) {
-          pos += (size_t)snprintf(key_str + pos, sizeof(key_str) - pos, "CTRL+");
-        }
-
-        if (new_event.key.is_special) {
-          const char *key_name = NULL;
-          switch (new_event.key.key) {
-          case UI_KEY_UP: key_name = "UP"; break;
-          case UI_KEY_DOWN: key_name = "DOWN"; break;
-          case UI_KEY_LEFT: key_name = "LEFT"; break;
-          case UI_KEY_RIGHT: key_name = "RIGHT"; break;
-          case UI_KEY_HOME: key_name = "HOME"; break;
-          case UI_KEY_END: key_name = "END"; break;
-          case UI_KEY_PAGEUP: key_name = "PGUP"; break;
-          case UI_KEY_PAGEDOWN: key_name = "PGDN"; break;
-          case UI_KEY_ENTER: key_name = "ENTER"; break;
-          case UI_KEY_TAB: key_name = "TAB"; break;
-          case UI_KEY_BACKSPACE: key_name = "BACKSPACE"; break;
-          case UI_KEY_DELETE: key_name = "DELETE"; break;
-          case UI_KEY_F1: key_name = "F1"; break;
-          case UI_KEY_F2: key_name = "F2"; break;
-          case UI_KEY_F3: key_name = "F3"; break;
-          case UI_KEY_F4: key_name = "F4"; break;
-          case UI_KEY_F5: key_name = "F5"; break;
-          case UI_KEY_F6: key_name = "F6"; break;
-          case UI_KEY_F7: key_name = "F7"; break;
-          case UI_KEY_F8: key_name = "F8"; break;
-          case UI_KEY_F9: key_name = "F9"; break;
-          case UI_KEY_F10: key_name = "F10"; break;
-          case UI_KEY_F11: key_name = "F11"; break;
-          case UI_KEY_F12: key_name = "F12"; break;
-          default: break;
-          }
-          if (key_name && pos < sizeof(key_str) - 1) {
-            snprintf(key_str + pos, sizeof(key_str) - pos, "%s", key_name);
-          }
-        } else {
-          /* Regular character - preserve case (n and N are different keys) */
-          char c = (char)new_event.key.key;
-          if (c >= 32 && c < 127 && pos < sizeof(key_str) - 1) {
-            key_str[pos] = c;
-            key_str[pos + 1] = '\0';
-          }
-        }
-
-        if (key_str[0]) {
-          /* Check for conflicts */
-          HotkeyAction conflict =
-              hotkey_find_conflict(config, action, key_str);
-          if (conflict != HOTKEY_COUNT) {
-            /* Show conflict warning */
-            werase(dlg);
-            wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-            box(dlg, 0, 0);
-            wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
-            wattron(dlg, COLOR_PAIR(COLOR_ERROR));
-            mvwprintw(dlg, dlg_height / 2, 2, "Key '%s' conflicts with '%s'",
-                      key_str, hotkey_action_name(conflict));
-            wattroff(dlg, COLOR_PAIR(COLOR_ERROR));
-            wrefresh(dlg);
-            napms(1500);
-          } else {
-            hotkey_add_key(config, action, key_str);
-            modified = true;
-          }
-        }
-      }
-    } else if (render_event_get_char(&event) == 'x' ||
-               render_event_is_special(&event, UI_KEY_DELETE)) {
-      /* Delete selected key */
-      if (binding->num_keys > 0 && highlight < binding->num_keys) {
-        hotkey_remove_key(config, action, highlight);
-        if (highlight > 0 && highlight >= binding->num_keys)
-          highlight--;
-        modified = true;
-      }
-    } else if (render_event_get_char(&event) == 'r') {
-      /* Reset to defaults */
-      config_reset_hotkey(config, action);
-      highlight = 0;
-      modified = true;
+  } else if (event.key.key > 0) {
+    /* Regular character */
+    char c = (char)event.key.key;
+    if (c == ' ') {
+      snprintf(key_str + pos, sizeof(key_str) - pos, "SPACE");
+    } else if (c == ',') {
+      snprintf(key_str + pos, sizeof(key_str) - pos, "COMMA");
+    } else {
+      key_str[pos] = c;
+      key_str[pos + 1] = '\0';
     }
   }
 
-  delwin(dlg);
-  return modified;
+  if (key_str[0] == '\0') {
+    return NULL;
+  }
+
+  return str_dup(key_str);
 }
 
 /* ============================================================================
@@ -881,6 +834,8 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
         ds->config->general.prefetch_pages = value;
       } else if (ds->selected_field == FIELD_MAX_RESULT_ROWS) {
         ds->config->general.max_result_rows = value;
+      } else if (ds->selected_field == FIELD_HISTORY_MAX_SIZE) {
+        ds->config->general.history_max_size = value;
       }
 
       ds->editing_number = false;
@@ -944,6 +899,16 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_DELETE_CONFIRM:
       ds->config->general.delete_confirmation =
           !ds->config->general.delete_confirmation;
+      break;
+    case FIELD_HISTORY_MODE:
+      /* Cycle through history modes: Off -> Session -> Persistent -> Off */
+      ds->config->general.history_mode =
+          (ds->config->general.history_mode + 1) % 3;
+      break;
+    case FIELD_HISTORY_MAX_SIZE:
+      number_input_init(&ds->num_input, ds->config->general.history_max_size,
+                        HISTORY_SIZE_MIN, HISTORY_SIZE_MAX);
+      ds->editing_number = true;
       break;
     case FIELD_AUTO_OPEN_TABLE:
       ds->config->general.auto_open_first_table =
@@ -1016,31 +981,48 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  /* Edit hotkey - only for action rows, not headers */
-  if (render_event_is_special(event, UI_KEY_ENTER)) {
+  /* Add hotkey - hardcoded +/= */
+  if (key_char == '+' || key_char == '=') {
     HotkeyAction action = get_action_at_display_index(ds->hotkey_highlight);
     if (action < HOTKEY_COUNT) {
-      show_hotkey_edit_dialog(ds->dialog_win, ds->config, action);
+      char *new_key = capture_hotkey(ds->dialog_win);
+      if (new_key) {
+        if (hotkey_add_key(ds->config, action, new_key)) {
+          free(ds->success_msg);
+          ds->success_msg = str_printf("Added key: %s", new_key);
+        }
+        free(new_key);
+      }
     }
     return true;
   }
 
-  /* Reset single hotkey - only for action rows (uses configurable hotkey) */
-  if (hotkey_matches(ds->config, event, HOTKEY_CONFIG_RESET)) {
+  /* Remove hotkey - hardcoded -/x/Delete */
+  if (key_char == '-' || key_char == 'x' ||
+      render_event_is_special(event, UI_KEY_DELETE)) {
+    HotkeyAction action = get_action_at_display_index(ds->hotkey_highlight);
+    if (action < HOTKEY_COUNT) {
+      HotkeyBinding *binding = &ds->config->hotkeys[action];
+      if (binding->num_keys > 0) {
+        /* Remove the last key */
+        char *removed = str_dup(binding->keys[binding->num_keys - 1]);
+        hotkey_remove_key(ds->config, action, binding->num_keys - 1);
+        free(ds->success_msg);
+        ds->success_msg = str_printf("Removed key: %s", removed ? removed : "");
+        free(removed);
+      }
+    }
+    return true;
+  }
+
+  /* Reset single hotkey - hardcoded r/Backspace */
+  if (key_char == 'r' || render_event_is_special(event, UI_KEY_BACKSPACE)) {
     HotkeyAction action = get_action_at_display_index(ds->hotkey_highlight);
     if (action < HOTKEY_COUNT) {
       config_reset_hotkey(ds->config, action);
       free(ds->success_msg);
       ds->success_msg = str_dup("Hotkey reset to default");
     }
-    return true;
-  }
-
-  /* Reset all hotkeys (uses configurable hotkey) */
-  if (hotkey_matches(ds->config, event, HOTKEY_CONFIG_RESET_ALL)) {
-    config_reset_all_hotkeys(ds->config);
-    free(ds->success_msg);
-    ds->success_msg = str_dup("All hotkeys reset to defaults");
     return true;
   }
 
@@ -1205,6 +1187,8 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
           ds.config->general.prefetch_pages = value;
         } else if (ds.selected_field == FIELD_MAX_RESULT_ROWS) {
           ds.config->general.max_result_rows = value;
+        } else if (ds.selected_field == FIELD_HISTORY_MAX_SIZE) {
+          ds.config->general.history_max_size = value;
         }
         ds.editing_number = false;
       }
