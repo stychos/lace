@@ -31,7 +31,8 @@ static void load_connection_history(TuiState *state, Connection *conn) {
   if (!config || config->general.history_mode != HISTORY_MODE_PERSISTENT)
     return;
 
-  /* If history already exists (created in app_add_connection), just set the ID */
+  /* If history already exists (created in app_add_connection), just set the ID
+   */
   if (conn->history) {
     if (!conn->history->connection_id) {
       conn->history->connection_id = str_dup(conn->saved_conn_id);
@@ -609,8 +610,7 @@ void tui_show_schema(TuiState *state) {
     int line = 0;
 
     /* Calculate total lines needed */
-    int total_lines =
-        2 + (int)schema->num_columns; /* Columns header + data */
+    int total_lines = 2 + (int)schema->num_columns; /* Columns header + data */
     if (schema->num_indexes > 0) {
       total_lines += 2 + (int)schema->num_indexes; /* Indexes section */
     }
@@ -912,7 +912,8 @@ void tui_show_connect_dialog(TuiState *state) {
     if (auto_open) {
       /* Create a table tab with the first table */
       size_t table_idx = 0;
-      Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, app_conn->tables[table_idx]);
+      Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx,
+                                            app_conn->tables[table_idx]);
       if (tab) {
         tab->table_index = table_idx;
         tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
@@ -941,11 +942,13 @@ void tui_show_connect_dialog(TuiState *state) {
         state->sidebar_focused = false;
 
         tui_set_status(state, "Connected in workspace %zu - %s",
-                       state->app->current_workspace + 1, app_conn->tables[table_idx]);
+                       state->app->current_workspace + 1,
+                       app_conn->tables[table_idx]);
       }
     } else {
       /* Create a connection tab (don't auto-load any table) */
-      Tab *tab = workspace_create_connection_tab(ws, conn_index, result.connstr);
+      Tab *tab =
+          workspace_create_connection_tab(ws, conn_index, result.connstr);
       if (tab) {
         /* Show sidebar for table selection */
         state->sidebar_visible = true;
@@ -964,7 +967,8 @@ void tui_show_connect_dialog(TuiState *state) {
           tui_set_status(state, "Connected in workspace %zu (no tables)",
                          state->app->current_workspace + 1);
         } else {
-          tui_set_status(state, "Connected in workspace %zu (%s) - Select a table",
+          tui_set_status(state,
+                         "Connected in workspace %zu (%s) - Select a table",
                          state->app->current_workspace + 1, conn->database);
         }
       }
@@ -1048,7 +1052,8 @@ void tui_show_connect_dialog(TuiState *state) {
       if (auto_open) {
         /* Create a table tab with the first table */
         size_t table_idx = 0;
-        Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, app_conn->tables[table_idx]);
+        Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx,
+                                              app_conn->tables[table_idx]);
         if (tab) {
           tab->table_index = table_idx;
           tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
@@ -1082,7 +1087,8 @@ void tui_show_connect_dialog(TuiState *state) {
         }
       } else {
         /* Create a connection tab (don't auto-load any table) */
-        Tab *tab = workspace_create_connection_tab(ws, conn_index, result.connstr);
+        Tab *tab =
+            workspace_create_connection_tab(ws, conn_index, result.connstr);
         if (tab) {
           /* Initialize UITabState - new connection shows sidebar focused */
           tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
@@ -1259,7 +1265,6 @@ void tui_show_table_selector(TuiState *state) {
   touchwin(stdscr);
   tui_refresh(state);
 }
-
 
 /* Spinner characters for processing dialog */
 static const char SPINNER_CHARS[] = {'|', '/', '-', '\\'};

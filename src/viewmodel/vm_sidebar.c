@@ -93,7 +93,8 @@ static void rebuild_filtered(VmSidebar *vm) {
  * ============================================================================
  */
 
-VmSidebar *vm_sidebar_create(AppState *app, const VmSidebarCallbacks *callbacks) {
+VmSidebar *vm_sidebar_create(AppState *app,
+                             const VmSidebarCallbacks *callbacks) {
   VmSidebar *vm = calloc(1, sizeof(VmSidebar));
   if (!vm)
     return NULL;
@@ -219,9 +220,7 @@ void vm_sidebar_select_prev(VmSidebar *vm) {
   notify_change(vm, VM_SIDEBAR_CHANGE_SELECTION);
 }
 
-void vm_sidebar_select_first(VmSidebar *vm) {
-  vm_sidebar_set_selection(vm, 0);
-}
+void vm_sidebar_select_first(VmSidebar *vm) { vm_sidebar_set_selection(vm, 0); }
 
 void vm_sidebar_select_last(VmSidebar *vm) {
   if (!vm || vm->filtered_count == 0)
@@ -350,9 +349,7 @@ void vm_sidebar_filter_backspace(VmSidebar *vm) {
   notify_change(vm, VM_SIDEBAR_CHANGE_FILTER | VM_SIDEBAR_CHANGE_TABLES);
 }
 
-void vm_sidebar_filter_clear(VmSidebar *vm) {
-  vm_sidebar_set_filter(vm, NULL);
-}
+void vm_sidebar_filter_clear(VmSidebar *vm) { vm_sidebar_set_filter(vm, NULL); }
 
 bool vm_sidebar_filter_active(const VmSidebar *vm) {
   return vm && vm->filter_active;
@@ -391,9 +388,7 @@ void vm_sidebar_refresh(VmSidebar *vm) {
  * ============================================================================
  */
 
-bool vm_sidebar_is_loading(const VmSidebar *vm) {
-  return vm && vm->loading;
-}
+bool vm_sidebar_is_loading(const VmSidebar *vm) { return vm && vm->loading; }
 
 const char *vm_sidebar_connection_name(const VmSidebar *vm) {
   if (!vm || !vm->connection)

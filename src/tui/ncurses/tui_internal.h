@@ -185,26 +185,26 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event);
 
 /* Parameters for drawing a result grid */
 typedef struct {
-  WINDOW *win;           /* Window to draw in */
-  int start_y;           /* Starting Y position in window */
-  int start_x;           /* Starting X position in window */
-  int height;            /* Available height for grid */
-  int width;             /* Available width for grid */
-  ResultSet *data;       /* Data to display */
-  int *col_widths;       /* Column widths array */
-  size_t num_col_widths; /* Number of column widths */
-  size_t cursor_row;     /* Current cursor row */
-  size_t cursor_col;     /* Current cursor column */
-  size_t scroll_row;     /* Vertical scroll offset */
-  size_t scroll_col;     /* Horizontal scroll offset */
+  WINDOW *win;             /* Window to draw in */
+  int start_y;             /* Starting Y position in window */
+  int start_x;             /* Starting X position in window */
+  int height;              /* Available height for grid */
+  int width;               /* Available width for grid */
+  ResultSet *data;         /* Data to display */
+  int *col_widths;         /* Column widths array */
+  size_t num_col_widths;   /* Number of column widths */
+  size_t cursor_row;       /* Current cursor row */
+  size_t cursor_col;       /* Current cursor column */
+  size_t scroll_row;       /* Vertical scroll offset */
+  size_t scroll_col;       /* Horizontal scroll offset */
   size_t selection_offset; /* Offset for selection calculation (global row) */
-  bool is_focused;       /* Whether this grid has focus */
-  bool is_editing;       /* Whether editing is active */
-  char *edit_buffer;     /* Edit buffer content */
-  size_t edit_pos;       /* Cursor position in edit buffer */
-  bool show_header_line; /* Whether to draw top border line */
-  SortEntry *sort_entries;  /* Array of sort columns (NULL if none) */
-  size_t num_sort_entries;  /* Number of sort columns */
+  bool is_focused;         /* Whether this grid has focus */
+  bool is_editing;         /* Whether editing is active */
+  char *edit_buffer;       /* Edit buffer content */
+  size_t edit_pos;         /* Cursor position in edit buffer */
+  bool show_header_line;   /* Whether to draw top border line */
+  SortEntry *sort_entries; /* Array of sort columns (NULL if none) */
+  size_t num_sort_entries; /* Number of sort columns */
 } GridDrawParams;
 
 /* Draw a result set grid (used by table view and query results) */

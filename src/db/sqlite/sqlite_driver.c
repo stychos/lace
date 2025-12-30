@@ -43,6 +43,9 @@ static bool sqlite_update_cell(DbConnection *conn, const char *table,
 static bool sqlite_delete_row(DbConnection *conn, const char *table,
                               const char **pk_cols, const DbValue *pk_vals,
                               size_t num_pk_cols, char **err);
+static bool sqlite_insert_row(DbConnection *conn, const char *table,
+                              const ColumnDef *cols, const DbValue *vals,
+                              size_t num_cols, char **err);
 static void sqlite_free_result(ResultSet *rs);
 static void sqlite_free_schema(TableSchema *schema);
 static void sqlite_free_string_list(char **list, size_t count);
@@ -69,7 +72,7 @@ DbDriver sqlite_driver = {
     .exec = sqlite_exec,
     .query_page = sqlite_query_page,
     .update_cell = sqlite_update_cell,
-    .insert_row = NULL,
+    .insert_row = sqlite_insert_row,
     .delete_row = sqlite_delete_row,
     .begin_transaction = NULL,
     .commit = NULL,
@@ -521,7 +524,7 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
    */
   for (size_t j = 0; j < schema->num_columns; j++) {
     if (schema->columns[j].primary_key && schema->columns[j].type_name &&
-        strstr(schema->columns[j].type_name, "INTEGER")) {
+        strcasestr(schema->columns[j].type_name, "INTEGER")) {
       schema->columns[j].auto_increment = true;
     }
   }
@@ -593,7 +596,8 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
                     index->columns[c] = dup;
                     c++;
                   }
-                  /* On str_dup failure, skip this column rather than storing NULL */
+                  /* On str_dup failure, skip this column rather than storing
+                   * NULL */
                 }
                 index->num_columns = c;
               }
@@ -751,7 +755,7 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
 
   bool oom = false;
   size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
-                                               : (size_t)MAX_RESULT_ROWS;
+                                              : (size_t)MAX_RESULT_ROWS;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     /* Limit result set size to prevent unbounded memory growth */
     if (rs->num_rows >= max_rows) {
@@ -866,8 +870,8 @@ static ResultSet *sqlite_query_page(DbConnection *conn, const char *table,
         return NULL;
       }
       sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                       escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
-                       offset);
+                       escaped_table, escaped_order, desc ? "DESC" : "ASC",
+                       limit, offset);
       free(escaped_order);
     }
   } else {
@@ -1132,6 +1136,171 @@ static bool sqlite_delete_row(DbConnection *conn, const char *table,
   if (rc != SQLITE_DONE) {
     if (err)
       *err = str_printf("Delete failed: %s", sqlite3_errmsg(data->db));
+    return false;
+  }
+
+  return true;
+}
+
+static bool sqlite_insert_row(DbConnection *conn, const char *table,
+                              const ColumnDef *cols, const DbValue *vals,
+                              size_t num_cols, char **err) {
+  if (!conn || !table || !cols || !vals || num_cols == 0) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return false;
+  }
+
+  SqliteData *data = conn->driver_data;
+
+  /* Escape table name */
+  char *escaped_table = str_escape_identifier_dquote(table);
+  if (!escaped_table) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  /* Build column list and placeholders, skipping auto_increment cols that
+   * weren't edited */
+  char *col_list = str_dup("");
+  char *val_list = str_dup("");
+  size_t param_count = 0;
+
+  /* Track which original columns map to which parameters */
+  size_t *col_to_param = calloc(num_cols, sizeof(size_t));
+  if (!col_list || !val_list || !col_to_param) {
+    free(col_list);
+    free(val_list);
+    free(col_to_param);
+    free(escaped_table);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  for (size_t i = 0; i < num_cols; i++) {
+    /* Skip auto_increment columns with NULL values (let DB generate) */
+    if (cols[i].auto_increment && vals[i].is_null) {
+      col_to_param[i] = 0; /* Not included */
+      continue;
+    }
+
+    char *escaped_col = str_escape_identifier_dquote(cols[i].name);
+    if (!escaped_col) {
+      free(col_list);
+      free(val_list);
+      free(col_to_param);
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
+    }
+
+    char *new_col_list;
+    char *new_val_list;
+    if (param_count == 0) {
+      new_col_list = str_printf("%s", escaped_col);
+      new_val_list = str_printf("?");
+    } else {
+      new_col_list = str_printf("%s, %s", col_list, escaped_col);
+      new_val_list = str_printf("%s, ?", val_list);
+    }
+    free(escaped_col);
+    free(col_list);
+    free(val_list);
+    col_list = new_col_list;
+    val_list = new_val_list;
+
+    if (!col_list || !val_list) {
+      free(col_list);
+      free(val_list);
+      free(col_to_param);
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
+    }
+
+    param_count++;
+    col_to_param[i] = param_count; /* 1-indexed parameter number */
+  }
+
+  /* Handle case where all columns are auto_increment */
+  char *sql;
+  if (param_count == 0) {
+    sql = str_printf("INSERT INTO %s DEFAULT VALUES", escaped_table);
+  } else {
+    sql = str_printf("INSERT INTO %s (%s) VALUES (%s)", escaped_table, col_list,
+                     val_list);
+  }
+  free(escaped_table);
+  free(col_list);
+  free(val_list);
+
+  if (!sql) {
+    free(col_to_param);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  int rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
+  free(sql);
+
+  if (rc != SQLITE_OK) {
+    free(col_to_param);
+    if (err)
+      *err = str_printf("Failed to prepare statement: %s",
+                        sqlite3_errmsg(data->db));
+    return false;
+  }
+
+  /* Bind values */
+  for (size_t i = 0; i < num_cols; i++) {
+    if (col_to_param[i] == 0)
+      continue; /* Skipped column */
+
+    int param_idx = (int)col_to_param[i];
+    const DbValue *val = &vals[i];
+
+    if (val->is_null) {
+      sqlite3_bind_null(stmt, param_idx);
+    } else {
+      switch (val->type) {
+      case DB_TYPE_INT:
+        sqlite3_bind_int64(stmt, param_idx, val->int_val);
+        break;
+      case DB_TYPE_FLOAT:
+        sqlite3_bind_double(stmt, param_idx, val->float_val);
+        break;
+      case DB_TYPE_TEXT:
+        sqlite3_bind_text(stmt, param_idx, val->text.data, (int)val->text.len,
+                          SQLITE_TRANSIENT);
+        break;
+      case DB_TYPE_BLOB:
+        sqlite3_bind_blob(stmt, param_idx, val->blob.data, (int)val->blob.len,
+                          SQLITE_TRANSIENT);
+        break;
+      case DB_TYPE_BOOL:
+        sqlite3_bind_int(stmt, param_idx, val->bool_val ? 1 : 0);
+        break;
+      default:
+        sqlite3_bind_null(stmt, param_idx);
+        break;
+      }
+    }
+  }
+
+  free(col_to_param);
+
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+
+  if (rc != SQLITE_DONE) {
+    if (err)
+      *err = str_printf("Insert failed: %s", sqlite3_errmsg(data->db));
     return false;
   }
 

@@ -64,11 +64,11 @@ typedef struct {
  */
 
 typedef struct {
-  size_t *rows;     /* Array of selected row indices */
-  size_t count;     /* Number of selected rows */
-  size_t capacity;  /* Allocated capacity */
-  size_t anchor;    /* Anchor row for shift-select */
-  bool anchor_set;  /* Is anchor valid */
+  size_t *rows;    /* Array of selected row indices */
+  size_t count;    /* Number of selected rows */
+  size_t capacity; /* Allocated capacity */
+  size_t anchor;   /* Anchor row for shift-select */
+  bool anchor_set; /* Is anchor valid */
 } VmSelection;
 
 /* ============================================================================
@@ -77,14 +77,14 @@ typedef struct {
  */
 
 typedef struct {
-  bool active;        /* Currently editing */
-  size_t row;         /* Row being edited */
-  size_t col;         /* Column being edited */
-  char *buffer;       /* Edit buffer */
-  size_t buffer_len;  /* Buffer content length */
-  size_t buffer_cap;  /* Buffer capacity */
-  size_t cursor_pos;  /* Cursor position in buffer */
-  char *original;     /* Original value (for cancel) */
+  bool active;       /* Currently editing */
+  size_t row;        /* Row being edited */
+  size_t col;        /* Column being edited */
+  char *buffer;      /* Edit buffer */
+  size_t buffer_len; /* Buffer content length */
+  size_t buffer_cap; /* Buffer capacity */
+  size_t cursor_pos; /* Cursor position in buffer */
+  char *original;    /* Original value (for cancel) */
 } VmEditState;
 
 /* ============================================================================
@@ -94,8 +94,8 @@ typedef struct {
 
 struct VmTable {
   /* Source data (references, not owned) */
-  Tab *tab;              /* Underlying tab (contains ResultSet, schema) */
-  AppState *app;         /* App state for connection access */
+  Tab *tab;      /* Underlying tab (contains ResultSet, schema) */
+  AppState *app; /* App state for connection access */
 
   /* Callbacks */
   VmTableCallbacks callbacks;
@@ -116,8 +116,8 @@ struct VmTable {
   bool sort_active;
 
   /* UI hints for native controls */
-  size_t visible_first_row;  /* First visible row (for lazy loading) */
-  size_t visible_row_count;  /* Number of visible rows */
+  size_t visible_first_row; /* First visible row (for lazy loading) */
+  size_t visible_row_count; /* Number of visible rows */
 };
 
 /* ============================================================================
@@ -143,7 +143,7 @@ void vm_table_bind(VmTable *vm, Tab *tab);
 /* Row/column counts */
 size_t vm_table_row_count(const VmTable *vm);
 size_t vm_table_col_count(const VmTable *vm);
-size_t vm_table_total_rows(const VmTable *vm);  /* Total including unloaded */
+size_t vm_table_total_rows(const VmTable *vm); /* Total including unloaded */
 
 /* Column info */
 const char *vm_table_column_name(const VmTable *vm, size_t col);

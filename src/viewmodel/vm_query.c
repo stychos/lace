@@ -302,7 +302,7 @@ void vm_query_delete_selection(VmQuery *vm) {
   vm->selection.active = false;
 
   notify_change(vm, VM_QUERY_CHANGE_TEXT | VM_QUERY_CHANGE_CURSOR |
-                    VM_QUERY_CHANGE_SELECTION);
+                        VM_QUERY_CHANGE_SELECTION);
 }
 
 void vm_query_delete_line(VmQuery *vm) {
@@ -386,8 +386,8 @@ void vm_query_move_cursor(VmQuery *vm, int delta) {
 void vm_query_move_left(VmQuery *vm) {
   if (vm->selection.active) {
     /* Move to start of selection */
-    size_t start = vm->selection.start < vm->selection.end
-                       ? vm->selection.start : vm->selection.end;
+    size_t start = vm->selection.start < vm->selection.end ? vm->selection.start
+                                                           : vm->selection.end;
     vm->selection.active = false;
     vm_query_set_cursor(vm, start);
     notify_change(vm, VM_QUERY_CHANGE_SELECTION);
@@ -399,8 +399,8 @@ void vm_query_move_left(VmQuery *vm) {
 void vm_query_move_right(VmQuery *vm) {
   if (vm->selection.active) {
     /* Move to end of selection */
-    size_t end = vm->selection.start > vm->selection.end
-                     ? vm->selection.start : vm->selection.end;
+    size_t end = vm->selection.start > vm->selection.end ? vm->selection.start
+                                                         : vm->selection.end;
     vm->selection.active = false;
     vm_query_set_cursor(vm, end);
     notify_change(vm, VM_QUERY_CHANGE_SELECTION);
@@ -536,7 +536,8 @@ void vm_query_end(VmQuery *vm) {
     return;
 
   size_t cursor = vm->tab->query_cursor;
-  size_t line_end = find_line_end(vm->tab->query_text, vm->tab->query_len, cursor);
+  size_t line_end =
+      find_line_end(vm->tab->query_text, vm->tab->query_len, cursor);
 
   vm->selection.active = false;
   vm_query_set_cursor(vm, line_end);
@@ -560,8 +561,10 @@ void vm_query_doc_end(VmQuery *vm) {
 
 void vm_query_get_cursor_pos(const VmQuery *vm, size_t *line, size_t *col) {
   if (!vm_query_valid(vm)) {
-    if (line) *line = 0;
-    if (col) *col = 0;
+    if (line)
+      *line = 0;
+    if (col)
+      *col = 0;
     return;
   }
 
@@ -602,13 +605,17 @@ void vm_query_set_cursor_pos(VmQuery *vm, size_t line, size_t col) {
 
 void vm_query_get_scroll(const VmQuery *vm, size_t *line, size_t *col) {
   if (!vm_query_valid(vm)) {
-    if (line) *line = 0;
-    if (col) *col = 0;
+    if (line)
+      *line = 0;
+    if (col)
+      *col = 0;
     return;
   }
 
-  if (line) *line = vm->tab->query_scroll_line;
-  if (col) *col = vm->tab->query_scroll_col;
+  if (line)
+    *line = vm->tab->query_scroll_line;
+  if (col)
+    *col = vm->tab->query_scroll_col;
 }
 
 void vm_query_set_scroll(VmQuery *vm, size_t line, size_t col) {
@@ -658,8 +665,10 @@ bool vm_query_has_selection(const VmQuery *vm) {
 
 void vm_query_get_selection(const VmQuery *vm, size_t *start, size_t *end) {
   if (!vm || !vm->selection.active) {
-    if (start) *start = 0;
-    if (end) *end = 0;
+    if (start)
+      *start = 0;
+    if (end)
+      *end = 0;
     return;
   }
 
@@ -672,8 +681,10 @@ void vm_query_get_selection(const VmQuery *vm, size_t *start, size_t *end) {
     e = tmp;
   }
 
-  if (start) *start = s;
-  if (end) *end = e;
+  if (start)
+    *start = s;
+  if (end)
+    *end = e;
 }
 
 char *vm_query_get_selected_text(const VmQuery *vm) {
@@ -699,8 +710,10 @@ void vm_query_set_selection(VmQuery *vm, size_t start, size_t end) {
     return;
 
   size_t len = vm->tab->query_len;
-  if (start > len) start = len;
-  if (end > len) end = len;
+  if (start > len)
+    start = len;
+  if (end > len)
+    end = len;
 
   vm->selection.start = start;
   vm->selection.end = end;
@@ -806,7 +819,8 @@ size_t vm_query_line_count(const VmQuery *vm) {
 
 const char *vm_query_line_at(const VmQuery *vm, size_t line, size_t *length) {
   if (!vm_query_valid(vm)) {
-    if (length) *length = 0;
+    if (length)
+      *length = 0;
     return "";
   }
 
@@ -816,7 +830,8 @@ const char *vm_query_line_at(const VmQuery *vm, size_t line, size_t *length) {
   size_t line_start = offset_for_line(text, len, line);
   size_t line_end = find_line_end(text, len, line_start);
 
-  if (length) *length = line_end - line_start;
+  if (length)
+    *length = line_end - line_start;
 
   return text + line_start;
 }

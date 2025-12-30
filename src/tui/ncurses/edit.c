@@ -328,8 +328,8 @@ void tui_confirm_edit(TuiState *state) {
 
   /* Attempt to update */
   char *err = NULL;
-  bool success = db_update_cell(conn, table, pk.col_names, pk.values,
-                                pk.count, col_name, &new_val, &err);
+  bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
+                                col_name, &new_val, &err);
 
   if (success) {
     /* History is recorded automatically by database layer */
@@ -402,8 +402,8 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
 
   /* Attempt to update */
   char *err = NULL;
-  bool success = db_update_cell(conn, table, pk.col_names, pk.values,
-                                pk.count, col_name, &new_val, &err);
+  bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
+                                col_name, &new_val, &err);
 
   if (success) {
     /* History is recorded automatically by database layer */
@@ -495,9 +495,8 @@ void tui_delete_row(TuiState *state) {
   size_t rows_to_delete = bulk_delete ? num_selected : 1;
 
   /* Check if confirmation is required */
-  bool need_confirmation =
-      state->app && state->app->config &&
-      state->app->config->general.delete_confirmation;
+  bool need_confirmation = state->app && state->app->config &&
+                           state->app->config->general.delete_confirmation;
 
   /* Show confirmation if needed */
   if (need_confirmation) {
@@ -519,7 +518,8 @@ void tui_delete_row(TuiState *state) {
   size_t failed_count = 0;
 
   if (bulk_delete) {
-    /* Delete selected rows - iterate in reverse to avoid index shifting issues */
+    /* Delete selected rows - iterate in reverse to avoid index shifting issues
+     */
     /* First, collect global indices and sort in descending order */
     size_t *to_delete = malloc(num_selected * sizeof(size_t));
     if (!to_delete) {
@@ -584,8 +584,8 @@ void tui_delete_row(TuiState *state) {
   /* Show result message */
   if (deleted_count > 0) {
     if (failed_count > 0) {
-      tui_set_status(state, "%zu row(s) deleted, %zu failed",
-                     deleted_count, failed_count);
+      tui_set_status(state, "%zu row(s) deleted, %zu failed", deleted_count,
+                     failed_count);
     } else if (deleted_count == 1) {
       tui_set_status(state, "Row deleted");
     } else {
@@ -766,5 +766,558 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Consume all other keys when editing */
+  return true;
+}
+
+/* ===== Add Row Mode ===== */
+
+/* Helper to ensure cursor column is visible in add-row mode */
+static void add_row_ensure_col_visible(TuiState *state) {
+  if (!state || !state->main_win || !state->adding_row)
+    return;
+
+  int win_rows, win_cols;
+  getmaxyx(state->main_win, win_rows, win_cols);
+  (void)win_rows;
+
+  size_t cursor_col = state->new_row_cursor_col;
+  size_t scroll_col = state->scroll_col;
+  size_t num_cols = state->new_row_num_cols;
+
+  /* Find visible range */
+  size_t first_visible = scroll_col;
+  size_t last_visible = scroll_col;
+  int x = 1;
+  for (size_t col = scroll_col; col < num_cols; col++) {
+    int width = tui_get_column_width(state, col);
+    if (x + width + 3 > win_cols)
+      break;
+    x += width + 1;
+    last_visible = col;
+  }
+
+  if (cursor_col < first_visible) {
+    state->scroll_col = cursor_col;
+  } else if (cursor_col > last_visible) {
+    /* Scroll right to show cursor */
+    state->scroll_col = cursor_col;
+    x = 1;
+    while (state->scroll_col > 0) {
+      int width = tui_get_column_width(state, state->scroll_col);
+      if (x + width + 3 > win_cols)
+        break;
+      x += width + 1;
+      if (state->scroll_col == cursor_col)
+        break;
+      state->scroll_col--;
+    }
+  }
+}
+
+/* Start add-row mode - create a temporary row for editing */
+bool tui_start_add_row(TuiState *state) {
+  if (!state || state->adding_row || state->editing)
+    return false;
+
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
+    return false;
+
+  const TableSchema *schema = vm_table_schema(vm);
+  if (!schema || schema->num_columns == 0)
+    return false;
+
+  size_t num_cols = schema->num_columns;
+
+  /* Allocate arrays for new row data */
+  state->new_row_values = calloc(num_cols, sizeof(DbValue));
+  state->new_row_placeholders = calloc(num_cols, sizeof(bool));
+  state->new_row_auto_increment = calloc(num_cols, sizeof(bool));
+  state->new_row_edited = calloc(num_cols, sizeof(bool));
+
+  if (!state->new_row_values || !state->new_row_placeholders ||
+      !state->new_row_auto_increment || !state->new_row_edited) {
+    free(state->new_row_values);
+    free(state->new_row_placeholders);
+    free(state->new_row_auto_increment);
+    free(state->new_row_edited);
+    state->new_row_values = NULL;
+    state->new_row_placeholders = NULL;
+    state->new_row_auto_increment = NULL;
+    state->new_row_edited = NULL;
+    return false;
+  }
+
+  /* Initialize each column value */
+  for (size_t i = 0; i < num_cols; i++) {
+    const ColumnDef *col = &schema->columns[i];
+
+    /* Track auto_increment status */
+    state->new_row_auto_increment[i] = col->auto_increment;
+
+    if (col->auto_increment) {
+      /* Auto-increment: show placeholder, will be skipped on INSERT */
+      state->new_row_values[i] = db_value_null();
+      state->new_row_placeholders[i] = true;
+    } else if (col->default_val && col->default_val[0]) {
+      /* Has default: show default value as placeholder */
+      state->new_row_values[i] = db_value_text(col->default_val);
+      state->new_row_placeholders[i] = true;
+    } else if (col->nullable) {
+      /* Nullable: initialize as NULL */
+      state->new_row_values[i] = db_value_null();
+      state->new_row_placeholders[i] = false;
+    } else {
+      /* Required: initialize as empty string */
+      state->new_row_values[i] = db_value_text("");
+      state->new_row_placeholders[i] = false;
+    }
+    state->new_row_edited[i] = false;
+  }
+
+  state->new_row_num_cols = num_cols;
+  state->new_row_cursor_col = 0;
+  state->new_row_edit_buffer = NULL;
+  state->new_row_edit_len = 0;
+  state->new_row_edit_pos = 0;
+  state->new_row_cell_editing = false;
+  state->adding_row = true;
+
+  tui_set_status(state,
+                 "Adding row - Enter to edit, Esc to cancel, F2 to save");
+  return true;
+}
+
+/* Cancel add-row mode and clean up */
+void tui_cancel_add_row(TuiState *state) {
+  if (!state)
+    return;
+
+  if (state->new_row_values) {
+    for (size_t i = 0; i < state->new_row_num_cols; i++) {
+      db_value_free(&state->new_row_values[i]);
+    }
+    free(state->new_row_values);
+  }
+  free(state->new_row_placeholders);
+  free(state->new_row_auto_increment);
+  free(state->new_row_edited);
+  free(state->new_row_edit_buffer);
+
+  state->new_row_values = NULL;
+  state->new_row_placeholders = NULL;
+  state->new_row_auto_increment = NULL;
+  state->new_row_edited = NULL;
+  state->new_row_edit_buffer = NULL;
+  state->new_row_num_cols = 0;
+  state->new_row_cursor_col = 0;
+  state->new_row_edit_len = 0;
+  state->new_row_edit_pos = 0;
+  state->new_row_cell_editing = false;
+  state->adding_row = false;
+
+  curs_set(0); /* Hide cursor */
+  tui_set_status(state, "Add row cancelled");
+}
+
+/* Persist the new row to the database */
+bool tui_confirm_add_row(TuiState *state) {
+  if (!state || !state->adding_row)
+    return false;
+
+  VmTable *vm = get_vm_table(state);
+  if (!vm)
+    return false;
+
+  DbConnection *conn = vm_table_connection(vm);
+  const char *table = vm_table_name(vm);
+  const TableSchema *schema = vm_table_schema(vm);
+
+  if (!conn || !table || !schema) {
+    tui_set_error(state, "Cannot add row: invalid table state");
+    return false;
+  }
+
+  /* Prepare column definitions and values for insert */
+  char *err = NULL;
+  bool success =
+      db_insert_row(conn, table, schema->columns, state->new_row_values,
+                    state->new_row_num_cols, &err);
+
+  if (success) {
+    /* Clean up add-row state */
+    if (state->new_row_values) {
+      for (size_t i = 0; i < state->new_row_num_cols; i++) {
+        db_value_free(&state->new_row_values[i]);
+      }
+      free(state->new_row_values);
+    }
+    free(state->new_row_placeholders);
+    free(state->new_row_auto_increment);
+    free(state->new_row_edited);
+    free(state->new_row_edit_buffer);
+
+    state->new_row_values = NULL;
+    state->new_row_placeholders = NULL;
+    state->new_row_auto_increment = NULL;
+    state->new_row_edited = NULL;
+    state->new_row_edit_buffer = NULL;
+    state->new_row_num_cols = 0;
+    state->new_row_cursor_col = 0;
+    state->new_row_edit_len = 0;
+    state->new_row_edit_pos = 0;
+    state->new_row_cell_editing = false;
+    state->adding_row = false;
+
+    curs_set(0);
+    tui_set_status(state, "Row added");
+
+    /* Mark other tabs with the same table as needing refresh */
+    Tab *tab = TUI_TAB(state);
+    if (tab) {
+      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
+    }
+
+    /* Reload table data to show the new row */
+    state->total_rows++;
+    tui_load_rows_at(state, state->loaded_offset);
+
+    return true;
+  } else {
+    tui_set_error(state, "Insert failed: %s", err ? err : "unknown error");
+    free(err);
+    return false;
+  }
+}
+
+/* Start editing a cell in the new row */
+void tui_add_row_start_cell_edit(TuiState *state, size_t col) {
+  if (!state || !state->adding_row || col >= state->new_row_num_cols)
+    return;
+
+  state->new_row_cursor_col = col;
+
+  /* Get current value as string */
+  const DbValue *val = &state->new_row_values[col];
+  char *content = NULL;
+
+  if (state->new_row_placeholders[col] && !state->new_row_edited[col]) {
+    /* Placeholder - start with empty buffer */
+    content = str_dup("");
+  } else if (val->is_null) {
+    content = str_dup("");
+  } else {
+    content = db_value_to_string(val);
+    if (!content)
+      content = str_dup("");
+  }
+
+  free(state->new_row_edit_buffer);
+  state->new_row_edit_buffer = content;
+  state->new_row_edit_len = content ? strlen(content) : 0;
+  state->new_row_edit_pos = state->new_row_edit_len;
+  state->new_row_cell_editing = true;
+
+  curs_set(1); /* Show cursor */
+}
+
+/* Confirm cell edit in new row */
+void tui_add_row_confirm_cell(TuiState *state) {
+  if (!state || !state->adding_row || !state->new_row_cell_editing)
+    return;
+
+  size_t col = state->new_row_cursor_col;
+  if (col >= state->new_row_num_cols)
+    return;
+
+  /* Update the value */
+  db_value_free(&state->new_row_values[col]);
+
+  if (!state->new_row_edit_buffer || state->new_row_edit_buffer[0] == '\0') {
+    state->new_row_values[col] = db_value_null();
+  } else {
+    state->new_row_values[col] = db_value_text(state->new_row_edit_buffer);
+  }
+
+  /* Mark as edited (no longer placeholder) */
+  state->new_row_edited[col] = true;
+  state->new_row_placeholders[col] = false;
+
+  /* Clean up edit state */
+  free(state->new_row_edit_buffer);
+  state->new_row_edit_buffer = NULL;
+  state->new_row_edit_len = 0;
+  state->new_row_edit_pos = 0;
+  state->new_row_cell_editing = false;
+
+  curs_set(0);
+}
+
+/* Cancel cell edit in new row */
+void tui_add_row_cancel_cell(TuiState *state) {
+  if (!state || !state->adding_row)
+    return;
+
+  free(state->new_row_edit_buffer);
+  state->new_row_edit_buffer = NULL;
+  state->new_row_edit_len = 0;
+  state->new_row_edit_pos = 0;
+  state->new_row_cell_editing = false;
+
+  curs_set(0);
+}
+
+/* Handle input in add-row mode */
+bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
+  if (!state || !state->adding_row || !event)
+    return false;
+
+  Config *cfg = state->app ? state->app->config : NULL;
+  size_t num_cols = state->new_row_num_cols;
+
+  /* If editing a cell, handle cell-level input first */
+  if (state->new_row_cell_editing) {
+    size_t len = state->new_row_edit_len;
+    int key_char = render_event_get_char(event);
+
+    /* Escape - cancel cell edit */
+    if (render_event_is_special(event, UI_KEY_ESCAPE)) {
+      tui_add_row_cancel_cell(state);
+      return true;
+    }
+
+    /* Enter - confirm cell edit */
+    if (render_event_is_special(event, UI_KEY_ENTER)) {
+      tui_add_row_confirm_cell(state);
+      return true;
+    }
+
+    /* Tab - confirm and move to next column */
+    if (render_event_is_special(event, UI_KEY_TAB)) {
+      tui_add_row_confirm_cell(state);
+      if (state->new_row_cursor_col < num_cols - 1) {
+        state->new_row_cursor_col++;
+      }
+      return true;
+    }
+
+    /* Left arrow - move cursor left */
+    if (render_event_is_special(event, UI_KEY_LEFT)) {
+      if (state->new_row_edit_pos > 0) {
+        state->new_row_edit_pos--;
+      }
+      return true;
+    }
+
+    /* Right arrow - move cursor right */
+    if (render_event_is_special(event, UI_KEY_RIGHT)) {
+      if (state->new_row_edit_pos < len) {
+        state->new_row_edit_pos++;
+      }
+      return true;
+    }
+
+    /* Home - go to start */
+    if (render_event_is_special(event, UI_KEY_HOME)) {
+      state->new_row_edit_pos = 0;
+      return true;
+    }
+
+    /* End - go to end */
+    if (render_event_is_special(event, UI_KEY_END)) {
+      state->new_row_edit_pos = len;
+      return true;
+    }
+
+    /* Backspace - delete character before cursor */
+    if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
+      if (state->new_row_edit_pos > 0 && state->new_row_edit_buffer) {
+        memmove(state->new_row_edit_buffer + state->new_row_edit_pos - 1,
+                state->new_row_edit_buffer + state->new_row_edit_pos,
+                len - state->new_row_edit_pos + 1);
+        state->new_row_edit_pos--;
+        state->new_row_edit_len--;
+      }
+      return true;
+    }
+
+    /* Delete - delete character at cursor */
+    if (render_event_is_special(event, UI_KEY_DELETE)) {
+      if (state->new_row_edit_pos < len && state->new_row_edit_buffer) {
+        memmove(state->new_row_edit_buffer + state->new_row_edit_pos,
+                state->new_row_edit_buffer + state->new_row_edit_pos + 1,
+                len - state->new_row_edit_pos);
+        state->new_row_edit_len--;
+      }
+      return true;
+    }
+
+    /* Printable character - insert at cursor */
+    if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+      if (len > SIZE_MAX - 2)
+        return true;
+      size_t new_len = len + 2;
+      char *new_buf = realloc(state->new_row_edit_buffer, new_len);
+      if (!new_buf)
+        return true;
+      state->new_row_edit_buffer = new_buf;
+      if (len == 0) {
+        state->new_row_edit_buffer[0] = (char)key_char;
+        state->new_row_edit_buffer[1] = '\0';
+        state->new_row_edit_pos = 1;
+      } else {
+        memmove(state->new_row_edit_buffer + state->new_row_edit_pos + 1,
+                state->new_row_edit_buffer + state->new_row_edit_pos,
+                len - state->new_row_edit_pos + 1);
+        state->new_row_edit_buffer[state->new_row_edit_pos] = (char)key_char;
+        state->new_row_edit_pos++;
+      }
+      state->new_row_edit_len++;
+      return true;
+    }
+
+    /* Consume all other keys when editing cell */
+    return true;
+  }
+
+  /* Not editing a cell - handle row-level navigation */
+
+  /* Escape - cancel add-row mode */
+  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
+    tui_cancel_add_row(state);
+    return true;
+  }
+
+  /* F2 (HOTKEY_ROW_SAVE) - save the new row */
+  if (cfg && hotkey_matches(cfg, event, HOTKEY_ROW_SAVE)) {
+    tui_confirm_add_row(state);
+    return true;
+  }
+
+  /* Up/Down arrows - save and exit add-row mode */
+  if (render_event_is_special(event, UI_KEY_UP) ||
+      render_event_is_special(event, UI_KEY_DOWN)) {
+    tui_confirm_add_row(state);
+    return true;
+  }
+
+  /* Left arrow - move to previous column */
+  if (render_event_is_special(event, UI_KEY_LEFT)) {
+    if (state->new_row_cursor_col > 0) {
+      state->new_row_cursor_col--;
+      add_row_ensure_col_visible(state);
+    }
+    return true;
+  }
+
+  /* Right arrow - move to next column */
+  if (render_event_is_special(event, UI_KEY_RIGHT)) {
+    if (state->new_row_cursor_col < num_cols - 1) {
+      state->new_row_cursor_col++;
+      add_row_ensure_col_visible(state);
+    }
+    return true;
+  }
+
+  /* Tab - move to next column */
+  if (render_event_is_special(event, UI_KEY_TAB)) {
+    if (state->new_row_cursor_col < num_cols - 1) {
+      state->new_row_cursor_col++;
+      add_row_ensure_col_visible(state);
+    }
+    return true;
+  }
+
+  /* Home - go to first column */
+  if (render_event_is_special(event, UI_KEY_HOME)) {
+    state->new_row_cursor_col = 0;
+    add_row_ensure_col_visible(state);
+    return true;
+  }
+
+  /* End - go to last column */
+  if (render_event_is_special(event, UI_KEY_END)) {
+    state->new_row_cursor_col = num_cols - 1;
+    add_row_ensure_col_visible(state);
+    return true;
+  }
+
+  /* Enter - start editing current cell */
+  if (render_event_is_special(event, UI_KEY_ENTER)) {
+    tui_add_row_start_cell_edit(state, state->new_row_cursor_col);
+    return true;
+  }
+
+  /* e or F4 - open modal editor for current cell */
+  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDIT_MODAL)) {
+    size_t col = state->new_row_cursor_col;
+    const DbValue *val = &state->new_row_values[col];
+
+    char *content = NULL;
+    if (state->new_row_placeholders[col] && !state->new_row_edited[col]) {
+      content = str_dup("");
+    } else if (val->is_null) {
+      content = str_dup("");
+    } else {
+      content = db_value_to_string(val);
+      if (!content)
+        content = str_dup("");
+    }
+
+    VmTable *vm = state->vm_table;
+    const char *col_name = vm ? vm_table_column_name(vm, col) : "Cell";
+    char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
+
+    EditorResult result =
+        editor_view_show(state, title ? title : "Edit Cell", content, false);
+    free(title);
+    free(content);
+
+    if (result.saved) {
+      db_value_free(&state->new_row_values[col]);
+      if (result.set_null) {
+        state->new_row_values[col] = db_value_null();
+      } else {
+        state->new_row_values[col] = db_value_text(result.content);
+      }
+      state->new_row_edited[col] = true;
+      state->new_row_placeholders[col] = false;
+      free(result.content);
+    } else {
+      free(result.content);
+    }
+    return true;
+  }
+
+  /* n - set cell to NULL */
+  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDITOR_NULL)) {
+    size_t col = state->new_row_cursor_col;
+    db_value_free(&state->new_row_values[col]);
+    state->new_row_values[col] = db_value_null();
+    state->new_row_edited[col] = true;
+    state->new_row_placeholders[col] = false;
+    return true;
+  }
+
+  /* Printable character - start editing and insert */
+  int key_char = render_event_get_char(event);
+  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    tui_add_row_start_cell_edit(state, state->new_row_cursor_col);
+    /* Insert the typed character */
+    if (state->new_row_edit_buffer) {
+      size_t len = state->new_row_edit_len;
+      char *new_buf = realloc(state->new_row_edit_buffer, len + 2);
+      if (new_buf) {
+        state->new_row_edit_buffer = new_buf;
+        state->new_row_edit_buffer[0] = (char)key_char;
+        state->new_row_edit_buffer[1] = '\0';
+        state->new_row_edit_len = 1;
+        state->new_row_edit_pos = 1;
+      }
+    }
+    return true;
+  }
+
+  /* Consume other keys to prevent leaking to table navigation */
   return true;
 }

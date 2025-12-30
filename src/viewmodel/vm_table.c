@@ -9,6 +9,7 @@
 #include "vm_table.h"
 #include "../db/db.h"
 #include "../util/str.h"
+#include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,9 +25,7 @@ static void notify_change(VmTable *vm, VmTableChangeFlags flags) {
   }
 }
 
-static void selection_init(VmSelection *sel) {
-  memset(sel, 0, sizeof(*sel));
-}
+static void selection_init(VmSelection *sel) { memset(sel, 0, sizeof(*sel)); }
 
 static void selection_free(VmSelection *sel) {
   free(sel->rows);
@@ -81,9 +80,7 @@ static void selection_remove(VmSelection *sel, size_t row) {
   }
 }
 
-static void edit_init(VmEditState *edit) {
-  memset(edit, 0, sizeof(*edit));
-}
+static void edit_init(VmEditState *edit) { memset(edit, 0, sizeof(*edit)); }
 
 static void edit_free(VmEditState *edit) {
   free(edit->buffer);
@@ -326,15 +323,21 @@ void vm_table_move_cursor(VmTable *vm, int row_delta, int col_delta) {
   size_t row, col;
   vm_table_get_cursor(vm, &row, &col);
 
-  if (row_delta < 0 && (size_t)(-row_delta) > row)
-    row = 0;
-  else
-    row = row + row_delta;
+  if (row_delta < 0) {
+    size_t abs_delta =
+        (row_delta == INT_MIN) ? (size_t)INT_MAX + 1 : (size_t)(-row_delta);
+    row = (abs_delta > row) ? 0 : row - abs_delta;
+  } else {
+    row = row + (size_t)row_delta;
+  }
 
-  if (col_delta < 0 && (size_t)(-col_delta) > col)
-    col = 0;
-  else
-    col = col + col_delta;
+  if (col_delta < 0) {
+    size_t abs_delta =
+        (col_delta == INT_MIN) ? (size_t)INT_MAX + 1 : (size_t)(-col_delta);
+    col = (abs_delta > col) ? 0 : col - abs_delta;
+  } else {
+    col = col + (size_t)col_delta;
+  }
 
   vm_table_set_cursor(vm, row, col);
 }
@@ -687,9 +690,7 @@ void vm_table_edit_move_cursor(VmTable *vm, int delta) {
   notify_change(vm, VM_TABLE_CHANGE_EDITING);
 }
 
-void vm_table_edit_home(VmTable *vm) {
-  vm_table_edit_set_cursor(vm, 0);
-}
+void vm_table_edit_home(VmTable *vm) { vm_table_edit_set_cursor(vm, 0); }
 
 void vm_table_edit_end(VmTable *vm) {
   if (!vm || !vm->edit.active)
@@ -697,9 +698,7 @@ void vm_table_edit_end(VmTable *vm) {
   vm_table_edit_set_cursor(vm, vm->edit.buffer_len);
 }
 
-bool vm_table_is_editing(const VmTable *vm) {
-  return vm && vm->edit.active;
-}
+bool vm_table_is_editing(const VmTable *vm) { return vm && vm->edit.active; }
 
 const char *vm_table_edit_buffer(const VmTable *vm) {
   if (!vm || !vm->edit.active)
@@ -899,9 +898,7 @@ void vm_table_clear_sort(VmTable *vm) {
   vm_table_refresh(vm);
 }
 
-bool vm_table_is_sorted(const VmTable *vm) {
-  return vm && vm->sort_active;
-}
+bool vm_table_is_sorted(const VmTable *vm) { return vm && vm->sort_active; }
 
 size_t vm_table_sort_column(const VmTable *vm) {
   if (!vm)

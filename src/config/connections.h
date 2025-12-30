@@ -13,10 +13,7 @@
 #include <stddef.h>
 
 /* Connection item types in the tree */
-typedef enum {
-  CONN_ITEM_FOLDER,
-  CONN_ITEM_CONNECTION
-} ConnectionItemType;
+typedef enum { CONN_ITEM_FOLDER, CONN_ITEM_CONNECTION } ConnectionItemType;
 
 /* Saved connection entry */
 typedef struct SavedConnection {
@@ -55,9 +52,9 @@ typedef struct ConnectionItem {
 
 /* Connection manager - owns all saved connections */
 typedef struct ConnectionManager {
-  ConnectionItem root;        /* Root folder */
-  bool modified;              /* Unsaved changes flag */
-  char *file_path;            /* Path to connections.json */
+  ConnectionItem root; /* Root folder */
+  bool modified;       /* Unsaved changes flag */
+  char *file_path;     /* Path to connections.json */
 } ConnectionManager;
 
 /* ============================================================================
@@ -98,7 +95,8 @@ bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item);
  * insert_after: item to insert after, or NULL to insert at beginning
  *               If insert_after is not in new_parent, inserts at end */
 bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
-                       ConnectionItem *new_parent, ConnectionItem *insert_after);
+                       ConnectionItem *new_parent,
+                       ConnectionItem *insert_after);
 
 /* ============================================================================
  * Folder CRUD

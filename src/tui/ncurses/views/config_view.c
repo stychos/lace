@@ -24,11 +24,7 @@
 typedef enum { TAB_GENERAL, TAB_HOTKEYS, TAB_COUNT } ConfigTab;
 
 /* Focus areas in General tab */
-typedef enum {
-  FOCUS_TABS,
-  FOCUS_SETTINGS,
-  FOCUS_BUTTONS
-} DialogFocus;
+typedef enum { FOCUS_TABS, FOCUS_SETTINGS, FOCUS_BUTTONS } DialogFocus;
 
 /* General settings field indices */
 typedef enum {
@@ -61,8 +57,8 @@ typedef struct {
 
 /* Dialog state */
 typedef struct {
-  Config *config;       /* Working copy of config */
-  Config *original;     /* Original config for comparison */
+  Config *config;   /* Working copy of config */
+  Config *original; /* Original config for comparison */
   ConfigTab current_tab;
   DialogFocus focus;
   int selected_field;
@@ -369,23 +365,20 @@ typedef struct {
   HotkeyAction action;
 } HotkeyDisplayItem;
 
-static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_items) {
+static size_t build_hotkey_display_list(HotkeyDisplayItem *items,
+                                        size_t max_items) {
   size_t count = 0;
 
-  /* Display order: General, Navigation, Table, Editor, Query, History, Filters, Sidebar, Connect */
+  /* Display order: General, Navigation, Table, Editor, Query, History, Filters,
+   * Sidebar, Connect */
   static const HotkeyCategory display_order[] = {
-      HOTKEY_CAT_GENERAL,
-      HOTKEY_CAT_NAVIGATION,
-      HOTKEY_CAT_TABLE,
-      HOTKEY_CAT_EDITOR,
-      HOTKEY_CAT_QUERY,
-      HOTKEY_CAT_HISTORY,
-      HOTKEY_CAT_FILTERS,
-      HOTKEY_CAT_SIDEBAR,
-      HOTKEY_CAT_CONNECT,
+      HOTKEY_CAT_GENERAL, HOTKEY_CAT_NAVIGATION, HOTKEY_CAT_TABLE,
+      HOTKEY_CAT_EDITOR,  HOTKEY_CAT_QUERY,      HOTKEY_CAT_HISTORY,
+      HOTKEY_CAT_FILTERS, HOTKEY_CAT_SIDEBAR,    HOTKEY_CAT_CONNECT,
   };
 
-  for (size_t c = 0; c < sizeof(display_order) / sizeof(display_order[0]); c++) {
+  for (size_t c = 0; c < sizeof(display_order) / sizeof(display_order[0]);
+       c++) {
     HotkeyCategory cat = display_order[c];
 
     /* Add category header */
@@ -417,8 +410,8 @@ static size_t build_hotkey_display_list(HotkeyDisplayItem *items, size_t max_ite
 /* Get action from display index (skipping headers) */
 static HotkeyAction get_action_at_display_index(size_t display_index) {
   HotkeyDisplayItem items[HOTKEY_COUNT + HOTKEY_CAT_COUNT];
-  size_t count = build_hotkey_display_list(items,
-                                           HOTKEY_COUNT + HOTKEY_CAT_COUNT);
+  size_t count =
+      build_hotkey_display_list(items, HOTKEY_COUNT + HOTKEY_CAT_COUNT);
 
   if (display_index < count && !items[display_index].is_header) {
     return items[display_index].action;
@@ -435,8 +428,8 @@ static size_t get_hotkey_display_count(void) {
 /* Check if display index is a header */
 static bool is_display_index_header(size_t display_index) {
   HotkeyDisplayItem items[HOTKEY_COUNT + HOTKEY_CAT_COUNT];
-  size_t count = build_hotkey_display_list(items,
-                                           HOTKEY_COUNT + HOTKEY_CAT_COUNT);
+  size_t count =
+      build_hotkey_display_list(items, HOTKEY_COUNT + HOTKEY_CAT_COUNT);
   return display_index < count && items[display_index].is_header;
 }
 
@@ -457,7 +450,8 @@ static size_t find_prev_selectable(size_t current) {
   HotkeyDisplayItem items[HOTKEY_COUNT + HOTKEY_CAT_COUNT];
   build_hotkey_display_list(items, HOTKEY_COUNT + HOTKEY_CAT_COUNT);
 
-  if (current == 0) return current;
+  if (current == 0)
+    return current;
 
   size_t prev = current - 1;
   while (prev > 0 && items[prev].is_header) {
@@ -474,8 +468,8 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
 
   /* Build display list */
   HotkeyDisplayItem items[HOTKEY_COUNT + HOTKEY_CAT_COUNT];
-  size_t total_items = build_hotkey_display_list(items,
-                                                  HOTKEY_COUNT + HOTKEY_CAT_COUNT);
+  size_t total_items =
+      build_hotkey_display_list(items, HOTKEY_COUNT + HOTKEY_CAT_COUNT);
 
   /* Calculate visible range (leave 2 lines: 1 empty + 1 for help text) */
   int visible_rows = height - 2;
@@ -491,8 +485,8 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
   }
 
   /* Draw items */
-  for (int i = 0; i < visible_rows && ds->hotkey_scroll + (size_t)i < total_items;
-       i++) {
+  for (int i = 0;
+       i < visible_rows && ds->hotkey_scroll + (size_t)i < total_items; i++) {
     size_t idx = ds->hotkey_scroll + (size_t)i;
     HotkeyDisplayItem *item = &items[idx];
     bool selected = (idx == ds->hotkey_highlight);
@@ -535,7 +529,8 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
   if (total_items > (size_t)visible_rows) {
     int scroll_y = start_y;
     int scroll_height = visible_rows;
-    int thumb_pos = (int)(ds->hotkey_scroll * (size_t)scroll_height / total_items);
+    int thumb_pos =
+        (int)(ds->hotkey_scroll * (size_t)scroll_height / total_items);
     int thumb_size = (visible_rows * scroll_height) / (int)total_items;
     if (thumb_size < 1)
       thumb_size = 1;
@@ -760,31 +755,80 @@ static char *capture_hotkey(WINDOW *parent) {
   if (event.key.is_special) {
     const char *key_name = NULL;
     switch (event.key.key) {
-    case UI_KEY_UP: key_name = "UP"; break;
-    case UI_KEY_DOWN: key_name = "DOWN"; break;
-    case UI_KEY_LEFT: key_name = "LEFT"; break;
-    case UI_KEY_RIGHT: key_name = "RIGHT"; break;
-    case UI_KEY_HOME: key_name = "HOME"; break;
-    case UI_KEY_END: key_name = "END"; break;
-    case UI_KEY_PAGEUP: key_name = "PGUP"; break;
-    case UI_KEY_PAGEDOWN: key_name = "PGDN"; break;
-    case UI_KEY_ENTER: key_name = "ENTER"; break;
-    case UI_KEY_TAB: key_name = "TAB"; break;
-    case UI_KEY_BACKSPACE: key_name = "BACKSPACE"; break;
-    case UI_KEY_DELETE: key_name = "DELETE"; break;
-    case UI_KEY_F1: key_name = "F1"; break;
-    case UI_KEY_F2: key_name = "F2"; break;
-    case UI_KEY_F3: key_name = "F3"; break;
-    case UI_KEY_F4: key_name = "F4"; break;
-    case UI_KEY_F5: key_name = "F5"; break;
-    case UI_KEY_F6: key_name = "F6"; break;
-    case UI_KEY_F7: key_name = "F7"; break;
-    case UI_KEY_F8: key_name = "F8"; break;
-    case UI_KEY_F9: key_name = "F9"; break;
-    case UI_KEY_F10: key_name = "F10"; break;
-    case UI_KEY_F11: key_name = "F11"; break;
-    case UI_KEY_F12: key_name = "F12"; break;
-    default: break;
+    case UI_KEY_UP:
+      key_name = "UP";
+      break;
+    case UI_KEY_DOWN:
+      key_name = "DOWN";
+      break;
+    case UI_KEY_LEFT:
+      key_name = "LEFT";
+      break;
+    case UI_KEY_RIGHT:
+      key_name = "RIGHT";
+      break;
+    case UI_KEY_HOME:
+      key_name = "HOME";
+      break;
+    case UI_KEY_END:
+      key_name = "END";
+      break;
+    case UI_KEY_PAGEUP:
+      key_name = "PGUP";
+      break;
+    case UI_KEY_PAGEDOWN:
+      key_name = "PGDN";
+      break;
+    case UI_KEY_ENTER:
+      key_name = "ENTER";
+      break;
+    case UI_KEY_TAB:
+      key_name = "TAB";
+      break;
+    case UI_KEY_BACKSPACE:
+      key_name = "BACKSPACE";
+      break;
+    case UI_KEY_DELETE:
+      key_name = "DELETE";
+      break;
+    case UI_KEY_F1:
+      key_name = "F1";
+      break;
+    case UI_KEY_F2:
+      key_name = "F2";
+      break;
+    case UI_KEY_F3:
+      key_name = "F3";
+      break;
+    case UI_KEY_F4:
+      key_name = "F4";
+      break;
+    case UI_KEY_F5:
+      key_name = "F5";
+      break;
+    case UI_KEY_F6:
+      key_name = "F6";
+      break;
+    case UI_KEY_F7:
+      key_name = "F7";
+      break;
+    case UI_KEY_F8:
+      key_name = "F8";
+      break;
+    case UI_KEY_F9:
+      key_name = "F9";
+      break;
+    case UI_KEY_F10:
+      key_name = "F10";
+      break;
+    case UI_KEY_F11:
+      key_name = "F11";
+      break;
+    case UI_KEY_F12:
+      key_name = "F12";
+      break;
+    default:
+      break;
     }
     if (key_name) {
       snprintf(key_str + pos, sizeof(key_str) - pos, "%s", key_name);
@@ -868,7 +912,8 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->config->general.show_header = !ds->config->general.show_header;
       break;
     case FIELD_SHOW_STATUS:
-      ds->config->general.show_status_bar = !ds->config->general.show_status_bar;
+      ds->config->general.show_status_bar =
+          !ds->config->general.show_status_bar;
       break;
     case FIELD_PAGE_SIZE:
       number_input_init(&ds->num_input, ds->config->general.page_size,
@@ -886,7 +931,8 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->editing_number = true;
       break;
     case FIELD_RESTORE_SESSION:
-      ds->config->general.restore_session = !ds->config->general.restore_session;
+      ds->config->general.restore_session =
+          !ds->config->general.restore_session;
       break;
     case FIELD_QUIT_CONFIRM:
       ds->config->general.quit_confirmation =
@@ -1147,7 +1193,8 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
   DialogState ds = {0};
   ds.config = working_config;
   ds.original = state->app->config;
-  ds.current_tab = (start_tab == CONFIG_TAB_HOTKEYS) ? TAB_HOTKEYS : TAB_GENERAL;
+  ds.current_tab =
+      (start_tab == CONFIG_TAB_HOTKEYS) ? TAB_HOTKEYS : TAB_GENERAL;
   ds.focus = FOCUS_SETTINGS;
   ds.selected_field = 0;
   ds.selected_button = BTN_SAVE;

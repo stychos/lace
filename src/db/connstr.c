@@ -9,6 +9,7 @@
 #include "connstr.h"
 #include "../util/str.h"
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -196,9 +197,11 @@ ConnString *connstr_parse(const char *str, char **err) {
         char *port_str = str_ndup(port_start, host_end - port_start);
         if (port_str) {
           char *endptr;
+          errno = 0; /* Reset errno before strtol */
           long port_val = strtol(port_str, &endptr, 10);
-          /* Validate: all chars consumed, in valid range */
-          if (*endptr == '\0' && port_val > 0 && port_val <= 65535) {
+          /* Validate: no overflow, all chars consumed, in valid range */
+          if (errno == 0 && *endptr == '\0' && port_val > 0 &&
+              port_val <= 65535) {
             cs->port = (int)port_val;
           } else {
             cs->port = 0; /* Invalid port, use default */
@@ -544,15 +547,9 @@ char *connstr_mask_password(const char *connstr) {
 
   /* Rebuild without password */
   char *result = connstr_build(
-      cs->driver,
-      cs->user,
-      NULL,  /* Remove password from display */
-      cs->host,
-      cs->port,
-      cs->database,
-      (const char **)cs->option_keys,
-      (const char **)cs->option_values,
-      cs->num_options);
+      cs->driver, cs->user, NULL, /* Remove password from display */
+      cs->host, cs->port, cs->database, (const char **)cs->option_keys,
+      (const char **)cs->option_values, cs->num_options);
 
   connstr_free(cs);
   return result;

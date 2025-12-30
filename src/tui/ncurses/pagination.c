@@ -146,7 +146,8 @@ static char *build_order_clause(TuiState *state) {
     first_added = true;
 
     /* Add column with direction */
-    sb_printf(sb, "%s %s", escaped, entry->direction == SORT_ASC ? "ASC" : "DESC");
+    sb_printf(sb, "%s %s", escaped,
+              entry->direction == SORT_ASC ? "ASC" : "DESC");
     free(escaped);
   }
 
@@ -475,8 +476,8 @@ bool tui_load_more_rows(TuiState *state) {
     more = db_query_page_where(state->conn, table, new_offset, PAGE_SIZE,
                                where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE, order_clause,
-                         false, &err);
+    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE,
+                         order_clause, false, &err);
   }
   free(where_clause);
   free(order_clause);
@@ -636,8 +637,8 @@ bool tui_load_prev_rows(TuiState *state) {
     more = db_query_page_where(state->conn, table, new_offset, load_count,
                                where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, load_count, order_clause,
-                         false, &err);
+    more = db_query_page(state->conn, table, new_offset, load_count,
+                         order_clause, false, &err);
   }
   free(where_clause);
   free(order_clause);
@@ -1451,7 +1452,8 @@ void tui_cancel_background_load(TuiState *state) {
     nanosleep(&ts, NULL);
   }
 
-  /* Free result if any - worker may have already freed on cancel, check under mutex */
+  /* Free result if any - worker may have already freed on cancel, check under
+   * mutex */
   lace_mutex_lock(&op->mutex);
   if (op->result) {
     db_result_free((ResultSet *)op->result);

@@ -7,11 +7,11 @@
  */
 
 #include "app.h"
+#include "../config/session.h"
 #include "../core/app_state.h"
 #include "../db/connstr.h"
 #include "../db/db.h"
 #include "../tui/ncurses/tui.h"
-#include "../config/session.h"
 #include "../util/str.h"
 #include <getopt.h>
 #include <stdio.h>
@@ -207,8 +207,8 @@ static int run_tui_mode(AppConfig *config) {
     if (!tui_connect(&state, config->connstr)) {
       /* Error message already shown in TUI */
     }
-  } else if (!config->skip_session &&
-             app.config && app.config->general.restore_session) {
+  } else if (!config->skip_session && app.config &&
+             app.config->general.restore_session) {
     /* No connection string - try to restore previous session */
     char *session_err = NULL;
     Session *session = session_load(&session_err);

@@ -19,10 +19,7 @@ typedef enum {
 } ConfigResult;
 
 /* Starting tab for config dialog */
-typedef enum {
-  CONFIG_TAB_GENERAL,
-  CONFIG_TAB_HOTKEYS
-} ConfigStartTab;
+typedef enum { CONFIG_TAB_GENERAL, CONFIG_TAB_HOTKEYS } ConfigStartTab;
 
 /* Show configuration dialog
  * Returns result indicating what happened.

@@ -55,6 +55,9 @@ static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
                                     const char **pk_cols,
                                     const DbValue *pk_vals, size_t num_pk_cols,
                                     char **err);
+static bool mysql_driver_insert_row(DbConnection *conn, const char *table,
+                                    const ColumnDef *cols, const DbValue *vals,
+                                    size_t num_cols, char **err);
 static void mysql_driver_free_result(ResultSet *rs);
 static void mysql_driver_free_schema(TableSchema *schema);
 static void mysql_driver_free_string_list(char **list, size_t count);
@@ -82,7 +85,7 @@ DbDriver mysql_driver = {
     .exec = mysql_driver_exec,
     .query_page = mysql_driver_query_page,
     .update_cell = mysql_driver_update_cell,
-    .insert_row = NULL,
+    .insert_row = mysql_driver_insert_row,
     .delete_row = mysql_driver_delete_row,
     .begin_transaction = NULL,
     .commit = NULL,
@@ -112,7 +115,7 @@ DbDriver mariadb_driver = {
     .exec = mysql_driver_exec,
     .query_page = mysql_driver_query_page,
     .update_cell = mysql_driver_update_cell,
-    .insert_row = NULL,
+    .insert_row = mysql_driver_insert_row,
     .delete_row = mysql_driver_delete_row,
     .begin_transaction = NULL,
     .commit = NULL,
@@ -864,6 +867,243 @@ static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
   return success;
 }
 
+static bool mysql_driver_insert_row(DbConnection *conn, const char *table,
+                                    const ColumnDef *cols, const DbValue *vals,
+                                    size_t num_cols, char **err) {
+  if (!conn || !table || !cols || !vals || num_cols == 0) {
+    if (err)
+      *err = str_dup("Invalid parameters");
+    return false;
+  }
+
+  MySqlData *data = conn->driver_data;
+  if (!data || !data->mysql) {
+    if (err)
+      *err = str_dup("Not connected");
+    return false;
+  }
+
+  /* Escape table name */
+  char *escaped_table = str_escape_identifier_backtick(table);
+  if (!escaped_table) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  /* Count columns to insert (skip auto_increment with NULL values) */
+  size_t insert_count = 0;
+  for (size_t i = 0; i < num_cols; i++) {
+    if (cols[i].auto_increment && vals[i].is_null) {
+      continue; /* Skip auto_increment columns with NULL */
+    }
+    insert_count++;
+  }
+
+  /* Handle case where all columns are auto_increment */
+  if (insert_count == 0) {
+    char *sql = str_printf("INSERT INTO %s () VALUES ()", escaped_table);
+    free(escaped_table);
+    if (!sql) {
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
+    }
+
+    if (mysql_query(data->mysql, sql) != 0) {
+      if (err)
+        *err = str_dup(mysql_error(data->mysql));
+      free(sql);
+      return false;
+    }
+    free(sql);
+    return true;
+  }
+
+  /* Build column list and parameter placeholders */
+  char *col_list = str_dup("");
+  char *val_placeholders = str_dup("");
+  size_t param_idx = 0;
+
+  for (size_t i = 0; i < num_cols; i++) {
+    if (cols[i].auto_increment && vals[i].is_null) {
+      continue; /* Skip auto_increment columns with NULL */
+    }
+
+    char *escaped_col = str_escape_identifier_backtick(cols[i].name);
+    if (!escaped_col || !col_list || !val_placeholders) {
+      free(escaped_col);
+      free(col_list);
+      free(val_placeholders);
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
+    }
+
+    char *new_col_list;
+    char *new_val_placeholders;
+    if (param_idx == 0) {
+      new_col_list = str_printf("%s", escaped_col);
+      new_val_placeholders = str_dup("?");
+    } else {
+      new_col_list = str_printf("%s, %s", col_list, escaped_col);
+      new_val_placeholders = str_printf("%s, ?", val_placeholders);
+    }
+    free(escaped_col);
+    free(col_list);
+    free(val_placeholders);
+    col_list = new_col_list;
+    val_placeholders = new_val_placeholders;
+
+    if (!col_list || !val_placeholders) {
+      free(col_list);
+      free(val_placeholders);
+      free(escaped_table);
+      if (err)
+        *err = str_dup("Memory allocation failed");
+      return false;
+    }
+
+    param_idx++;
+  }
+
+  /* Build parameterized INSERT statement */
+  char *sql = str_printf("INSERT INTO %s (%s) VALUES (%s)", escaped_table,
+                         col_list, val_placeholders);
+  free(escaped_table);
+  free(col_list);
+  free(val_placeholders);
+
+  if (!sql) {
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  MYSQL_STMT *stmt = mysql_stmt_init(data->mysql);
+  if (!stmt) {
+    free(sql);
+    if (err)
+      *err = str_dup("Failed to initialize statement");
+    return false;
+  }
+
+  if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
+    if (err)
+      *err = str_dup(mysql_stmt_error(stmt));
+    mysql_stmt_close(stmt);
+    free(sql);
+    return false;
+  }
+  free(sql);
+
+  /* Allocate bind array and value storage */
+  MYSQL_BIND *bind = calloc(insert_count, sizeof(MYSQL_BIND));
+  long long *val_ints = calloc(insert_count, sizeof(long long));
+  double *val_floats = calloc(insert_count, sizeof(double));
+  my_bool *val_is_nulls = calloc(insert_count, sizeof(my_bool));
+  unsigned long *val_lens = calloc(insert_count, sizeof(unsigned long));
+
+  if (!bind || !val_ints || !val_floats || !val_is_nulls || !val_lens) {
+    free(bind);
+    free(val_ints);
+    free(val_floats);
+    free(val_is_nulls);
+    free(val_lens);
+    mysql_stmt_close(stmt);
+    if (err)
+      *err = str_dup("Memory allocation failed");
+    return false;
+  }
+
+  /* Bind values */
+  param_idx = 0;
+  for (size_t i = 0; i < num_cols; i++) {
+    if (cols[i].auto_increment && vals[i].is_null) {
+      continue; /* Skip auto_increment columns with NULL */
+    }
+
+    const DbValue *val = &vals[i];
+    val_is_nulls[param_idx] = val->is_null;
+
+    if (val->is_null) {
+      bind[param_idx].buffer_type = MYSQL_TYPE_NULL;
+    } else {
+      switch (val->type) {
+      case DB_TYPE_INT:
+        bind[param_idx].buffer_type = MYSQL_TYPE_LONGLONG;
+        val_ints[param_idx] = val->int_val;
+        bind[param_idx].buffer = &val_ints[param_idx];
+        break;
+      case DB_TYPE_FLOAT:
+        bind[param_idx].buffer_type = MYSQL_TYPE_DOUBLE;
+        val_floats[param_idx] = val->float_val;
+        bind[param_idx].buffer = &val_floats[param_idx];
+        break;
+      case DB_TYPE_BOOL:
+        bind[param_idx].buffer_type = MYSQL_TYPE_LONGLONG;
+        val_ints[param_idx] = val->bool_val ? 1 : 0;
+        bind[param_idx].buffer = &val_ints[param_idx];
+        break;
+      case DB_TYPE_BLOB:
+        bind[param_idx].buffer_type = MYSQL_TYPE_BLOB;
+        bind[param_idx].buffer = (void *)val->blob.data;
+        bind[param_idx].buffer_length = val->blob.len;
+        val_lens[param_idx] = val->blob.len;
+        bind[param_idx].length = &val_lens[param_idx];
+        break;
+      default:
+        bind[param_idx].buffer_type = MYSQL_TYPE_STRING;
+        bind[param_idx].buffer = val->text.data;
+        bind[param_idx].buffer_length = val->text.len;
+        val_lens[param_idx] = val->text.len;
+        bind[param_idx].length = &val_lens[param_idx];
+        break;
+      }
+    }
+    bind[param_idx].is_null = &val_is_nulls[param_idx];
+    param_idx++;
+  }
+
+  bool success = true;
+  if (mysql_stmt_bind_param(stmt, bind) != 0) {
+    if (err)
+      *err = str_dup(mysql_stmt_error(stmt));
+    success = false;
+  } else if (mysql_stmt_execute(stmt) != 0) {
+    if (err)
+      *err = str_dup(mysql_stmt_error(stmt));
+    success = false;
+  }
+
+  /* Consume any results from the statement before closing */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_stmt_next_result(stmt) == 0;
+       loop_guard++) {
+    /* Just consume, no results expected from INSERT */
+  }
+
+  mysql_stmt_close(stmt);
+
+  /* Clear any pending results on the connection (for multi-statement safety) */
+  for (int loop_guard = 0; loop_guard < MAX_RESULT_CONSUME_ITERATIONS &&
+                           mysql_next_result(data->mysql) == 0;
+       loop_guard++) {
+    MYSQL_RES *res = mysql_store_result(data->mysql);
+    if (res)
+      mysql_free_result(res);
+  }
+
+  free(bind);
+  free(val_ints);
+  free(val_floats);
+  free(val_is_nulls);
+  free(val_lens);
+
+  return success;
+}
+
 static char **mysql_driver_list_tables(DbConnection *conn, size_t *count,
                                        char **err) {
   if (!conn || !count) {
@@ -1036,6 +1276,9 @@ static TableSchema *mysql_driver_get_table_schema(DbConnection *conn,
     col->default_val = (row[4] && row[4][0] && !str_eq(row[4], "NULL"))
                            ? str_dup(row[4])
                            : NULL;
+    /* Extra column (row[5]) contains "auto_increment" for auto-increment cols
+     */
+    col->auto_increment = row[5] && strcasestr(row[5], "auto_increment");
 
     /* Map type */
     if (col->type_name) {
@@ -1145,7 +1388,7 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   size_t num_rows = mysql_num_rows(result);
   /* Limit result set size to prevent unbounded memory growth */
   size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
-                                               : (size_t)MAX_RESULT_ROWS;
+                                              : (size_t)MAX_RESULT_ROWS;
   if (num_rows > max_rows) {
     num_rows = max_rows;
   }
@@ -1261,8 +1504,8 @@ static ResultSet *mysql_driver_query_page(DbConnection *conn, const char *table,
         return NULL;
       }
       sql = str_printf("SELECT * FROM %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-                       escaped_table, escaped_order, desc ? "DESC" : "ASC", limit,
-                       offset);
+                       escaped_table, escaped_order, desc ? "DESC" : "ASC",
+                       limit, offset);
       free(escaped_order);
     }
   } else {

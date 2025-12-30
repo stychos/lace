@@ -29,11 +29,11 @@ typedef struct VmApp VmApp;
 
 typedef enum {
   VM_APP_CHANGE_NONE = 0,
-  VM_APP_CHANGE_CONNECTION = (1 << 0),  /* Connection added/removed/changed */
-  VM_APP_CHANGE_WORKSPACE = (1 << 1),   /* Workspace added/removed/switched */
-  VM_APP_CHANGE_TAB = (1 << 2),         /* Tab added/removed/switched */
-  VM_APP_CHANGE_STATUS = (1 << 3),      /* Status message changed */
-  VM_APP_CHANGE_LAYOUT = (1 << 4),      /* UI layout changed (sidebar visible) */
+  VM_APP_CHANGE_CONNECTION = (1 << 0), /* Connection added/removed/changed */
+  VM_APP_CHANGE_WORKSPACE = (1 << 1),  /* Workspace added/removed/switched */
+  VM_APP_CHANGE_TAB = (1 << 2),        /* Tab added/removed/switched */
+  VM_APP_CHANGE_STATUS = (1 << 3),     /* Status message changed */
+  VM_APP_CHANGE_LAYOUT = (1 << 4),     /* UI layout changed (sidebar visible) */
   VM_APP_CHANGE_ALL = 0xFF
 } VmAppChangeFlags;
 

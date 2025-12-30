@@ -18,6 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Maximum number of visible columns (limited by terminal width) */
+#define MAX_VISIBLE_COLUMNS 256
+
 /* ============================================================================
  * Helper Functions
  * ============================================================================
@@ -75,7 +78,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
   int max_x = params->start_x + params->width;
 
   /* Calculate column divider positions for intersection characters */
-  int divider_positions[256]; /* Max 256 columns */
+  int divider_positions[MAX_VISIBLE_COLUMNS];
   size_t num_dividers = 0;
 
   {
@@ -85,7 +88,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       if (calc_x + width + 3 > max_x)
         break;
       calc_x += width + 1;
-      if (num_dividers < 256) {
+      if (num_dividers < MAX_VISIBLE_COLUMNS) {
         divider_positions[num_dividers++] = calc_x - 1;
       }
     }
@@ -156,11 +159,13 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
         if (params->sort_entries[i].column == col) {
           /* Show: arrow + direction + priority (e.g., "▲ asc, 1") */
           const char *arrow = (params->sort_entries[i].direction == SORT_ASC)
-                              ? "\xE2\x96\xB2"   /* ▲ UTF-8 */
-                              : "\xE2\x96\xBC";  /* ▼ UTF-8 */
-          const char *dir_text = (params->sort_entries[i].direction == SORT_ASC) ? "asc" : "desc";
+                                  ? "\xE2\x96\xB2"  /* ▲ UTF-8 */
+                                  : "\xE2\x96\xBC"; /* ▼ UTF-8 */
+          const char *dir_text =
+              (params->sort_entries[i].direction == SORT_ASC) ? "asc" : "desc";
           char sort_info[24];
-          snprintf(sort_info, sizeof(sort_info), "%s %s, %d", arrow, dir_text, (int)(i + 1));
+          snprintf(sort_info, sizeof(sort_info), "%s %s, %d", arrow, dir_text,
+                   (int)(i + 1));
           mvwprintw(win, y, x, "%-*.*s", width, width, sort_info);
           found = true;
           break;
@@ -432,6 +437,174 @@ void tui_draw_header(TuiState *state) {
 }
 
 /* ============================================================================
+ * Add Row Drawing
+ * ============================================================================
+ */
+
+/* Helper to draw a single cell in the new row */
+static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
+                              TuiState *state, size_t col, bool is_selected,
+                              bool is_editing) {
+  bool is_edited = state->new_row_edited && state->new_row_edited[col];
+  bool is_auto_increment = state->schema && col < state->schema->num_columns &&
+                           state->schema->columns[col].auto_increment;
+  bool is_placeholder = state->new_row_placeholders[col] && !is_edited;
+
+  if (is_editing) {
+    /* Draw edit field with distinctive background */
+    wattron(win, COLOR_PAIR(COLOR_EDIT));
+    mvwhline(win, y, x, ' ', width);
+
+    const char *buf =
+        state->new_row_edit_buffer ? state->new_row_edit_buffer : "";
+    size_t buf_len = strlen(buf);
+
+    /* Calculate scroll for long text */
+    size_t scroll = 0;
+    if (state->new_row_edit_pos >= (size_t)(width - 1)) {
+      scroll = state->new_row_edit_pos - width + 2;
+    }
+
+    /* Draw visible portion of text */
+    size_t draw_len = buf_len > scroll ? buf_len - scroll : 0;
+    if (draw_len > (size_t)width)
+      draw_len = width;
+    if (draw_len > 0) {
+      mvwaddnstr(win, y, x, buf + scroll, (int)draw_len);
+    }
+
+    wattroff(win, COLOR_PAIR(COLOR_EDIT));
+
+    /* Draw cursor */
+    int cursor_x = x + (int)(state->new_row_edit_pos - scroll);
+    if (cursor_x >= x && cursor_x < x + width) {
+      char cursor_char = (state->new_row_edit_pos < buf_len)
+                             ? buf[state->new_row_edit_pos]
+                             : ' ';
+      wattron(win, A_REVERSE | A_BOLD);
+      mvwaddch(win, y, cursor_x, cursor_char);
+      wattroff(win, A_REVERSE | A_BOLD);
+      wmove(win, y, cursor_x);
+    }
+  } else if (is_selected) {
+    wattron(win, COLOR_PAIR(COLOR_SELECTED));
+    mvwhline(win, y, x, ' ', width);
+
+    if (is_placeholder && is_auto_increment) {
+      /* Auto-increment placeholder - show in dim */
+      wattron(win, A_DIM);
+      mvwprintw(win, y, x, "%-*.*s", width, width, "ai");
+      wattroff(win, A_DIM);
+    } else if (is_placeholder) {
+      /* Default value placeholder - show in dim */
+      wattron(win, A_DIM);
+      const DbValue *val = &state->new_row_values[col];
+      char *str = db_value_to_string(val);
+      mvwprintw(win, y, x, "%-*.*s", width, width, str ? str : "");
+      free(str);
+      wattroff(win, A_DIM);
+    } else {
+      const DbValue *val = &state->new_row_values[col];
+      if (val->is_null) {
+        mvwprintw(win, y, x, "%-*s", width, "NULL");
+      } else {
+        char *str = db_value_to_string(val);
+        if (str) {
+          char *safe = tui_sanitize_for_display(str);
+          mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+          free(safe);
+          free(str);
+        }
+      }
+    }
+    wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+  } else {
+    /* Non-selected cell */
+    if (is_placeholder && is_auto_increment) {
+      /* Auto-increment placeholder - gray/dim */
+      wattron(win, A_DIM);
+      mvwprintw(win, y, x, "%-*.*s", width, width, "ai");
+      wattroff(win, A_DIM);
+    } else if (is_placeholder) {
+      /* Default value placeholder - gray/dim */
+      wattron(win, A_DIM);
+      const DbValue *val = &state->new_row_values[col];
+      char *str = db_value_to_string(val);
+      mvwprintw(win, y, x, "%-*.*s", width, width, str ? str : "");
+      free(str);
+      wattroff(win, A_DIM);
+    } else {
+      const DbValue *val = &state->new_row_values[col];
+      if (val->is_null) {
+        wattron(win, COLOR_PAIR(COLOR_NULL));
+        mvwprintw(win, y, x, "%-*s", width, "NULL");
+        wattroff(win, COLOR_PAIR(COLOR_NULL));
+      } else {
+        char *str = db_value_to_string(val);
+        if (str) {
+          char *safe = tui_sanitize_for_display(str);
+          mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+          free(safe);
+          free(str);
+        }
+      }
+    }
+  }
+}
+
+/* Draw the add-row as overlay at the bottom of the table */
+static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
+  if (!state || !state->adding_row || !params || !params->win)
+    return;
+
+  WINDOW *win = params->win;
+  int win_rows, win_cols;
+  getmaxyx(win, win_rows, win_cols);
+  (void)win_cols;
+
+  /* Calculate the Y position for the overlay */
+  int overlay_y = win_rows - 2;
+  if (overlay_y < params->start_y + 3)
+    return;
+
+  /* Draw separator line */
+  wattron(win, COLOR_PAIR(COLOR_BORDER));
+  mvwhline(win, overlay_y, params->start_x, ACS_HLINE, params->width);
+  wattroff(win, COLOR_PAIR(COLOR_BORDER));
+
+  int row_y = overlay_y + 1;
+
+  /* Use the table's scroll_col for horizontal alignment */
+  size_t scroll_col = state->scroll_col;
+
+  /* Draw cells aligned with the main table */
+  int x = params->start_x + 1;
+  ResultSet *data = params->data;
+  if (!data)
+    return;
+
+  for (size_t col = scroll_col; col < data->num_columns; col++) {
+    if (col >= state->new_row_num_cols)
+      break;
+
+    int width = grid_get_col_width(params, col);
+    if (x + width + 3 > params->start_x + params->width)
+      break;
+
+    bool is_selected = (col == state->new_row_cursor_col);
+    bool is_editing = is_selected && state->new_row_cell_editing;
+
+    draw_add_row_cell(win, row_y, x, width, state, col, is_selected,
+                      is_editing);
+
+    x += width + 1;
+    wattron(win, COLOR_PAIR(COLOR_BORDER));
+    mvwaddch(win, row_y, x - 1, ACS_VLINE);
+    wattroff(win, COLOR_PAIR(COLOR_BORDER));
+  }
+}
+
+/* ============================================================================
  * Table Drawing
  * ============================================================================
  */
@@ -483,8 +656,9 @@ void tui_draw_table(TuiState *state) {
     mvwprintw(state->main_win, center_y - 1, (win_cols - (int)strlen(msg1)) / 2,
               "%s", msg1);
     wattroff(state->main_win, A_BOLD);
-    mvwprintw(state->main_win, center_y, (win_cols - (int)strlen(tab->table_name)) / 2,
-              "%s", tab->table_name ? tab->table_name : "(unknown)");
+    mvwprintw(state->main_win, center_y,
+              (win_cols - (int)strlen(tab->table_name)) / 2, "%s",
+              tab->table_name ? tab->table_name : "(unknown)");
     wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR_TEXT));
 
     wattron(state->main_win, A_DIM);
@@ -531,6 +705,13 @@ void tui_draw_table(TuiState *state) {
                            .num_sort_entries = tab ? tab->num_sort_entries : 0};
 
   tui_draw_result_grid(state, &params);
+
+  /* Draw add-row overlay if in add-row mode */
+  if (state->adding_row && state->new_row_values &&
+      state->new_row_num_cols > 0) {
+    tui_draw_add_row_overlay(state, &params);
+  }
+
   wrefresh(state->main_win);
 }
 
@@ -695,6 +876,39 @@ void tui_draw_status(TuiState *state) {
     if (display_col->default_val) {
       snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s",
                display_col->default_val);
+    }
+
+    mvwprintw(state->status_win, 0, 1, "%s", info);
+  } else if (state->adding_row && state->schema &&
+             state->new_row_cursor_col < state->schema->num_columns) {
+    /* Add-row mode: show column info for current cursor position */
+    ColumnDef *col = &state->schema->columns[state->new_row_cursor_col];
+
+    /* Build column info string */
+    char info[256];
+    int pos = 0;
+
+    /* Column name */
+    pos += snprintf(info + pos, sizeof(info) - pos, "[+] %s",
+                    col->name ? col->name : "?");
+
+    /* Type */
+    if (col->type_name) {
+      pos += snprintf(info + pos, sizeof(info) - pos, " : %s", col->type_name);
+    }
+
+    /* Flags */
+    if (col->primary_key) {
+      pos += snprintf(info + pos, sizeof(info) - pos, " [PK]");
+    }
+    if (col->auto_increment) {
+      pos += snprintf(info + pos, sizeof(info) - pos, " [AI]");
+    }
+    if (!col->nullable) {
+      pos += snprintf(info + pos, sizeof(info) - pos, " NOT NULL");
+    }
+    if (col->default_val) {
+      snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s", col->default_val);
     }
 
     mvwprintw(state->status_win, 0, 1, "%s", info);
@@ -1135,8 +1349,9 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     /* Grid starts at results_start = editor_height + 1 (window coords)
      * In screen coords: 2 + editor_height + 1 (main_win starts at y=2)
      * Grid layout: column headers (1 row) + separator (1 row) + data */
-    int results_start_y = 2 + editor_height + 1;  /* screen coords */
-    int results_data_y = results_start_y + 2;     /* After col headers + separator */
+    int results_start_y = 2 + editor_height + 1; /* screen coords */
+    int results_data_y =
+        results_start_y + 2; /* After col headers + separator */
 
     if (mouse_y < results_start_y) {
       /* Clicked in editor area */
@@ -1192,7 +1407,8 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Check if click is in filters panel (TABLE tabs only, when filters visible) */
+  /* Check if click is in filters panel (TABLE tabs only, when filters visible)
+   */
   Tab *filters_click_tab = TUI_TAB(state);
   if (mouse_x >= sidebar_width && state->filters_visible && filters_click_tab &&
       filters_click_tab->type == TAB_TYPE_TABLE) {
@@ -1251,13 +1467,15 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     /* Calculate data start row accounting for all header elements */
     int filters_height = 0;
     Tab *click_tab = TUI_TAB(state);
-    if (state->filters_visible && click_tab && click_tab->type == TAB_TYPE_TABLE) {
+    if (state->filters_visible && click_tab &&
+        click_tab->type == TAB_TYPE_TABLE) {
       filters_height = tui_get_filters_panel_height(state);
     }
 
     /* Data rows start after: filters panel + header line + column names +
      * sort indicator row (if sorting) + separator */
-    int data_start_y = filters_height + 3; /* +3 = header line + col names + separator */
+    int data_start_y =
+        filters_height + 3; /* +3 = header line + col names + separator */
 
     /* Add extra row if sorting is active (sort indicator row) */
     if (click_tab && click_tab->num_sort_entries > 0) {

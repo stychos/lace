@@ -495,7 +495,8 @@ void tab_close(TuiState *state) {
   }
 
   /* Closing a TABLE or QUERY tab */
-  /* Count remaining content tabs FOR THIS CONNECTION (excluding the one being closed) */
+  /* Count remaining content tabs FOR THIS CONNECTION (excluding the one being
+   * closed) */
   size_t remaining_conn_content_tabs = 0;
   bool has_conn_connection_tab = false;
   for (size_t i = 0; i < ws->num_tabs; i++) {
@@ -519,8 +520,9 @@ void tab_close(TuiState *state) {
   }
   memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
-  /* If this was the last content tab for this connection, create a connection tab
-   * (unless close_conn_on_last_tab is enabled, in which case close the connection) */
+  /* If this was the last content tab for this connection, create a connection
+   * tab (unless close_conn_on_last_tab is enabled, in which case close the
+   * connection) */
   if (remaining_conn_content_tabs == 0 && !has_conn_connection_tab) {
     /* Check if we should close connection instead of creating connection tab */
     bool close_conn = state->app->config &&

@@ -108,7 +108,8 @@ static bool copy_to_clipboard(TuiState *state, const char *text) {
   FILE *p = popen("pbcopy", "w");
 #else
   /* Use wl-copy on Wayland, xclip on X11 */
-  const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+  const char *cmd =
+      getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
   FILE *p = popen(cmd, "w");
 #endif
   if (!p) {
@@ -181,7 +182,8 @@ void tui_show_history_dialog(TuiState *state) {
   /* Display state */
   size_t selected = 0;
   size_t scroll_offset = 0;
-  size_t visible_rows = (size_t)(height - 5); /* Account for border and footer */
+  size_t visible_rows =
+      (size_t)(height - 5); /* Account for border and footer */
   size_t num_entries = history->num_entries;
 
   /* Main loop */
@@ -263,14 +265,17 @@ void tui_show_history_dialog(TuiState *state) {
     }
 
     /* Draw scrollbar if needed */
-    if (num_entries > visible_rows) {
+    if (num_entries > visible_rows && num_entries > 0) {
       int scrollbar_height = (int)visible_rows;
       int thumb_height = (int)((visible_rows * visible_rows) / num_entries);
       if (thumb_height < 1)
         thumb_height = 1;
-      int thumb_pos =
-          (int)((scroll_offset * (size_t)(scrollbar_height - thumb_height)) /
-                (num_entries - visible_rows));
+      size_t scroll_range = num_entries - visible_rows;
+      int thumb_pos = (scroll_range > 0)
+                          ? (int)((scroll_offset *
+                                   (size_t)(scrollbar_height - thumb_height)) /
+                                  scroll_range)
+                          : 0;
 
       for (int i = 0; i < scrollbar_height; i++) {
         if (i >= thumb_pos && i < thumb_pos + thumb_height) {
@@ -286,16 +291,18 @@ void tui_show_history_dialog(TuiState *state) {
     /* Footer with instructions - show configured keys */
     int footer_y = height - 2;
     wattron(dialog, A_DIM);
-    char *copy_key = hotkey_get_display(state->app->config, HOTKEY_HISTORY_COPY);
-    char *del_key = hotkey_get_display(state->app->config, HOTKEY_HISTORY_DELETE);
-    char *clear_key = hotkey_get_display(state->app->config, HOTKEY_HISTORY_CLEAR);
-    char *close_key = hotkey_get_display(state->app->config, HOTKEY_HISTORY_CLOSE);
+    char *copy_key =
+        hotkey_get_display(state->app->config, HOTKEY_HISTORY_COPY);
+    char *del_key =
+        hotkey_get_display(state->app->config, HOTKEY_HISTORY_DELETE);
+    char *clear_key =
+        hotkey_get_display(state->app->config, HOTKEY_HISTORY_CLEAR);
+    char *close_key =
+        hotkey_get_display(state->app->config, HOTKEY_HISTORY_CLOSE);
     mvwprintw(dialog, footer_y, 2,
               "[%s] Copy  [%s] Delete  [%s] Clear All  [%s] Close",
-              copy_key ? copy_key : "Enter",
-              del_key ? del_key : "x",
-              clear_key ? clear_key : "c",
-              close_key ? close_key : "Esc");
+              copy_key ? copy_key : "Enter", del_key ? del_key : "x",
+              clear_key ? clear_key : "c", close_key ? close_key : "Esc");
     free(copy_key);
     free(del_key);
     free(clear_key);
@@ -373,7 +380,8 @@ void tui_show_history_dialog(TuiState *state) {
         }
         running = false;
       }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_HISTORY_DELETE)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_HISTORY_DELETE)) {
       /* Delete selected entry */
       if (num_entries > 0) {
         size_t entry_idx = num_entries - 1 - selected;
@@ -390,10 +398,12 @@ void tui_show_history_dialog(TuiState *state) {
 
         /* Adjust scroll if needed */
         if (scroll_offset > 0 && scroll_offset + visible_rows > num_entries) {
-          scroll_offset = num_entries > visible_rows ? num_entries - visible_rows : 0;
+          scroll_offset =
+              num_entries > visible_rows ? num_entries - visible_rows : 0;
         }
       }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_HISTORY_CLEAR)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_HISTORY_CLEAR)) {
       /* Clear all history (with confirmation) */
       if (num_entries > 0) {
         /* Simple confirmation - show message on same dialog */
@@ -407,7 +417,8 @@ void tui_show_history_dialog(TuiState *state) {
           tui_set_status(state, "History cleared");
         }
       }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_HISTORY_CLOSE)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_HISTORY_CLOSE)) {
       running = false;
     }
   }

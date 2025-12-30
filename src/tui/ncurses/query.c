@@ -135,7 +135,8 @@ bool tab_create_query(TuiState *state) {
     ui->query_focus_results = false;
   }
 
-  /* Update tab name (free the default "Query" name set by workspace_create_query_tab) */
+  /* Update tab name (free the default "Query" name set by
+   * workspace_create_query_tab) */
   free(tab->table_name);
   tab->table_name = str_printf("Query %d", max_query_num + 1);
   if (!tab->table_name) {
@@ -1332,9 +1333,8 @@ void tui_draw_query(TuiState *state) {
 
   /* Find current query bounds for highlighting */
   size_t query_start = 0, query_end = 0;
-  bool has_query_bounds =
-      query_find_bounds_at_cursor(tab->query_text, tab->query_cursor,
-                                  &query_start, &query_end);
+  bool has_query_bounds = query_find_bounds_at_cursor(
+      tab->query_text, tab->query_cursor, &query_start, &query_end);
 
   /* Draw editor area */
   if (!ui->query_focus_results) {
@@ -1356,8 +1356,8 @@ void tui_draw_query(TuiState *state) {
     /* Check if this line is within the current query bounds */
     size_t line_start = li->start;
     size_t line_end = li->start + li->len;
-    bool line_in_query = has_query_bounds &&
-                         line_end > query_start && line_start < query_end;
+    bool line_in_query =
+        has_query_bounds && line_end > query_start && line_start < query_end;
 
     /* Dim lines outside the current query */
     bool is_dimmed = has_query_bounds && !line_in_query;
@@ -1481,7 +1481,8 @@ void tui_draw_query(TuiState *state) {
   } else {
     /* No results yet */
     wattron(state->main_win, A_DIM);
-    char *exec_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
+    char *exec_key =
+        hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
     mvwprintw(state->main_win, results_start + 1, 1,
               "Enter SQL and press %s to execute",
               exec_key ? exec_key : "Ctrl+R");
@@ -2974,8 +2975,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
        * Consecutive = cursor at start of line (where last cut left it).
        * Any other action (typing, navigation, paste) moves cursor. */
       static size_t last_cut_cursor = SIZE_MAX;
-      bool is_consecutive = (last_cut_cursor == start) &&
-                            (state->clipboard_buffer != NULL);
+      bool is_consecutive =
+          (last_cut_cursor == start) && (state->clipboard_buffer != NULL);
 
       if (is_consecutive) {
         /* Append to existing buffer */
@@ -3007,11 +3008,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 #ifdef __APPLE__
         FILE *p = popen("pbcopy", "w");
 #else
-        const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+        const char *cmd = getenv("WAYLAND_DISPLAY")
+                              ? "wl-copy"
+                              : "xclip -selection clipboard";
         FILE *p = popen(cmd, "w");
 #endif
         if (p) {
-          fwrite(state->clipboard_buffer, 1, strlen(state->clipboard_buffer), p);
+          fwrite(state->clipboard_buffer, 1, strlen(state->clipboard_buffer),
+                 p);
           pclose(p);
         }
       }
@@ -3028,7 +3032,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Ctrl+U - paste from system clipboard first, then internal buffer if OS inaccessible */
+  /* Ctrl+U - paste from system clipboard first, then internal buffer if OS
+   * inaccessible */
   if (hotkey_matches(cfg, event, HOTKEY_PASTE)) {
     char *paste_text = NULL;
     bool os_clipboard_accessible = false;
@@ -3037,8 +3042,9 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 #ifdef __APPLE__
     FILE *p = popen("pbpaste", "r");
 #else
-    const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-paste -n 2>/dev/null"
-                                                 : "xclip -selection clipboard -o 2>/dev/null";
+    const char *cmd = getenv("WAYLAND_DISPLAY")
+                          ? "wl-paste -n 2>/dev/null"
+                          : "xclip -selection clipboard -o 2>/dev/null";
     FILE *p = popen(cmd, "r");
 #endif
     if (p) {
@@ -3052,7 +3058,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
           if (len + 1 >= capacity) {
             capacity *= 2;
             char *new_buf = realloc(paste_text, capacity);
-            if (!new_buf) break;
+            if (!new_buf)
+              break;
             paste_text = new_buf;
           }
           paste_text[len++] = (char)c;

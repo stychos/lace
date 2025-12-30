@@ -310,13 +310,12 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
 
   /* Use driver-specific implementation if available */
   if (conn->driver->query_page) {
-    ResultSet *rs =
-        conn->driver->query_page(conn, table, offset, limit, order_by, desc,
-                                 err);
+    ResultSet *rs = conn->driver->query_page(conn, table, offset, limit,
+                                             order_by, desc, err);
     /* Record history for driver-specific query_page */
     if (rs && conn->history_callback) {
-      char *sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu",
-                             table, limit, offset);
+      char *sql = str_printf("SELECT * FROM %s LIMIT %zu OFFSET %zu", table,
+                             limit, offset);
       if (sql) {
         db_record_history(conn, sql, DB_HISTORY_SELECT);
         free(sql);
@@ -495,7 +494,8 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
       /* Single column - escape and add direction */
       char *escaped_order = escape_identifier(conn, order_by);
       if (escaped_order) {
-        ok = sb_printf(sb, " ORDER BY %s %s", escaped_order, desc ? "DESC" : "ASC");
+        ok = sb_printf(sb, " ORDER BY %s %s", escaped_order,
+                       desc ? "DESC" : "ASC");
         free(escaped_order);
       }
     }

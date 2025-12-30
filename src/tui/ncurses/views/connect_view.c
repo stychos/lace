@@ -32,9 +32,9 @@ typedef struct {
 
 /* Dialog focus states */
 typedef enum {
-  FOCUS_TREE,    /* Saved connections tree */
-  FOCUS_URL,     /* URL input field */
-  FOCUS_BUTTONS  /* Bottom buttons */
+  FOCUS_TREE,   /* Saved connections tree */
+  FOCUS_URL,    /* URL input field */
+  FOCUS_BUTTONS /* Bottom buttons */
 } DialogFocus;
 
 /* Button IDs */
@@ -49,22 +49,24 @@ typedef enum {
   BTN_COUNT
 } ButtonId;
 
-/* Move operation state - tracks folder and position for hierarchical navigation */
+/* Move operation state - tracks folder and position for hierarchical navigation
+ */
 typedef struct {
-  bool active;                    /* Is move in progress? */
-  ConnectionItem *source;         /* Item being moved */
-  size_t source_idx;              /* Original visible index of source item */
-  ConnectionItem *target_folder;  /* Folder where item will be inserted */
-  size_t insert_pos;              /* Position within folder (0=before first, N=after last) */
+  bool active;                   /* Is move in progress? */
+  ConnectionItem *source;        /* Item being moved */
+  size_t source_idx;             /* Original visible index of source item */
+  ConnectionItem *target_folder; /* Folder where item will be inserted */
+  size_t insert_pos; /* Position within folder (0=before first, N=after last) */
 } MoveState;
 
 /* Dialog state */
 typedef struct {
   ConnectionManager *mgr;
-  const Config *config;       /* App configuration for hotkeys */
+  const Config *config; /* App configuration for hotkeys */
   InputField url_input;
   DialogFocus focus;
-  DialogFocus prev_panel_focus; /* Previous panel focus (TREE or URL) for returning from buttons */
+  DialogFocus prev_panel_focus; /* Previous panel focus (TREE or URL) for
+                                   returning from buttons */
   size_t tree_highlight;
   size_t tree_scroll;
   int selected_button;
@@ -75,7 +77,7 @@ typedef struct {
   int width;
   int tree_height;
   WINDOW *dialog_win;
-  MoveState move;             /* Move operation state */
+  MoveState move; /* Move operation state */
 } DialogState;
 
 /* ============================================================================
@@ -100,7 +102,8 @@ static void input_draw(WINDOW *win, InputField *input, int y, int x,
   mvwhline(win, y, x, ' ', input->width);
 
   /* Draw text */
-  size_t draw_len = (visible_start <= input->len) ? input->len - visible_start : 0;
+  size_t draw_len =
+      (visible_start <= input->len) ? input->len - visible_start : 0;
   if (draw_len > visible_len)
     draw_len = visible_len;
 
@@ -146,17 +149,20 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
     return;
   }
 
-  if (render_event_is_special(event, UI_KEY_HOME) || render_event_is_ctrl(event, 'A')) {
+  if (render_event_is_special(event, UI_KEY_HOME) ||
+      render_event_is_ctrl(event, 'A')) {
     input->cursor = 0;
     input->scroll = 0;
     return;
   }
 
-  if (render_event_is_special(event, UI_KEY_END) || render_event_is_ctrl(event, 'E')) {
+  if (render_event_is_special(event, UI_KEY_END) ||
+      render_event_is_ctrl(event, 'E')) {
     input->cursor = input->len;
     if (input->cursor >= input->scroll + (size_t)input->width - 2) {
       input->scroll = input->cursor > (size_t)input->width - 3
-                    ? input->cursor - (size_t)input->width + 3 : 0;
+                          ? input->cursor - (size_t)input->width + 3
+                          : 0;
     }
     return;
   }
@@ -173,7 +179,8 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
     return;
   }
 
-  if (render_event_is_special(event, UI_KEY_DELETE) || render_event_is_ctrl(event, 'D')) {
+  if (render_event_is_special(event, UI_KEY_DELETE) ||
+      render_event_is_ctrl(event, 'D')) {
     if (input->cursor < input->len) {
       memmove(input->buffer + input->cursor, input->buffer + input->cursor + 1,
               input->len - input->cursor);
@@ -206,7 +213,8 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
     input->len++;
     if (input->cursor >= input->scroll + (size_t)input->width - 2) {
       input->scroll = input->cursor > (size_t)input->width - 3
-                    ? input->cursor - (size_t)input->width + 3 : 0;
+                          ? input->cursor - (size_t)input->width + 3
+                          : 0;
     }
   }
 }
@@ -249,9 +257,9 @@ static void draw_tree_item(WINDOW *win, int y, int x, int width,
   if (connmgr_is_folder(item)) {
     /* Folder: name followed by expand/collapse arrow */
     const char *arrow = item->folder.expanded
-                        ? " \xE2\x96\xBC"   /* ▼ UTF-8 (expanded) */
-                        : " \xE2\x96\xB6";  /* ▶ UTF-8 (collapsed) */
-    int arrow_width = 2;  /* space + arrow */
+                            ? " \xE2\x96\xBC"  /* ▼ UTF-8 (expanded) */
+                            : " \xE2\x96\xB6"; /* ▶ UTF-8 (collapsed) */
+    int arrow_width = 2;                       /* space + arrow */
     int max_name = name_width - arrow_width;
     if (max_name > 0) {
       if ((int)strlen(name) > max_name) {
@@ -296,7 +304,8 @@ static void draw_tree_item(WINDOW *win, int y, int x, int width,
  */
 
 /* Count children in folder excluding the source item */
-static size_t count_children_excluding_source(ConnectionItem *folder, ConnectionItem *source) {
+static size_t count_children_excluding_source(ConnectionItem *folder,
+                                              ConnectionItem *source) {
   if (!folder || folder->type != CONN_ITEM_FOLDER)
     return 0;
   size_t count = 0;
@@ -308,7 +317,9 @@ static size_t count_children_excluding_source(ConnectionItem *folder, Connection
 }
 
 /* Get child at index (excluding source) */
-static ConnectionItem *get_child_excluding_source(ConnectionItem *folder, size_t idx, ConnectionItem *source) {
+static ConnectionItem *get_child_excluding_source(ConnectionItem *folder,
+                                                  size_t idx,
+                                                  ConnectionItem *source) {
   if (!folder || folder->type != CONN_ITEM_FOLDER)
     return NULL;
   size_t count = 0;
@@ -324,7 +335,8 @@ static ConnectionItem *get_child_excluding_source(ConnectionItem *folder, size_t
 }
 
 /* Find index of item in parent folder (excluding source) */
-static size_t find_index_in_parent(ConnectionItem *item, ConnectionItem *source) {
+static size_t find_index_in_parent(ConnectionItem *item,
+                                   ConnectionItem *source) {
   if (!item || !item->parent || item->parent->type != CONN_ITEM_FOLDER)
     return 0;
   ConnectionFolder *folder = &item->parent->folder;
@@ -340,13 +352,15 @@ static size_t find_index_in_parent(ConnectionItem *item, ConnectionItem *source)
   return idx;
 }
 
-/* Get the insert_after item for current position (NULL = insert at beginning) */
+/* Get the insert_after item for current position (NULL = insert at beginning)
+ */
 static ConnectionItem *get_insert_after_for_pos(DialogState *ds) {
   if (!ds->move.active || !ds->move.target_folder)
     return NULL;
   if (ds->move.insert_pos == 0)
     return NULL;
-  return get_child_excluding_source(ds->move.target_folder, ds->move.insert_pos - 1, ds->move.source);
+  return get_child_excluding_source(ds->move.target_folder,
+                                    ds->move.insert_pos - 1, ds->move.source);
 }
 
 /* Get the depth for current target position */
@@ -371,7 +385,8 @@ static void clear_move_state(MoveState *move) {
 }
 
 /* Helper: draw the moving item at its target position */
-static void draw_moving_item_at_depth(WINDOW *win, DialogState *ds, int y, int x, int width, int depth) {
+static void draw_moving_item_at_depth(WINDOW *win, DialogState *ds, int y,
+                                      int x, int width, int depth) {
   if (!ds->move.source)
     return;
   const char *name = connmgr_item_name(ds->move.source);
@@ -380,7 +395,8 @@ static void draw_moving_item_at_depth(WINDOW *win, DialogState *ds, int y, int x
   wattron(win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
   mvwhline(win, y, x, ' ', width);
   if (connmgr_is_folder(ds->move.source)) {
-    const char *arrow = ds->move.source->folder.expanded ? " \xE2\x96\xBC" : " \xE2\x96\xB6";
+    const char *arrow =
+        ds->move.source->folder.expanded ? " \xE2\x96\xBC" : " \xE2\x96\xB6";
     mvwprintw(win, y, x + depth * 2, "%s%s", name, arrow);
   } else {
     mvwprintw(win, y, x + depth * 2, "%s", name);
@@ -399,13 +415,15 @@ static bool is_descendant_of(ConnectionItem *item, ConnectionItem *ancestor) {
     return false;
   ConnectionItem *p = item->parent;
   while (p) {
-    if (p == ancestor) return true;
+    if (p == ancestor)
+      return true;
     p = p->parent;
   }
   return false;
 }
 
-/* Compute the visual index where source should appear (excluding source from count) */
+/* Compute the visual index where source should appear (excluding source from
+ * count) */
 static ssize_t compute_source_visual_position(DialogState *ds) {
   if (!ds->move.active || !ds->move.target_folder)
     return -1;
@@ -417,15 +435,16 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
   /* Case 1: Insert at beginning of folder */
   if (insert_pos == 0) {
     if (target == &ds->mgr->root) {
-      return 0;  /* Very first position */
+      return 0; /* Very first position */
     }
     /* Find the target folder in the visible list */
     size_t idx = 0;
     for (size_t i = 0; i < visible_count; i++) {
       ConnectionItem *item = connmgr_get_visible_item(ds->mgr, i);
-      if (item == ds->move.source) continue;
+      if (item == ds->move.source)
+        continue;
       if (item == target) {
-        return (ssize_t)(idx + 1);  /* Right after the folder header */
+        return (ssize_t)(idx + 1); /* Right after the folder header */
       }
       idx++;
     }
@@ -433,15 +452,18 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
   }
 
   /* Case 2: Insert after a specific child */
-  ConnectionItem *after_child = get_child_excluding_source(target, insert_pos - 1, ds->move.source);
+  ConnectionItem *after_child =
+      get_child_excluding_source(target, insert_pos - 1, ds->move.source);
   if (!after_child) {
-    /* Fallback: insert at end of folder, find folder's last visible descendant */
+    /* Fallback: insert at end of folder, find folder's last visible descendant
+     */
     size_t idx = 0;
     ssize_t folder_idx = -1;
     ssize_t last_descendant_idx = -1;
     for (size_t i = 0; i < visible_count; i++) {
       ConnectionItem *item = connmgr_get_visible_item(ds->mgr, i);
-      if (item == ds->move.source) continue;
+      if (item == ds->move.source)
+        continue;
       if (item == target) {
         folder_idx = (ssize_t)idx;
         last_descendant_idx = (ssize_t)idx;
@@ -462,7 +484,8 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
 
   for (size_t i = 0; i < visible_count; i++) {
     ConnectionItem *item = connmgr_get_visible_item(ds->mgr, i);
-    if (item == ds->move.source) continue;
+    if (item == ds->move.source)
+      continue;
 
     if (item == after_child) {
       after_child_idx = (ssize_t)idx;
@@ -471,7 +494,7 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
       if (is_descendant_of(item, after_child)) {
         last_descendant_idx = (ssize_t)idx;
       } else {
-        break;  /* No longer a descendant */
+        break; /* No longer a descendant */
       }
     }
     idx++;
@@ -480,8 +503,10 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
   return (last_descendant_idx >= 0) ? last_descendant_idx + 1 : -1;
 }
 
-/* Get first key display for a hotkey action (returns static buffer, max 8 chars) */
-static const char *get_first_key_hint(const Config *config, HotkeyAction action) {
+/* Get first key display for a hotkey action (returns static buffer, max 8
+ * chars) */
+static const char *get_first_key_hint(const Config *config,
+                                      HotkeyAction action) {
   static char buf[16];
   buf[0] = '\0';
 
@@ -494,7 +519,8 @@ static const char *get_first_key_hint(const Config *config, HotkeyAction action)
     char *comma = strchr(display, ',');
     if (comma) {
       size_t len = (size_t)(comma - display);
-      if (len > sizeof(buf) - 1) len = sizeof(buf) - 1;
+      if (len > sizeof(buf) - 1)
+        len = sizeof(buf) - 1;
       strncpy(buf, display, len);
       buf[len] = '\0';
     } else {
@@ -506,8 +532,8 @@ static const char *get_first_key_hint(const Config *config, HotkeyAction action)
   return buf;
 }
 
-static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start_x,
-                            int height, int width) {
+static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y,
+                            int start_x, int height, int width) {
   /* Panel header */
   wattron(win, A_BOLD);
   mvwprintw(win, start_y, start_x, "Saved Connections");
@@ -516,8 +542,8 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
   /* Show move target folder info */
   if (ds->move.active && ds->move.target_folder) {
     const char *folder_name = (ds->move.target_folder == &ds->mgr->root)
-                              ? "(root)"
-                              : connmgr_item_name(ds->move.target_folder);
+                                  ? "(root)"
+                                  : connmgr_item_name(ds->move.target_folder);
     wattron(win, COLOR_PAIR(COLOR_NUMBER));
     mvwprintw(win, start_y, start_x + 18, " -> %s", folder_name);
     wattroff(win, COLOR_PAIR(COLOR_NUMBER));
@@ -548,11 +574,14 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
     }
 
     int draw_y = tree_y;
-    for (size_t i = ds->tree_scroll; i < visible_count && draw_y < tree_y + tree_height; i++) {
+    for (size_t i = ds->tree_scroll;
+         i < visible_count && draw_y < tree_y + tree_height; i++) {
       ConnectionItem *item = connmgr_get_visible_item(ds->mgr, i);
-      if (!item) continue;
+      if (!item)
+        continue;
       bool is_cursor = (i == ds->tree_highlight);
-      draw_tree_item(win, draw_y, start_x, width, item, is_cursor, ds->focus == FOCUS_TREE, false);
+      draw_tree_item(win, draw_y, start_x, width, item, is_cursor,
+                     ds->focus == FOCUS_TREE, false);
       draw_y++;
     }
   } else {
@@ -570,9 +599,11 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
       source_drawn = true;
     }
 
-    for (size_t i = 0; i < visible_count && draw_y < tree_y + tree_height; i++) {
+    for (size_t i = 0; i < visible_count && draw_y < tree_y + tree_height;
+         i++) {
       ConnectionItem *item = connmgr_get_visible_item(ds->mgr, i);
-      if (!item) continue;
+      if (!item)
+        continue;
 
       /* Skip the source item (it's drawn at target position) */
       if (is_source_item(ds, item))
@@ -584,7 +615,8 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
         draw_moving_item_at_depth(win, ds, draw_y, start_x, width, depth);
         draw_y++;
         source_drawn = true;
-        if (draw_y >= tree_y + tree_height) break;
+        if (draw_y >= tree_y + tree_height)
+          break;
       }
 
       /* Draw the regular item */
@@ -605,33 +637,40 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
   wattron(win, A_DIM);
   if (ds->move.active) {
     char move_key[16];
-    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE), sizeof(move_key) - 1);
+    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE),
+            sizeof(move_key) - 1);
     move_key[sizeof(move_key) - 1] = '\0';
     mvwprintw(win, hint_y, start_x, "%s:drop Esc:cancel",
               move_key[0] ? move_key : "Space");
   } else {
-    /* Build hints from configured hotkeys (copy to avoid static buffer reuse) */
-    char new_key[16], folder_key[16], edit_key[16], del_key[16], rename_key[16], move_key[16];
-    strncpy(new_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW), sizeof(new_key) - 1);
+    /* Build hints from configured hotkeys (copy to avoid static buffer reuse)
+     */
+    char new_key[16], folder_key[16], edit_key[16], del_key[16], rename_key[16],
+        move_key[16];
+    strncpy(new_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW),
+            sizeof(new_key) - 1);
     new_key[sizeof(new_key) - 1] = '\0';
-    strncpy(folder_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW_FOLDER), sizeof(folder_key) - 1);
+    strncpy(folder_key, get_first_key_hint(ds->config, HOTKEY_CONN_NEW_FOLDER),
+            sizeof(folder_key) - 1);
     folder_key[sizeof(folder_key) - 1] = '\0';
-    strncpy(edit_key, get_first_key_hint(ds->config, HOTKEY_CONN_EDIT), sizeof(edit_key) - 1);
+    strncpy(edit_key, get_first_key_hint(ds->config, HOTKEY_CONN_EDIT),
+            sizeof(edit_key) - 1);
     edit_key[sizeof(edit_key) - 1] = '\0';
-    strncpy(del_key, get_first_key_hint(ds->config, HOTKEY_CONN_DELETE), sizeof(del_key) - 1);
+    strncpy(del_key, get_first_key_hint(ds->config, HOTKEY_CONN_DELETE),
+            sizeof(del_key) - 1);
     del_key[sizeof(del_key) - 1] = '\0';
-    strncpy(rename_key, get_first_key_hint(ds->config, HOTKEY_CONN_RENAME), sizeof(rename_key) - 1);
+    strncpy(rename_key, get_first_key_hint(ds->config, HOTKEY_CONN_RENAME),
+            sizeof(rename_key) - 1);
     rename_key[sizeof(rename_key) - 1] = '\0';
-    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE), sizeof(move_key) - 1);
+    strncpy(move_key, get_first_key_hint(ds->config, HOTKEY_CONN_MOVE),
+            sizeof(move_key) - 1);
     move_key[sizeof(move_key) - 1] = '\0';
 
     mvwprintw(win, hint_y, start_x, "%s:new %s:folder %s:edit",
-              new_key[0] ? new_key : "n",
-              folder_key[0] ? folder_key : "N",
+              new_key[0] ? new_key : "n", folder_key[0] ? folder_key : "N",
               edit_key[0] ? edit_key : "e");
     mvwprintw(win, hint_y + 1, start_x, "%s:move %s:del %s:rename",
-              move_key[0] ? move_key : "Space",
-              del_key[0] ? del_key : "d",
+              move_key[0] ? move_key : "Space", del_key[0] ? del_key : "d",
               rename_key[0] ? rename_key : "r");
   }
   wattroff(win, A_DIM);
@@ -642,8 +681,9 @@ static void draw_tree_panel(WINDOW *win, DialogState *ds, int start_y, int start
  * ============================================================================
  */
 
-static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y, int start_x,
-                           int width, int *cursor_y, int *cursor_x) {
+static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y,
+                           int start_x, int width, int *cursor_y,
+                           int *cursor_x) {
   (void)width; /* May be used for layout adjustments later */
 
   /* Panel header */
@@ -658,8 +698,8 @@ static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y, int start_
   y++;
 
   /* Input field */
-  input_draw(win, &ds->url_input, y, start_x, ds->focus == FOCUS_URL,
-             cursor_y, cursor_x);
+  input_draw(win, &ds->url_input, y, start_x, ds->focus == FOCUS_URL, cursor_y,
+             cursor_x);
   y += 3;
 
   /* Examples */
@@ -677,7 +717,8 @@ static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y, int start_
  */
 
 static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
-  const char *buttons[] = {"Connect", "New WS", "Test", "Save", "Delete", "Close", "Quit"};
+  const char *buttons[] = {"Connect", "New WS", "Test", "Save",
+                           "Delete",  "Close",  "Quit"};
   int btn_widths[] = {9, 8, 6, 6, 8, 7, 6};
   int total_width = 0;
 
@@ -710,7 +751,8 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
  * ============================================================================
  */
 
-static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor_x) {
+static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
+                        int *cursor_x) {
   werase(win);
   wattron(win, COLOR_PAIR(COLOR_BORDER));
   box(win, 0, 0);
@@ -751,8 +793,9 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y, int *cursor
 
   /* Error/success messages */
   int msg_y = ds->height - 3;
-  int msg_max_len = ds->width - 4;  /* Leave margin on both sides */
-  if (msg_max_len < 10) msg_max_len = 10;
+  int msg_max_len = ds->width - 4; /* Leave margin on both sides */
+  if (msg_max_len < 10)
+    msg_max_len = 10;
   if (ds->error_msg && ds->error_msg[0]) {
     wattron(win, COLOR_PAIR(COLOR_ERROR));
     mvwprintw(win, msg_y, 2, "%.*s", msg_max_len, ds->error_msg);
@@ -787,13 +830,15 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
 
   int dlg_height = 8;
   int dlg_width = 50;
-  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+  if (dlg_width > parent_w - 10)
+    dlg_width = parent_w - 10;
 
   int dlg_y = 5;
   int dlg_x = (parent_w - dlg_width) / 2;
 
   WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
-  if (!dlg) return NULL;
+  if (!dlg)
+    return NULL;
 
   keypad(dlg, TRUE);
 
@@ -846,12 +891,16 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
 
     /* Buttons */
     int btn_x = dlg_width / 2 - 10;
-    if (focus == 1) wattron(dlg, A_REVERSE);
+    if (focus == 1)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 6, btn_x, "[ OK ]");
-    if (focus == 1) wattroff(dlg, A_REVERSE);
-    if (focus == 2) wattron(dlg, A_REVERSE);
+    if (focus == 1)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 6, btn_x + 8, "[ Cancel ]");
-    if (focus == 2) wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattroff(dlg, A_REVERSE);
 
     if (focus == 0) {
       wmove(dlg, 3, 2 + (int)cursor);
@@ -892,9 +941,11 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
           len--;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0) cursor--;
+        if (cursor > 0)
+          cursor--;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len) cursor++;
+        if (cursor < len)
+          cursor++;
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
@@ -912,9 +963,11 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
     } else {
       /* Button navigation with left/right */
       if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (focus == 2) focus = 1;
+        if (focus == 2)
+          focus = 1;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (focus == 1) focus = 2;
+        if (focus == 1)
+          focus = 2;
       }
     }
   }
@@ -933,18 +986,20 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
 
   int dlg_height = 7;
   int dlg_width = 50;
-  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+  if (dlg_width > parent_w - 10)
+    dlg_width = parent_w - 10;
 
   int dlg_y = 5;
   int dlg_x = (parent_w - dlg_width) / 2;
 
   WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
-  if (!dlg) return false;
+  if (!dlg)
+    return false;
 
   keypad(dlg, TRUE);
 
   /* Focus: 0 = Yes, 1 = No */
-  int focus = 1;  /* Default to No for safety */
+  int focus = 1; /* Default to No for safety */
 
   bool result = false;
   bool running = true;
@@ -962,17 +1017,22 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
 
     /* Message */
     int msg_x = (dlg_width - (int)strlen(message)) / 2;
-    if (msg_x < 2) msg_x = 2;
+    if (msg_x < 2)
+      msg_x = 2;
     mvwprintw(dlg, 2, msg_x, "%s", message);
 
     /* Buttons */
     int btn_x = dlg_width / 2 - 10;
-    if (focus == 0) wattron(dlg, A_REVERSE);
+    if (focus == 0)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 5, btn_x, "[ Yes ]");
-    if (focus == 0) wattroff(dlg, A_REVERSE);
-    if (focus == 1) wattron(dlg, A_REVERSE);
+    if (focus == 0)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 1)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 5, btn_x + 9, "[ No ]");
-    if (focus == 1) wattroff(dlg, A_REVERSE);
+    if (focus == 1)
+      wattroff(dlg, A_REVERSE);
 
     curs_set(0);
     wrefresh(dlg);
@@ -988,7 +1048,7 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
                render_event_is_special(&event, UI_KEY_RIGHT) ||
                render_event_get_char(&event) == 'h' ||
                render_event_get_char(&event) == 'l') {
-      focus = 1 - focus;  /* Toggle between 0 and 1 */
+      focus = 1 - focus; /* Toggle between 0 and 1 */
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       result = (focus == 0);
       running = false;
@@ -1016,13 +1076,15 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
 
   int dlg_height = 8;
   int dlg_width = 50;
-  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+  if (dlg_width > parent_w - 10)
+    dlg_width = parent_w - 10;
 
   int dlg_y = 5;
   int dlg_x = (parent_w - dlg_width) / 2;
 
   WINDOW *dlg = derwin(parent, dlg_height, dlg_width, dlg_y, dlg_x);
-  if (!dlg) return NULL;
+  if (!dlg)
+    return NULL;
 
   keypad(dlg, TRUE);
 
@@ -1070,12 +1132,16 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
 
     /* Buttons */
     int btn_x = dlg_width / 2 - 10;
-    if (focus == 1) wattron(dlg, A_REVERSE);
+    if (focus == 1)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 6, btn_x, "[ OK ]");
-    if (focus == 1) wattroff(dlg, A_REVERSE);
-    if (focus == 2) wattron(dlg, A_REVERSE);
+    if (focus == 1)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 6, btn_x + 8, "[ Cancel ]");
-    if (focus == 2) wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattroff(dlg, A_REVERSE);
 
     if (focus == 0) {
       wmove(dlg, 3, 2 + (int)cursor);
@@ -1114,9 +1180,11 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
           len--;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0) cursor--;
+        if (cursor > 0)
+          cursor--;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len) cursor++;
+        if (cursor < len)
+          cursor++;
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
@@ -1134,9 +1202,11 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
     } else {
       /* Button navigation with left/right */
       if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (focus == 2) focus = 1;
+        if (focus == 2)
+          focus = 1;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (focus == 1) focus = 2;
+        if (focus == 1)
+          focus = 2;
       }
     }
   }
@@ -1164,7 +1234,8 @@ static void collect_folders_recursive(ConnectionItem *item, FolderList *list) {
   /* Add this folder */
   if (list->num_folders >= list->capacity) {
     size_t new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
-    ConnectionItem **new_folders = realloc(list->folders, new_cap * sizeof(ConnectionItem *));
+    ConnectionItem **new_folders =
+        realloc(list->folders, new_cap * sizeof(ConnectionItem *));
     if (!new_folders)
       return;
     list->folders = new_folders;
@@ -1201,14 +1272,15 @@ static char *folder_display_name(ConnectionItem *folder) {
     return str_dup("(root)");
   }
 
-  char *result = malloc(depth * 2 + strlen(name) + 1);
+  size_t name_len = strlen(name);
+  char *result = malloc(depth * 2 + name_len + 1);
   if (!result)
     return str_dup(name);
 
   for (int i = 0; i < depth * 2; i++) {
     result[i] = ' ';
   }
-  strcpy(result + depth * 2, name);
+  memcpy(result + depth * 2, name, name_len + 1); /* Include null terminator */
   return result;
 }
 
@@ -1229,7 +1301,7 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
   /* Collect all folders for the picker */
   FolderList folders = collect_all_folders(mgr);
-  size_t selected_folder = 0;  /* Default to root */
+  size_t selected_folder = 0; /* Default to root */
 
   int parent_h, parent_w;
   getmaxyx(parent, parent_h, parent_w);
@@ -1238,7 +1310,8 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
   /* Dialog with name input and folder picker */
   int dlg_height = 12;
   int dlg_width = 50;
-  if (dlg_width > parent_w - 10) dlg_width = parent_w - 10;
+  if (dlg_width > parent_w - 10)
+    dlg_width = parent_w - 10;
 
   int dlg_y = 4;
   int dlg_x = (parent_w - dlg_width) / 2;
@@ -1325,12 +1398,16 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
     /* Buttons */
     int btn_x = dlg_width / 2 - 12;
-    if (focus == 2) wattron(dlg, A_REVERSE);
+    if (focus == 2)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 10, btn_x, "[ Save ]");
-    if (focus == 2) wattroff(dlg, A_REVERSE);
-    if (focus == 3) wattron(dlg, A_REVERSE);
+    if (focus == 2)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 3)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, 10, btn_x + 10, "[ Cancel ]");
-    if (focus == 3) wattroff(dlg, A_REVERSE);
+    if (focus == 3)
+      wattroff(dlg, A_REVERSE);
 
     /* Position cursor */
     if (focus == 0) {
@@ -1388,9 +1465,11 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
           name_len--;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (name_cursor > 0) name_cursor--;
+        if (name_cursor > 0)
+          name_cursor--;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (name_cursor < name_len) name_cursor++;
+        if (name_cursor < name_len)
+          name_cursor++;
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         name_cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
@@ -1424,9 +1503,11 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
     } else {
       /* Button navigation with left/right */
       if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (focus == 3) focus = 2;
+        if (focus == 3)
+          focus = 2;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (focus == 2) focus = 3;
+        if (focus == 2)
+          focus = 3;
       }
     }
   }
@@ -1450,7 +1531,7 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
 typedef struct {
   char name[128];
-  char driver[32];   /* sqlite, postgres, mysql, mariadb */
+  char driver[32]; /* sqlite, postgres, mysql, mariadb */
   char host[128];
   char port[8];
   char database[256];
@@ -1461,15 +1542,15 @@ typedef struct {
 
 static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
                                  ConnectionItem *edit_item, /* NULL for new */
-                                 ConnectionItem *parent_folder,
-                                 char **error) {
+                                 ConnectionItem *parent_folder, char **error) {
   int parent_h, parent_w;
   getmaxyx(parent, parent_h, parent_w);
   (void)parent_h;
 
   int dlg_height = 20;
   int dlg_width = 60;
-  if (dlg_width > parent_w - 6) dlg_width = parent_w - 6;
+  if (dlg_width > parent_w - 6)
+    dlg_width = parent_w - 6;
 
   int dlg_y = 2;
   int dlg_x = (parent_w - dlg_width) / 2;
@@ -1483,24 +1564,32 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
   keypad(dlg, TRUE);
 
   ConnectionFormData form = {0};
-  strcpy(form.driver, "postgres");  /* Default driver */
+  strncpy(form.driver, "postgres",
+          sizeof(form.driver) - 1); /* Default driver */
 
   /* Pre-fill if editing */
   if (edit_item && connmgr_is_connection(edit_item)) {
     SavedConnection *conn = &edit_item->connection;
-    if (conn->name) strncpy(form.name, conn->name, sizeof(form.name) - 1);
-    if (conn->driver) strncpy(form.driver, conn->driver, sizeof(form.driver) - 1);
-    if (conn->host) strncpy(form.host, conn->host, sizeof(form.host) - 1);
-    if (conn->port > 0) snprintf(form.port, sizeof(form.port), "%d", conn->port);
-    if (conn->database) strncpy(form.database, conn->database, sizeof(form.database) - 1);
-    if (conn->user) strncpy(form.user, conn->user, sizeof(form.user) - 1);
-    if (conn->password) strncpy(form.password, conn->password, sizeof(form.password) - 1);
+    if (conn->name)
+      strncpy(form.name, conn->name, sizeof(form.name) - 1);
+    if (conn->driver)
+      strncpy(form.driver, conn->driver, sizeof(form.driver) - 1);
+    if (conn->host)
+      strncpy(form.host, conn->host, sizeof(form.host) - 1);
+    if (conn->port > 0)
+      snprintf(form.port, sizeof(form.port), "%d", conn->port);
+    if (conn->database)
+      strncpy(form.database, conn->database, sizeof(form.database) - 1);
+    if (conn->user)
+      strncpy(form.user, conn->user, sizeof(form.user) - 1);
+    if (conn->password)
+      strncpy(form.password, conn->password, sizeof(form.password) - 1);
     form.save_password = conn->save_password;
   }
 
   const char *drivers[] = {"sqlite", "postgres", "mysql", "mariadb"};
   int num_drivers = 4;
-  int current_driver = 1;  /* postgres default */
+  int current_driver = 1; /* postgres default */
 
   /* Find current driver index */
   for (int i = 0; i < num_drivers; i++) {
@@ -1511,7 +1600,19 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
   }
 
   /* Field definitions */
-  enum { FLD_NAME, FLD_DRIVER, FLD_HOST, FLD_PORT, FLD_DATABASE, FLD_USER, FLD_PASSWORD, FLD_SAVE_PWD, FLD_SAVE_BTN, FLD_CANCEL_BTN, FLD_COUNT };
+  enum {
+    FLD_NAME,
+    FLD_DRIVER,
+    FLD_HOST,
+    FLD_PORT,
+    FLD_DATABASE,
+    FLD_USER,
+    FLD_PASSWORD,
+    FLD_SAVE_PWD,
+    FLD_SAVE_BTN,
+    FLD_CANCEL_BTN,
+    FLD_COUNT
+  };
   int focus = FLD_NAME;
   size_t cursors[FLD_COUNT] = {0};
 
@@ -1541,45 +1642,52 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
     int label_w = 12;
     int field_w = dlg_width - label_w - 4;
 
-    /* Helper macro to draw field */
-    #define DRAW_FIELD(fld, label, buf, is_password) do { \
-      mvwprintw(dlg, y, 2, "%s:", label); \
-      if (focus == fld) wattron(dlg, COLOR_PAIR(COLOR_SELECTED)); \
-      mvwhline(dlg, y, label_w + 2, ' ', field_w); \
-      if (is_password) { \
-        for (size_t _i = 0; _i < strlen(buf); _i++) mvwaddch(dlg, y, label_w + 2 + (int)_i, '*'); \
-      } else { \
-        mvwaddnstr(dlg, y, label_w + 2, buf, field_w - 1); \
-      } \
-      if (focus == fld) wattroff(dlg, COLOR_PAIR(COLOR_SELECTED)); \
-      y++; \
-    } while(0)
+/* Helper macro to draw field */
+#define DRAW_FIELD(fld, label, buf, is_password)                               \
+  do {                                                                         \
+    mvwprintw(dlg, y, 2, "%s:", label);                                        \
+    if (focus == fld)                                                          \
+      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));                                \
+    mvwhline(dlg, y, label_w + 2, ' ', field_w);                               \
+    if (is_password) {                                                         \
+      for (size_t _i = 0; _i < strlen(buf); _i++)                              \
+        mvwaddch(dlg, y, label_w + 2 + (int)_i, '*');                          \
+    } else {                                                                   \
+      mvwaddnstr(dlg, y, label_w + 2, buf, field_w - 1);                       \
+    }                                                                          \
+    if (focus == fld)                                                          \
+      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));                               \
+    y++;                                                                       \
+  } while (0)
 
     DRAW_FIELD(FLD_NAME, "Name", form.name, false);
-    y++;  /* Spacer */
+    y++; /* Spacer */
 
     /* Driver selector */
     mvwprintw(dlg, y, 2, "Driver:");
-    if (focus == FLD_DRIVER) wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
+    if (focus == FLD_DRIVER)
+      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
     mvwprintw(dlg, y, label_w + 2, "< %s >", drivers[current_driver]);
-    if (focus == FLD_DRIVER) wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
+    if (focus == FLD_DRIVER)
+      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
     y++;
 
     DRAW_FIELD(FLD_HOST, "Host", form.host, false);
     DRAW_FIELD(FLD_PORT, "Port", form.port, false);
     DRAW_FIELD(FLD_DATABASE, "Database", form.database, false);
-    y++;  /* Spacer */
+    y++; /* Spacer */
     DRAW_FIELD(FLD_USER, "User", form.user, false);
     DRAW_FIELD(FLD_PASSWORD, "Password", form.password, true);
 
     /* Save password checkbox */
-    mvwprintw(dlg, y, label_w + 2, "[%c] Save password", form.save_password ? 'X' : ' ');
+    mvwprintw(dlg, y, label_w + 2, "[%c] Save password",
+              form.save_password ? 'X' : ' ');
     if (focus == FLD_SAVE_PWD) {
       mvwchgat(dlg, y, label_w + 2, 18, A_REVERSE, 0, NULL);
     }
     y += 2;
 
-    #undef DRAW_FIELD
+#undef DRAW_FIELD
 
     /* Separator */
     mvwaddch(dlg, y, 0, ACS_LTEE);
@@ -1589,24 +1697,46 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
 
     /* Buttons */
     int btn_x = dlg_width / 2 - 12;
-    if (focus == FLD_SAVE_BTN) wattron(dlg, A_REVERSE);
+    if (focus == FLD_SAVE_BTN)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, y, btn_x, "[ Save ]");
-    if (focus == FLD_SAVE_BTN) wattroff(dlg, A_REVERSE);
-    if (focus == FLD_CANCEL_BTN) wattron(dlg, A_REVERSE);
+    if (focus == FLD_SAVE_BTN)
+      wattroff(dlg, A_REVERSE);
+    if (focus == FLD_CANCEL_BTN)
+      wattron(dlg, A_REVERSE);
     mvwprintw(dlg, y, btn_x + 10, "[ Cancel ]");
-    if (focus == FLD_CANCEL_BTN) wattroff(dlg, A_REVERSE);
+    if (focus == FLD_CANCEL_BTN)
+      wattroff(dlg, A_REVERSE);
 
     /* Position cursor */
     if (focus >= FLD_NAME && focus <= FLD_PASSWORD && focus != FLD_DRIVER) {
       char *field = NULL;
       int field_y = 0;
       switch (focus) {
-        case FLD_NAME: field = form.name; field_y = 2; break;
-        case FLD_HOST: field = form.host; field_y = 5; break;
-        case FLD_PORT: field = form.port; field_y = 6; break;
-        case FLD_DATABASE: field = form.database; field_y = 7; break;
-        case FLD_USER: field = form.user; field_y = 9; break;
-        case FLD_PASSWORD: field = form.password; field_y = 10; break;
+      case FLD_NAME:
+        field = form.name;
+        field_y = 2;
+        break;
+      case FLD_HOST:
+        field = form.host;
+        field_y = 5;
+        break;
+      case FLD_PORT:
+        field = form.port;
+        field_y = 6;
+        break;
+      case FLD_DATABASE:
+        field = form.database;
+        field_y = 7;
+        break;
+      case FLD_USER:
+        field = form.user;
+        field_y = 9;
+        break;
+      case FLD_PASSWORD:
+        field = form.password;
+        field_y = 10;
+        break;
       }
       if (field) {
         wmove(dlg, field_y, label_w + 2 + (int)cursors[focus]);
@@ -1637,7 +1767,8 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
         form.save_password = !form.save_password;
       } else if (strlen(form.name) > 0) {
         /* Create/update connection */
-        SavedConnection *conn = edit_item ? &edit_item->connection : connmgr_new_connection();
+        SavedConnection *conn =
+            edit_item ? &edit_item->connection : connmgr_new_connection();
         if (!conn) {
           *error = str_dup("Failed to create connection");
           running = false;
@@ -1647,20 +1778,32 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
         /* Update fields */
         if (!edit_item) {
           /* New connection - need to allocate */
-          free(conn->name); conn->name = str_dup(form.name);
-          free(conn->driver); conn->driver = str_dup(drivers[current_driver]);
-          free(conn->host); conn->host = str_dup(form.host);
-          free(conn->database); conn->database = str_dup(form.database);
-          free(conn->user); conn->user = str_dup(form.user);
-          str_secure_free(conn->password); conn->password = str_dup(form.password);
+          free(conn->name);
+          conn->name = str_dup(form.name);
+          free(conn->driver);
+          conn->driver = str_dup(drivers[current_driver]);
+          free(conn->host);
+          conn->host = str_dup(form.host);
+          free(conn->database);
+          conn->database = str_dup(form.database);
+          free(conn->user);
+          conn->user = str_dup(form.user);
+          str_secure_free(conn->password);
+          conn->password = str_dup(form.password);
         } else {
           /* Edit - update in place */
-          free(conn->name); conn->name = str_dup(form.name);
-          free(conn->driver); conn->driver = str_dup(drivers[current_driver]);
-          free(conn->host); conn->host = str_dup(form.host);
-          free(conn->database); conn->database = str_dup(form.database);
-          free(conn->user); conn->user = str_dup(form.user);
-          str_secure_free(conn->password); conn->password = str_dup(form.password);
+          free(conn->name);
+          conn->name = str_dup(form.name);
+          free(conn->driver);
+          conn->driver = str_dup(drivers[current_driver]);
+          free(conn->host);
+          conn->host = str_dup(form.host);
+          free(conn->database);
+          conn->database = str_dup(form.database);
+          free(conn->user);
+          conn->user = str_dup(form.user);
+          str_secure_free(conn->password);
+          conn->password = str_dup(form.password);
         }
         conn->port = atoi(form.port);
         conn->save_password = form.save_password;
@@ -1687,11 +1830,11 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
       if (render_event_is_special(&event, UI_KEY_LEFT) ||
           render_event_get_char(&event) == 'h') {
         current_driver = (current_driver + num_drivers - 1) % num_drivers;
-        strcpy(form.driver, drivers[current_driver]);
+        strncpy(form.driver, drivers[current_driver], sizeof(form.driver) - 1);
       } else if (render_event_is_special(&event, UI_KEY_RIGHT) ||
                  render_event_get_char(&event) == 'l') {
         current_driver = (current_driver + 1) % num_drivers;
-        strcpy(form.driver, drivers[current_driver]);
+        strncpy(form.driver, drivers[current_driver], sizeof(form.driver) - 1);
       }
     } else if (focus == FLD_SAVE_PWD) {
       if (render_event_get_char(&event) == ' ') {
@@ -1700,21 +1843,41 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
     } else if (focus == FLD_SAVE_BTN || focus == FLD_CANCEL_BTN) {
       /* Button navigation with left/right */
       if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (focus == FLD_CANCEL_BTN) focus = FLD_SAVE_BTN;
+        if (focus == FLD_CANCEL_BTN)
+          focus = FLD_SAVE_BTN;
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (focus == FLD_SAVE_BTN) focus = FLD_CANCEL_BTN;
+        if (focus == FLD_SAVE_BTN)
+          focus = FLD_CANCEL_BTN;
       }
     } else {
       /* Text field input */
       char *field = NULL;
       size_t max_len = 0;
       switch (focus) {
-        case FLD_NAME: field = form.name; max_len = sizeof(form.name) - 1; break;
-        case FLD_HOST: field = form.host; max_len = sizeof(form.host) - 1; break;
-        case FLD_PORT: field = form.port; max_len = sizeof(form.port) - 1; break;
-        case FLD_DATABASE: field = form.database; max_len = sizeof(form.database) - 1; break;
-        case FLD_USER: field = form.user; max_len = sizeof(form.user) - 1; break;
-        case FLD_PASSWORD: field = form.password; max_len = sizeof(form.password) - 1; break;
+      case FLD_NAME:
+        field = form.name;
+        max_len = sizeof(form.name) - 1;
+        break;
+      case FLD_HOST:
+        field = form.host;
+        max_len = sizeof(form.host) - 1;
+        break;
+      case FLD_PORT:
+        field = form.port;
+        max_len = sizeof(form.port) - 1;
+        break;
+      case FLD_DATABASE:
+        field = form.database;
+        max_len = sizeof(form.database) - 1;
+        break;
+      case FLD_USER:
+        field = form.user;
+        max_len = sizeof(form.user) - 1;
+        break;
+      case FLD_PASSWORD:
+        field = form.password;
+        max_len = sizeof(form.password) - 1;
+        break;
       }
 
       if (field) {
@@ -1727,9 +1890,11 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
             cursors[focus]--;
           }
         } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-          if (cursor > 0) cursors[focus]--;
+          if (cursor > 0)
+            cursors[focus]--;
         } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-          if (cursor < len) cursors[focus]++;
+          if (cursor < len)
+            cursors[focus]++;
         } else if (render_event_is_special(&event, UI_KEY_HOME)) {
           cursors[focus] = 0;
         } else if (render_event_is_special(&event, UI_KEY_END)) {
@@ -1737,7 +1902,8 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
         } else {
           int key_char = render_event_get_char(&event);
           /* For port field, only allow digits */
-          bool valid = render_event_is_char(&event) && key_char >= 32 && key_char < 127;
+          bool valid =
+              render_event_is_char(&event) && key_char >= 32 && key_char < 127;
           if (focus == FLD_PORT && (key_char < '0' || key_char > '9')) {
             valid = false;
           }
@@ -1789,9 +1955,11 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
   SavedConnection *saved_conn = NULL;
 
   /* Determine source: tree selection or URL */
-  if (ds->focus == FOCUS_TREE || (ds->focus == FOCUS_BUTTONS && ds->url_input.len == 0)) {
+  if (ds->focus == FOCUS_TREE ||
+      (ds->focus == FOCUS_BUTTONS && ds->url_input.len == 0)) {
     /* Use selected saved connection */
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (!item || !connmgr_is_connection(item)) {
       ds->error_msg = str_dup("Select a connection first");
       return NULL;
@@ -1826,8 +1994,7 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
   if (!conn) {
     /* Connection failed - only prompt for password if it's an auth error */
     if (saved_conn && saved_conn->driver &&
-        strcmp(saved_conn->driver, "sqlite") != 0 &&
-        is_auth_error(err)) {
+        strcmp(saved_conn->driver, "sqlite") != 0 && is_auth_error(err)) {
       /* Prompt for password */
       char *password = show_password_dialog(ds->dialog_win, "Password Required",
                                             "Enter password:");
@@ -1843,7 +2010,9 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
             password,
             (saved_conn->host && saved_conn->host[0]) ? saved_conn->host : NULL,
             saved_conn->port,
-            (saved_conn->database && saved_conn->database[0]) ? saved_conn->database : NULL,
+            (saved_conn->database && saved_conn->database[0])
+                ? saved_conn->database
+                : NULL,
             NULL, NULL, 0);
 
         str_secure_free(password);
@@ -1872,7 +2041,8 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
 
   /* Determine mode */
   if (mode) {
-    *mode = ds->has_existing_tabs ? CONNECT_MODE_NEW_TAB : CONNECT_MODE_NEW_WORKSPACE;
+    *mode = ds->has_existing_tabs ? CONNECT_MODE_NEW_TAB
+                                  : CONNECT_MODE_NEW_WORKSPACE;
   }
 
   return connstr;
@@ -1891,17 +2061,20 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
   if (ds->move.active) {
     ConnectionItem *target = ds->move.target_folder;
     size_t pos = ds->move.insert_pos;
-    size_t num_children = count_children_excluding_source(target, ds->move.source);
+    size_t num_children =
+        count_children_excluding_source(target, ds->move.source);
 
     if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
       if (pos > 0) {
         /* Move up within folder */
         ds->move.insert_pos--;
         /* Check if we're now after an expanded folder - enter it at end */
-        ConnectionItem *prev = get_child_excluding_source(target, ds->move.insert_pos, ds->move.source);
+        ConnectionItem *prev = get_child_excluding_source(
+            target, ds->move.insert_pos, ds->move.source);
         if (prev && connmgr_is_folder(prev) && prev->folder.expanded) {
           ds->move.target_folder = prev;
-          ds->move.insert_pos = count_children_excluding_source(prev, ds->move.source);
+          ds->move.insert_pos =
+              count_children_excluding_source(prev, ds->move.source);
         }
       } else {
         /* At start of folder - exit to parent (before this folder) */
@@ -1917,7 +2090,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
     if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
       if (pos < num_children) {
         /* Check if item at current position is an expanded folder - enter it */
-        ConnectionItem *curr = get_child_excluding_source(target, pos, ds->move.source);
+        ConnectionItem *curr =
+            get_child_excluding_source(target, pos, ds->move.source);
         if (curr && connmgr_is_folder(curr) && curr->folder.expanded) {
           ds->move.target_folder = curr;
           ds->move.insert_pos = 0;
@@ -1947,7 +2121,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
     if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
       if (visible_count > 0 && ds->tree_highlight < visible_count - 1) {
         ds->tree_highlight++;
-      } else if (visible_count == 0 || ds->tree_highlight >= visible_count - 1) {
+      } else if (visible_count == 0 ||
+                 ds->tree_highlight >= visible_count - 1) {
         /* At bottom of tree, move to buttons panel */
         ds->prev_panel_focus = FOCUS_TREE;
         ds->focus = FOCUS_BUTTONS;
@@ -2025,15 +2200,19 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
         ds->tree_highlight = visible - 1;
       }
     } else {
-      /* Start move - initialize target_folder and insert_pos from source position */
-      ConnectionItem *current = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
-      if (current && current->parent && current->parent->type == CONN_ITEM_FOLDER) {
+      /* Start move - initialize target_folder and insert_pos from source
+       * position */
+      ConnectionItem *current =
+          connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+      if (current && current->parent &&
+          current->parent->type == CONN_ITEM_FOLDER) {
         ds->move.active = true;
         ds->move.source = current;
         ds->move.source_idx = ds->tree_highlight;
         ds->move.target_folder = current->parent;
-        /* Find actual index of source in parent - this becomes the insert position
-         * because after removing source, insert_pos=K means "after K items" */
+        /* Find actual index of source in parent - this becomes the insert
+         * position because after removing source, insert_pos=K means "after K
+         * items" */
         ConnectionFolder *pf = &current->parent->folder;
         size_t src_idx = 0;
         for (size_t i = 0; i < pf->num_children; i++) {
@@ -2058,7 +2237,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
 
   /* Right arrow: expand folder or move to URL panel */
   if (render_event_is_special(event, UI_KEY_RIGHT)) {
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item && connmgr_is_folder(item) && !item->folder.expanded) {
       connmgr_toggle_folder(item);
       ds->mgr->modified = true;
@@ -2070,7 +2250,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
   }
 
   if (render_event_is_special(event, UI_KEY_LEFT)) {
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item) {
       if (connmgr_is_folder(item) && item->folder.expanded) {
         /* Collapse folder */
@@ -2095,8 +2276,10 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
     if (name) {
       ConnectionFolder *folder = connmgr_new_folder(name);
       if (folder) {
-        /* Determine parent: selected folder, or parent of selected connection */
-        ConnectionItem *selected = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+        /* Determine parent: selected folder, or parent of selected connection
+         */
+        ConnectionItem *selected =
+            connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
         ConnectionItem *parent = &ds->mgr->root;
 
         if (selected) {
@@ -2125,7 +2308,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
 
   /* New connection - adds to selected folder or parent of selected item */
   if (ds->config && hotkey_matches(ds->config, event, HOTKEY_CONN_NEW)) {
-    ConnectionItem *selected = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *selected =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     ConnectionItem *parent = &ds->mgr->root;
 
     if (selected) {
@@ -2148,7 +2332,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
 
   /* Edit connection */
   if (ds->config && hotkey_matches(ds->config, event, HOTKEY_CONN_EDIT)) {
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item && connmgr_is_connection(item)) {
       char *err = NULL;
       if (show_connection_form(ds->dialog_win, ds->mgr, item, NULL, &err)) {
@@ -2159,7 +2344,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
     } else if (item && connmgr_is_folder(item)) {
       /* For folders, just rename */
       const char *current_name = connmgr_item_name(item);
-      char *new_name = show_input_dialog(ds->dialog_win, "Rename Folder", "Name:", current_name);
+      char *new_name = show_input_dialog(ds->dialog_win, "Rename Folder",
+                                         "Name:", current_name);
       if (new_name) {
         free(item->folder.name);
         item->folder.name = new_name;
@@ -2171,10 +2357,12 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
 
   /* Rename */
   if (ds->config && hotkey_matches(ds->config, event, HOTKEY_CONN_RENAME)) {
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item) {
       const char *current_name = connmgr_item_name(item);
-      char *new_name = show_input_dialog(ds->dialog_win, "Rename", "Name:", current_name);
+      char *new_name =
+          show_input_dialog(ds->dialog_win, "Rename", "Name:", current_name);
       if (new_name) {
         if (connmgr_is_folder(item)) {
           free(item->folder.name);
@@ -2191,7 +2379,8 @@ static bool handle_tree_input(DialogState *ds, const UiEvent *event) {
 
   /* Delete */
   if (ds->config && hotkey_matches(ds->config, event, HOTKEY_CONN_DELETE)) {
-    ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+    ConnectionItem *item =
+        connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
     if (item && item->parent) {
       const char *name = connmgr_item_name(item);
       char msg[128];
@@ -2241,7 +2430,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
       if (connstr) {
         result->connstr = connstr;
         result->mode = CONNECT_MODE_NEW_TAB;
-        *should_exit = false;  /* false = stop running */
+        *should_exit = false; /* false = stop running */
       }
       break;
     }
@@ -2252,7 +2441,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
       if (connstr) {
         result->connstr = connstr;
         result->mode = CONNECT_MODE_NEW_WORKSPACE;
-        *should_exit = false;  /* false = stop running */
+        *should_exit = false; /* false = stop running */
       }
       break;
     }
@@ -2294,7 +2483,8 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
     }
 
     case BTN_DELETE: {
-      ConnectionItem *item = connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
+      ConnectionItem *item =
+          connmgr_get_visible_item(ds->mgr, ds->tree_highlight);
       if (item && item->parent) {
         const char *name = connmgr_item_name(item);
         char msg[128];
@@ -2311,12 +2501,12 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
     }
 
     case BTN_CLOSE:
-      *should_exit = false;  /* false = stop running */
+      *should_exit = false; /* false = stop running */
       break;
 
     case BTN_QUIT:
       result->mode = CONNECT_MODE_QUIT;
-      *should_exit = false;  /* false = stop running */
+      *should_exit = false; /* false = stop running */
       break;
     }
     return true;
@@ -2356,17 +2546,23 @@ ConnectResult connect_view_show(TuiState *state) {
 
   /* Calculate dialog size */
   int width = term_cols - 10;
-  if (width < MIN_DIALOG_WIDTH) width = MIN_DIALOG_WIDTH;
-  if (width > 100) width = 100;
+  if (width < MIN_DIALOG_WIDTH)
+    width = MIN_DIALOG_WIDTH;
+  if (width > 100)
+    width = 100;
 
   int height = term_rows - 6;
-  if (height < MIN_DIALOG_HEIGHT) height = MIN_DIALOG_HEIGHT;
-  if (height > 30) height = 30;
+  if (height < MIN_DIALOG_HEIGHT)
+    height = MIN_DIALOG_HEIGHT;
+  if (height > 30)
+    height = 30;
 
   int starty = (term_rows - height) / 2;
   int startx = (term_cols - width) / 2;
-  if (starty < 0) starty = 0;
-  if (startx < 0) startx = 0;
+  if (starty < 0)
+    starty = 0;
+  if (startx < 0)
+    startx = 0;
 
   WINDOW *dialog = newwin(height, width, starty, startx);
   if (!dialog) {
@@ -2381,7 +2577,7 @@ ConnectResult connect_view_show(TuiState *state) {
   ds.mgr = mgr;
   ds.config = state && state->app ? state->app->config : NULL;
   ds.focus = connmgr_count_visible(mgr) > 0 ? FOCUS_TREE : FOCUS_URL;
-  ds.prev_panel_focus = ds.focus;  /* Initialize to same as initial focus */
+  ds.prev_panel_focus = ds.focus; /* Initialize to same as initial focus */
   ds.tree_highlight = 0;
   ds.tree_scroll = 0;
   ds.selected_button = BTN_CONNECT;
@@ -2445,7 +2641,8 @@ ConnectResult connect_view_show(TuiState *state) {
     }
 
     /* Save URL to list hotkey */
-    if (ds.config && hotkey_matches(ds.config, &event, HOTKEY_CONN_SAVE) && ds.url_input.len > 0) {
+    if (ds.config && hotkey_matches(ds.config, &event, HOTKEY_CONN_SAVE) &&
+        ds.url_input.len > 0) {
       char *url_to_save = NULL;
       char *err = NULL;
 
@@ -2473,7 +2670,8 @@ ConnectResult connect_view_show(TuiState *state) {
     /* Global shortcuts (work regardless of focus) */
 
     /* New folder hotkey (global) */
-    if (ds.config && hotkey_matches(ds.config, &event, HOTKEY_CONN_NEW_FOLDER) &&
+    if (ds.config &&
+        hotkey_matches(ds.config, &event, HOTKEY_CONN_NEW_FOLDER) &&
         !ds.move.active && ds.focus != FOCUS_URL) {
       char *name = show_input_dialog(dialog, "New Folder", "Name:", "");
       if (name) {

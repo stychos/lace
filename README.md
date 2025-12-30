@@ -1,20 +1,21 @@
 # Lace
 
-A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and MySQL.
+A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, MySQL, and MariaDB.
 
 [![asciicast](https://asciinema.org/a/ZBXGyPBcaUoAYaIVRtmPheudu.svg)](https://asciinema.org/a/ZBXGyPBcaUoAYaIVRtmPheudu)
 
 ## Features
 
-- Memory efficient, as fast as possible
-- Classic & vim-like, spatial & configurable navigation with mouse support
-- Multi-tabs & workspaces
-- SQL editor tabs that remember content between restarts
-- Multi-column data filtering and sorting, RAW SQL filters
+- Memory-efficient and optimized for speed
+- Classic and Vim-style navigation with configurable hotkeys and mouse support
+- Multiple tabs and workspaces
+- SQL editor tabs with persistent content across restarts
+- Multi-column filtering and sorting with raw SQL filter support
 - Inline data editing with live updates
-- Queries history tracking
-- OS clipboard sync where possible, internal clipboard as fallback
-- Linux & macOS compatible
+- Quick row insertion
+- Query history tracking
+- System clipboard integration with internal clipboard fallback
+- Compatible with Linux and macOS
 - Works over SSH
 
 ## Installation
@@ -61,7 +62,7 @@ Binary will be at `build/lace`.
 # MySQL/MariaDB
 ./build/lace mysql://user:pass@host/database
 
-# Or start without arguments for connection dialog or to restore previous session (optionally)
+# Or start without arguments to open the connection dialog or restore a previous session
 ./build/lace
 ```
 
@@ -70,14 +71,14 @@ Binary will be at `build/lace`.
 - [x] Configuration management
 - [x] Connection management (saved connections)
 - [x] Session persistence (save/restore tabs on restart)
-- [x] Bulk delete
-- [ ] Data adding (insert rows)
-- [ ] Export operations (incl. partial exports for selected rows)
+- [x] Bulk row deletion
+- [x] Row insertion
+- [ ] Data export (including partial exports for selected rows)
 - [ ] Database management
-- [ ] Tables management
+- [ ] Table management
 - [ ] Schema management
-- [ ] Foreign keys management
-- [ ] Database users management
+- [ ] Foreign key management
+- [ ] User management
 
 ## License
 

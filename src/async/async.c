@@ -18,7 +18,8 @@ static void *async_worker_thread(void *arg) {
 
   lace_mutex_lock(&op->mutex);
   op->state = ASYNC_STATE_RUNNING;
-  /* Prepare cancellation handle while holding mutex to prevent race with async_cancel */
+  /* Prepare cancellation handle while holding mutex to prevent race with
+   * async_cancel */
   if (op->conn && op->conn->driver && op->conn->driver->prepare_cancel) {
     op->cancel_handle = op->conn->driver->prepare_cancel(op->conn);
   }

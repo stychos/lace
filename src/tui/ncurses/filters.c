@@ -111,12 +111,12 @@ void tui_draw_filters_panel(TuiState *state) {
   char *add_key = hotkey_get_display(state->app->config, HOTKEY_ADD_FILTER);
   char *rem_key = hotkey_get_display(state->app->config, HOTKEY_REMOVE_FILTER);
   char *clr_key = hotkey_get_display(state->app->config, HOTKEY_CLEAR_FILTERS);
-  char *sw_key = hotkey_get_display(state->app->config, HOTKEY_FILTERS_SWITCH_FOCUS);
+  char *sw_key =
+      hotkey_get_display(state->app->config, HOTKEY_FILTERS_SWITCH_FOCUS);
   if (active_count > 0) {
     mvwprintw(state->main_win, start_y, col_x,
               "Filters (%zu) (%s/%s:add/del, %s:clear, %s:switch, Esc)",
-              active_count,
-              add_key ? add_key : "+", rem_key ? rem_key : "-",
+              active_count, add_key ? add_key : "+", rem_key ? rem_key : "-",
               clr_key ? clr_key : "c", sw_key ? sw_key : "^W");
   } else {
     mvwprintw(state->main_win, start_y, col_x,
@@ -161,7 +161,8 @@ void tui_draw_filters_panel(TuiState *state) {
         const char *name = vm_table_column_name(vm, cf->column_index);
         if (name)
           col_name = name;
-      } else if (state->schema && cf->column_index < state->schema->num_columns) {
+      } else if (state->schema &&
+                 cf->column_index < state->schema->num_columns) {
         col_name = state->schema->columns[cf->column_index].name;
       }
     }
@@ -655,7 +656,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       if (state->filters_edit_len > 0) {
         state->filters_edit_buffer[--state->filters_edit_len] = '\0';
       }
-    } else if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    } else if (render_event_is_char(event) && key_char >= 32 &&
+               key_char < 127) {
       /* Printable character */
       if (state->filters_edit_len < sizeof(state->filters_edit_buffer) - 1) {
         state->filters_edit_buffer[state->filters_edit_len++] = (char)key_char;
@@ -1039,7 +1041,8 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
     if (sel >= 0) {
       FilterOperator new_op = (FilterOperator)sel;
       bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
-      bool will_have_effect = cf->value[0] != '\0' || !filter_op_needs_value(new_op);
+      bool will_have_effect =
+          cf->value[0] != '\0' || !filter_op_needs_value(new_op);
       cf->op = new_op;
       if (had_effect || will_have_effect) {
         tui_apply_filters(state);

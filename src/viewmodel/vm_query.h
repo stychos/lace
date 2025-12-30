@@ -28,13 +28,13 @@ typedef struct VmQuery VmQuery;
 
 typedef enum {
   VM_QUERY_CHANGE_NONE = 0,
-  VM_QUERY_CHANGE_TEXT = (1 << 0),       /* Query text changed */
-  VM_QUERY_CHANGE_CURSOR = (1 << 1),     /* Cursor position changed */
-  VM_QUERY_CHANGE_SELECTION = (1 << 2),  /* Text selection changed */
-  VM_QUERY_CHANGE_RESULTS = (1 << 3),    /* Query results changed */
-  VM_QUERY_CHANGE_EXECUTING = (1 << 4),  /* Execution state changed */
-  VM_QUERY_CHANGE_ERROR = (1 << 5),      /* Error occurred */
-  VM_QUERY_CHANGE_FOCUS = (1 << 6),      /* Focus changed (editor vs results) */
+  VM_QUERY_CHANGE_TEXT = (1 << 0),      /* Query text changed */
+  VM_QUERY_CHANGE_CURSOR = (1 << 1),    /* Cursor position changed */
+  VM_QUERY_CHANGE_SELECTION = (1 << 2), /* Text selection changed */
+  VM_QUERY_CHANGE_RESULTS = (1 << 3),   /* Query results changed */
+  VM_QUERY_CHANGE_EXECUTING = (1 << 4), /* Execution state changed */
+  VM_QUERY_CHANGE_ERROR = (1 << 5),     /* Error occurred */
+  VM_QUERY_CHANGE_FOCUS = (1 << 6),     /* Focus changed (editor vs results) */
   VM_QUERY_CHANGE_ALL = 0xFF
 } VmQueryChangeFlags;
 
@@ -44,10 +44,10 @@ typedef enum {
  */
 
 typedef enum {
-  VM_QUERY_IDLE,       /* Not executing */
-  VM_QUERY_EXECUTING,  /* Query running */
-  VM_QUERY_CANCELLED,  /* Execution cancelled */
-  VM_QUERY_COMPLETE,   /* Execution complete (check results/error) */
+  VM_QUERY_IDLE,      /* Not executing */
+  VM_QUERY_EXECUTING, /* Query running */
+  VM_QUERY_CANCELLED, /* Execution cancelled */
+  VM_QUERY_COMPLETE,  /* Execution complete (check results/error) */
 } VmQueryExecState;
 
 /* ============================================================================
@@ -56,8 +56,8 @@ typedef enum {
  */
 
 typedef enum {
-  VM_QUERY_FOCUS_EDITOR,   /* SQL editor has focus */
-  VM_QUERY_FOCUS_RESULTS,  /* Results grid has focus */
+  VM_QUERY_FOCUS_EDITOR,  /* SQL editor has focus */
+  VM_QUERY_FOCUS_RESULTS, /* Results grid has focus */
 } VmQueryFocus;
 
 /* ============================================================================
@@ -82,9 +82,9 @@ typedef struct {
  */
 
 typedef struct {
-  size_t start;     /* Start position (inclusive) */
-  size_t end;       /* End position (exclusive) */
-  bool active;      /* Is there an active selection */
+  size_t start; /* Start position (inclusive) */
+  size_t end;   /* End position (exclusive) */
+  bool active;  /* Is there an active selection */
 } VmTextSelection;
 
 /* ============================================================================
@@ -143,11 +143,11 @@ void vm_query_set_text(VmQuery *vm, const char *text);
 /* Text mutations */
 void vm_query_insert_char(VmQuery *vm, char ch);
 void vm_query_insert_text(VmQuery *vm, const char *text);
-void vm_query_delete_char(VmQuery *vm);       /* Delete at cursor */
-void vm_query_backspace(VmQuery *vm);         /* Delete before cursor */
-void vm_query_delete_selection(VmQuery *vm);  /* Delete selected text */
-void vm_query_delete_line(VmQuery *vm);       /* Delete current line */
-void vm_query_delete_to_end(VmQuery *vm);     /* Delete to end of line */
+void vm_query_delete_char(VmQuery *vm);      /* Delete at cursor */
+void vm_query_backspace(VmQuery *vm);        /* Delete before cursor */
+void vm_query_delete_selection(VmQuery *vm); /* Delete selected text */
+void vm_query_delete_line(VmQuery *vm);      /* Delete current line */
+void vm_query_delete_to_end(VmQuery *vm);    /* Delete to end of line */
 
 /* ============================================================================
  * Cursor
@@ -166,10 +166,10 @@ void vm_query_move_left(VmQuery *vm);
 void vm_query_move_right(VmQuery *vm);
 void vm_query_move_word_left(VmQuery *vm);
 void vm_query_move_word_right(VmQuery *vm);
-void vm_query_home(VmQuery *vm);         /* Start of line */
-void vm_query_end(VmQuery *vm);          /* End of line */
-void vm_query_doc_start(VmQuery *vm);    /* Start of document */
-void vm_query_doc_end(VmQuery *vm);      /* End of document */
+void vm_query_home(VmQuery *vm);      /* Start of line */
+void vm_query_end(VmQuery *vm);       /* End of line */
+void vm_query_doc_start(VmQuery *vm); /* Start of document */
+void vm_query_doc_end(VmQuery *vm);   /* End of document */
 
 /* Get cursor position as line/column */
 void vm_query_get_cursor_pos(const VmQuery *vm, size_t *line, size_t *col);
@@ -241,7 +241,7 @@ void vm_query_toggle_focus(VmQuery *vm);
 
 /* Execute query (async) */
 void vm_query_execute(VmQuery *vm);
-void vm_query_execute_selected(VmQuery *vm);  /* Execute selected text only */
+void vm_query_execute_selected(VmQuery *vm); /* Execute selected text only */
 
 /* Cancel execution */
 void vm_query_cancel(VmQuery *vm);

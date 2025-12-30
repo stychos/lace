@@ -94,7 +94,8 @@ struct DbConnection {
   int transaction_depth; /* Nesting depth (for savepoints, future use) */
 
   /* Query limits */
-  size_t max_result_rows; /* Maximum rows to return from queries (0 = use default) */
+  size_t max_result_rows; /* Maximum rows to return from queries (0 = use
+                             default) */
 
   /* History recording callback (called after each successful query/exec)
    * type values: 0=auto-detect, or HistoryEntryType from history.h */

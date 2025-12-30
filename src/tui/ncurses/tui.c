@@ -6,9 +6,9 @@
  * https://github.com/stychos/lace
  */
 
+#include "../../config/session.h"
 #include "../../core/actions.h"
 #include "tui_internal.h"
-#include "../../config/session.h"
 #include "views/config_view.h"
 #include <ctype.h>
 #include <locale.h>
@@ -27,7 +27,8 @@
 #define INITIAL_TAB_UI_WS_CAPACITY 4
 #define INITIAL_TAB_UI_TAB_CAPACITY 8
 
-bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx) {
+bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx,
+                                size_t tab_idx) {
   if (!state)
     return false;
 
@@ -933,7 +934,8 @@ bool tui_connect(TuiState *state, const char *connstr) {
   if (auto_open) {
     /* Create a table tab with the first table */
     size_t table_idx = 0;
-    Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx, state->tables[table_idx]);
+    Tab *tab = workspace_create_table_tab(ws, conn_index, table_idx,
+                                          state->tables[table_idx]);
     if (tab) {
       tab->table_index = table_idx;
 
@@ -1014,7 +1016,8 @@ bool tui_connect(TuiState *state, const char *connstr) {
       tui_recreate_windows(state);
 
       if (state->num_tables == 0) {
-        tui_set_status(state, "Connected to %s - No tables found", conn->database);
+        tui_set_status(state, "Connected to %s - No tables found",
+                       conn->database);
       } else {
         tui_set_status(state, "Connected to %s - Select a table from sidebar",
                        conn->database);
@@ -1315,6 +1318,12 @@ void tui_run(TuiState *state) {
       continue;
     }
 
+    /* Handle add-row mode input */
+    if (state->adding_row && tui_handle_add_row_input(state, &event)) {
+      tui_refresh(state);
+      continue;
+    }
+
     /* Handle query tab input */
     Tab *query_tab = TUI_TAB(state);
     if (query_tab && !state->sidebar_focused) {
@@ -1406,12 +1415,23 @@ void tui_run(TuiState *state) {
       action = action_cell_set_empty();
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_DELETE_ROW)) {
       action = action_row_delete();
+    } else if (hotkey_matches(state->app->config, &event, HOTKEY_ROW_ADD) &&
+               !state->sidebar_focused && !state->filters_focused) {
+      /* Start add-row mode */
+      Tab *add_tab = TUI_TAB(state);
+      if (add_tab && add_tab->type == TAB_TYPE_TABLE && state->data) {
+        if (tui_start_add_row(state)) {
+          tui_refresh(state);
+        }
+      }
     }
     /* ========== Row Selection ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_SELECTION) &&
+    else if (hotkey_matches(state->app->config, &event,
+                            HOTKEY_TOGGLE_SELECTION) &&
              !state->sidebar_focused && !state->filters_focused) {
       action = action_row_toggle_select();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CLEAR_SELECTIONS) &&
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_CLEAR_SELECTIONS) &&
                !state->sidebar_focused && !state->filters_focused) {
       Tab *tab = TUI_TAB(state);
       if (tab && tab->num_selected > 0) {
@@ -1425,9 +1445,11 @@ void tui_run(TuiState *state) {
       action = action_tab_next();
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_PREV_TAB)) {
       action = action_tab_prev();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_NEXT_WORKSPACE)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_NEXT_WORKSPACE)) {
       action = action_workspace_next();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PREV_WORKSPACE)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_PREV_WORKSPACE)) {
       action = action_workspace_prev();
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_CLOSE_TAB)) {
       /* Close with confirmation for query tabs with content */
@@ -1436,8 +1458,8 @@ void tui_run(TuiState *state) {
         if (close_tab->type == TAB_TYPE_QUERY &&
             ((close_tab->query_text && close_tab->query_len > 0) ||
              close_tab->query_results)) {
-          if (!tui_show_confirm_dialog(state,
-                                       "Close query tab with unsaved content?")) {
+          if (!tui_show_confirm_dialog(
+                  state, "Close query tab with unsaved content?")) {
             handled = false;
           } else {
             tab_close(state);
@@ -1448,7 +1470,8 @@ void tui_run(TuiState *state) {
       }
     }
     /* ========== Sidebar ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_SIDEBAR)) {
+    else if (hotkey_matches(state->app->config, &event,
+                            HOTKEY_TOGGLE_SIDEBAR)) {
       /* If sidebar visible but not focused, focus it; otherwise toggle */
       if (state->sidebar_visible && !state->sidebar_focused) {
         action = action_sidebar_focus();
@@ -1457,14 +1480,16 @@ void tui_run(TuiState *state) {
       }
     }
     /* ========== Filters ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_FILTERS)) {
+    else if (hotkey_matches(state->app->config, &event,
+                            HOTKEY_TOGGLE_FILTERS)) {
       /* If filters visible but not focused, focus them; otherwise toggle */
       if (state->filters_visible && !state->filters_focused) {
         action = action_filters_focus();
       } else {
         action = action_filters_toggle();
       }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FILTERS_SWITCH_FOCUS)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_FILTERS_SWITCH_FOCUS)) {
       if (state->filters_visible) {
         action = action_filters_focus();
       }
@@ -1472,7 +1497,8 @@ void tui_run(TuiState *state) {
     /* ========== UI Toggles ========== */
     else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_HEADER)) {
       action = action_toggle_header();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_STATUS)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_TOGGLE_STATUS)) {
       action = action_toggle_status();
     }
     /* ========== Table Operations ========== */
@@ -1501,15 +1527,18 @@ void tui_run(TuiState *state) {
             /* Column not in list - add with ASC if room */
             if (sort_tab->num_sort_entries < MAX_SORT_COLUMNS) {
               sort_tab->sort_entries[sort_tab->num_sort_entries].column = col;
-              sort_tab->sort_entries[sort_tab->num_sort_entries].direction = SORT_ASC;
+              sort_tab->sort_entries[sort_tab->num_sort_entries].direction =
+                  SORT_ASC;
               sort_tab->num_sort_entries++;
             }
-          } else if (sort_tab->sort_entries[existing_idx].direction == SORT_ASC) {
+          } else if (sort_tab->sort_entries[existing_idx].direction ==
+                     SORT_ASC) {
             /* Was ascending -> descending */
             sort_tab->sort_entries[existing_idx].direction = SORT_DESC;
           } else {
             /* Was descending -> remove from list */
-            for (size_t i = existing_idx; i < sort_tab->num_sort_entries - 1; i++) {
+            for (size_t i = existing_idx; i < sort_tab->num_sort_entries - 1;
+                 i++) {
               sort_tab->sort_entries[i] = sort_tab->sort_entries[i + 1];
             }
             sort_tab->num_sort_entries--;
@@ -1524,9 +1553,11 @@ void tui_run(TuiState *state) {
       tui_show_schema(state);
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_GOTO_ROW)) {
       tui_show_goto_dialog(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CONNECT_DIALOG)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_CONNECT_DIALOG)) {
       tui_show_connect_dialog(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_HISTORY)) {
+    } else if (hotkey_matches(state->app->config, &event,
+                              HOTKEY_TOGGLE_HISTORY)) {
       tui_show_history_dialog(state);
       tui_refresh(state);
     } else if (hotkey_matches(state->app->config, &event, HOTKEY_HELP)) {

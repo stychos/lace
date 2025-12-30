@@ -70,18 +70,18 @@ typedef struct {
  */
 
 typedef enum {
-  SORT_NONE,  /* No sorting (default order) */
-  SORT_ASC,   /* Ascending */
-  SORT_DESC   /* Descending */
+  SORT_NONE, /* No sorting (default order) */
+  SORT_ASC,  /* Ascending */
+  SORT_DESC  /* Descending */
 } SortDirection;
 
 /* Single sort entry for multi-column sorting */
 typedef struct {
-  size_t column;         /* Column index */
-  SortDirection direction;  /* Sort direction */
+  size_t column;           /* Column index */
+  SortDirection direction; /* Sort direction */
 } SortEntry;
 
-#define MAX_SORT_COLUMNS 8  /* Maximum columns for multi-column sort */
+#define MAX_SORT_COLUMNS 8 /* Maximum columns for multi-column sort */
 
 /* ============================================================================
  * Connection - Database connection (pool entry)
@@ -90,9 +90,9 @@ typedef struct {
 
 /* Connection - a database connection in the pool */
 typedef struct {
-  bool active;        /* Is this connection slot used */
-  DbConnection *conn; /* Database connection handle */
-  char *connstr;      /* Connection string (for display/reconnect) */
+  bool active;         /* Is this connection slot used */
+  DbConnection *conn;  /* Database connection handle */
+  char *connstr;       /* Connection string (for display/reconnect) */
   char *saved_conn_id; /* UUID of saved connection (for session persistence) */
 
   /* Tables list (from this connection) */
@@ -110,9 +110,9 @@ typedef struct {
 
 /* Tab type */
 typedef enum {
-  TAB_TYPE_TABLE,      /* Table data view */
-  TAB_TYPE_QUERY,      /* SQL query editor */
-  TAB_TYPE_CONNECTION  /* Connection placeholder (no table loaded) */
+  TAB_TYPE_TABLE,     /* Table data view */
+  TAB_TYPE_QUERY,     /* SQL query editor */
+  TAB_TYPE_CONNECTION /* Connection placeholder (no table loaded) */
 } TabType;
 
 /* Tab - holds per-tab state (table data or query) */
@@ -153,8 +153,8 @@ typedef struct {
   TableFilters filters;
 
   /* Sort state (per-table) - multi-column sorting */
-  SortEntry sort_entries[MAX_SORT_COLUMNS];  /* Sort columns in priority order */
-  size_t num_sort_entries;  /* Number of active sort columns */
+  SortEntry sort_entries[MAX_SORT_COLUMNS]; /* Sort columns in priority order */
+  size_t num_sort_entries;                  /* Number of active sort columns */
 
   /* Query mode fields */
   char *query_text;
@@ -165,7 +165,7 @@ typedef struct {
   size_t query_scroll_col;
   ResultSet *query_results;
   int64_t query_affected;
-  bool query_exec_success;  /* True if last exec (non-SELECT) succeeded */
+  bool query_exec_success; /* True if last exec (non-SELECT) succeeded */
   char *query_error;
   size_t query_result_row;
   size_t query_result_col;
@@ -191,12 +191,12 @@ typedef struct {
   size_t bg_load_target_offset; /* Target offset being loaded */
 
   /* Row selection (for bulk operations) */
-  size_t *selected_rows;   /* Array of selected global row indices */
-  size_t num_selected;     /* Number of selected rows */
+  size_t *selected_rows;    /* Array of selected global row indices */
+  size_t num_selected;      /* Number of selected rows */
   size_t selected_capacity; /* Capacity of selected_rows array */
 
   /* Data change tracking */
-  bool needs_refresh;  /* True if data was modified in another tab */
+  bool needs_refresh; /* True if data was modified in another tab */
 } Tab;
 
 /* ============================================================================

@@ -381,7 +381,8 @@ char *db_value_to_string(const DbValue *val) {
     hex[pos++] = 'x';
     hex[pos++] = '\'';
     for (size_t i = 0; i < display_len; i++) {
-      int written = snprintf(hex + pos, hex_len - pos, "%02x", val->blob.data[i]);
+      int written =
+          snprintf(hex + pos, hex_len - pos, "%02x", val->blob.data[i]);
       if (written < 0 || pos + (size_t)written >= hex_len)
         break;
       pos += (size_t)written;

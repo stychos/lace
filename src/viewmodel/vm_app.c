@@ -99,8 +99,7 @@ void vm_app_connect(VmApp *vm, const char *connstr) {
 
   /* Apply config limits to the new connection */
   if (vm->app && vm->app->config) {
-    db_conn->max_result_rows =
-        (size_t)vm->app->config->general.max_result_rows;
+    db_conn->max_result_rows = (size_t)vm->app->config->general.max_result_rows;
   }
 
   /* Add to connection pool */
@@ -315,8 +314,8 @@ bool vm_app_open_table(VmApp *vm, size_t connection_index, size_t table_index,
 
   vm_app_sync_from_current_tab(vm);
 
-  Tab *tab = workspace_create_table_tab(ws, connection_index, table_index,
-                                        table_name);
+  Tab *tab =
+      workspace_create_table_tab(ws, connection_index, table_index, table_name);
   if (tab) {
     vm_app_sync_to_current_tab(vm);
     notify_change(vm, VM_APP_CHANGE_TAB);
@@ -490,9 +489,7 @@ void vm_app_toggle_sidebar_focus(VmApp *vm) {
     vm_app_set_sidebar_focused(vm, !vm->sidebar_focused);
 }
 
-bool vm_app_header_visible(const VmApp *vm) {
-  return vm && vm->header_visible;
-}
+bool vm_app_header_visible(const VmApp *vm) { return vm && vm->header_visible; }
 
 void vm_app_set_header_visible(VmApp *vm, bool visible) {
   if (!vm || vm->header_visible == visible)
@@ -509,9 +506,7 @@ void vm_app_toggle_header(VmApp *vm) {
     vm_app_set_header_visible(vm, !vm->header_visible);
 }
 
-bool vm_app_status_visible(const VmApp *vm) {
-  return vm && vm->status_visible;
-}
+bool vm_app_status_visible(const VmApp *vm) { return vm && vm->status_visible; }
 
 void vm_app_set_status_visible(VmApp *vm, bool visible) {
   if (!vm || vm->status_visible == visible)

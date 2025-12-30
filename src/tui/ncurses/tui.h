@@ -12,11 +12,11 @@
 #include "../../async/async.h"
 #include "../../core/app_state.h"
 #include "../../db/db.h"
-#include "backend.h"
 #include "../../viewmodel/vm_app.h"
 #include "../../viewmodel/vm_query.h"
 #include "../../viewmodel/vm_sidebar.h"
 #include "../../viewmodel/vm_table.h"
+#include "backend.h"
 #include <ncurses.h>
 #include <stdbool.h>
 
@@ -156,6 +156,20 @@ struct TuiState {
   /* Internal clipboard buffer (fallback when external clipboard unavailable) */
   char *clipboard_buffer;
 
+  /* Add row mode (temporary row being created) */
+  bool adding_row;              /* True when in add-row mode */
+  DbValue *new_row_values;      /* Array of values for new row (num_columns) */
+  bool *new_row_placeholders;   /* Track which cells show placeholder
+                                   (auto/default) */
+  bool *new_row_auto_increment; /* Track which columns are auto_increment */
+  bool *new_row_edited;         /* Track which cells user has edited */
+  size_t new_row_num_cols;      /* Number of columns */
+  size_t new_row_cursor_col;    /* Currently focused column in new row */
+  char *new_row_edit_buffer;    /* Edit buffer for current cell */
+  size_t new_row_edit_len;      /* Length of edit buffer content */
+  size_t new_row_edit_pos;      /* Cursor position in edit buffer */
+  bool new_row_cell_editing; /* True when editing a cell within the new row */
+
   /* Running flag */
   bool running;
 
@@ -204,9 +218,9 @@ struct TuiState {
    * Dynamic 2D array: tab_ui[workspace_index][tab_index]
    * =========================================================================
    */
-  UITabState **tab_ui;          /* Array of per-workspace UITabState arrays */
-  size_t *tab_ui_capacity;      /* Capacity per workspace */
-  size_t tab_ui_ws_capacity;    /* Capacity for workspace dimension */
+  UITabState **tab_ui;       /* Array of per-workspace UITabState arrays */
+  size_t *tab_ui_capacity;   /* Capacity per workspace */
+  size_t tab_ui_ws_capacity; /* Capacity for workspace dimension */
 };
 typedef struct TuiState TuiState;
 
@@ -422,6 +436,32 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event);
 bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y);
 void tui_apply_filters(TuiState *state);
 int tui_get_filters_panel_height(TuiState *state);
+
+/* ============================================================================
+ * Add Row Mode
+ * ============================================================================
+ */
+
+/* Start add-row mode - creates temporary row for editing */
+bool tui_start_add_row(TuiState *state);
+
+/* Cancel add-row mode (Escape) - discards temporary row */
+void tui_cancel_add_row(TuiState *state);
+
+/* Persist new row to database */
+bool tui_confirm_add_row(TuiState *state);
+
+/* Handle input while in add-row mode */
+bool tui_handle_add_row_input(TuiState *state, const UiEvent *event);
+
+/* Start editing a cell in the new row */
+void tui_add_row_start_cell_edit(TuiState *state, size_t col);
+
+/* Confirm cell edit in new row */
+void tui_add_row_confirm_cell(TuiState *state);
+
+/* Cancel cell edit in new row */
+void tui_add_row_cancel_cell(TuiState *state);
 
 /* ============================================================================
  * Async operations with progress dialog

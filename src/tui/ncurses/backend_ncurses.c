@@ -131,7 +131,7 @@ static void translate_key(int ch, UiEvent *event) {
   /* Check for control keys (1-26 = Ctrl+A through Ctrl+Z) */
   if (ch >= 1 && ch <= 26) {
     event->key.mods = UI_MOD_CTRL;
-    event->key.key = 'A' + ch - 1;  /* Uppercase to match render_translate_key */
+    event->key.key = 'A' + ch - 1; /* Uppercase to match render_translate_key */
     return;
   }
 
@@ -291,8 +291,7 @@ static bool translate_mouse(MEVENT *mevent, UiEvent *event) {
   }
 
   /* Determine action */
-  if (mevent->bstate &
-      (BUTTON1_PRESSED | BUTTON2_PRESSED | BUTTON3_PRESSED)) {
+  if (mevent->bstate & (BUTTON1_PRESSED | BUTTON2_PRESSED | BUTTON3_PRESSED)) {
     event->mouse.action = UI_MOUSE_PRESS;
   } else if (mevent->bstate &
              (BUTTON1_RELEASED | BUTTON2_RELEASED | BUTTON3_RELEASED)) {
@@ -332,11 +331,11 @@ static RenderContext *ncurses_init(void) {
   }
 
   /* Configure ncurses */
-  cbreak();             /* Disable line buffering */
-  noecho();             /* Don't echo input */
-  keypad(stdscr, TRUE); /* Enable special keys */
+  cbreak();               /* Disable line buffering */
+  noecho();               /* Don't echo input */
+  keypad(stdscr, TRUE);   /* Enable special keys */
   nodelay(stdscr, FALSE); /* Blocking input by default */
-  curs_set(1);          /* Show cursor */
+  curs_set(1);            /* Show cursor */
 
   /* Initialize colors */
   init_colors(ctx);

@@ -26,11 +26,11 @@ typedef struct VmSidebar VmSidebar;
 
 typedef enum {
   VM_SIDEBAR_CHANGE_NONE = 0,
-  VM_SIDEBAR_CHANGE_TABLES = (1 << 0),     /* Table list changed */
-  VM_SIDEBAR_CHANGE_SELECTION = (1 << 1),  /* Selection changed */
-  VM_SIDEBAR_CHANGE_FILTER = (1 << 2),     /* Filter changed */
-  VM_SIDEBAR_CHANGE_SCROLL = (1 << 3),     /* Scroll position changed */
-  VM_SIDEBAR_CHANGE_LOADING = (1 << 4),    /* Loading state changed */
+  VM_SIDEBAR_CHANGE_TABLES = (1 << 0),    /* Table list changed */
+  VM_SIDEBAR_CHANGE_SELECTION = (1 << 1), /* Selection changed */
+  VM_SIDEBAR_CHANGE_FILTER = (1 << 2),    /* Filter changed */
+  VM_SIDEBAR_CHANGE_SCROLL = (1 << 3),    /* Scroll position changed */
+  VM_SIDEBAR_CHANGE_LOADING = (1 << 4),   /* Loading state changed */
   VM_SIDEBAR_CHANGE_ALL = 0xFF
 } VmSidebarChangeFlags;
 
@@ -44,7 +44,8 @@ typedef struct {
   void (*on_change)(VmSidebar *vm, VmSidebarChangeFlags changes, void *ctx);
 
   /* Called when table is opened */
-  void (*on_table_open)(VmSidebar *vm, size_t index, const char *name, void *ctx);
+  void (*on_table_open)(VmSidebar *vm, size_t index, const char *name,
+                        void *ctx);
 
   /* User context */
   void *context;
@@ -58,7 +59,7 @@ typedef struct {
 struct VmSidebar {
   /* Source (references, not owned) */
   AppState *app;
-  Connection *connection;  /* Current connection */
+  Connection *connection; /* Current connection */
 
   /* Callbacks */
   VmSidebarCallbacks callbacks;
@@ -69,13 +70,13 @@ struct VmSidebar {
   bool filter_active;
 
   /* Filtered table indices */
-  size_t *filtered_indices;  /* Indices into connection->tables */
+  size_t *filtered_indices; /* Indices into connection->tables */
   size_t filtered_count;
   size_t filtered_capacity;
 
   /* Selection and scroll */
-  size_t selection;     /* Index into filtered list */
-  size_t scroll;        /* Scroll offset */
+  size_t selection; /* Index into filtered list */
+  size_t scroll;    /* Scroll offset */
 
   /* Loading state */
   bool loading;
@@ -87,7 +88,8 @@ struct VmSidebar {
  */
 
 /* Create sidebar viewmodel */
-VmSidebar *vm_sidebar_create(AppState *app, const VmSidebarCallbacks *callbacks);
+VmSidebar *vm_sidebar_create(AppState *app,
+                             const VmSidebarCallbacks *callbacks);
 
 /* Destroy viewmodel */
 void vm_sidebar_destroy(VmSidebar *vm);

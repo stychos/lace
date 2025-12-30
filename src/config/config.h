@@ -22,8 +22,8 @@
 #define CONFIG_PREFETCH_PAGES_MAX 10
 #define CONFIG_PREFETCH_PAGES_DEFAULT 2
 #define CONFIG_MAX_RESULT_ROWS_MIN 1000
-#define CONFIG_MAX_RESULT_ROWS_MAX (10 * 1024 * 1024)  /* 10M rows */
-#define CONFIG_MAX_RESULT_ROWS_DEFAULT (1024 * 1024)   /* 1M rows */
+#define CONFIG_MAX_RESULT_ROWS_MAX (10 * 1024 * 1024) /* 10M rows */
+#define CONFIG_MAX_RESULT_ROWS_DEFAULT (1024 * 1024)  /* 1M rows */
 
 /* ============================================================================
  * Hotkey Categories - for conflict detection and UI grouping
@@ -121,6 +121,10 @@ typedef enum {
   HOTKEY_TOGGLE_SELECTION,
   HOTKEY_CLEAR_SELECTIONS,
 
+  /* Row Add (HOTKEY_CAT_TABLE) */
+  HOTKEY_ROW_ADD,
+  HOTKEY_ROW_SAVE,
+
   /* Modal Editor (HOTKEY_CAT_EDITOR) */
   HOTKEY_EDITOR_SAVE,
   HOTKEY_EDITOR_NULL,
@@ -153,17 +157,17 @@ typedef struct {
   int prefetch_pages;
   bool restore_session;
   bool quit_confirmation;
-  bool delete_confirmation;      /* Ask for confirmation before deleting rows */
-  int max_result_rows;           /* Maximum rows returned by raw SQL queries */
-  bool auto_open_first_table;    /* Open first table instead of connection tab */
-  bool close_conn_on_last_tab;   /* Close connection when last tab closes */
-  int history_mode;              /* 0=off, 1=session, 2=persistent */
-  int history_max_size;          /* Max history entries per connection */
+  bool delete_confirmation;    /* Ask for confirmation before deleting rows */
+  int max_result_rows;         /* Maximum rows returned by raw SQL queries */
+  bool auto_open_first_table;  /* Open first table instead of connection tab */
+  bool close_conn_on_last_tab; /* Close connection when last tab closes */
+  int history_mode;            /* 0=off, 1=session, 2=persistent */
+  int history_max_size;        /* Max history entries per connection */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */
 typedef struct {
-  char **keys;      /* Array of key strings */
+  char **keys; /* Array of key strings */
   size_t num_keys;
 } HotkeyBinding;
 

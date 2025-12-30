@@ -431,7 +431,8 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     snprintf(close_hint, sizeof(close_hint), "[%s] Close",
              cancel_key ? cancel_key : "Esc");
     free(cancel_key);
-    mvwprintw(win, status_y, width - (int)strlen(close_hint) - 2, "%s", close_hint);
+    mvwprintw(win, status_y, width - (int)strlen(close_hint) - 2, "%s",
+              close_hint);
   } else {
     mvwprintw(win, status_y, 2, "L%zu/%zu C%zu", state->cursor_line + 1,
               state->num_lines, state->cursor_col + 1);
@@ -441,11 +442,10 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     char *empty_key = hotkey_get_display(config, HOTKEY_EDITOR_EMPTY);
     char *cancel_key = hotkey_get_display(config, HOTKEY_EDITOR_CANCEL);
     char status_hint[128];
-    snprintf(status_hint, sizeof(status_hint), "[%s] Save [%s] NULL [%s] Empty [%s] Cancel",
-             save_key ? save_key : "F2",
-             null_key ? null_key : "^N",
-             empty_key ? empty_key : "^D",
-             cancel_key ? cancel_key : "Esc");
+    snprintf(status_hint, sizeof(status_hint),
+             "[%s] Save [%s] NULL [%s] Empty [%s] Cancel",
+             save_key ? save_key : "F2", null_key ? null_key : "^N",
+             empty_key ? empty_key : "^D", cancel_key ? cancel_key : "Esc");
     free(save_key);
     free(null_key);
     free(empty_key);
@@ -661,7 +661,8 @@ EditorResult editor_view_show(TuiState *state, const char *title,
           if (is_consecutive) {
             /* Append to buffer */
             size_t old_len = strlen(state->clipboard_buffer);
-            char *new_buf = realloc(state->clipboard_buffer, old_len + count + 1);
+            char *new_buf =
+                realloc(state->clipboard_buffer, old_len + count + 1);
             if (new_buf) {
               memcpy(new_buf + old_len, editor.buf.data + start, count);
               new_buf[old_len + count] = '\0';
@@ -671,7 +672,8 @@ EditorResult editor_view_show(TuiState *state, const char *title,
             /* Replace buffer, add newline if needed */
             free(state->clipboard_buffer);
             bool needs_newline = (editor.buf.data[end - 1] != '\n');
-            state->clipboard_buffer = malloc(count + (needs_newline ? 1 : 0) + 1);
+            state->clipboard_buffer =
+                malloc(count + (needs_newline ? 1 : 0) + 1);
             if (state->clipboard_buffer) {
               memcpy(state->clipboard_buffer, editor.buf.data + start, count);
               if (needs_newline) {
@@ -688,11 +690,14 @@ EditorResult editor_view_show(TuiState *state, const char *title,
 #ifdef __APPLE__
             FILE *p = popen("pbcopy", "w");
 #else
-            const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+            const char *cmd = getenv("WAYLAND_DISPLAY")
+                                  ? "wl-copy"
+                                  : "xclip -selection clipboard";
             FILE *p = popen(cmd, "w");
 #endif
             if (p) {
-              fwrite(state->clipboard_buffer, 1, strlen(state->clipboard_buffer), p);
+              fwrite(state->clipboard_buffer, 1,
+                     strlen(state->clipboard_buffer), p);
               pclose(p);
             }
           }
@@ -720,8 +725,9 @@ EditorResult editor_view_show(TuiState *state, const char *title,
 #ifdef __APPLE__
       FILE *p = popen("pbpaste", "r");
 #else
-      const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-paste -n 2>/dev/null"
-                                                   : "xclip -selection clipboard -o 2>/dev/null";
+      const char *cmd = getenv("WAYLAND_DISPLAY")
+                            ? "wl-paste -n 2>/dev/null"
+                            : "xclip -selection clipboard -o 2>/dev/null";
       FILE *p = popen(cmd, "r");
 #endif
       if (p) {
@@ -734,7 +740,8 @@ EditorResult editor_view_show(TuiState *state, const char *title,
             if (len + 1 >= capacity) {
               capacity *= 2;
               char *new_buf = realloc(paste_text, capacity);
-              if (!new_buf) break;
+              if (!new_buf)
+                break;
               paste_text = new_buf;
             }
             paste_text[len++] = (char)c;
@@ -762,7 +769,8 @@ EditorResult editor_view_show(TuiState *state, const char *title,
         size_t needed = editor.buf.len + paste_len + 1;
         if (needed > editor.buf.cap) {
           size_t new_cap = editor.buf.cap * 2;
-          if (new_cap < needed) new_cap = needed + 256;
+          if (new_cap < needed)
+            new_cap = needed + 256;
           char *new_data = realloc(editor.buf.data, new_cap);
           if (new_data) {
             editor.buf.data = new_data;

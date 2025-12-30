@@ -25,15 +25,15 @@ struct TuiState;
 
 /* Serialized filter */
 typedef struct {
-  char *column_name;  /* Column name (resolved at restore) */
-  int op;             /* FilterOperator enum value */
-  char *value;        /* Filter value */
+  char *column_name; /* Column name (resolved at restore) */
+  int op;            /* FilterOperator enum value */
+  char *value;       /* Filter value */
 } SessionFilter;
 
 /* Serialized sort entry (uses column name, not index) */
 typedef struct {
-  char *column_name;  /* Column name (resolved at restore) */
-  int direction;      /* SortDirection enum value */
+  char *column_name; /* Column name (resolved at restore) */
+  int direction;     /* SortDirection enum value */
 } SessionSortEntry;
 
 /* Serialized tab UI state */
@@ -51,9 +51,9 @@ typedef struct {
 
 /* Serialized tab */
 typedef struct {
-  int type;              /* TabType enum value */
-  char *connection_id;   /* UUID from saved connections */
-  char *table_name;      /* For TABLE tabs */
+  int type;            /* TabType enum value */
+  char *connection_id; /* UUID from saved connections */
+  char *table_name;    /* For TABLE tabs */
 
   /* Cursor/scroll state */
   size_t cursor_row;
@@ -62,8 +62,8 @@ typedef struct {
   size_t scroll_col;
 
   /* Sort state (multi-column) */
-  SessionSortEntry *sort_entries;  /* Array of sort columns (by name) */
-  size_t num_sort_entries;         /* Number of sort columns */
+  SessionSortEntry *sort_entries; /* Array of sort columns (by name) */
+  size_t num_sort_entries;        /* Number of sort columns */
 
   /* Filters */
   SessionFilter *filters;

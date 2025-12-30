@@ -184,8 +184,8 @@ char *filters_parse_in_values(const char *input, char **err) {
   if (*p == '(')
     p++;
 
-  /* Limit number of values to prevent DoS */
-  #define MAX_IN_VALUES 1000
+/* Limit number of values to prevent DoS */
+#define MAX_IN_VALUES 1000
   size_t value_count = 0;
 
   bool first = true;
@@ -318,7 +318,8 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
       sb_append(sb, " AND ");
     first = false;
 
-    /* Handle RAW filters (virtual column) - advanced feature for SQL-savvy users */
+    /* Handle RAW filters (virtual column) - advanced feature for SQL-savvy
+     * users */
     if (cf->column_index == SIZE_MAX) {
       sb_printf(sb, "(%s)", cf->value);
       continue;

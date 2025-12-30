@@ -9,8 +9,8 @@
  * https://github.com/stychos/lace
  */
 
-#include "tui_internal.h"
 #include "../../viewmodel/vm_table.h"
+#include "tui_internal.h"
 
 /* Helper to get VmTable, returns NULL if not valid for table navigation */
 static VmTable *get_vm_table(TuiState *state) {
@@ -37,8 +37,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   /* Update row */
   if (row_delta < 0 && cursor_row > 0) {
     cursor_row--;
-  } else if (row_delta > 0 && loaded_rows > 0 &&
-             cursor_row < loaded_rows - 1) {
+  } else if (row_delta > 0 && loaded_rows > 0 && cursor_row < loaded_rows - 1) {
     cursor_row++;
   } else if (row_delta > 0 && loaded_rows > 0 &&
              cursor_row == loaded_rows - 1) {

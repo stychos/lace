@@ -42,8 +42,8 @@ static bool history_ensure_capacity(QueryHistory *history, size_t needed) {
   if (history->capacity >= needed)
     return true;
 
-  size_t new_capacity = history->capacity == 0 ? HISTORY_INITIAL_CAPACITY
-                                               : history->capacity * 2;
+  size_t new_capacity =
+      history->capacity == 0 ? HISTORY_INITIAL_CAPACITY : history->capacity * 2;
   while (new_capacity < needed)
     new_capacity *= 2;
 
@@ -513,9 +513,8 @@ HistoryEntryType history_detect_type(const char *sql) {
       (sql[6] == '\0' || isspace((unsigned char)sql[6])))
     return HISTORY_TYPE_INSERT;
 
-  if (strncasecmp(sql, "CREATE", 6) == 0 ||
-      strncasecmp(sql, "ALTER", 5) == 0 || strncasecmp(sql, "DROP", 4) == 0 ||
-      strncasecmp(sql, "TRUNCATE", 8) == 0)
+  if (strncasecmp(sql, "CREATE", 6) == 0 || strncasecmp(sql, "ALTER", 5) == 0 ||
+      strncasecmp(sql, "DROP", 4) == 0 || strncasecmp(sql, "TRUNCATE", 8) == 0)
     return HISTORY_TYPE_DDL;
 
   return HISTORY_TYPE_QUERY;

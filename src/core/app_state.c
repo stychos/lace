@@ -7,10 +7,10 @@
  */
 
 #include "app_state.h"
-#include "history.h"
 #include "../async/async.h"
 #include "../db/db.h"
 #include "../util/str.h"
+#include "history.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -25,8 +25,8 @@
 
 /* Context for history callback - stored per connection */
 typedef struct {
-  Connection *conn;   /* App-level connection (owns history) */
-  int max_size;       /* Max history entries from config */
+  Connection *conn; /* App-level connection (owns history) */
+  int max_size;     /* Max history entries from config */
 } HistoryCallbackContext;
 
 /* Callback function invoked by db_query/db_exec after successful queries */
@@ -36,8 +36,9 @@ static void history_callback(void *context, const char *sql, int type) {
     return;
 
   /* Use auto-detect if type is DB_HISTORY_AUTO */
-  HistoryEntryType entry_type =
-      (type == DB_HISTORY_AUTO) ? history_detect_type(sql) : (HistoryEntryType)type;
+  HistoryEntryType entry_type = (type == DB_HISTORY_AUTO)
+                                    ? history_detect_type(sql)
+                                    : (HistoryEntryType)type;
 
   history_add(ctx->conn->history, sql, entry_type, ctx->max_size);
 }
@@ -55,8 +56,8 @@ static bool workspace_ensure_tab_capacity(Workspace *ws) {
   if (ws->num_tabs < ws->tab_capacity)
     return true; /* Already have capacity */
 
-  size_t new_capacity = ws->tab_capacity == 0 ? INITIAL_TAB_CAPACITY
-                                              : ws->tab_capacity * 2;
+  size_t new_capacity =
+      ws->tab_capacity == 0 ? INITIAL_TAB_CAPACITY : ws->tab_capacity * 2;
   Tab *new_tabs = realloc(ws->tabs, new_capacity * sizeof(Tab));
   if (!new_tabs)
     return false;
@@ -545,7 +546,7 @@ Connection *app_add_connection(AppState *app, DbConnection *db_conn,
 
   /* Create history object and set up callback if history tracking is enabled */
   if (app->config && app->config->general.history_mode != HISTORY_MODE_OFF) {
-    conn->history = history_create(NULL);  /* ID set later when known */
+    conn->history = history_create(NULL); /* ID set later when known */
 
     /* Set up history callback in the database connection */
     if (conn->history && db_conn) {
@@ -579,7 +580,8 @@ bool app_close_connection(AppState *app, size_t index) {
   Connection *conn = &app->connections[index];
 
   /* Save history before closing if in persistent mode */
-  if (app->config && app->config->general.history_mode == HISTORY_MODE_PERSISTENT &&
+  if (app->config &&
+      app->config->general.history_mode == HISTORY_MODE_PERSISTENT &&
       conn->history && conn->saved_conn_id) {
     /* Update connection ID in history before saving */
     if (!conn->history->connection_id && conn->saved_conn_id) {
@@ -764,7 +766,7 @@ bool tab_toggle_selection(Tab *tab, size_t global_row) {
   /* Ensure capacity */
   if (tab->num_selected >= tab->selected_capacity) {
     size_t new_cap = tab->selected_capacity == 0 ? INITIAL_SELECTION_CAPACITY
-                                                  : tab->selected_capacity * 2;
+                                                 : tab->selected_capacity * 2;
     size_t *new_arr = realloc(tab->selected_rows, new_cap * sizeof(size_t));
     if (!new_arr)
       return false;
