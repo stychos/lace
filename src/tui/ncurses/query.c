@@ -2949,27 +2949,145 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Ctrl+U - clear line */
-  if (render_event_is_ctrl(event, 'U')) {
-    QueryLineInfo *lines = NULL;
-    size_t num_lines = 0;
-    query_rebuild_line_cache(tab, &lines, &num_lines);
+  /* Ctrl+K - cut full line (including newline) to buffer.
+   * Consecutive cuts append to buffer so multiple lines can be cut together. */
+  if (hotkey_matches(cfg, event, HOTKEY_CUT_LINE)) {
+    /* Find start of current line */
+    size_t start = tab->query_cursor;
+    while (start > 0 && tab->query_text[start - 1] != '\n') {
+      start--;
+    }
 
-    size_t line, col;
-    query_cursor_to_line_col(tab, &line, &col);
+    /* Find end of current line (including newline if present) */
+    size_t end = tab->query_cursor;
+    while (end < tab->query_len && tab->query_text[end] != '\n') {
+      end++;
+    }
+    /* Include the newline character if present */
+    if (end < tab->query_len && tab->query_text[end] == '\n') {
+      end++;
+    }
 
-    if (lines && line < num_lines) {
-      /* Delete from line start to cursor */
-      size_t start = lines[line].start;
-      size_t count = tab->query_cursor - start;
-      if (count > 0) {
-        memmove(tab->query_text + start, tab->query_text + tab->query_cursor,
-                tab->query_len - tab->query_cursor + 1);
-        tab->query_len -= count;
-        tab->query_cursor = start;
+    size_t count = end - start;
+    if (count > 0) {
+      /* Check if this is a consecutive cut (append) or new cut (replace).
+       * Consecutive = cursor at start of line (where last cut left it).
+       * Any other action (typing, navigation, paste) moves cursor. */
+      static size_t last_cut_cursor = SIZE_MAX;
+      bool is_consecutive = (last_cut_cursor == start) &&
+                            (state->clipboard_buffer != NULL);
+
+      if (is_consecutive) {
+        /* Append to existing buffer */
+        size_t old_len = strlen(state->clipboard_buffer);
+        char *new_buf = realloc(state->clipboard_buffer, old_len + count + 1);
+        if (new_buf) {
+          memcpy(new_buf + old_len, tab->query_text + start, count);
+          new_buf[old_len + count] = '\0';
+          state->clipboard_buffer = new_buf;
+        }
+      } else {
+        /* New cut - replace buffer, add newline if line doesn't end with one */
+        free(state->clipboard_buffer);
+        bool needs_newline = (tab->query_text[end - 1] != '\n');
+        state->clipboard_buffer = malloc(count + (needs_newline ? 1 : 0) + 1);
+        if (state->clipboard_buffer) {
+          memcpy(state->clipboard_buffer, tab->query_text + start, count);
+          if (needs_newline) {
+            state->clipboard_buffer[count] = '\n';
+            state->clipboard_buffer[count + 1] = '\0';
+          } else {
+            state->clipboard_buffer[count] = '\0';
+          }
+        }
+      }
+
+      /* Copy to OS clipboard */
+      if (state->clipboard_buffer) {
+#ifdef __APPLE__
+        FILE *p = popen("pbcopy", "w");
+#else
+        const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+        FILE *p = popen(cmd, "w");
+#endif
+        if (p) {
+          fwrite(state->clipboard_buffer, 1, strlen(state->clipboard_buffer), p);
+          pclose(p);
+        }
+      }
+
+      /* Delete the text and move cursor to line start */
+      memmove(tab->query_text + start, tab->query_text + end,
+              tab->query_len - end + 1);
+      tab->query_len -= count;
+      tab->query_cursor = start;
+
+      /* Track cursor position for consecutive cut detection. */
+      last_cut_cursor = start;
+    }
+    return true;
+  }
+
+  /* Ctrl+U - paste from system clipboard first, then internal buffer if OS inaccessible */
+  if (hotkey_matches(cfg, event, HOTKEY_PASTE)) {
+    char *paste_text = NULL;
+    bool os_clipboard_accessible = false;
+
+    /* Try to read from system clipboard first */
+#ifdef __APPLE__
+    FILE *p = popen("pbpaste", "r");
+#else
+    const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-paste -n 2>/dev/null"
+                                                 : "xclip -selection clipboard -o 2>/dev/null";
+    FILE *p = popen(cmd, "r");
+#endif
+    if (p) {
+      /* Read clipboard content */
+      size_t capacity = 4096;
+      size_t len = 0;
+      paste_text = malloc(capacity);
+      if (paste_text) {
+        int c;
+        while ((c = fgetc(p)) != EOF) {
+          if (len + 1 >= capacity) {
+            capacity *= 2;
+            char *new_buf = realloc(paste_text, capacity);
+            if (!new_buf) break;
+            paste_text = new_buf;
+          }
+          paste_text[len++] = (char)c;
+        }
+        paste_text[len] = '\0';
+      }
+      int status = pclose(p);
+      /* OS clipboard is accessible if command succeeded (status 0) */
+      os_clipboard_accessible = (status == 0);
+      if (!os_clipboard_accessible || (paste_text && paste_text[0] == '\0')) {
+        free(paste_text);
+        paste_text = NULL;
       }
     }
-    free(lines);
+
+    /* Only fall back to internal buffer if OS clipboard is inaccessible */
+    if (!os_clipboard_accessible && state->clipboard_buffer) {
+      paste_text = strdup(state->clipboard_buffer);
+    }
+
+    /* Perform the paste */
+    if (paste_text && paste_text[0]) {
+      size_t paste_len = strlen(paste_text);
+      if (query_ensure_capacity(tab, tab->query_len + paste_len + 1)) {
+        /* Make room for pasted text */
+        memmove(tab->query_text + tab->query_cursor + paste_len,
+                tab->query_text + tab->query_cursor,
+                tab->query_len - tab->query_cursor + 1);
+        /* Insert pasted text */
+        memcpy(tab->query_text + tab->query_cursor, paste_text, paste_len);
+        tab->query_len += paste_len;
+        tab->query_cursor += paste_len;
+      }
+    }
+    free(paste_text);
     return true;
   }
 

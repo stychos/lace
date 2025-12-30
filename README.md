@@ -13,6 +13,7 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, and 
 - Multi-column data filtering and sorting, RAW SQL filters
 - Inline data editing with live updates
 - Queries history tracking
+- OS clipboard sync where possible, internal clipboard as fallback
 - Linux & macOS compatible
 - Works over SSH
 
@@ -69,9 +70,9 @@ Binary will be at `build/lace`.
 - [x] Configuration management
 - [x] Connection management (saved connections)
 - [x] Session persistence (save/restore tabs on restart)
+- [x] Bulk delete
 - [ ] Data adding (insert rows)
-- [ ] Export operations
-- [ ] Batch operations (bulk delete, partial export)
+- [ ] Export operations (incl. partial exports for selected rows)
 - [ ] Database management
 - [ ] Tables management
 - [ ] Schema management

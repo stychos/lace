@@ -153,6 +153,9 @@ struct TuiState {
   char *status_msg;
   bool status_is_error;
 
+  /* Internal clipboard buffer (fallback when external clipboard unavailable) */
+  char *clipboard_buffer;
+
   /* Running flag */
   bool running;
 

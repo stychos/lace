@@ -76,6 +76,8 @@ static const char *def_help[] = {"?", "F1"};
 static const char *def_quit[] = {"q", "CTRL+X", "F10"};
 static const char *def_config[] = {"COMMA", "F11"};
 static const char *def_toggle_history[] = {"i"};
+static const char *def_cut_line[] = {"CTRL+K"};
+static const char *def_paste[] = {"CTRL+U"};
 
 /* Query Tab */
 static const char *def_open_query[] = {"p"};
@@ -167,6 +169,8 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_HELP] = {"help", "Hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help)},
     [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit)},
     [HOTKEY_CONFIG] = {"config", "Configuration", HOTKEY_CAT_GENERAL, DEF_KEYS(def_config)},
+    [HOTKEY_CUT_LINE] = {"cut_line", "Cut line to buffer", HOTKEY_CAT_GENERAL, DEF_KEYS(def_cut_line)},
+    [HOTKEY_PASTE] = {"paste", "Paste from buffer", HOTKEY_CAT_GENERAL, DEF_KEYS(def_paste)},
 
     /* Query Tab */
     [HOTKEY_OPEN_QUERY] = {"open_query", "Open query tab", HOTKEY_CAT_QUERY, DEF_KEYS(def_open_query)},

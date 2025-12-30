@@ -787,6 +787,9 @@ void tui_cleanup(TuiState *state) {
   /* Free status message */
   free(state->status_msg);
 
+  /* Free internal clipboard buffer */
+  free(state->clipboard_buffer);
+
   /* Delete windows */
   if (state->main_win)
     delwin(state->main_win);

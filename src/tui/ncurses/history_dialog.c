@@ -91,24 +91,37 @@ static int type_color(HistoryEntryType type) {
   }
 }
 
-/* Copy text to clipboard using pbcopy on macOS, xclip on Linux */
-static bool copy_to_clipboard(const char *text) {
+/* Copy text to clipboard using pbcopy on macOS, wl-copy/xclip on Linux.
+ * Always saves to internal buffer as fallback for pasting within the app. */
+static bool copy_to_clipboard(TuiState *state, const char *text) {
   if (!text || !text[0])
     return false;
 
+  /* Always save to internal buffer for in-app pasting */
+  if (state) {
+    free(state->clipboard_buffer);
+    state->clipboard_buffer = strdup(text);
+  }
+
+  /* Try external clipboard */
 #ifdef __APPLE__
   FILE *p = popen("pbcopy", "w");
 #else
-  FILE *p = popen("xclip -selection clipboard", "w");
+  /* Use wl-copy on Wayland, xclip on X11 */
+  const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+  FILE *p = popen(cmd, "w");
 #endif
-  if (!p)
-    return false;
+  if (!p) {
+    /* External clipboard failed, but internal buffer is set */
+    return state && state->clipboard_buffer;
+  }
 
   size_t len = strlen(text);
   size_t written = fwrite(text, 1, len, p);
   int status = pclose(p);
 
-  return (written == len && status == 0);
+  /* Success if external worked OR we have internal buffer */
+  return (written == len && status == 0) || (state && state->clipboard_buffer);
 }
 
 /* Show the history dialog */
@@ -353,7 +366,7 @@ void tui_show_history_dialog(TuiState *state) {
       if (num_entries > 0) {
         size_t entry_idx = num_entries - 1 - selected;
         const HistoryEntry *entry = &history->entries[entry_idx];
-        if (copy_to_clipboard(entry->sql)) {
+        if (copy_to_clipboard(state, entry->sql)) {
           tui_set_status(state, "SQL copied to clipboard");
         } else {
           tui_set_status(state, "Failed to copy to clipboard");

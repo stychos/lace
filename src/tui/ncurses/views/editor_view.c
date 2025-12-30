@@ -640,6 +640,150 @@ EditorResult editor_view_show(TuiState *state, const char *title,
       result.content = str_dup("");
       running = false;
     }
+    /* Cut line - configurable (default: Ctrl+K) */
+    else if (hotkey_matches(config, &event, HOTKEY_CUT_LINE) && !readonly) {
+      if (editor.cursor_line < editor.num_lines) {
+        LineInfo *line = &editor.lines[editor.cursor_line];
+        size_t start = line->start;
+        size_t end = start + line->len;
+        /* Include newline if present */
+        if (end < editor.buf.len && editor.buf.data[end] == '\n') {
+          end++;
+        }
+        size_t count = end - start;
+
+        if (count > 0 && state) {
+          /* Check for consecutive cut */
+          static size_t last_cut_line = SIZE_MAX;
+          bool is_consecutive = (last_cut_line == editor.cursor_line) &&
+                                (state->clipboard_buffer != NULL);
+
+          if (is_consecutive) {
+            /* Append to buffer */
+            size_t old_len = strlen(state->clipboard_buffer);
+            char *new_buf = realloc(state->clipboard_buffer, old_len + count + 1);
+            if (new_buf) {
+              memcpy(new_buf + old_len, editor.buf.data + start, count);
+              new_buf[old_len + count] = '\0';
+              state->clipboard_buffer = new_buf;
+            }
+          } else {
+            /* Replace buffer, add newline if needed */
+            free(state->clipboard_buffer);
+            bool needs_newline = (editor.buf.data[end - 1] != '\n');
+            state->clipboard_buffer = malloc(count + (needs_newline ? 1 : 0) + 1);
+            if (state->clipboard_buffer) {
+              memcpy(state->clipboard_buffer, editor.buf.data + start, count);
+              if (needs_newline) {
+                state->clipboard_buffer[count] = '\n';
+                state->clipboard_buffer[count + 1] = '\0';
+              } else {
+                state->clipboard_buffer[count] = '\0';
+              }
+            }
+          }
+
+          /* Copy to OS clipboard */
+          if (state->clipboard_buffer) {
+#ifdef __APPLE__
+            FILE *p = popen("pbcopy", "w");
+#else
+            const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-copy" : "xclip -selection clipboard";
+            FILE *p = popen(cmd, "w");
+#endif
+            if (p) {
+              fwrite(state->clipboard_buffer, 1, strlen(state->clipboard_buffer), p);
+              pclose(p);
+            }
+          }
+
+          /* Delete the line */
+          memmove(editor.buf.data + start, editor.buf.data + end,
+                  editor.buf.len - end + 1);
+          editor.buf.len -= count;
+          editor.cursor = start;
+          editor.modified = true;
+          editor_rebuild_lines(&editor);
+          editor_update_cursor_pos(&editor);
+          editor_ensure_visible(&editor);
+
+          last_cut_line = editor.cursor_line;
+        }
+      }
+    }
+    /* Paste - configurable (default: Ctrl+U) */
+    else if (hotkey_matches(config, &event, HOTKEY_PASTE) && !readonly) {
+      char *paste_text = NULL;
+      bool os_clipboard_accessible = false;
+
+      /* Try system clipboard first */
+#ifdef __APPLE__
+      FILE *p = popen("pbpaste", "r");
+#else
+      const char *cmd = getenv("WAYLAND_DISPLAY") ? "wl-paste -n 2>/dev/null"
+                                                   : "xclip -selection clipboard -o 2>/dev/null";
+      FILE *p = popen(cmd, "r");
+#endif
+      if (p) {
+        size_t capacity = 4096;
+        size_t len = 0;
+        paste_text = malloc(capacity);
+        if (paste_text) {
+          int c;
+          while ((c = fgetc(p)) != EOF) {
+            if (len + 1 >= capacity) {
+              capacity *= 2;
+              char *new_buf = realloc(paste_text, capacity);
+              if (!new_buf) break;
+              paste_text = new_buf;
+            }
+            paste_text[len++] = (char)c;
+          }
+          paste_text[len] = '\0';
+        }
+        int status = pclose(p);
+        /* OS clipboard is accessible if command succeeded (status 0) */
+        os_clipboard_accessible = (status == 0);
+        if (!os_clipboard_accessible || (paste_text && paste_text[0] == '\0')) {
+          free(paste_text);
+          paste_text = NULL;
+        }
+      }
+
+      /* Only fall back to internal buffer if OS clipboard is inaccessible */
+      if (!os_clipboard_accessible && state && state->clipboard_buffer) {
+        paste_text = strdup(state->clipboard_buffer);
+      }
+
+      /* Perform paste */
+      if (paste_text && paste_text[0]) {
+        size_t paste_len = strlen(paste_text);
+        /* Ensure capacity */
+        size_t needed = editor.buf.len + paste_len + 1;
+        if (needed > editor.buf.cap) {
+          size_t new_cap = editor.buf.cap * 2;
+          if (new_cap < needed) new_cap = needed + 256;
+          char *new_data = realloc(editor.buf.data, new_cap);
+          if (new_data) {
+            editor.buf.data = new_data;
+            editor.buf.cap = new_cap;
+          }
+        }
+        if (editor.buf.len + paste_len < editor.buf.cap) {
+          memmove(editor.buf.data + editor.cursor + paste_len,
+                  editor.buf.data + editor.cursor,
+                  editor.buf.len - editor.cursor + 1);
+          memcpy(editor.buf.data + editor.cursor, paste_text, paste_len);
+          editor.buf.len += paste_len;
+          editor.cursor += paste_len;
+          editor.modified = true;
+          editor_rebuild_lines(&editor);
+          editor_update_cursor_pos(&editor);
+          editor_ensure_visible(&editor);
+        }
+      }
+      free(paste_text);
+    }
     /* Enter - insert newline */
     else if (render_event_is_special(&event, UI_KEY_ENTER) && !readonly) {
       editor_insert_char(&editor, '\n');
