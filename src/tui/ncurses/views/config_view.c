@@ -330,11 +330,11 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   wattroff(win, A_BOLD | A_UNDERLINE);
   y++;
 
-  draw_checkbox(win, y++, start_x + 2, "Open first table when a new connection is opened",
+  draw_checkbox(win, y++, start_x + 2, "Auto-open first table on connect",
                 ds->config->general.auto_open_first_table,
                 ds->selected_field == FIELD_AUTO_OPEN_TABLE, focused);
 
-  draw_checkbox(win, y++, start_x + 2, "Close connection when last connection tab is closed",
+  draw_checkbox(win, y++, start_x + 2, "Close connection when last tab closes",
                 ds->config->general.close_conn_on_last_tab,
                 ds->selected_field == FIELD_CLOSE_CONN_LAST_TAB, focused);
 
@@ -354,13 +354,7 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                 ds->config->general.quit_confirmation,
                 ds->selected_field == FIELD_QUIT_CONFIRM, focused);
 
-  y += 2;
-
-  /* Help text */
-  wattron(win, A_DIM);
-  mvwprintw(win, y++, start_x, "Use arrows to navigate, Space/Enter to toggle");
-  mvwprintw(win, y++, start_x, "For numbers: Enter to edit, Enter to confirm");
-  wattroff(win, A_DIM);
+  (void)y; /* Suppress unused warning */
 }
 
 /* ============================================================================
@@ -597,9 +591,11 @@ static void draw_tab_bar(WINDOW *win, DialogState *ds, int y, int width) {
     x += (int)strlen(tabs[i]) + 3;
   }
 
-  /* Underline */
+  /* Underline with proper T-junctions at borders */
   wattron(win, COLOR_PAIR(COLOR_BORDER));
+  mvwaddch(win, y + 1, 0, ACS_LTEE);
   mvwhline(win, y + 1, 1, ACS_HLINE, width - 2);
+  mvwaddch(win, y + 1, width - 1, ACS_RTEE);
   wattroff(win, COLOR_PAIR(COLOR_BORDER));
 }
 
