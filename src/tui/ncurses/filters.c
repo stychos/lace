@@ -27,9 +27,6 @@ static VmTable *get_vm_table(TuiState *state) {
   return state->vm_table;
 }
 
-/* Maximum number of visible filter rows in panel */
-#define MAX_VISIBLE_FILTERS 8
-
 /* Sentinel value for RAW filter (virtual column) */
 #define FILTER_COL_RAW SIZE_MAX
 
@@ -813,7 +810,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         state->filters_edit_len = strlen(state->filters_edit_buffer);
       }
       break;
-    case 3: /* Delete/Reset */ {
+    case 3: /* Delete */ {
       /* Check if filter had an effect before deleting */
       bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
       if (f->num_filters > 1) {
@@ -821,9 +818,15 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         if (state->filters_cursor_row >= f->num_filters)
           state->filters_cursor_row = f->num_filters - 1;
       } else {
-        cf->column_index = 0;
-        cf->op = FILTER_OP_EQ;
-        cf->value[0] = '\0';
+        /* Last filter - remove it and close panel */
+        filters_remove(f, filter_idx);
+        state->filters_visible = false;
+        state->filters_focused = false;
+        UITabState *ui = TUI_TAB_UI(state);
+        if (ui) {
+          ui->filters_visible = false;
+          ui->filters_focused = false;
+        }
       }
       /* Only apply if deleted filter had effect */
       if (had_effect) {
@@ -886,9 +889,15 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
                                     : 0;
       }
     } else {
-      cf->column_index = 0;
-      cf->op = FILTER_OP_EQ;
-      cf->value[0] = '\0';
+      /* Last filter - remove it and close panel */
+      filters_remove(f, filter_idx);
+      state->filters_visible = false;
+      state->filters_focused = false;
+      UITabState *ui = TUI_TAB_UI(state);
+      if (ui) {
+        ui->filters_visible = false;
+        ui->filters_focused = false;
+      }
     }
     /* Only apply if deleted filter had effect */
     if (had_effect) {
@@ -909,6 +918,23 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_QUIT) ||
            hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false; /* Let global keys work from filters */
+  }
+  /* Printable character on Value column - start editing immediately */
+  else if (state->filters_cursor_col == 2 && render_event_is_char(event)) {
+    int key_char = render_event_get_char(event);
+    if (key_char >= 32 && key_char < 127) {
+      size_t filter_idx = state->filters_cursor_row;
+      ColumnFilter *cf = &f->filters[filter_idx];
+      bool is_raw = (cf->column_index == FILTER_COL_RAW);
+
+      if (is_raw || filter_op_needs_value(cf->op)) {
+        /* Start editing with the typed character */
+        state->filters_editing = true;
+        state->filters_edit_buffer[0] = (char)key_char;
+        state->filters_edit_buffer[1] = '\0';
+        state->filters_edit_len = 1;
+      }
+    }
   }
   /* Consume all other keys when filters focused */
 
@@ -1063,9 +1089,15 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
       if (state->filters_cursor_row >= f->num_filters)
         state->filters_cursor_row = f->num_filters - 1;
     } else {
-      cf->column_index = 0;
-      cf->op = FILTER_OP_EQ;
-      cf->value[0] = '\0';
+      /* Last filter - remove it and close panel */
+      filters_remove(f, target_filter);
+      state->filters_visible = false;
+      state->filters_focused = false;
+      UITabState *ui = TUI_TAB_UI(state);
+      if (ui) {
+        ui->filters_visible = false;
+        ui->filters_focused = false;
+      }
     }
     if (had_effect) {
       tui_apply_filters(state);

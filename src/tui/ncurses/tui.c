@@ -1483,10 +1483,75 @@ void tui_run(TuiState *state) {
     else if (hotkey_matches(state->app->config, &event,
                             HOTKEY_TOGGLE_FILTERS)) {
       /* If filters visible but not focused, focus them; otherwise toggle */
-      if (state->filters_visible && !state->filters_focused) {
+      bool focusing = state->filters_visible && !state->filters_focused;
+      size_t table_col = state->cursor_col;
+
+      if (focusing) {
         action = action_filters_focus();
       } else {
         action = action_filters_toggle();
+      }
+
+      /* Smart filter positioning when opening or focusing from table */
+      bool dominated = (!focusing && state->filters_visible); /* closing */
+      if (!dominated && state->schema && table_col < state->schema->num_columns) {
+        Tab *ftab = TUI_TAB(state);
+        if (ftab && ftab->type == TAB_TYPE_TABLE) {
+          TableFilters *f = &ftab->filters;
+
+          /* Check if column already exists in filters */
+          size_t found_idx = SIZE_MAX;
+          for (size_t i = 0; i < f->num_filters; i++) {
+            if (f->filters[i].column_index == table_col) {
+              found_idx = i;
+              break;
+            }
+          }
+
+          if (found_idx != SIZE_MAX) {
+            /* Column exists - move cursor to that filter row */
+            ColumnFilter *cf = &f->filters[found_idx];
+            state->filters_cursor_row = found_idx;
+            /* If op needs value, go to value field; otherwise column selector */
+            state->filters_cursor_col = filter_op_needs_value(cf->op) ? 2 : 0;
+            /* Adjust scroll if needed */
+            if (found_idx < state->filters_scroll) {
+              state->filters_scroll = found_idx;
+            } else if (found_idx >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
+              state->filters_scroll = found_idx - MAX_VISIBLE_FILTERS + 1;
+            }
+          } else if (f->num_filters == 1) {
+            /* Single filter - check if inactive, update its column */
+            ColumnFilter *cf = &f->filters[0];
+            bool is_raw = (cf->column_index == SIZE_MAX);
+            bool is_inactive =
+                (cf->value[0] == '\0' && (is_raw || filter_op_needs_value(cf->op)));
+            if (is_inactive) {
+              cf->column_index = table_col;
+              state->filters_cursor_row = 0;
+              state->filters_cursor_col = 2;
+            } else {
+              /* Single active filter for different column - add new filter */
+              filters_add(f, table_col, FILTER_OP_EQ, "");
+              state->filters_cursor_row = f->num_filters - 1;
+              state->filters_cursor_col = 2;
+            }
+          } else if (f->num_filters == 0) {
+            /* No filters - add one with current column */
+            filters_add(f, table_col, FILTER_OP_EQ, "");
+            state->filters_cursor_row = 0;
+            state->filters_cursor_col = 2;
+          } else {
+            /* Multiple filters, column not found - add new filter */
+            filters_add(f, table_col, FILTER_OP_EQ, "");
+            state->filters_cursor_row = f->num_filters - 1;
+            state->filters_cursor_col = 2;
+            /* Scroll to show new filter */
+            if (state->filters_cursor_row >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
+              state->filters_scroll = state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
+            }
+          }
+        }
       }
     } else if (hotkey_matches(state->app->config, &event,
                               HOTKEY_FILTERS_SWITCH_FOCUS)) {

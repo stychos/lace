@@ -29,6 +29,7 @@
 #define TRIM_DISTANCE_PAGES 2 /* Trim data farther than this from cursor */
 #define PREFETCH_THRESHOLD                                                     \
   PAGE_SIZE /* Start prefetch when within 1 page of edge */
+#define MAX_VISIBLE_FILTERS 8 /* Max filter rows visible in panel */
 
 /* ============================================================================
  * Helper functions (tui.c)
