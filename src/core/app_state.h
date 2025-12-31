@@ -41,6 +41,7 @@ typedef enum {
   FILTER_OP_IN,           /* IN (value list) */
   FILTER_OP_CONTAINS,     /* LIKE '%value%' */
   FILTER_OP_REGEX,        /* REGEXP/~ (driver-specific) */
+  FILTER_OP_BETWEEN,      /* BETWEEN value AND value2 */
   FILTER_OP_IS_EMPTY,     /* = '' */
   FILTER_OP_IS_NOT_EMPTY, /* <> '' */
   FILTER_OP_IS_NULL,      /* IS NULL */
@@ -48,13 +49,14 @@ typedef enum {
   FILTER_OP_RAW,          /* Raw SQL condition */
 } FilterOperator;
 
-#define FILTER_OP_COUNT 14
+#define FILTER_OP_COUNT 15
 
 /* Single column filter */
 typedef struct {
   size_t column_index; /* Index into schema columns */
   FilterOperator op;   /* Operator type */
   char value[256];     /* Filter value (for ops that need it) */
+  char value2[256];    /* Second value (for BETWEEN) */
 } ColumnFilter;
 
 /* Table filters collection */

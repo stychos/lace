@@ -188,19 +188,79 @@ void tui_draw_filters_panel(TuiState *state) {
       }
     }
 
-    /* Value field - always shown for RAW, depends on operator otherwise */
+    /* Value field(s) - BETWEEN has two values, others have one */
+    bool is_between = (cf->op == FILTER_OP_BETWEEN);
     if (is_raw || filter_op_needs_value(cf->op)) {
-      const char *display_val = cf->value;
       bool show_placeholder = is_raw && cf->value[0] == '\0';
 
-      if (row_selected && state->filters_cursor_col == 2) {
-        if (state->filters_editing) {
-          wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                    state->filters_edit_buffer);
-          wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+      if (is_between) {
+        /* BETWEEN: two value fields split evenly */
+        int half_width = (val_width - 5) / 2; /* -5 for " AND " */
+        if (half_width < 5)
+          half_width = 5;
+        int val2_x = val_x + half_width + 5;
+
+        /* Value 1 */
+        if (row_selected && state->filters_cursor_col == 2) {
+          if (state->filters_editing) {
+            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width,
+                      half_width, state->filters_edit_buffer);
+            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+          } else {
+            wattron(state->main_win, A_REVERSE);
+            mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width,
+                      half_width, cf->value);
+            wattroff(state->main_win, A_REVERSE);
+          }
         } else {
-          wattron(state->main_win, A_REVERSE);
+          mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width, half_width,
+                    cf->value);
+        }
+
+        /* " AND " separator */
+        mvwprintw(state->main_win, y, val_x + half_width, " AND ");
+
+        /* Value 2 */
+        if (row_selected && state->filters_cursor_col == 3) {
+          if (state->filters_editing) {
+            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width,
+                      half_width, state->filters_edit_buffer);
+            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+          } else {
+            wattron(state->main_win, A_REVERSE);
+            mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width,
+                      half_width, cf->value2);
+            wattroff(state->main_win, A_REVERSE);
+          }
+        } else {
+          mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width, half_width,
+                    cf->value2);
+        }
+      } else {
+        /* Regular: single value field */
+        const char *display_val = cf->value;
+        if (row_selected && state->filters_cursor_col == 2) {
+          if (state->filters_editing) {
+            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
+                      state->filters_edit_buffer);
+            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+          } else {
+            wattron(state->main_win, A_REVERSE);
+            if (show_placeholder) {
+              wattron(state->main_win, A_DIM);
+              mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width,
+                        val_width, "WHERE ...");
+              wattroff(state->main_win, A_DIM);
+            } else {
+              mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width,
+                        val_width, display_val);
+            }
+            wattroff(state->main_win, A_REVERSE);
+          }
+        } else {
           if (show_placeholder) {
             wattron(state->main_win, A_DIM);
             mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
@@ -210,26 +270,16 @@ void tui_draw_filters_panel(TuiState *state) {
             mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
                       display_val);
           }
-          wattroff(state->main_win, A_REVERSE);
-        }
-      } else {
-        if (show_placeholder) {
-          wattron(state->main_win, A_DIM);
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                    "WHERE ...");
-          wattroff(state->main_win, A_DIM);
-        } else {
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                    display_val);
         }
       }
     }
 
-    /* Delete button */
-    if (row_selected && state->filters_cursor_col == 3)
+    /* Delete button - column 3 for regular ops, column 4 for BETWEEN */
+    int del_col = is_between ? 4 : 3;
+    if (row_selected && state->filters_cursor_col == (size_t)del_col)
       wattron(state->main_win, A_REVERSE);
     mvwprintw(state->main_win, y, del_x, "[x]");
-    if (row_selected && state->filters_cursor_col == 3)
+    if (row_selected && state->filters_cursor_col == (size_t)del_col)
       wattroff(state->main_win, A_REVERSE);
 
     y++;
@@ -645,6 +695,11 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         if (state->filters_cursor_col == 2) {
           strncpy(cf->value, state->filters_edit_buffer, sizeof(cf->value) - 1);
           cf->value[sizeof(cf->value) - 1] = '\0';
+        } else if (state->filters_cursor_col == 3 &&
+                   cf->op == FILTER_OP_BETWEEN) {
+          strncpy(cf->value2, state->filters_edit_buffer,
+                  sizeof(cf->value2) - 1);
+          cf->value2[sizeof(cf->value2) - 1] = '\0';
         }
       }
       state->filters_editing = false;
@@ -734,8 +789,10 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     size_t idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
+    bool is_between = (cf->op == FILTER_OP_BETWEEN);
     bool needs_value = filter_op_needs_value(cf->op);
-    if (state->filters_cursor_col < 3) {
+    size_t max_col = is_between ? 4 : 3; /* BETWEEN has extra value2 column */
+    if (state->filters_cursor_col < max_col) {
       state->filters_cursor_col++;
       /* Skip operator column for RAW filters */
       if (is_raw && state->filters_cursor_col == 1)
@@ -747,8 +804,12 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   }
   /* Tab - move to next field/row */
   else if (render_event_is_special(event, UI_KEY_TAB)) {
+    size_t idx = state->filters_cursor_row;
+    ColumnFilter *cf = &f->filters[idx];
+    bool is_between = (cf->op == FILTER_OP_BETWEEN);
+    size_t max_col = is_between ? 4 : 3;
     state->filters_cursor_col++;
-    if (state->filters_cursor_col > 3) {
+    if (state->filters_cursor_col > max_col) {
       state->filters_cursor_col = 0;
       if (state->filters_cursor_row < f->num_filters - 1) {
         state->filters_cursor_row++;
@@ -762,9 +823,11 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     size_t filter_idx = state->filters_cursor_row;
     ColumnFilter *cf = &f->filters[filter_idx];
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
+    bool is_between = (cf->op == FILTER_OP_BETWEEN);
+    size_t del_col = is_between ? 4 : 3;
 
-    switch (state->filters_cursor_col) {
-    case 0: /* Column - show dropdown */ {
+    if (state->filters_cursor_col == 0) {
+      /* Column - show dropdown */
       ssize_t sel = show_column_dropdown(state, cf->column_index,
                                          state->filters_cursor_row);
       if (sel >= 0) {
@@ -780,9 +843,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
           tui_apply_filters(state);
         }
       }
-      break;
-    }
-    case 1: /* Operator - show dropdown (not for RAW) */
+    } else if (state->filters_cursor_col == 1) {
+      /* Operator - show dropdown (not for RAW) */
       if (!is_raw) {
         int sel =
             show_operator_dropdown(state, cf->op, state->filters_cursor_row);
@@ -793,14 +855,18 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
           bool will_have_effect =
               cf->value[0] != '\0' || !filter_op_needs_value(new_op);
           cf->op = new_op;
+          /* Clear value2 if switching away from BETWEEN */
+          if (cf->op != FILTER_OP_BETWEEN) {
+            cf->value2[0] = '\0';
+          }
           /* Only apply if filter had or will have effect */
           if (had_effect || will_have_effect) {
             tui_apply_filters(state);
           }
         }
       }
-      break;
-    case 2: /* Value - edit */
+    } else if (state->filters_cursor_col == 2) {
+      /* Value - edit */
       if (is_raw || filter_op_needs_value(cf->op)) {
         state->filters_editing = true;
         strncpy(state->filters_edit_buffer, cf->value,
@@ -809,10 +875,19 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
             '\0';
         state->filters_edit_len = strlen(state->filters_edit_buffer);
       }
-      break;
-    case 3: /* Delete */ {
-      /* Check if filter had an effect before deleting */
+    } else if (state->filters_cursor_col == 3 && is_between) {
+      /* Value2 - edit (only for BETWEEN) */
+      state->filters_editing = true;
+      strncpy(state->filters_edit_buffer, cf->value2,
+              sizeof(state->filters_edit_buffer) - 1);
+      state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
+      state->filters_edit_len = strlen(state->filters_edit_buffer);
+    } else if (state->filters_cursor_col == del_col) {
+      /* Delete */
       bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+      if (is_between) {
+        had_effect = had_effect || cf->value2[0] != '\0';
+      }
       if (f->num_filters > 1) {
         filters_remove(f, filter_idx);
         if (state->filters_cursor_row >= f->num_filters)
@@ -832,8 +907,6 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       if (had_effect) {
         tui_apply_filters(state);
       }
-      break;
-    }
     }
   }
   /* + or = - add new filter */
@@ -919,8 +992,11 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false; /* Let global keys work from filters */
   }
-  /* Printable character on Value column - start editing immediately */
-  else if (state->filters_cursor_col == 2 && render_event_is_char(event)) {
+  /* Printable character on Value column(s) - start editing immediately */
+  else if ((state->filters_cursor_col == 2 ||
+            (state->filters_cursor_col == 3 &&
+             f->filters[state->filters_cursor_row].op == FILTER_OP_BETWEEN)) &&
+           render_event_is_char(event)) {
     int key_char = render_event_get_char(event);
     if (key_char >= 32 && key_char < 127) {
       size_t filter_idx = state->filters_cursor_row;
@@ -1038,9 +1114,11 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   state->filters_focused = true;
   state->sidebar_focused = false;
 
-  /* Get the filter to check if RAW */
+  /* Get the filter to check if RAW or BETWEEN */
   ColumnFilter *cf = &f->filters[target_filter];
   bool is_raw = (cf->column_index == FILTER_COL_RAW);
+  bool is_between = (cf->op == FILTER_OP_BETWEEN);
+  size_t del_col = is_between ? 4 : 3;
 
   /* Refresh display to show highlighted field before opening dropdown */
   tui_refresh(state);
@@ -1070,6 +1148,10 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
       bool will_have_effect =
           cf->value[0] != '\0' || !filter_op_needs_value(new_op);
       cf->op = new_op;
+      /* Clear value2 if switching away from BETWEEN */
+      if (cf->op != FILTER_OP_BETWEEN) {
+        cf->value2[0] = '\0';
+      }
       if (had_effect || will_have_effect) {
         tui_apply_filters(state);
       }
@@ -1081,9 +1163,19 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
             sizeof(state->filters_edit_buffer) - 1);
     state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
     state->filters_edit_len = strlen(state->filters_edit_buffer);
-  } else if (target_col == 3) {
+  } else if (target_col == 3 && is_between) {
+    /* Value2 field for BETWEEN - start editing */
+    state->filters_editing = true;
+    strncpy(state->filters_edit_buffer, cf->value2,
+            sizeof(state->filters_edit_buffer) - 1);
+    state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
+    state->filters_edit_len = strlen(state->filters_edit_buffer);
+  } else if (target_col == del_col) {
     /* Delete button - delete filter */
     bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
+    if (is_between) {
+      had_effect = had_effect || cf->value2[0] != '\0';
+    }
     if (f->num_filters > 1) {
       filters_remove(f, target_filter);
       if (state->filters_cursor_row >= f->num_filters)

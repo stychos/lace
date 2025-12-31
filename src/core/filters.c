@@ -36,6 +36,7 @@ static const FilterOpDef FILTER_OPS[] = {
     [FILTER_OP_IN] = {"in", NULL, true},
     [FILTER_OP_CONTAINS] = {"contains", NULL, true},
     [FILTER_OP_REGEX] = {"regex", NULL, true},
+    [FILTER_OP_BETWEEN] = {"between", NULL, true},
     [FILTER_OP_IS_EMPTY] = {"is empty", NULL, false},
     [FILTER_OP_IS_NOT_EMPTY] = {"is not empty", NULL, false},
     [FILTER_OP_IS_NULL] = {"is null", NULL, false},
@@ -98,6 +99,7 @@ bool filters_add(TableFilters *f, size_t col_idx, FilterOperator op,
   } else {
     cf->value[0] = '\0';
   }
+  cf->value2[0] = '\0'; /* Initialize second value for BETWEEN */
 
   f->num_filters++;
   return true;
@@ -308,9 +310,13 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
 
     /* Skip filters with empty values if the operator requires a value.
      * Operators like IS NULL, IS NOT NULL, IS EMPTY, IS NOT EMPTY don't need
-     * values. RAW filters also need a value (the SQL expression). */
+     * values. RAW filters also need a value (the SQL expression).
+     * BETWEEN requires both values to be non-empty. */
     bool is_raw = (cf->column_index == SIZE_MAX);
     if (cf->value[0] == '\0' && (is_raw || filter_op_needs_value(cf->op))) {
+      continue;
+    }
+    if (cf->op == FILTER_OP_BETWEEN && cf->value2[0] == '\0') {
       continue;
     }
 
@@ -394,6 +400,17 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
                   escaped_val ? escaped_val : "");
       }
       free(escaped_val);
+      break;
+    }
+
+    case FILTER_OP_BETWEEN: {
+      char *escaped_val1 = escape_sql_value(cf->value);
+      char *escaped_val2 = escape_sql_value(cf->value2);
+      sb_printf(sb, "%s BETWEEN '%s' AND '%s'", escaped_col,
+                escaped_val1 ? escaped_val1 : "",
+                escaped_val2 ? escaped_val2 : "");
+      free(escaped_val1);
+      free(escaped_val2);
       break;
     }
 
