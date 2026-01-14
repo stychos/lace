@@ -9,6 +9,7 @@
 #ifndef LACE_TUI_INTERNAL_H
 #define LACE_TUI_INTERNAL_H
 
+#include "../../core/constants.h"
 #include "../../db/db.h"
 #include "../../util/str.h"
 #include "render_helpers.h"
@@ -17,19 +18,357 @@
 #include <ncurses.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
 
-/* Shared constants */
-#define MIN_COL_WIDTH 4
-#define MAX_COL_WIDTH 40
-#define DEFAULT_COL_WIDTH 15
-#define PAGE_SIZE 1000
-#define PREFETCH_PAGES 2      /* Number of pages to load at once */
-#define LOAD_THRESHOLD 50     /* Load more when within this many rows of edge */
-#define MAX_LOADED_PAGES 5    /* Maximum pages to keep in memory */
-#define TRIM_DISTANCE_PAGES 2 /* Trim data farther than this from cursor */
-#define PREFETCH_THRESHOLD                                                     \
-  PAGE_SIZE /* Start prefetch when within 1 page of edge */
-#define MAX_VISIBLE_FILTERS 8 /* Max filter rows visible in panel */
+/* ============================================================================
+ * ViewModel accessor helpers
+ * ============================================================================
+ * These eliminate duplicate get_vm_* functions across TUI modules.
+ */
+
+/* Get VmTable if valid, otherwise NULL */
+static inline VmTable *tui_vm_table(TuiState *state) {
+  if (!state || !state->vm_table)
+    return NULL;
+  return vm_table_valid(state->vm_table) ? state->vm_table : NULL;
+}
+
+/* Shared constants are now in core/constants.h */
+
+/* ============================================================================
+ * Drawing helper macros
+ * ============================================================================
+ * These reduce boilerplate for common ncurses attribute patterns.
+ */
+
+/* Draw with temporary attribute - automatically turns off after */
+#define WITH_ATTR(win, attr, ...)                                              \
+  do {                                                                         \
+    wattron(win, attr);                                                        \
+    __VA_ARGS__;                                                               \
+    wattroff(win, attr);                                                       \
+  } while (0)
+
+/* Draw box with color - common border pattern */
+#define DRAW_BOX(win, color)                                                   \
+  do {                                                                         \
+    wattron(win, COLOR_PAIR(color));                                           \
+    box(win, 0, 0);                                                            \
+    wattroff(win, COLOR_PAIR(color));                                          \
+  } while (0)
+
+/* Draw horizontal line with color */
+#define DRAW_HLINE(win, y, x, width, color)                                    \
+  do {                                                                         \
+    wattron(win, COLOR_PAIR(color));                                           \
+    mvwhline(win, y, x, ACS_HLINE, width);                                     \
+    wattroff(win, COLOR_PAIR(color));                                          \
+  } while (0)
+
+/* Focus cycling helpers for dialog navigation */
+#define FOCUS_NEXT(f, n) (((f) + 1) % (n))
+#define FOCUS_PREV(f, n) (((f) + (n) - 1) % (n))
+
+/* Center text within a width */
+#define TEXT_CENTER_X(width, text_len) (((width) - (text_len)) / 2)
+
+/* ============================================================================
+ * Scroll position helpers
+ * ============================================================================
+ * These reduce boilerplate for common scroll/cursor clamping patterns.
+ */
+
+/* Subtract with underflow protection - returns 0 if subtraction would underflow.
+ * Use for scroll/cursor adjustments: position = subtract_clamped(pos, amount) */
+static inline size_t subtract_clamped(size_t value, size_t amount) {
+  return (value > amount) ? value - amount : 0;
+}
+
+/* Calculate maximum valid scroll position given total items and visible count.
+ * Returns 0 if all items fit in view. */
+static inline size_t scroll_max(size_t total, size_t visible) {
+  return (total > visible) ? total - visible : 0;
+}
+
+/* Adjust scroll position to keep cursor visible within view.
+ * Updates *scroll in place if cursor is outside visible range.
+ * visible must be > 0. */
+static inline void scroll_clamp_to_cursor(size_t *scroll, size_t cursor,
+                                          size_t visible) {
+  if (cursor < *scroll) {
+    *scroll = cursor;
+  } else if (cursor >= *scroll + visible) {
+    *scroll = cursor - visible + 1;
+  }
+}
+
+/* Clamp scroll to maximum valid position.
+ * Updates *scroll in place if it exceeds max_scroll. */
+static inline void scroll_clamp_to_max(size_t *scroll, size_t max_scroll) {
+  if (*scroll > max_scroll)
+    *scroll = max_scroll;
+}
+
+/* ============================================================================
+ * Layout calculation helpers
+ * ============================================================================
+ * These eliminate repeated getmaxyx + filters_height + visible_rows patterns.
+ */
+
+typedef struct {
+  int win_rows;       /* Total window height */
+  int win_cols;       /* Total window width */
+  int filters_height; /* Height of filters panel (0 if hidden) */
+  int header_rows;    /* Number of header rows (typically 3) */
+  int visible_rows;   /* Rows available for data display */
+  int data_start_y;   /* Y offset where data rows begin */
+} LayoutInfo;
+
+/* Calculate layout information for main table view.
+ * Returns populated LayoutInfo, or zeros if state/main_win is invalid. */
+static inline LayoutInfo tui_get_layout_info(TuiState *state) {
+  LayoutInfo layout = {0, 0, 0, 3, 1, 3}; /* Default: 3 header rows */
+
+  if (!state || !state->main_win)
+    return layout;
+
+  getmaxyx(state->main_win, layout.win_rows, layout.win_cols);
+
+  /* Calculate filters panel height */
+  layout.filters_height =
+      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+
+  /* Visible rows = window height - header rows - filters panel */
+  layout.visible_rows =
+      layout.win_rows - layout.header_rows - layout.filters_height;
+  if (layout.visible_rows < 1)
+    layout.visible_rows = 1;
+
+  /* Data rows start after filters and headers */
+  layout.data_start_y = layout.filters_height + layout.header_rows;
+
+  return layout;
+}
+
+/* ============================================================================
+ * Dialog geometry helpers
+ * ============================================================================
+ */
+
+/* Calculate centered dialog position with bounds clamping */
+static inline void dialog_center_position(int *y, int *x, int height, int width,
+                                          int term_h, int term_w) {
+  *y = (term_h - height) / 2;
+  *x = (term_w - width) / 2;
+  if (*y < 0)
+    *y = 0;
+  if (*x < 0)
+    *x = 0;
+}
+
+/* Clamp dialog width to fit within parent with margin */
+static inline int dialog_clamp_width(int width, int parent_w, int margin) {
+  int max_w = parent_w - margin;
+  return (width > max_w) ? max_w : width;
+}
+
+/* Clamp dialog dimensions to min/max bounds and terminal size */
+static inline void dialog_clamp_dimensions(int *h, int *w, int min_h, int min_w,
+                                           int max_h, int max_w, int term_h,
+                                           int term_w) {
+  if (*h < min_h)
+    *h = min_h;
+  if (*w < min_w)
+    *w = min_w;
+  if (max_h > 0 && *h > max_h)
+    *h = max_h;
+  if (max_w > 0 && *w > max_w)
+    *w = max_w;
+  if (*h > term_h - 2)
+    *h = term_h - 2;
+  if (*w > term_w - 2)
+    *w = term_w - 2;
+}
+
+/* Create a centered dialog window with keypad enabled.
+ * Returns NULL if newwin fails. Caller must delwin() when done. */
+static inline WINDOW *dialog_create(int height, int width, int term_h,
+                                    int term_w) {
+  int y, x;
+  dialog_center_position(&y, &x, height, width, term_h, term_w);
+  WINDOW *win = newwin(height, width, y, x);
+  if (win)
+    keypad(win, TRUE);
+  return win;
+}
+
+/* Create a centered dialog with box border drawn */
+static inline WINDOW *dialog_create_boxed(int height, int width, int term_h,
+                                          int term_w, int border_color) {
+  WINDOW *win = dialog_create(height, width, term_h, term_w);
+  if (win) {
+    wattron(win, COLOR_PAIR(border_color));
+    box(win, 0, 0);
+    wattroff(win, COLOR_PAIR(border_color));
+  }
+  return win;
+}
+
+/* ============================================================================
+ * DialogContext - Encapsulates modal dialog state and lifecycle
+ * ============================================================================
+ */
+
+typedef struct {
+  WINDOW *win;       /* Dialog window */
+  int height;        /* Dialog height */
+  int width;         /* Dialog width */
+  int term_h;        /* Terminal height at creation */
+  int term_w;        /* Terminal width at creation */
+  int selected;      /* Selected button/item index */
+  bool running;      /* Event loop running flag */
+  int border_color;  /* Border color pair */
+  const char *title; /* Dialog title (not owned) */
+} DialogContext;
+
+/* Initialize dialog context and create window.
+ * Returns true on success, false if window creation fails.
+ * Caller must call dialog_ctx_destroy() when done. */
+static inline bool dialog_ctx_init(DialogContext *ctx, int height, int width,
+                                   int border_color, const char *title) {
+  if (!ctx)
+    return false;
+
+  memset(ctx, 0, sizeof(*ctx));
+  getmaxyx(stdscr, ctx->term_h, ctx->term_w);
+
+  /* Clamp dimensions to terminal */
+  if (height > ctx->term_h - 2)
+    height = ctx->term_h - 2;
+  if (width > ctx->term_w - 2)
+    width = ctx->term_w - 2;
+  if (height < 3)
+    height = 3;
+  if (width < 10)
+    width = 10;
+
+  ctx->height = height;
+  ctx->width = width;
+  ctx->border_color = border_color;
+  ctx->title = title;
+  ctx->running = true;
+
+  ctx->win = dialog_create(height, width, ctx->term_h, ctx->term_w);
+  return ctx->win != NULL;
+}
+
+/* Destroy dialog and cleanup */
+static inline void dialog_ctx_destroy(DialogContext *ctx) {
+  if (!ctx)
+    return;
+  if (ctx->win) {
+    delwin(ctx->win);
+    ctx->win = NULL;
+  }
+  touchwin(stdscr);
+}
+
+/* Draw dialog border and title */
+static inline void dialog_ctx_draw_frame(DialogContext *ctx) {
+  if (!ctx || !ctx->win)
+    return;
+  werase(ctx->win);
+  wattron(ctx->win, COLOR_PAIR(ctx->border_color));
+  box(ctx->win, 0, 0);
+  wattroff(ctx->win, COLOR_PAIR(ctx->border_color));
+
+  if (ctx->title) {
+    int title_len = (int)strlen(ctx->title);
+    int title_x = (ctx->width - title_len - 2) / 2;
+    if (title_x < 1)
+      title_x = 1;
+    wattron(ctx->win, A_BOLD);
+    mvwprintw(ctx->win, 0, title_x, " %s ", ctx->title);
+    wattroff(ctx->win, A_BOLD);
+  }
+}
+
+/* Draw button row at bottom of dialog.
+ * buttons: array of button labels, num_buttons: count
+ * selected: which button is highlighted (0-indexed) */
+static inline void dialog_ctx_draw_buttons(DialogContext *ctx,
+                                           const char **buttons,
+                                           size_t num_buttons, int selected) {
+  if (!ctx || !ctx->win || !buttons || num_buttons == 0)
+    return;
+
+  int btn_y = ctx->height - 2;
+  int total_width = 0;
+  for (size_t i = 0; i < num_buttons; i++) {
+    total_width += (int)strlen(buttons[i]) + 4; /* "[ label ]" + space */
+  }
+  total_width -= 1; /* No trailing space */
+
+  int start_x = (ctx->width - total_width) / 2;
+  if (start_x < 2)
+    start_x = 2;
+
+  int x = start_x;
+  for (size_t i = 0; i < num_buttons; i++) {
+    if ((int)i == selected)
+      wattron(ctx->win, A_REVERSE);
+    mvwprintw(ctx->win, btn_y, x, "[ %s ]", buttons[i]);
+    if ((int)i == selected)
+      wattroff(ctx->win, A_REVERSE);
+    x += (int)strlen(buttons[i]) + 5;
+  }
+}
+
+/* Get next key from dialog window */
+static inline int dialog_ctx_getch(DialogContext *ctx) {
+  if (!ctx || !ctx->win)
+    return ERR;
+  return wgetch(ctx->win);
+}
+
+/* Cycle selected button (for Tab, Left, Right) */
+static inline void dialog_ctx_cycle_button(DialogContext *ctx,
+                                           int num_buttons) {
+  if (!ctx || num_buttons <= 1)
+    return;
+  ctx->selected = (ctx->selected + 1) % num_buttons;
+}
+
+/* ============================================================================
+ * Menu helpers
+ * ============================================================================
+ */
+
+/* Setup a menu within a window with standard configuration.
+ * Returns the menu subwindow (caller should NOT free it - owned by menu_win).
+ * padding: inset from window border for the menu area */
+static inline WINDOW *menu_setup(MENU *menu, WINDOW *menu_win, int height,
+                                 int width, int padding) {
+  set_menu_win(menu, menu_win);
+  WINDOW *sub = derwin(menu_win, height - (padding * 2), width - (padding * 2),
+                       padding, padding);
+  set_menu_sub(menu, sub);
+  set_menu_mark(menu, "> ");
+  set_menu_format(menu, height - (padding * 2), 1);
+  post_menu(menu);
+  return sub;
+}
+
+/* Cleanup a menu and its items. Does NOT delete the window. */
+static inline void menu_cleanup(MENU *menu, ITEM **items, size_t num_items) {
+  unpost_menu(menu);
+  free_menu(menu);
+  for (size_t i = 0; i < num_items; i++) {
+    if (items[i])
+      free_item(items[i]);
+  }
+  free(items);
+}
 
 /* ============================================================================
  * Helper functions (tui.c)
@@ -162,6 +501,18 @@ void tui_confirm_edit(TuiState *state);
 /* Set cell value directly (NULL or empty string) */
 void tui_set_cell_direct(TuiState *state, bool set_null);
 
+/* Copy current cell value to clipboard */
+void tui_cell_copy(TuiState *state);
+
+/* Paste clipboard content to current cell and update database */
+void tui_cell_paste(TuiState *state);
+
+/* Clipboard helpers - copy text to system clipboard and internal buffer */
+bool tui_clipboard_copy(TuiState *state, const char *text);
+
+/* Clipboard helpers - read text from clipboard (returns malloc'd string) */
+char *tui_clipboard_read(TuiState *state);
+
 /* Delete current row */
 void tui_delete_row(TuiState *state);
 
@@ -227,5 +578,28 @@ void tui_show_goto_dialog(TuiState *state);
 
 /* Note: tui_show_schema, tui_show_connect_dialog, tui_show_table_selector,
  * tui_show_config are declared in tui.h as public API */
+
+/* ============================================================================
+ * Widget lifecycle functions (tab_widgets.c)
+ * ============================================================================
+ */
+
+/* Initialize widgets for a table tab */
+bool tui_init_table_tab_widgets(TuiState *state, UITabState *ui, Tab *tab);
+
+/* Initialize widgets for a query tab */
+bool tui_init_query_tab_widgets(TuiState *state, UITabState *ui, Tab *tab);
+
+/* Cleanup widgets when tab is closed */
+void tui_cleanup_tab_widgets(UITabState *ui);
+
+/* Get query widget for current tab (NULL if not a query tab) */
+QueryWidget *tui_query_widget_for_tab(TuiState *state);
+
+/* Get sidebar widget for current tab (NULL if not available) */
+SidebarWidget *tui_sidebar_widget(TuiState *state);
+
+/* Get or create sidebar widget for current tab */
+SidebarWidget *tui_ensure_sidebar_widget(TuiState *state);
 
 #endif /* LACE_TUI_INTERNAL_H */

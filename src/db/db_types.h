@@ -9,17 +9,10 @@
 #ifndef LACE_DB_TYPES_H
 #define LACE_DB_TYPES_H
 
+#include "../core/constants.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-
-/* Maximum size for a single field value (1MB) to prevent DoS/OOM.
- * Fields exceeding this are displayed as placeholder text. */
-#define MAX_FIELD_SIZE (1024 * 1024)
-
-/* Maximum rows for a result set (1M rows) to prevent unbounded memory growth.
- * Queries returning more rows will be truncated. */
-#define MAX_RESULT_ROWS (1024 * 1024)
 
 /* Database value types */
 typedef enum {
@@ -140,6 +133,17 @@ DbValueType db_value_type_from_name(const char *name);
 void db_value_free(DbValue *val);
 void db_row_free(Row *row);
 void db_result_free(ResultSet *rs);
+
+/* Allocate an empty result set (for non-SELECT statements) */
+ResultSet *db_result_alloc_empty(void);
+
+/* Result set construction helpers - reduce driver boilerplate.
+ * These return false and set error on failure.
+ * On success, rs->columns/rows is allocated and rs->num_columns/num_rows is set.
+ */
+bool db_result_alloc_columns(ResultSet *rs, size_t num_cols, char **err);
+bool db_result_alloc_rows(ResultSet *rs, size_t num_rows, char **err);
+
 void db_column_free(ColumnDef *col);
 void db_index_free(IndexDef *idx);
 void db_fk_free(ForeignKeyDef *fk);
@@ -153,6 +157,7 @@ DbValue db_value_text(const char *str);
 DbValue db_value_text_len(const char *str, size_t len);
 DbValue db_value_blob(const uint8_t *data, size_t len);
 DbValue db_value_bool(bool val);
+DbValue db_value_oversized_placeholder(const char *type_label, size_t size);
 DbValue db_value_copy(const DbValue *src);
 
 /* Value conversion */

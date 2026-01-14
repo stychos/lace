@@ -8,6 +8,8 @@
 
 #include "history.h"
 #include "../platform/platform.h"
+#include "../util/json_helpers.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include <cJSON.h>
 #include <ctype.h>
@@ -25,48 +27,27 @@
  * ============================================================================
  */
 
-static void set_error(char **error, const char *fmt, ...) {
-  if (!error)
-    return;
-  va_list args;
-  va_start(args, fmt);
-  *error = str_vprintf(fmt, args);
-  va_end(args);
-}
-
 /* Ensure capacity for entries array */
-static bool history_ensure_capacity(QueryHistory *history, size_t needed) {
-  if (!history)
-    return false;
+static void history_ensure_capacity(QueryHistory *history, size_t needed) {
+  if (!history || history->capacity >= needed)
+    return;
 
-  if (history->capacity >= needed)
-    return true;
+  size_t new_cap = history->capacity == 0 ? HISTORY_INITIAL_CAPACITY : history->capacity;
+  while (new_cap < needed) {
+    new_cap *= 2;
+  }
 
-  size_t new_capacity =
-      history->capacity == 0 ? HISTORY_INITIAL_CAPACITY : history->capacity * 2;
-  while (new_capacity < needed)
-    new_capacity *= 2;
-
-  HistoryEntry *new_entries =
-      realloc(history->entries, new_capacity * sizeof(HistoryEntry));
-  if (!new_entries)
-    return false;
-
-  /* Zero new entries */
-  memset(&new_entries[history->capacity], 0,
-         (new_capacity - history->capacity) * sizeof(HistoryEntry));
-
-  history->entries = new_entries;
-  history->capacity = new_capacity;
-  return true;
+  size_t old_cap = history->capacity;
+  history->entries = safe_reallocarray(history->entries, new_cap, sizeof(HistoryEntry));
+  memset(&history->entries[old_cap], 0, (new_cap - old_cap) * sizeof(HistoryEntry));
+  history->capacity = new_cap;
 }
 
 /* Free a single entry's contents */
 static void entry_free(HistoryEntry *entry) {
   if (!entry)
     return;
-  free(entry->sql);
-  entry->sql = NULL;
+  FREE_NULL(entry->sql);
   entry->timestamp = 0;
   entry->type = HISTORY_TYPE_QUERY;
 }
@@ -77,16 +58,10 @@ static void entry_free(HistoryEntry *entry) {
  */
 
 QueryHistory *history_create(const char *connection_id) {
-  QueryHistory *history = calloc(1, sizeof(QueryHistory));
-  if (!history)
-    return NULL;
+  QueryHistory *history = safe_calloc(1, sizeof(QueryHistory));
 
   if (connection_id) {
     history->connection_id = str_dup(connection_id);
-    if (!history->connection_id) {
-      free(history);
-      return NULL;
-    }
   }
 
   return history;
@@ -116,8 +91,9 @@ void history_add(QueryHistory *history, const char *sql, HistoryEntryType type,
     return;
 
   /* Ensure we have capacity */
-  if (!history_ensure_capacity(history, history->num_entries + 1))
-    return;
+  history_ensure_capacity(history, history->num_entries + 1);
+
+  char *new_sql = str_dup(sql);
 
   /* Trim oldest entries if we're at max */
   if (max_size > 0 && history->num_entries >= (size_t)max_size) {
@@ -132,10 +108,7 @@ void history_add(QueryHistory *history, const char *sql, HistoryEntryType type,
 
   /* Add new entry at end (newest) */
   HistoryEntry *entry = &history->entries[history->num_entries];
-  entry->sql = str_dup(sql);
-  if (!entry->sql)
-    return;
-
+  entry->sql = new_sql;
   entry->timestamp = time(NULL);
   entry->type = type;
   history->num_entries++;
@@ -187,20 +160,20 @@ char *history_get_file_path(const char *connection_id) {
 bool history_ensure_dir(char **error) {
   const char *data_dir = platform_get_data_dir();
   if (!data_dir) {
-    set_error(error, "Failed to get data directory");
+    err_setf(error, "Failed to get data directory");
     return false;
   }
 
   char *history_dir =
       str_printf("%s%s%s", data_dir, LACE_PATH_SEP_STR, HISTORY_DIR);
   if (!history_dir) {
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     return false;
   }
 
   if (!platform_dir_exists(history_dir)) {
     if (!platform_mkdir(history_dir)) {
-      set_error(error, "Failed to create history directory: %s", history_dir);
+      err_setf(error, "Failed to create history directory: %s", history_dir);
       free(history_dir);
       return false;
     }
@@ -247,7 +220,7 @@ static HistoryEntryType string_to_type(const char *str) {
 
 bool history_load(QueryHistory *history, char **error) {
   if (!history || !history->connection_id) {
-    set_error(error, "Invalid history object");
+    err_setf(error, "Invalid history object");
     return false;
   }
 
@@ -256,7 +229,7 @@ bool history_load(QueryHistory *history, char **error) {
 
   char *path = history_get_file_path(history->connection_id);
   if (!path) {
-    set_error(error, "Failed to get history file path");
+    err_setf(error, "Failed to get history file path");
     return false;
   }
 
@@ -270,7 +243,7 @@ bool history_load(QueryHistory *history, char **error) {
   /* Read file */
   FILE *f = fopen(path, "r");
   if (!f) {
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return false;
   }
@@ -285,13 +258,7 @@ bool history_load(QueryHistory *history, char **error) {
     return true; /* Empty file is valid */
   }
 
-  char *content = malloc((size_t)size + 1);
-  if (!content) {
-    fclose(f);
-    free(path);
-    set_error(error, "Out of memory");
-    return false;
-  }
+  char *content = safe_malloc((size_t)size + 1);
 
   size_t read_size = fread(content, 1, (size_t)size, f);
   fclose(f);
@@ -302,7 +269,7 @@ bool history_load(QueryHistory *history, char **error) {
   free(content);
 
   if (!json) {
-    set_error(error, "Failed to parse history JSON: %s", path);
+    err_setf(error, "Failed to parse history JSON: %s", path);
     free(path);
     return false;
   }
@@ -310,38 +277,29 @@ bool history_load(QueryHistory *history, char **error) {
   free(path);
 
   /* Parse entries array */
-  cJSON *entries = cJSON_GetObjectItem(json, "entries");
-  if (!cJSON_IsArray(entries)) {
+  cJSON *entries = json_get_array(json, "entries");
+  if (!entries) {
     cJSON_Delete(json);
     return true; /* No entries is valid */
   }
 
-  size_t count = (size_t)cJSON_GetArraySize(entries);
+  size_t count = (size_t)json_array_size(entries);
   if (count > 0) {
-    if (!history_ensure_capacity(history, count)) {
-      cJSON_Delete(json);
-      set_error(error, "Out of memory");
-      return false;
-    }
+    history_ensure_capacity(history, count);
 
     cJSON *entry_json;
     cJSON_ArrayForEach(entry_json, entries) {
-      cJSON *sql_item = cJSON_GetObjectItem(entry_json, "sql");
-      cJSON *ts_item = cJSON_GetObjectItem(entry_json, "timestamp");
-      cJSON *type_item = cJSON_GetObjectItem(entry_json, "type");
-
-      if (!cJSON_IsString(sql_item))
+      const char *sql = json_get_string(entry_json, "sql", NULL);
+      if (!sql)
         continue;
 
       HistoryEntry *entry = &history->entries[history->num_entries];
-      entry->sql = str_dup(sql_item->valuestring);
-      if (!entry->sql)
-        continue;
+      memset(entry, 0, sizeof(HistoryEntry));
+      entry->sql = str_dup(sql);
 
       entry->timestamp =
-          cJSON_IsNumber(ts_item) ? (time_t)ts_item->valuedouble : time(NULL);
-      entry->type = string_to_type(
-          cJSON_IsString(type_item) ? type_item->valuestring : NULL);
+          (time_t)json_get_int64(entry_json, "timestamp", (int64_t)time(NULL));
+      entry->type = string_to_type(json_get_string(entry_json, "type", NULL));
 
       history->num_entries++;
     }
@@ -353,7 +311,7 @@ bool history_load(QueryHistory *history, char **error) {
 
 bool history_save(const QueryHistory *history, char **error) {
   if (!history || !history->connection_id) {
-    set_error(error, "Invalid history object");
+    err_setf(error, "Invalid history object");
     return false;
   }
 
@@ -363,7 +321,7 @@ bool history_save(const QueryHistory *history, char **error) {
 
   char *path = history_get_file_path(history->connection_id);
   if (!path) {
-    set_error(error, "Failed to get history file path");
+    err_setf(error, "Failed to get history file path");
     return false;
   }
 
@@ -371,7 +329,7 @@ bool history_save(const QueryHistory *history, char **error) {
   cJSON *json = cJSON_CreateObject();
   if (!json) {
     free(path);
-    set_error(error, "Failed to create JSON object");
+    err_setf(error, "Failed to create JSON object");
     return false;
   }
 
@@ -382,7 +340,7 @@ bool history_save(const QueryHistory *history, char **error) {
   if (!entries) {
     cJSON_Delete(json);
     free(path);
-    set_error(error, "Failed to create entries array");
+    err_setf(error, "Failed to create entries array");
     return false;
   }
 
@@ -410,14 +368,14 @@ bool history_save(const QueryHistory *history, char **error) {
 
   if (!content) {
     free(path);
-    set_error(error, "Failed to serialize JSON");
+    err_setf(error, "Failed to serialize JSON");
     return false;
   }
 
   FILE *f = fopen(path, "w");
   if (!f) {
     free(content);
-    set_error(error, "Failed to open %s for writing: %s", path,
+    err_setf(error, "Failed to open %s for writing: %s", path,
               strerror(errno));
     free(path);
     return false;
@@ -435,7 +393,7 @@ bool history_save(const QueryHistory *history, char **error) {
   free(path);
 
   if (written != len) {
-    set_error(error, "Failed to write all data");
+    err_setf(error, "Failed to write all data");
     return false;
   }
 

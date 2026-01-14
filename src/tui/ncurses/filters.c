@@ -5,27 +5,22 @@
  * Core filter logic (filters_init, filters_add, filters_build_where, etc.)
  * is in core/filters.c. This file contains only TUI-specific code.
  *
- * Uses VmTable for schema access where applicable.
+ * Uses TableViewModel for schema access where applicable.
+ *
+ * Uses FiltersViewModel as source of truth for filter panel state.
+ * Access via tui_filters_widget() to get the view model.
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
 #include "../../config/config.h"
-#include "../../viewmodel/vm_table.h"
+#include "../../util/mem.h"
+#include "../../viewmodel/filters_viewmodel.h"
 #include "tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* Helper to get VmTable, returns NULL if not valid */
-static VmTable *get_vm_table(TuiState *state) {
-  if (!state || !state->vm_table)
-    return NULL;
-  if (!vm_table_valid(state->vm_table))
-    return NULL;
-  return state->vm_table;
-}
 
 /* Sentinel value for RAW filter (virtual column) */
 #define FILTER_COL_RAW SIZE_MAX
@@ -150,17 +145,18 @@ void tui_draw_filters_panel(TuiState *state) {
         state->filters_focused && (state->filters_cursor_row == filter_idx);
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
 
-    /* Column name - use VmTable if available */
+    /* Column name - use VmTable if available, fallback to Tab */
     const char *col_name = is_raw ? "(RAW)" : "???";
     if (!is_raw) {
-      VmTable *vm = get_vm_table(state);
+      VmTable *vm = tui_vm_table(state);
+      Tab *tab = TUI_TAB(state);
       if (vm) {
         const char *name = vm_table_column_name(vm, cf->column_index);
         if (name)
           col_name = name;
-      } else if (state->schema &&
-                 cf->column_index < state->schema->num_columns) {
-        col_name = state->schema->columns[cf->column_index].name;
+      } else if (tab && tab->schema &&
+                 cf->column_index < tab->schema->num_columns) {
+        col_name = tab->schema->columns[cf->column_index].name;
       }
     }
 
@@ -291,9 +287,10 @@ void tui_draw_filters_panel(TuiState *state) {
  * Caller must check if result == schema->num_columns to detect RAW. */
 static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
                                     size_t filter_row) {
-  /* Get schema via VmTable if available, fallback to state->schema */
-  VmTable *vm = get_vm_table(state);
-  const TableSchema *schema = vm ? vm_table_schema(vm) : state->schema;
+  /* Get schema via VmTable if available, fallback to Tab */
+  VmTable *vm = tui_vm_table(state);
+  Tab *tab = TUI_TAB(state);
+  const TableSchema *schema = vm ? vm_table_schema(vm) : (tab ? tab->schema : NULL);
   if (!state || !schema || schema->num_columns == 0)
     return -1;
 
@@ -342,20 +339,11 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
 
   keypad(menu_win, TRUE);
   mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
-  box(menu_win, 0, 0);
-  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
-
-  wattron(menu_win, A_BOLD);
-  mvwprintw(menu_win, 0, 2, " Column ");
-  wattroff(menu_win, A_BOLD);
+  DRAW_BOX(menu_win, COLOR_BORDER);
+  WITH_ATTR(menu_win, A_BOLD, mvwprintw(menu_win, 0, 2, " Column "));
 
   /* Create menu items: columns + RAW */
-  ITEM **items = calloc(total_items + 1, sizeof(ITEM *));
-  if (!items) {
-    delwin(menu_win);
-    return -1;
-  }
+  ITEM **items = safe_calloc(total_items + 1, sizeof(ITEM *));
 
   for (size_t i = 0; i < num_cols; i++) {
     items[i] = new_item(schema->columns[i].name, "");
@@ -372,11 +360,7 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
     return -1;
   }
 
-  set_menu_win(menu, menu_win);
-  WINDOW *menu_sub = derwin(menu_win, height - 2, width - 2, 1, 1);
-  set_menu_sub(menu, menu_sub);
-  set_menu_mark(menu, "> ");
-  set_menu_format(menu, height - 2, 1);
+  menu_setup(menu, menu_win, height, width, 1);
 
   /* Set current item */
   if (current_col == FILTER_COL_RAW)
@@ -384,7 +368,6 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
   else if (current_col < num_cols)
     set_current_item(menu, items[current_col]);
 
-  post_menu(menu);
   wrefresh(menu_win);
 
   ssize_t result = -1;
@@ -528,20 +511,11 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
 
   keypad(menu_win, TRUE);
   mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
-  box(menu_win, 0, 0);
-  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
-
-  wattron(menu_win, A_BOLD);
-  mvwprintw(menu_win, 0, 2, " Operator ");
-  wattroff(menu_win, A_BOLD);
+  DRAW_BOX(menu_win, COLOR_BORDER);
+  WITH_ATTR(menu_win, A_BOLD, mvwprintw(menu_win, 0, 2, " Operator "));
 
   /* Create menu items (exclude RAW) */
-  ITEM **items = calloc(FILTER_OP_VISIBLE + 1, sizeof(ITEM *));
-  if (!items) {
-    delwin(menu_win);
-    return -1;
-  }
+  ITEM **items = safe_calloc(FILTER_OP_VISIBLE + 1, sizeof(ITEM *));
 
   for (int i = 0; i < FILTER_OP_VISIBLE; i++) {
     items[i] = new_item(filter_op_name((FilterOperator)i), "");
@@ -557,15 +531,11 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
     return -1;
   }
 
-  set_menu_win(menu, menu_win);
-  set_menu_sub(menu, derwin(menu_win, height - 2, width - 2, 1, 1));
-  set_menu_mark(menu, "> ");
-  set_menu_format(menu, height - 2, 1);
+  menu_setup(menu, menu_win, height, width, 1);
 
   if ((int)current_op < FILTER_OP_VISIBLE)
     set_current_item(menu, items[(int)current_op]);
 
-  post_menu(menu);
   wrefresh(menu_win);
 
   int result = -1;
@@ -659,7 +629,7 @@ static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
 
 /* Handle filters panel input */
 bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
-  if (!state || !state->filters_visible || !state->filters_focused)
+  if (!state || !tui_filters_visible(state) || !tui_filters_focused(state))
     return false;
   if (!event || event->type != UI_EVENT_KEY)
     return false;
@@ -678,7 +648,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
 
   /* Ctrl+W - switch focus to table */
   if (render_event_is_ctrl(event, 'W')) {
-    state->filters_focused = false;
+    tui_set_filters_focused(state, false);
     return true;
   }
 
@@ -708,6 +678,34 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       if (state->filters_edit_len > 0) {
         state->filters_edit_buffer[--state->filters_edit_len] = '\0';
       }
+    } else if (render_event_is_ctrl(event, 'K')) {
+      /* Ctrl+K - copy filter value to clipboard */
+      if (state->filters_edit_len > 0) {
+        tui_clipboard_copy(state, state->filters_edit_buffer);
+        tui_set_status(state, "Copied to clipboard");
+      }
+    } else if (render_event_is_ctrl(event, 'U')) {
+      /* Ctrl+U - paste from clipboard */
+      char *paste_text = tui_clipboard_read(state);
+      if (paste_text && paste_text[0]) {
+        /* Strip newlines for single-line filter field */
+        for (char *p = paste_text; *p; p++) {
+          if (*p == '\n' || *p == '\r')
+            *p = ' ';
+        }
+        size_t paste_len = strlen(paste_text);
+        size_t space_left =
+            sizeof(state->filters_edit_buffer) - 1 - state->filters_edit_len;
+        if (paste_len > space_left)
+          paste_len = space_left;
+        if (paste_len > 0) {
+          memcpy(state->filters_edit_buffer + state->filters_edit_len,
+                 paste_text, paste_len);
+          state->filters_edit_len += paste_len;
+          state->filters_edit_buffer[state->filters_edit_len] = '\0';
+        }
+      }
+      free(paste_text);
     } else if (render_event_is_char(event) && key_char >= 32 &&
                key_char < 127) {
       /* Printable character */
@@ -724,17 +722,27 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   /* Navigation mode */
   const Config *cfg = state->app ? state->app->config : NULL;
 
-  /* Escape, f, / - close panel (toggle filters or escape to close) */
-  if (render_event_is_special(event, UI_KEY_ESCAPE) ||
-      hotkey_matches(cfg, event, HOTKEY_TOGGLE_FILTERS)) {
+  /* Escape - close panel */
+  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
     /* Save cursor position to UITabState before closing */
     UITabState *ui = TUI_TAB_UI(state);
     if (ui) {
       ui->filters_cursor_row = state->filters_cursor_row;
       ui->filters_cursor_col = state->filters_cursor_col;
     }
-    state->filters_visible = false;
-    state->filters_focused = false;
+    tui_set_filters_visible(state, false);
+    tui_set_filters_focused(state, false);
+  }
+  /* Filter hotkey (f, /) - switch focus to table if filters exist, else close */
+  else if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_FILTERS)) {
+    if (f && f->num_filters > 0) {
+      /* Filters exist - just switch focus to table, keep panel visible */
+      tui_set_filters_focused(state, false);
+    } else {
+      /* No filters - close the panel */
+      tui_set_filters_visible(state, false);
+      tui_set_filters_focused(state, false);
+    }
   }
   /* Up / k - move cursor up */
   else if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
@@ -758,7 +766,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       }
     } else {
       /* At last filter row - move focus to table */
-      state->filters_focused = false;
+      tui_set_filters_focused(state, false);
     }
   }
   /* Left / h - move cursor left */
@@ -775,13 +783,13 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       /* Skip value column for is* operators that don't need a value */
       if (!is_raw && !needs_value && state->filters_cursor_col == 2)
         state->filters_cursor_col = 1;
-    } else if (state->sidebar_visible) {
+    } else if (tui_sidebar_visible(state)) {
       /* At leftmost column - move focus to sidebar */
       state->filters_was_focused = true; /* Remember filters were focused */
-      state->sidebar_focused = true;
-      state->filters_focused = false;
+      tui_set_sidebar_focused(state, true);
+      tui_set_filters_focused(state, false);
       /* Restore last sidebar position */
-      state->sidebar_highlight = state->sidebar_last_position;
+      tui_set_sidebar_highlight(state, state->sidebar_last_position);
     }
   }
   /* Right / l - move cursor right */
@@ -832,7 +840,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
                                          state->filters_cursor_row);
       if (sel >= 0) {
         /* Check if RAW was selected (index == num_columns) */
-        size_t num_cols = state->schema ? state->schema->num_columns : 0;
+        Tab *col_tab = TUI_TAB(state);
+        size_t num_cols = (col_tab && col_tab->schema) ? col_tab->schema->num_columns : 0;
         if ((size_t)sel == num_cols) {
           cf->column_index = FILTER_COL_RAW;
         } else {
@@ -895,13 +904,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       } else {
         /* Last filter - remove it and close panel */
         filters_remove(f, filter_idx);
-        state->filters_visible = false;
-        state->filters_focused = false;
-        UITabState *ui = TUI_TAB_UI(state);
-        if (ui) {
-          ui->filters_visible = false;
-          ui->filters_focused = false;
-        }
+        tui_set_filters_visible(state, false);
+        tui_set_filters_focused(state, false);
       }
       /* Only apply if deleted filter had effect */
       if (had_effect) {
@@ -911,7 +915,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   }
   /* + or = - add new filter */
   else if (hotkey_matches(cfg, event, HOTKEY_ADD_FILTER)) {
-    if (state->schema && state->schema->num_columns > 0) {
+    Tab *add_tab = TUI_TAB(state);
+    if (add_tab && add_tab->schema && add_tab->schema->num_columns > 0) {
       filters_add(f, 0, FILTER_OP_EQ, "");
       state->filters_cursor_row = f->num_filters - 1;
       state->filters_cursor_col = 0;
@@ -923,7 +928,57 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       }
     }
   }
-  /* c/C - clear all filters */
+  /* c - copy current filter value to clipboard */
+  else if (hotkey_matches(cfg, event, HOTKEY_CELL_COPY)) {
+    size_t filter_idx = state->filters_cursor_row;
+    if (filter_idx < f->num_filters) {
+      ColumnFilter *cf = &f->filters[filter_idx];
+      const char *value_to_copy = NULL;
+      if (state->filters_cursor_col == 2 && cf->value[0]) {
+        value_to_copy = cf->value;
+      } else if (state->filters_cursor_col == 3 &&
+                 cf->op == FILTER_OP_BETWEEN && cf->value2[0]) {
+        value_to_copy = cf->value2;
+      } else if (cf->value[0]) {
+        /* Default to value if cursor not on a value column */
+        value_to_copy = cf->value;
+      }
+      if (value_to_copy) {
+        tui_clipboard_copy(state, value_to_copy);
+        tui_set_status(state, "Copied to clipboard");
+      }
+    }
+  }
+  /* v - paste into current filter value */
+  else if (hotkey_matches(cfg, event, HOTKEY_CELL_PASTE)) {
+    size_t filter_idx = state->filters_cursor_row;
+    if (filter_idx < f->num_filters) {
+      ColumnFilter *cf = &f->filters[filter_idx];
+      char *paste_text = tui_clipboard_read(state);
+      if (paste_text && paste_text[0]) {
+        /* Strip newlines */
+        for (char *p = paste_text; *p; p++) {
+          if (*p == '\n' || *p == '\r')
+            *p = ' ';
+        }
+        /* Paste into appropriate value field */
+        if (state->filters_cursor_col == 3 && cf->op == FILTER_OP_BETWEEN) {
+          strncpy(cf->value2, paste_text, sizeof(cf->value2) - 1);
+          cf->value2[sizeof(cf->value2) - 1] = '\0';
+        } else {
+          strncpy(cf->value, paste_text, sizeof(cf->value) - 1);
+          cf->value[sizeof(cf->value) - 1] = '\0';
+          /* Move cursor to value column if not there */
+          if (state->filters_cursor_col < 2)
+            state->filters_cursor_col = 2;
+        }
+        tui_apply_filters(state);
+        tui_set_status(state, "Pasted from clipboard");
+      }
+      free(paste_text);
+    }
+  }
+  /* X - clear all filters */
   else if (hotkey_matches(cfg, event, HOTKEY_CLEAR_FILTERS)) {
     /* Check if any filters had effect before clearing */
     bool had_effect = false;
@@ -964,13 +1019,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     } else {
       /* Last filter - remove it and close panel */
       filters_remove(f, filter_idx);
-      state->filters_visible = false;
-      state->filters_focused = false;
-      UITabState *ui = TUI_TAB_UI(state);
-      if (ui) {
-        ui->filters_visible = false;
-        ui->filters_focused = false;
-      }
+      tui_set_filters_visible(state, false);
+      tui_set_filters_focused(state, false);
     }
     /* Only apply if deleted filter had effect */
     if (had_effect) {
@@ -1045,10 +1095,10 @@ void tui_apply_filters(TuiState *state) {
   }
 
   if (active_count > 0) {
-    tui_set_status(state, "%zu rows (%zu filter%s applied)", state->total_rows,
+    tui_set_status(state, "%zu rows (%zu filter%s applied)", tab->total_rows,
                    active_count, active_count == 1 ? "" : "s");
   } else {
-    tui_set_status(state, "%zu rows", state->total_rows);
+    tui_set_status(state, "%zu rows", tab->total_rows);
   }
 }
 
@@ -1111,8 +1161,8 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   /* Update cursor position */
   state->filters_cursor_row = target_filter;
   state->filters_cursor_col = target_col;
-  state->filters_focused = true;
-  state->sidebar_focused = false;
+  tui_set_filters_focused(state, true);
+  tui_set_sidebar_focused(state, false);
 
   /* Get the filter to check if RAW or BETWEEN */
   ColumnFilter *cf = &f->filters[target_filter];
@@ -1129,7 +1179,8 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
     ssize_t sel = show_column_dropdown(state, cf->column_index, target_filter);
     if (sel >= 0) {
       /* Check if RAW was selected (index == num_columns) */
-      size_t num_cols = state->schema ? state->schema->num_columns : 0;
+      Tab *click_tab = TUI_TAB(state);
+      size_t num_cols = (click_tab && click_tab->schema) ? click_tab->schema->num_columns : 0;
       if ((size_t)sel == num_cols) {
         cf->column_index = FILTER_COL_RAW;
       } else {
@@ -1183,13 +1234,8 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
     } else {
       /* Last filter - remove it and close panel */
       filters_remove(f, target_filter);
-      state->filters_visible = false;
-      state->filters_focused = false;
-      UITabState *ui = TUI_TAB_UI(state);
-      if (ui) {
-        ui->filters_visible = false;
-        ui->filters_focused = false;
-      }
+      tui_set_filters_visible(state, false);
+      tui_set_filters_focused(state, false);
     }
     if (had_effect) {
       tui_apply_filters(state);

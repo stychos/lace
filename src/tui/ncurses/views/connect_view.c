@@ -10,20 +10,23 @@
 #include "../../../config/config.h"
 #include "../../../config/connections.h"
 #include "../../../db/connstr.h"
+#include "../../../util/mem.h"
 #include "../../../util/str.h"
 #include "../render_helpers.h"
+#include "../tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_CONNSTR_LEN 512
+/* Local dialog-specific constants */
+#define INPUT_BUFFER_LEN 512
 #define TREE_PANEL_WIDTH 30
 #define MIN_DIALOG_WIDTH 70
 #define MIN_DIALOG_HEIGHT 18
 
 /* Input field structure */
 typedef struct {
-  char buffer[MAX_CONNSTR_LEN];
+  char buffer[INPUT_BUFFER_LEN];
   size_t len;
   size_t cursor;
   size_t scroll;
@@ -205,7 +208,7 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
 
   /* Printable character */
   if (render_event_is_char(event) && key_char >= 32 && key_char < 127 &&
-      input->len < MAX_CONNSTR_LEN - 1 && input->cursor <= input->len) {
+      input->len < INPUT_BUFFER_LEN - 1 && input->cursor <= input->len) {
     memmove(input->buffer + input->cursor + 1, input->buffer + input->cursor,
             input->len - input->cursor + 1);
     input->buffer[input->cursor] = (char)key_char;
@@ -754,14 +757,9 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
 static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
                         int *cursor_x) {
   werase(win);
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  box(win, 0, 0);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
-
-  /* Title */
-  wattron(win, A_BOLD);
-  mvwprintw(win, 0, (ds->width - 20) / 2, " Connection Manager ");
-  wattroff(win, A_BOLD);
+  DRAW_BOX(win, COLOR_BORDER);
+  WITH_ATTR(win, A_BOLD,
+            mvwprintw(win, 0, (ds->width - 20) / 2, " Connection Manager "));
 
   /* Horizontal line above buttons (calculate first for divider) */
   int btn_line_y = ds->height - 4;
@@ -863,25 +861,20 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+    DRAW_BOX(dlg, COLOR_BORDER);
 
     int title_len = (int)strlen(title) + 2;
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
-    wattroff(dlg, A_BOLD);
+    WITH_ATTR(dlg, A_BOLD,
+              mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title));
 
     mvwprintw(dlg, 2, 2, "%s", label);
 
-    if (focus == 0) {
+    if (focus == 0)
       wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
     mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
     mvwaddnstr(dlg, 3, 2, buf, dlg_width - 5);
-    if (focus == 0) {
+    if (focus == 0)
       wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
 
     wattron(dlg, A_DIM);
     mvwaddch(dlg, 4, 0, ACS_LTEE);
@@ -918,9 +911,9 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
       running = false;
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
-      focus = (focus + 1) % 3;
+      focus = FOCUS_NEXT(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      focus = (focus + 2) % 3;
+      focus = FOCUS_PREV(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 2) {
         /* Cancel */
@@ -1006,14 +999,11 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+    DRAW_BOX(dlg, COLOR_BORDER);
 
     int title_len = (int)strlen(title) + 2;
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
-    wattroff(dlg, A_BOLD);
+    WITH_ATTR(dlg, A_BOLD,
+              mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title));
 
     /* Message */
     int msg_x = (dlg_width - (int)strlen(message)) / 2;
@@ -1101,28 +1091,23 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
 
   while (running) {
     werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+    DRAW_BOX(dlg, COLOR_BORDER);
 
     int title_len = (int)strlen(title) + 2;
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
-    wattroff(dlg, A_BOLD);
+    WITH_ATTR(dlg, A_BOLD,
+              mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title));
 
     mvwprintw(dlg, 2, 2, "%s", label);
 
-    if (focus == 0) {
+    if (focus == 0)
       wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
     mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
     /* Show asterisks instead of actual password */
     for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
       mvwaddch(dlg, 3, 2 + (int)i, '*');
     }
-    if (focus == 0) {
+    if (focus == 0)
       wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
 
     wattron(dlg, A_DIM);
     mvwaddch(dlg, 4, 0, ACS_LTEE);
@@ -1159,9 +1144,9 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
       running = false;
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
-      focus = (focus + 1) % 3;
+      focus = FOCUS_NEXT(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      focus = (focus + 2) % 3;
+      focus = FOCUS_PREV(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 2) {
         /* Cancel */
@@ -1213,6 +1198,13 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
 
   curs_set(0);
   delwin(dlg);
+
+  /* Securely zero password buffer before returning to prevent stack leakage */
+  volatile char *vbuf = buf;
+  for (size_t i = 0; i < sizeof(buf); i++) {
+    vbuf[i] = 0;
+  }
+
   return result;
 }
 
@@ -1234,11 +1226,8 @@ static void collect_folders_recursive(ConnectionItem *item, FolderList *list) {
   /* Add this folder */
   if (list->num_folders >= list->capacity) {
     size_t new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
-    ConnectionItem **new_folders =
-        realloc(list->folders, new_cap * sizeof(ConnectionItem *));
-    if (!new_folders)
-      return;
-    list->folders = new_folders;
+    list->folders =
+        safe_reallocarray(list->folders, new_cap, sizeof(ConnectionItem *));
     list->capacity = new_cap;
   }
   list->folders[list->num_folders++] = item;
@@ -1272,15 +1261,20 @@ static char *folder_display_name(ConnectionItem *folder) {
     return str_dup("(root)");
   }
 
-  size_t name_len = strlen(name);
-  char *result = malloc(depth * 2 + name_len + 1);
-  if (!result)
-    return str_dup(name);
+  /* Validate depth to prevent overflow in size calculation */
+  if (depth < 0 || depth > 1000) {
+    return str_dup(name); /* Fallback for pathological nesting */
+  }
 
-  for (int i = 0; i < depth * 2; i++) {
+  size_t indent = (size_t)depth * 2;
+  size_t name_len = strlen(name);
+
+  char *result = safe_malloc(indent + name_len + 1);
+
+  for (size_t i = 0; i < indent; i++) {
     result[i] = ' ';
   }
-  memcpy(result + depth * 2, name, name_len + 1); /* Include null terminator */
+  memcpy(result + indent, name, name_len + 1); /* Include null terminator */
   return result;
 }
 
@@ -1349,13 +1343,9 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
   while (running) {
     werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
-
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - 18) / 2, " Save Connection ");
-    wattroff(dlg, A_BOLD);
+    DRAW_BOX(dlg, COLOR_BORDER);
+    WITH_ATTR(dlg, A_BOLD,
+              mvwprintw(dlg, 0, (dlg_width - 18) / 2, " Save Connection "));
 
     /* Name input */
     mvwprintw(dlg, 2, 2, "Name:");
@@ -1427,9 +1417,9 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
       running = false;
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
-      focus = (focus + 1) % 4;
+      focus = FOCUS_NEXT(focus, 4);
     } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      focus = (focus + 3) % 4;
+      focus = FOCUS_PREV(focus, 4);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 3) {
         /* Cancel */
@@ -1629,14 +1619,11 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
 
   while (running) {
     werase(dlg);
-    wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-    box(dlg, 0, 0);
-    wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
+    DRAW_BOX(dlg, COLOR_BORDER);
 
     const char *title = edit_item ? " Edit Connection " : " New Connection ";
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - (int)strlen(title)) / 2, "%s", title);
-    wattroff(dlg, A_BOLD);
+    WITH_ATTR(dlg, A_BOLD,
+              mvwprintw(dlg, 0, (dlg_width - (int)strlen(title)) / 2, "%s", title));
 
     int y = 2;
     int label_w = 12;
@@ -1756,9 +1743,9 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
       running = false;
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
-      focus = (focus + 1) % FLD_COUNT;
+      focus = FOCUS_NEXT(focus, FLD_COUNT);
     } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      focus = (focus + FLD_COUNT - 1) % FLD_COUNT;
+      focus = FOCUS_PREV(focus, FLD_COUNT);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == FLD_CANCEL_BTN) {
         /* Cancel */
@@ -1919,6 +1906,13 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
 
   curs_set(0);
   delwin(dlg);
+
+  /* Securely zero password buffer before returning to prevent stack leakage */
+  volatile char *vpass = form.password;
+  for (size_t i = 0; i < sizeof(form.password); i++) {
+    vpass[i] = 0;
+  }
+
   return result;
 }
 
@@ -2000,7 +1994,7 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
                                             "Enter password:");
       if (password) {
         /* Rebuild connection string with password */
-        free(connstr);
+        str_secure_free(connstr); /* Connection string may contain password */
         free(err);
         err = NULL;
 
@@ -2026,7 +2020,7 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
 
     if (!conn) {
       ds->error_msg = err ? err : str_dup("Connection failed");
-      free(connstr);
+      str_secure_free(connstr); /* Connection string may contain password */
       return NULL;
     }
   }
@@ -2035,7 +2029,7 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
 
   if (test_only) {
     ds->success_msg = str_dup("Connection successful!");
-    free(connstr);
+    str_secure_free(connstr); /* Connection string may contain password */
     return NULL;
   }
 
@@ -2557,20 +2551,11 @@ ConnectResult connect_view_show(TuiState *state) {
   if (height > 30)
     height = 30;
 
-  int starty = (term_rows - height) / 2;
-  int startx = (term_cols - width) / 2;
-  if (starty < 0)
-    starty = 0;
-  if (startx < 0)
-    startx = 0;
-
-  WINDOW *dialog = newwin(height, width, starty, startx);
+  WINDOW *dialog = dialog_create(height, width, term_rows, term_cols);
   if (!dialog) {
     connmgr_free(mgr);
     return result;
   }
-
-  keypad(dialog, TRUE);
 
   /* Initialize dialog state */
   DialogState ds = {0};
@@ -2783,6 +2768,13 @@ ConnectResult connect_view_show(TuiState *state) {
   connmgr_free(mgr);
   free(ds.error_msg);
   free(ds.success_msg);
+
+  /* Securely zero url_input buffer which may contain connection strings with
+   * passwords */
+  volatile char *vbuf = ds.url_input.buffer;
+  for (size_t i = 0; i < sizeof(ds.url_input.buffer); i++) {
+    vbuf[i] = 0;
+  }
 
   /* Redraw main screen */
   touchwin(stdscr);

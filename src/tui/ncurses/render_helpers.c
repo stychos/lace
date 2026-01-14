@@ -233,14 +233,18 @@ void render_string_center(RenderContext *ctx, int x, int y, const char *str,
 void render_hline(RenderContext *ctx, int x, int y, int width) {
   const RenderBackend *backend = render_backend_current();
   if (backend && backend->draw_hline) {
-    backend->draw_hline(ctx, x, y, width, ACS_HLINE);
+    int ch = backend->get_line_char ? backend->get_line_char(ctx, UI_LINE_HLINE)
+                                    : '-';
+    backend->draw_hline(ctx, x, y, width, ch);
   }
 }
 
 void render_vline(RenderContext *ctx, int x, int y, int height) {
   const RenderBackend *backend = render_backend_current();
   if (backend && backend->draw_vline) {
-    backend->draw_vline(ctx, x, y, height, ACS_VLINE);
+    int ch = backend->get_line_char ? backend->get_line_char(ctx, UI_LINE_VLINE)
+                                    : '|';
+    backend->draw_vline(ctx, x, y, height, ch);
   }
 }
 
@@ -356,7 +360,9 @@ void render_region_hline(RenderContext *ctx, RenderRegion *region, int x, int y,
 
   const RenderBackend *backend = render_backend_current();
   if (backend && backend->draw_hline) {
-    backend->draw_hline(ctx, abs_x, abs_y, width, ACS_HLINE);
+    int ch = backend->get_line_char ? backend->get_line_char(ctx, UI_LINE_HLINE)
+                                    : '-';
+    backend->draw_hline(ctx, abs_x, abs_y, width, ch);
   }
 }
 
@@ -385,38 +391,114 @@ void render_region_background(RenderContext *ctx, RenderRegion *region,
 }
 
 /* ============================================================================
+ * Region Management
+ * ============================================================================
+ */
+
+bool render_set_region(RenderContext *ctx, UiRegionId id, int x, int y,
+                       int width, int height) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->set_region) {
+    return backend->set_region(ctx, id, x, y, width, height);
+  }
+  return false;
+}
+
+bool render_get_region(RenderContext *ctx, UiRegionId id,
+                       UiRegionBounds *bounds) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->get_region) {
+    return backend->get_region(ctx, id, bounds);
+  }
+  return false;
+}
+
+void render_begin_region(RenderContext *ctx, UiRegionId id) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->begin_region) {
+    backend->begin_region(ctx, id);
+  }
+}
+
+void render_end_region(RenderContext *ctx) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->end_region) {
+    backend->end_region(ctx);
+  }
+}
+
+void render_clear_region(RenderContext *ctx, UiRegionId id) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->clear_region) {
+    backend->clear_region(ctx, id);
+  }
+}
+
+void render_refresh_region(RenderContext *ctx, UiRegionId id) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->refresh_region) {
+    backend->refresh_region(ctx, id);
+  }
+}
+
+void *render_get_region_handle(RenderContext *ctx, UiRegionId id) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->get_region_handle) {
+    return backend->get_region_handle(ctx, id);
+  }
+  return NULL;
+}
+
+void render_set_region_handle(RenderContext *ctx, UiRegionId id, void *handle) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->set_region_handle) {
+    backend->set_region_handle(ctx, id, handle);
+  }
+}
+
+/* ============================================================================
  * Box Drawing Characters
  * ============================================================================
  */
 
+int render_line_char(RenderContext *ctx, UiLineChar ch) {
+  const RenderBackend *backend = render_backend_current();
+  if (backend && backend->get_line_char) {
+    return backend->get_line_char(ctx, ch);
+  }
+  /* Fallback to ASCII if no backend */
+  switch (ch) {
+  case UI_LINE_HLINE:
+    return '-';
+  case UI_LINE_VLINE:
+    return '|';
+  default:
+    return '+';
+  }
+}
+
 int render_acs_hline(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_HLINE;
+  return render_line_char(ctx, UI_LINE_HLINE);
 }
 
 int render_acs_vline(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_VLINE;
+  return render_line_char(ctx, UI_LINE_VLINE);
 }
 
 int render_acs_ulcorner(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_ULCORNER;
+  return render_line_char(ctx, UI_LINE_ULCORNER);
 }
 
 int render_acs_urcorner(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_URCORNER;
+  return render_line_char(ctx, UI_LINE_URCORNER);
 }
 
 int render_acs_llcorner(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_LLCORNER;
+  return render_line_char(ctx, UI_LINE_LLCORNER);
 }
 
 int render_acs_lrcorner(RenderContext *ctx) {
-  (void)ctx;
-  return ACS_LRCORNER;
+  return render_line_char(ctx, UI_LINE_LRCORNER);
 }
 
 /* ============================================================================

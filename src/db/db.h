@@ -9,7 +9,9 @@
 #ifndef LACE_DB_H
 #define LACE_DB_H
 
+#include "../util/str.h"
 #include "db_types.h"
+#include <string.h>
 
 /* Forward declaration */
 typedef struct DbConnection DbConnection;
@@ -132,6 +134,10 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err);
 TableSchema *db_get_table_schema(DbConnection *conn, const char *table,
                                  char **err);
 
+/* Identifier escaping - uses driver-appropriate quoting (backticks for MySQL,
+ * double quotes for PostgreSQL/SQLite). Returns newly allocated string. */
+char *db_escape_identifier(DbConnection *conn, const char *name);
+
 /* Query operations */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err);
 int64_t db_exec(DbConnection *conn, const char *sql, char **err);
@@ -190,5 +196,56 @@ void db_transaction_end(DbTransaction *txn);
 /* Initialize database subsystem */
 void db_init(void);
 void db_cleanup(void);
+
+/* ============================================================================
+ * Driver validation macros
+ * ============================================================================
+ * These reduce boilerplate for common parameter/connection checks in drivers.
+ */
+
+/* Validate parameters, set error and return on failure */
+#define DB_REQUIRE(cond, err_ptr, ret_val)                                     \
+  do {                                                                         \
+    if (!(cond)) {                                                             \
+      err_set(err_ptr, "Invalid parameters");                                  \
+      return ret_val;                                                          \
+    }                                                                          \
+  } while (0)
+
+/* Validate connection and extract driver data into a variable.
+ * data_type: the driver-specific struct type (e.g., SqliteData)
+ * data_var: variable name to declare and assign
+ * native_field: field in driver data that must be non-NULL (e.g., db, mysql)
+ */
+#define DB_REQUIRE_CONN(conn, data_type, data_var, native_field, err_ptr,      \
+                        ret_val)                                               \
+  data_type *data_var = (conn) ? (data_type *)(conn)->driver_data : NULL;      \
+  do {                                                                         \
+    if (!data_var || !data_var->native_field) {                                \
+      err_set(err_ptr, "Not connected");                                       \
+      return ret_val;                                                          \
+    }                                                                          \
+  } while (0)
+
+/* Combined: validate params then extract connection data */
+#define DB_REQUIRE_PARAMS_CONN(cond, conn, data_type, data_var, native_field,  \
+                               err_ptr, ret_val)                               \
+  DB_REQUIRE(cond, err_ptr, ret_val);                                          \
+  DB_REQUIRE_CONN(conn, data_type, data_var, native_field, err_ptr, ret_val)
+
+/* ============================================================================
+ * Query building helpers
+ * ============================================================================
+ */
+
+/* Check if an ORDER BY string is a pre-built clause (contains ASC/DESC/comma)
+ * or a simple column name that needs escaping. Used by drivers. */
+static inline bool db_order_is_prebuilt(const char *order_by) {
+  if (!order_by)
+    return false;
+  return strstr(order_by, " ASC") || strstr(order_by, " DESC") ||
+         strstr(order_by, " asc") || strstr(order_by, " desc") ||
+         strchr(order_by, ',');
+}
 
 #endif /* LACE_DB_H */

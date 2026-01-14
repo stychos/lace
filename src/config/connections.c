@@ -9,6 +9,8 @@
 #include "connections.h"
 #include "../db/connstr.h"
 #include "../platform/platform.h"
+#include "../util/json_helpers.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include <cJSON.h>
 #include <errno.h>
@@ -54,9 +56,7 @@ static bool secure_random_bytes(unsigned char *buf, size_t len) {
 
 /* Generate a simple UUID v4 string */
 static char *generate_uuid(void) {
-  char *uuid = malloc(37);
-  if (!uuid)
-    return NULL;
+  char *uuid = safe_malloc(37);
 
   unsigned char bytes[16];
   if (!secure_random_bytes(bytes, sizeof(bytes))) {
@@ -90,16 +90,6 @@ static char *generate_uuid(void) {
  * ============================================================================
  */
 
-static void set_error(char **err, const char *fmt, ...) {
-  if (!err)
-    return;
-
-  va_list args;
-  va_start(args, fmt);
-  *err = str_vprintf(fmt, args);
-  va_end(args);
-}
-
 /* Get path to connections.json file */
 static char *get_connections_path(void) {
   const char *config_dir = platform_get_config_dir();
@@ -121,23 +111,23 @@ static void init_folder_item(ConnectionItem *item, const char *name) {
 }
 
 /* Ensure folder has capacity for more children */
-static bool folder_ensure_capacity(ConnectionFolder *folder, size_t needed) {
-  if (folder->num_children + needed <= folder->children_capacity)
-    return true;
+static void folder_ensure_capacity(ConnectionFolder *folder, size_t needed) {
+  if (!folder)
+    return;
 
-  size_t new_cap =
-      folder->children_capacity == 0 ? 8 : folder->children_capacity * 2;
-  while (new_cap < folder->num_children + needed)
+  size_t required = folder->num_children + needed;
+  if (folder->children_capacity >= required)
+    return;
+
+  size_t new_cap = folder->children_capacity == 0 ? 8 : folder->children_capacity;
+  while (new_cap < required) {
     new_cap *= 2;
+  }
 
-  ConnectionItem *new_children =
-      realloc(folder->children, new_cap * sizeof(ConnectionItem));
-  if (!new_children)
-    return false;
-
-  folder->children = new_children;
+  size_t old_cap = folder->children_capacity;
+  folder->children = safe_reallocarray(folder->children, new_cap, sizeof(ConnectionItem));
+  memset(&folder->children[old_cap], 0, (new_cap - old_cap) * sizeof(ConnectionItem));
   folder->children_capacity = new_cap;
-  return true;
 }
 
 /* ============================================================================
@@ -146,16 +136,6 @@ static bool folder_ensure_capacity(ConnectionFolder *folder, size_t needed) {
  */
 
 static bool parse_connection(cJSON *json, SavedConnection *conn) {
-  cJSON *id = cJSON_GetObjectItem(json, "id");
-  cJSON *name = cJSON_GetObjectItem(json, "name");
-  cJSON *driver = cJSON_GetObjectItem(json, "driver");
-  cJSON *host = cJSON_GetObjectItem(json, "host");
-  cJSON *database = cJSON_GetObjectItem(json, "database");
-  cJSON *user = cJSON_GetObjectItem(json, "user");
-  cJSON *password = cJSON_GetObjectItem(json, "password");
-  cJSON *port = cJSON_GetObjectItem(json, "port");
-  cJSON *save_password = cJSON_GetObjectItem(json, "save_password");
-
   /* Initialize all pointers to NULL for safe cleanup on failure */
   conn->id = NULL;
   conn->name = NULL;
@@ -164,49 +144,40 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
   conn->database = NULL;
   conn->user = NULL;
   conn->password = NULL;
-  conn->port = cJSON_IsNumber(port) ? port->valueint : 0;
-  conn->save_password =
-      cJSON_IsBool(save_password) ? cJSON_IsTrue(save_password) : false;
+  conn->port = json_get_int(json, "port", 0);
+  conn->save_password = json_get_bool(json, "save_password", false);
 
-  conn->id = str_dup(cJSON_IsString(id) ? id->valuestring : "");
+  conn->id = json_dup_string_or(json, "id", "");
   if (!conn->id)
     goto cleanup;
-  conn->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
+  conn->name = json_dup_string_or(json, "name", "");
   if (!conn->name)
     goto cleanup;
-  conn->driver = str_dup(cJSON_IsString(driver) ? driver->valuestring : "");
+  conn->driver = json_dup_string_or(json, "driver", "");
   if (!conn->driver)
     goto cleanup;
-  conn->host = str_dup(cJSON_IsString(host) ? host->valuestring : "");
+  conn->host = json_dup_string_or(json, "host", "");
   if (!conn->host)
     goto cleanup;
-  conn->database =
-      str_dup(cJSON_IsString(database) ? database->valuestring : "");
+  conn->database = json_dup_string_or(json, "database", "");
   if (!conn->database)
     goto cleanup;
-  conn->user = str_dup(cJSON_IsString(user) ? user->valuestring : "");
+  conn->user = json_dup_string_or(json, "user", "");
   if (!conn->user)
     goto cleanup;
-  conn->password =
-      str_dup(cJSON_IsString(password) ? password->valuestring : "");
+  conn->password = json_dup_string_or(json, "password", "");
   if (!conn->password)
     goto cleanup;
 
   return true;
 
 cleanup:
-  free(conn->id);
-  conn->id = NULL;
-  free(conn->name);
-  conn->name = NULL;
-  free(conn->driver);
-  conn->driver = NULL;
-  free(conn->host);
-  conn->host = NULL;
-  free(conn->database);
-  conn->database = NULL;
-  free(conn->user);
-  conn->user = NULL;
+  FREE_NULL(conn->id);
+  FREE_NULL(conn->name);
+  FREE_NULL(conn->driver);
+  FREE_NULL(conn->host);
+  FREE_NULL(conn->database);
+  FREE_NULL(conn->user);
   str_secure_free(conn->password);
   conn->password = NULL;
   return false;
@@ -216,12 +187,8 @@ static bool parse_item(cJSON *json, ConnectionItem *item,
                        ConnectionItem *parent);
 
 static bool parse_folder(cJSON *json, ConnectionFolder *folder) {
-  cJSON *name = cJSON_GetObjectItem(json, "name");
-  cJSON *expanded = cJSON_GetObjectItem(json, "expanded");
-  cJSON *children = cJSON_GetObjectItem(json, "children");
-
-  folder->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
-  folder->expanded = cJSON_IsBool(expanded) ? cJSON_IsTrue(expanded) : true;
+  folder->name = json_dup_string_or(json, "name", "");
+  folder->expanded = json_get_bool(json, "expanded", true);
   folder->children = NULL;
   folder->num_children = 0;
   folder->children_capacity = 0;
@@ -229,11 +196,11 @@ static bool parse_folder(cJSON *json, ConnectionFolder *folder) {
   if (!folder->name)
     return false;
 
-  if (cJSON_IsArray(children)) {
-    size_t count = (size_t)cJSON_GetArraySize(children);
+  cJSON *children = json_get_array(json, "children");
+  if (children) {
+    size_t count = (size_t)json_array_size(children);
     if (count > 0) {
-      if (!folder_ensure_capacity(folder, count))
-        return false;
+      folder_ensure_capacity(folder, count);
 
       /* Note: item->parent is set in parse_item, but we need a way to
        * pass the parent. We'll handle this in the caller. */
@@ -245,8 +212,7 @@ static bool parse_folder(cJSON *json, ConnectionFolder *folder) {
 
 static bool parse_item(cJSON *json, ConnectionItem *item,
                        ConnectionItem *parent) {
-  cJSON *type = cJSON_GetObjectItem(json, "type");
-  const char *type_str = cJSON_IsString(type) ? type->valuestring : "";
+  const char *type_str = json_get_string(json, "type", "");
 
   item->parent = parent;
 
@@ -256,15 +222,16 @@ static bool parse_item(cJSON *json, ConnectionItem *item,
       return false;
 
     /* Parse children */
-    cJSON *children = cJSON_GetObjectItem(json, "children");
-    if (cJSON_IsArray(children)) {
-      size_t count = (size_t)cJSON_GetArraySize(children);
+    cJSON *children = json_get_array(json, "children");
+    if (children) {
+      size_t count = (size_t)json_array_size(children);
       if (count > 0) {
-        if (!folder_ensure_capacity(&item->folder, count))
-          return false;
+        folder_ensure_capacity(&item->folder, count);
 
         cJSON *child;
         cJSON_ArrayForEach(child, children) {
+          if (item->folder.num_children >= count)
+            break; /* Safety check: don't exceed allocated capacity */
           ConnectionItem *child_item =
               &item->folder.children[item->folder.num_children];
           if (!parse_item(child, child_item, item)) {
@@ -302,21 +269,17 @@ static cJSON *serialize_connection(const SavedConnection *conn) {
   if (!json)
     return NULL;
 
-  cJSON_AddStringToObject(json, "type", "connection");
-  cJSON_AddStringToObject(json, "id", conn->id ? conn->id : "");
-  cJSON_AddStringToObject(json, "name", conn->name ? conn->name : "");
-  cJSON_AddStringToObject(json, "driver", conn->driver ? conn->driver : "");
-  cJSON_AddStringToObject(json, "host", conn->host ? conn->host : "");
-  cJSON_AddNumberToObject(json, "port", conn->port);
-  cJSON_AddStringToObject(json, "database",
-                          conn->database ? conn->database : "");
-  cJSON_AddStringToObject(json, "user", conn->user ? conn->user : "");
-  if (conn->save_password && conn->password) {
-    cJSON_AddStringToObject(json, "password", conn->password);
-  } else {
-    cJSON_AddStringToObject(json, "password", "");
-  }
-  cJSON_AddBoolToObject(json, "save_password", conn->save_password);
+  JSON_ADD_STR(json, "type", "connection");
+  JSON_ADD_STR(json, "id", conn->id);
+  JSON_ADD_STR(json, "name", conn->name);
+  JSON_ADD_STR(json, "driver", conn->driver);
+  JSON_ADD_STR(json, "host", conn->host);
+  JSON_ADD_INT(json, "port", conn->port);
+  JSON_ADD_STR(json, "database", conn->database);
+  JSON_ADD_STR(json, "user", conn->user);
+  JSON_ADD_STR(json, "password",
+               (conn->save_password && conn->password) ? conn->password : "");
+  JSON_ADD_BOOL(json, "save_password", conn->save_password);
 
   return json;
 }
@@ -328,9 +291,9 @@ static cJSON *serialize_folder(const ConnectionFolder *folder) {
   if (!json)
     return NULL;
 
-  cJSON_AddStringToObject(json, "type", "folder");
-  cJSON_AddStringToObject(json, "name", folder->name ? folder->name : "");
-  cJSON_AddBoolToObject(json, "expanded", folder->expanded);
+  JSON_ADD_STR(json, "type", "folder");
+  JSON_ADD_STR(json, "name", folder->name);
+  JSON_ADD_BOOL(json, "expanded", folder->expanded);
 
   cJSON *children = cJSON_CreateArray();
   if (!children) {
@@ -366,9 +329,7 @@ static cJSON *serialize_item(const ConnectionItem *item) {
  */
 
 ConnectionManager *connmgr_new(void) {
-  ConnectionManager *mgr = calloc(1, sizeof(ConnectionManager));
-  if (!mgr)
-    return NULL;
+  ConnectionManager *mgr = safe_calloc(1, sizeof(ConnectionManager));
 
   init_folder_item(&mgr->root, "Connections");
   mgr->modified = false;
@@ -380,7 +341,7 @@ ConnectionManager *connmgr_new(void) {
 ConnectionManager *connmgr_load(char **error) {
   char *path = get_connections_path();
   if (!path) {
-    set_error(error, "Failed to get config directory");
+    err_setf(error, "Failed to get config directory");
     return NULL;
   }
 
@@ -395,7 +356,7 @@ ConnectionManager *connmgr_load(char **error) {
   /* Read file */
   FILE *f = fopen(path, "r");
   if (!f) {
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return NULL;
   }
@@ -406,25 +367,19 @@ ConnectionManager *connmgr_load(char **error) {
 
   if (size < 0) {
     fclose(f);
-    set_error(error, "Failed to determine file size: %s", strerror(errno));
+    err_setf(error, "Failed to determine file size: %s", strerror(errno));
     free(path);
     return NULL;
   }
 
   if (size == 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
     fclose(f);
-    set_error(error, "Invalid file size");
+    err_setf(error, "Invalid file size");
     free(path);
     return NULL;
   }
 
-  char *content = malloc((size_t)size + 1);
-  if (!content) {
-    fclose(f);
-    set_error(error, "Out of memory");
-    free(path);
-    return NULL;
-  }
+  char *content = safe_malloc((size_t)size + 1);
 
   size_t read = fread(content, 1, (size_t)size, f);
   fclose(f);
@@ -436,30 +391,24 @@ ConnectionManager *connmgr_load(char **error) {
 
   if (!json) {
     const char *err_ptr = cJSON_GetErrorPtr();
-    set_error(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
+    err_setf(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
     free(path);
     return NULL;
   }
 
   /* Create manager */
-  ConnectionManager *mgr = calloc(1, sizeof(ConnectionManager));
-  if (!mgr) {
-    cJSON_Delete(json);
-    set_error(error, "Out of memory");
-    free(path);
-    return NULL;
-  }
+  ConnectionManager *mgr = safe_calloc(1, sizeof(ConnectionManager));
 
   mgr->file_path = path;
 
   /* Parse root */
-  cJSON *root = cJSON_GetObjectItem(json, "root");
-  if (root && cJSON_IsObject(root)) {
+  cJSON *root = json_get_object(json, "root");
+  if (root) {
     if (!parse_item(root, &mgr->root, NULL)) {
       cJSON_Delete(json);
       free(mgr->file_path);
       free(mgr);
-      set_error(error, "Failed to parse root folder");
+      err_setf(error, "Failed to parse root folder");
       return NULL;
     }
   } else {
@@ -472,20 +421,20 @@ ConnectionManager *connmgr_load(char **error) {
 
 bool connmgr_save(ConnectionManager *mgr, char **error) {
   if (!mgr || !mgr->file_path) {
-    set_error(error, "Invalid connection manager");
+    err_setf(error, "Invalid connection manager");
     return false;
   }
 
   /* Ensure config directory exists */
   const char *config_dir = platform_get_config_dir();
   if (!config_dir) {
-    set_error(error, "Failed to get config directory");
+    err_setf(error, "Failed to get config directory");
     return false;
   }
 
   if (!platform_dir_exists(config_dir)) {
     if (!platform_mkdir(config_dir)) {
-      set_error(error, "Failed to create config directory");
+      err_setf(error, "Failed to create config directory");
       return false;
     }
   }
@@ -493,14 +442,14 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
   /* Build JSON */
   cJSON *json = cJSON_CreateObject();
   if (!json) {
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     return false;
   }
 
   cJSON *root = serialize_item(&mgr->root);
   if (!root) {
     cJSON_Delete(json);
-    set_error(error, "Failed to serialize connections");
+    err_setf(error, "Failed to serialize connections");
     return false;
   }
   cJSON_AddItemToObject(json, "root", root);
@@ -510,14 +459,14 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
   cJSON_Delete(json);
 
   if (!content) {
-    set_error(error, "Failed to serialize JSON");
+    err_setf(error, "Failed to serialize JSON");
     return false;
   }
 
   FILE *f = fopen(mgr->file_path, "w");
   if (!f) {
-    free(content);
-    set_error(error, "Failed to open %s for writing: %s", mgr->file_path,
+    str_secure_free(content); /* Content may contain passwords */
+    err_setf(error, "Failed to open %s for writing: %s", mgr->file_path,
               strerror(errno));
     return false;
   }
@@ -530,10 +479,10 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
   size_t len = strlen(content);
   size_t written = fwrite(content, 1, len, f);
   fclose(f);
-  free(content);
+  str_secure_free(content); /* Content may contain passwords */
 
   if (written != len) {
-    set_error(error, "Failed to write all data");
+    err_setf(error, "Failed to write all data");
     return false;
   }
 
@@ -585,11 +534,14 @@ void connmgr_free(ConnectionManager *mgr) {
  */
 
 SavedConnection *connmgr_new_connection(void) {
-  SavedConnection *conn = calloc(1, sizeof(SavedConnection));
-  if (!conn)
-    return NULL;
+  SavedConnection *conn = safe_calloc(1, sizeof(SavedConnection));
 
   conn->id = generate_uuid();
+  if (!conn->id) {
+    free(conn);
+    return NULL;
+  }
+
   conn->name = str_dup("");
   conn->driver = str_dup("");
   conn->host = str_dup("");
@@ -599,13 +551,6 @@ SavedConnection *connmgr_new_connection(void) {
   conn->port = 0;
   conn->save_password = false;
 
-  if (!conn->id || !conn->name || !conn->driver || !conn->host ||
-      !conn->database || !conn->user || !conn->password) {
-    connmgr_free_connection(conn);
-    free(conn);
-    return NULL;
-  }
-
   return conn;
 }
 
@@ -613,8 +558,7 @@ bool connmgr_add_connection(ConnectionItem *folder, SavedConnection *conn) {
   if (!folder || folder->type != CONN_ITEM_FOLDER || !conn)
     return false;
 
-  if (!folder_ensure_capacity(&folder->folder, 1))
-    return false;
+  folder_ensure_capacity(&folder->folder, 1);
 
   ConnectionItem *item = &folder->folder.children[folder->folder.num_children];
   item->type = CONN_ITEM_CONNECTION;
@@ -826,17 +770,7 @@ bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
     }
 
     /* Ensure capacity in new parent */
-    if (!folder_ensure_capacity(new_parent_folder, 1)) {
-      /* Failed - try to restore in old parent */
-      folder_ensure_capacity(old_parent_folder, 1);
-      /* Shift to make room at old position */
-      for (size_t i = old_parent_folder->num_children; i > old_idx; i--) {
-        old_parent_folder->children[i] = old_parent_folder->children[i - 1];
-      }
-      old_parent_folder->children[old_idx] = item_copy;
-      old_parent_folder->num_children++;
-      return false;
-    }
+    folder_ensure_capacity(new_parent_folder, 1);
 
     /* Shift items to make room at insert position */
     for (size_t i = new_parent_folder->num_children; i > insert_idx; i--) {
@@ -869,9 +803,7 @@ bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
  */
 
 ConnectionFolder *connmgr_new_folder(const char *name) {
-  ConnectionFolder *folder = calloc(1, sizeof(ConnectionFolder));
-  if (!folder)
-    return NULL;
+  ConnectionFolder *folder = safe_calloc(1, sizeof(ConnectionFolder));
 
   folder->name = str_dup(name ? name : "New Folder");
   folder->expanded = true;
@@ -891,8 +823,7 @@ bool connmgr_add_folder(ConnectionItem *parent, ConnectionFolder *folder) {
   if (!parent || parent->type != CONN_ITEM_FOLDER || !folder)
     return false;
 
-  if (!folder_ensure_capacity(&parent->folder, 1))
-    return false;
+  folder_ensure_capacity(&parent->folder, 1);
 
   ConnectionItem *item = &parent->folder.children[parent->folder.num_children];
   item->type = CONN_ITEM_FOLDER;
@@ -1013,7 +944,7 @@ char *connmgr_build_connstr(const SavedConnection *conn) {
 
 SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
   if (!url || !url[0]) {
-    set_error(error, "Empty URL");
+    err_setf(error, "Empty URL");
     return NULL;
   }
 
@@ -1024,23 +955,19 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
   SavedConnection *conn = connmgr_new_connection();
   if (!conn) {
     connstr_free(cs);
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     return NULL;
   }
 
-  /* Copy fields */
+  /* Replace default empty strings with actual values */
   free(conn->driver);
   conn->driver = str_dup(cs->driver ? cs->driver : "");
-
   free(conn->host);
   conn->host = str_dup(cs->host ? cs->host : "");
-
   free(conn->database);
   conn->database = str_dup(cs->database ? cs->database : "");
-
   free(conn->user);
   conn->user = str_dup(cs->user ? cs->user : "");
-
   str_secure_free(conn->password);
   conn->password = str_dup(cs->password ? cs->password : "");
 
@@ -1062,6 +989,13 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
     /* Use host/database for network DBs */
     conn->name = str_printf("%s/%s", cs->host ? cs->host : "localhost",
                             cs->database ? cs->database : "");
+    if (!conn->name) {
+      connmgr_free_connection(conn);
+      free(conn);
+      connstr_free(cs);
+      err_setf(error, "Out of memory");
+      return NULL;
+    }
   }
 
   connstr_free(cs);

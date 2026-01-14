@@ -8,8 +8,10 @@
 
 #include "editor_view.h"
 #include "../../../config/config.h"
+#include "../../../util/mem.h"
 #include "../../../util/str.h"
 #include "../render_helpers.h"
+#include "../tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,46 +68,29 @@ static void editor_buffer_free(EditorBuffer *buf) {
   buf->cap = 0;
 }
 
-static bool editor_buffer_set(EditorBuffer *buf, const char *content) {
+static void editor_buffer_set(EditorBuffer *buf, const char *content) {
   editor_buffer_free(buf);
 
   if (!content) {
     buf->cap = 256;
-    buf->data = malloc(buf->cap);
-    if (!buf->data)
-      return false;
+    buf->data = safe_malloc(buf->cap);
     buf->data[0] = '\0';
     buf->len = 0;
-    return true;
+    return;
   }
 
   buf->len = strlen(content);
   buf->cap = buf->len + 256;
-  buf->data = malloc(buf->cap);
-  if (!buf->data)
-    return false;
+  buf->data = safe_malloc(buf->cap);
   memcpy(buf->data, content, buf->len + 1);
-  return true;
 }
 
-static bool editor_buffer_insert(EditorBuffer *buf, size_t pos, char ch) {
+static void editor_buffer_insert(EditorBuffer *buf, size_t pos, char ch) {
   if (buf->len + 2 > buf->cap) {
-    /* Check for overflow BEFORE multiplying */
-    size_t new_cap;
-    if (buf->cap > SIZE_MAX / 2) {
-      /* Would overflow on double, use safe fallback */
-      if (buf->cap > SIZE_MAX - 256)
-        return false; /* Cannot grow further */
-      new_cap = buf->cap + 256;
-    } else {
-      new_cap = buf->cap * 2;
-      if (new_cap == 0)
-        new_cap = 256; /* Handle zero capacity case */
-    }
-    char *new_data = realloc(buf->data, new_cap);
-    if (!new_data)
-      return false;
-    buf->data = new_data;
+    size_t new_cap = buf->cap * 2;
+    if (new_cap == 0)
+      new_cap = 256; /* Handle zero capacity case */
+    buf->data = safe_realloc(buf->data, new_cap);
     buf->cap = new_cap;
   }
 
@@ -114,7 +99,6 @@ static bool editor_buffer_insert(EditorBuffer *buf, size_t pos, char ch) {
   memmove(buf->data + pos + 1, buf->data + pos, buf->len - pos + 1);
   buf->data[pos] = ch;
   buf->len++;
-  return true;
 }
 
 static void editor_buffer_delete(EditorBuffer *buf, size_t pos) {
@@ -137,10 +121,8 @@ static void editor_rebuild_lines(EditorState *state) {
       /* Add line */
       if (state->num_lines >= state->lines_cap) {
         size_t new_cap = state->lines_cap == 0 ? 64 : state->lines_cap * 2;
-        LineInfo *new_lines = realloc(state->lines, new_cap * sizeof(LineInfo));
-        if (!new_lines)
-          return;
-        state->lines = new_lines;
+        state->lines =
+            safe_reallocarray(state->lines, new_cap, sizeof(LineInfo));
         state->lines_cap = new_cap;
       }
 
@@ -155,15 +137,12 @@ static void editor_rebuild_lines(EditorState *state) {
   /* Ensure at least one line */
   if (state->num_lines == 0) {
     if (state->lines_cap == 0) {
-      state->lines = malloc(sizeof(LineInfo));
-      if (state->lines)
-        state->lines_cap = 1;
+      state->lines = safe_malloc(sizeof(LineInfo));
+      state->lines_cap = 1;
     }
-    if (state->lines) {
-      state->lines[0].start = 0;
-      state->lines[0].len = 0;
-      state->num_lines = 1;
-    }
+    state->lines[0].start = 0;
+    state->lines[0].len = 0;
+    state->num_lines = 1;
   }
 }
 
@@ -300,13 +279,12 @@ static void editor_insert_char(EditorState *state, char ch) {
   if (state->readonly)
     return;
 
-  if (editor_buffer_insert(&state->buf, state->cursor, ch)) {
-    state->cursor++;
-    state->modified = true;
-    editor_rebuild_lines(state);
-    editor_update_cursor_pos(state);
-    editor_ensure_visible(state);
-  }
+  editor_buffer_insert(&state->buf, state->cursor, ch);
+  state->cursor++;
+  state->modified = true;
+  editor_rebuild_lines(state);
+  editor_update_cursor_pos(state);
+  editor_ensure_visible(state);
 }
 
 static void editor_delete_char(EditorState *state) {
@@ -338,19 +316,17 @@ static void editor_backspace(EditorState *state) {
 static void draw_editor(WINDOW *win, EditorState *state, const char *title,
                         int height, int width, const Config *config) {
   werase(win);
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  box(win, 0, 0);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
+  DRAW_BOX(win, COLOR_BORDER);
 
   /* Title */
-  wattron(win, A_BOLD);
-  int title_len = strlen(title);
+  int title_len = (int)strlen(title);
   if (title_len > width - 4)
     title_len = width - 4;
-  mvwaddnstr(win, 0, (width - title_len - 2) / 2, " ", 1);
-  waddnstr(win, title, title_len);
-  waddnstr(win, " ", 1);
-  wattroff(win, A_BOLD);
+  WITH_ATTR(win, A_BOLD, {
+    mvwaddnstr(win, 0, (width - title_len - 2) / 2, " ", 1);
+    waddnstr(win, title, title_len);
+    waddnstr(win, " ", 1);
+  });
 
   /* Modified indicator */
   if (state->modified) {
@@ -492,8 +468,8 @@ EditorResult editor_view_show(TuiState *state, const char *title,
   if (width > term_cols - 2)
     width = term_cols - 2;
 
-  int starty = (term_rows - height) / 2;
-  int startx = (term_cols - width) / 2;
+  int starty, startx;
+  dialog_center_position(&starty, &startx, height, width, term_rows, term_cols);
 
   WINDOW *win = newwin(height, width, starty, startx);
   if (!win)
@@ -510,10 +486,7 @@ EditorResult editor_view_show(TuiState *state, const char *title,
   editor_buffer_init(&editor.buf);
   editor.readonly = readonly;
 
-  if (!editor_buffer_set(&editor.buf, content)) {
-    delwin(win);
-    return result;
-  }
+  editor_buffer_set(&editor.buf, content);
 
   editor_rebuild_lines(&editor);
   editor_update_cursor_pos(&editor);
@@ -661,27 +634,23 @@ EditorResult editor_view_show(TuiState *state, const char *title,
           if (is_consecutive) {
             /* Append to buffer */
             size_t old_len = strlen(state->clipboard_buffer);
-            char *new_buf =
-                realloc(state->clipboard_buffer, old_len + count + 1);
-            if (new_buf) {
-              memcpy(new_buf + old_len, editor.buf.data + start, count);
-              new_buf[old_len + count] = '\0';
-              state->clipboard_buffer = new_buf;
-            }
+            state->clipboard_buffer =
+                safe_realloc(state->clipboard_buffer, old_len + count + 1);
+            memcpy(state->clipboard_buffer + old_len, editor.buf.data + start,
+                   count);
+            state->clipboard_buffer[old_len + count] = '\0';
           } else {
             /* Replace buffer, add newline if needed */
             free(state->clipboard_buffer);
             bool needs_newline = (editor.buf.data[end - 1] != '\n');
             state->clipboard_buffer =
-                malloc(count + (needs_newline ? 1 : 0) + 1);
-            if (state->clipboard_buffer) {
-              memcpy(state->clipboard_buffer, editor.buf.data + start, count);
-              if (needs_newline) {
-                state->clipboard_buffer[count] = '\n';
-                state->clipboard_buffer[count + 1] = '\0';
-              } else {
-                state->clipboard_buffer[count] = '\0';
-              }
+                safe_malloc(count + (needs_newline ? 1 : 0) + 1);
+            memcpy(state->clipboard_buffer, editor.buf.data + start, count);
+            if (needs_newline) {
+              state->clipboard_buffer[count] = '\n';
+              state->clipboard_buffer[count + 1] = '\0';
+            } else {
+              state->clipboard_buffer[count] = '\0';
             }
           }
 
@@ -733,25 +702,20 @@ EditorResult editor_view_show(TuiState *state, const char *title,
       if (p) {
         size_t capacity = 4096;
         size_t len = 0;
-        paste_text = malloc(capacity);
-        if (paste_text) {
-          int c;
-          while ((c = fgetc(p)) != EOF) {
-            if (len + 1 >= capacity) {
-              capacity *= 2;
-              char *new_buf = realloc(paste_text, capacity);
-              if (!new_buf)
-                break;
-              paste_text = new_buf;
-            }
-            paste_text[len++] = (char)c;
+        paste_text = safe_malloc(capacity);
+        int c;
+        while ((c = fgetc(p)) != EOF) {
+          if (len + 1 >= capacity) {
+            capacity *= 2;
+            paste_text = safe_realloc(paste_text, capacity);
           }
-          paste_text[len] = '\0';
+          paste_text[len++] = (char)c;
         }
+        paste_text[len] = '\0';
         int status = pclose(p);
         /* OS clipboard is accessible if command succeeded (status 0) */
         os_clipboard_accessible = (status == 0);
-        if (!os_clipboard_accessible || (paste_text && paste_text[0] == '\0')) {
+        if (!os_clipboard_accessible || paste_text[0] == '\0') {
           free(paste_text);
           paste_text = NULL;
         }
@@ -771,24 +735,19 @@ EditorResult editor_view_show(TuiState *state, const char *title,
           size_t new_cap = editor.buf.cap * 2;
           if (new_cap < needed)
             new_cap = needed + 256;
-          char *new_data = realloc(editor.buf.data, new_cap);
-          if (new_data) {
-            editor.buf.data = new_data;
-            editor.buf.cap = new_cap;
-          }
+          editor.buf.data = safe_realloc(editor.buf.data, new_cap);
+          editor.buf.cap = new_cap;
         }
-        if (editor.buf.len + paste_len < editor.buf.cap) {
-          memmove(editor.buf.data + editor.cursor + paste_len,
-                  editor.buf.data + editor.cursor,
-                  editor.buf.len - editor.cursor + 1);
-          memcpy(editor.buf.data + editor.cursor, paste_text, paste_len);
-          editor.buf.len += paste_len;
-          editor.cursor += paste_len;
-          editor.modified = true;
-          editor_rebuild_lines(&editor);
-          editor_update_cursor_pos(&editor);
-          editor_ensure_visible(&editor);
-        }
+        memmove(editor.buf.data + editor.cursor + paste_len,
+                editor.buf.data + editor.cursor,
+                editor.buf.len - editor.cursor + 1);
+        memcpy(editor.buf.data + editor.cursor, paste_text, paste_len);
+        editor.buf.len += paste_len;
+        editor.cursor += paste_len;
+        editor.modified = true;
+        editor_rebuild_lines(&editor);
+        editor_update_cursor_pos(&editor);
+        editor_ensure_visible(&editor);
       }
       free(paste_text);
     }

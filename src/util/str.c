@@ -7,28 +7,41 @@
  */
 
 #include "str.h"
+#include "../core/constants.h"
+#include "json_helpers.h"
+#include "mem.h"
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
-#define SB_INITIAL_CAP 64
-#define SB_GROWTH_FACTOR 2
+#include <sys/stat.h>
+#include <unistd.h>
 
 char *str_dup(const char *s) {
   if (!s)
-    return NULL;
-  return strdup(s);
+    s = "";
+  char *result = strdup(s);
+  if (!result) {
+    fprintf(stderr, "Fatal: out of memory in str_dup\n");
+    abort();
+  }
+  return result;
 }
 
 char *str_ndup(const char *s, size_t n) {
   if (!s)
-    return NULL;
-  return strndup(s, n);
+    s = "";
+  char *result = strndup(s, n);
+  if (!result) {
+    fprintf(stderr, "Fatal: out of memory in str_ndup\n");
+    abort();
+  }
+  return result;
 }
 
 char *str_printf(const char *fmt, ...) {
@@ -109,9 +122,7 @@ char *str_url_decode(const char *s) {
     return NULL;
 
   size_t len = strlen(s);
-  char *result = malloc(len + 1);
-  if (!result)
-    return NULL;
+  char *result = safe_malloc(len + 1);
 
   char *dst = result;
   for (const char *p = s; *p; p++) {
@@ -185,25 +196,40 @@ void str_secure_free(char *s) {
   free(s);
 }
 
+bool str_buf_ensure_capacity(char **buf, size_t *cap, size_t min_cap,
+                             size_t initial_cap) {
+  if (!buf || !cap)
+    return false;
+
+  if (min_cap <= *cap)
+    return true;
+
+  /* Calculate new capacity with doubling growth */
+  size_t new_cap = *cap == 0 ? initial_cap : *cap;
+  while (new_cap < min_cap) {
+    if (new_cap > SIZE_MAX / 2)
+      return false; /* Would overflow */
+    new_cap *= 2;
+  }
+
+  *buf = safe_realloc(*buf, new_cap);
+  *cap = new_cap;
+  return true;
+}
+
 /* StringBuilder implementation */
 
 StringBuilder *sb_new(size_t initial_cap) {
-  StringBuilder *sb = malloc(sizeof(StringBuilder));
-  if (!sb)
-    return NULL;
+  StringBuilder *sb = safe_malloc(sizeof(StringBuilder));
 
   if (initial_cap == 0)
     initial_cap = SB_INITIAL_CAP;
 
-  sb->data = malloc(initial_cap);
-  if (!sb->data) {
-    free(sb);
-    return NULL;
-  }
-
+  sb->data = safe_malloc(initial_cap);
   sb->data[0] = '\0';
   sb->len = 0;
   sb->cap = initial_cap;
+  sb->failed = false;
   return sb;
 }
 
@@ -232,31 +258,36 @@ static bool sb_grow(StringBuilder *sb, size_t min_cap) {
     new_cap *= SB_GROWTH_FACTOR;
   }
 
-  char *new_data = realloc(sb->data, new_cap);
-  if (!new_data)
-    return false;
-
-  sb->data = new_data;
+  sb->data = safe_realloc(sb->data, new_cap);
   sb->cap = new_cap;
   return true;
 }
 
 bool sb_append(StringBuilder *sb, const char *s) {
-  if (!sb || !s)
+  if (!sb || !s) {
+    if (sb)
+      sb->failed = true;
     return false;
+  }
   return sb_append_len(sb, s, strlen(s));
 }
 
 bool sb_append_len(StringBuilder *sb, const char *s, size_t len) {
-  if (!sb || !s)
+  if (!sb || !s) {
+    if (sb)
+      sb->failed = true;
     return false;
+  }
 
   /* Check for overflow before calculating needed size */
-  if (len > SIZE_MAX - sb->len - 1)
+  if (len > SIZE_MAX - sb->len - 1) {
+    sb->failed = true;
     return false;
+  }
 
   size_t needed = sb->len + len + 1;
   if (needed > sb->cap && !sb_grow(sb, needed)) {
+    sb->failed = true;
     return false;
   }
 
@@ -271,11 +302,14 @@ bool sb_append_char(StringBuilder *sb, char c) {
     return false;
 
   /* Check for overflow (extremely unlikely but possible) */
-  if (sb->len > SIZE_MAX - 2)
+  if (sb->len > SIZE_MAX - 2) {
+    sb->failed = true;
     return false;
+  }
 
   size_t needed = sb->len + 2;
   if (needed > sb->cap && !sb_grow(sb, needed)) {
+    sb->failed = true;
     return false;
   }
 
@@ -285,8 +319,11 @@ bool sb_append_char(StringBuilder *sb, char c) {
 }
 
 bool sb_printf(StringBuilder *sb, const char *fmt, ...) {
-  if (!sb || !fmt)
+  if (!sb || !fmt) {
+    if (sb)
+      sb->failed = true;
     return false;
+  }
 
   va_list args;
   va_start(args, fmt);
@@ -297,18 +334,21 @@ bool sb_printf(StringBuilder *sb, const char *fmt, ...) {
   va_end(args_copy);
 
   if (len < 0) {
+    sb->failed = true;
     va_end(args);
     return false;
   }
 
   /* Check for overflow before calculating needed size */
   if ((size_t)len > SIZE_MAX - sb->len - 1) {
+    sb->failed = true;
     va_end(args);
     return false;
   }
 
   size_t needed = sb->len + (size_t)len + 1;
   if (needed > sb->cap && !sb_grow(sb, needed)) {
+    sb->failed = true;
     va_end(args);
     return false;
   }
@@ -335,6 +375,52 @@ char *sb_to_string(StringBuilder *sb) {
 }
 
 /*
+ * Consumes the StringBuilder and returns the string if successful.
+ * If any operation on the builder failed, returns NULL and frees everything.
+ */
+char *sb_finish(StringBuilder *sb) {
+  if (!sb)
+    return NULL;
+  if (sb->failed) {
+    sb_free(sb);
+    return NULL;
+  }
+  return sb_to_string(sb);
+}
+
+/* Check if the StringBuilder is in a valid state */
+bool sb_ok(StringBuilder *sb) { return sb && !sb->failed; }
+
+/* ============================================================================
+ * Error string helpers
+ * ============================================================================
+ */
+
+void err_set(char **err, const char *msg) {
+  if (!err)
+    return;
+  free(*err);
+  *err = msg ? str_dup(msg) : NULL;
+}
+
+void err_setf(char **err, const char *fmt, ...) {
+  if (!err || !fmt)
+    return;
+  free(*err);
+  va_list args;
+  va_start(args, fmt);
+  *err = str_vprintf(fmt, args);
+  va_end(args);
+}
+
+void err_clear(char **err) {
+  if (err) {
+    free(*err);
+    *err = NULL;
+  }
+}
+
+/*
  * SQL Identifier escaping functions
  * These escape identifiers (table/column names) to prevent SQL injection
  */
@@ -353,28 +439,16 @@ char *str_escape_identifier_dquote(const char *s) {
   if (!sb)
     return NULL;
 
-  if (!sb_append_char(sb, '"')) {
-    sb_free(sb);
-    return NULL;
-  }
+  sb_append_char(sb, '"');
   for (const char *p = s; *p; p++) {
-    bool ok;
-    if (*p == '"') {
-      ok = sb_append(sb, "\"\""); /* Double the quote */
-    } else {
-      ok = sb_append_char(sb, *p);
-    }
-    if (!ok) {
-      sb_free(sb);
-      return NULL;
-    }
+    if (*p == '"')
+      sb_append(sb, "\"\""); /* Double the quote */
+    else
+      sb_append_char(sb, *p);
   }
-  if (!sb_append_char(sb, '"')) {
-    sb_free(sb);
-    return NULL;
-  }
+  sb_append_char(sb, '"');
 
-  return sb_to_string(sb);
+  return sb_finish(sb); /* Returns NULL on any failure */
 }
 
 char *str_escape_identifier_backtick(const char *s) {
@@ -391,26 +465,171 @@ char *str_escape_identifier_backtick(const char *s) {
   if (!sb)
     return NULL;
 
-  if (!sb_append_char(sb, '`')) {
-    sb_free(sb);
-    return NULL;
-  }
+  sb_append_char(sb, '`');
   for (const char *p = s; *p; p++) {
-    bool ok;
-    if (*p == '`') {
-      ok = sb_append(sb, "``"); /* Double the backtick */
-    } else {
-      ok = sb_append_char(sb, *p);
-    }
-    if (!ok) {
+    if (*p == '`')
+      sb_append(sb, "``"); /* Double the backtick */
+    else
+      sb_append_char(sb, *p);
+  }
+  sb_append_char(sb, '`');
+
+  return sb_finish(sb); /* Returns NULL on any failure */
+}
+
+char *str_build_pk_where(const char **pk_cols, size_t num_pk_cols, bool use_dollar,
+                         size_t start_idx, bool use_backtick) {
+  if (!pk_cols || num_pk_cols == 0)
+    return NULL;
+
+  StringBuilder *sb = sb_new(64);
+  if (!sb)
+    return NULL;
+
+  for (size_t i = 0; i < num_pk_cols; i++) {
+    if (!pk_cols[i]) {
       sb_free(sb);
       return NULL;
     }
+
+    /* Escape column name */
+    char *escaped = use_backtick ? str_escape_identifier_backtick(pk_cols[i])
+                                 : str_escape_identifier_dquote(pk_cols[i]);
+    if (!escaped) {
+      sb_free(sb);
+      return NULL;
+    }
+
+    /* Add AND separator after first column */
+    if (i > 0) {
+      sb_append(sb, " AND ");
+    }
+
+    /* Add "column = placeholder" */
+    sb_append(sb, escaped);
+    if (use_dollar) {
+      sb_printf(sb, " = $%zu", start_idx + i);
+    } else {
+      sb_append(sb, " = ?");
+    }
+
+    free(escaped);
   }
-  if (!sb_append_char(sb, '`')) {
-    sb_free(sb);
+
+  return sb_finish(sb);
+}
+
+/* ============================================================================
+ * JSON file I/O helpers
+ * ============================================================================
+ */
+
+#define JSON_DEFAULT_MAX_SIZE (1024 * 1024) /* 1MB */
+
+cJSON *json_load_from_file(const char *path, size_t max_size, char **error) {
+  if (!path) {
+    err_setf(error, "NULL path");
     return NULL;
   }
 
-  return sb_to_string(sb);
+  if (max_size == 0)
+    max_size = JSON_DEFAULT_MAX_SIZE;
+
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+    return NULL;
+  }
+
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  if (size <= 0 || (size_t)size > max_size) {
+    fclose(f);
+    err_setf(error, "Invalid file size for %s", path);
+    return NULL;
+  }
+
+  char *content = safe_malloc((size_t)size + 1);
+
+  size_t read_bytes = fread(content, 1, (size_t)size, f);
+  fclose(f);
+  content[read_bytes] = '\0';
+
+  cJSON *json = cJSON_Parse(content);
+  free(content);
+
+  if (!json) {
+    const char *err_ptr = cJSON_GetErrorPtr();
+    err_setf(error, "JSON parse error in %s: %s", path,
+             err_ptr ? err_ptr : "unknown");
+    return NULL;
+  }
+
+  return json;
+}
+
+bool json_save_to_file(cJSON *json, const char *path, bool secure,
+                       char **error) {
+  if (!json || !path) {
+    err_setf(error, "NULL json or path");
+    return false;
+  }
+
+  char *content = cJSON_Print(json);
+  if (!content) {
+    err_setf(error, "Failed to serialize JSON");
+    return false;
+  }
+
+  FILE *f = NULL;
+
+  if (secure) {
+#ifndef LACE_OS_WINDOWS
+    /* Open with secure permissions atomically (0600 = owner read/write only) */
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+      free(content);
+      err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+      return false;
+    }
+    f = fdopen(fd, "w");
+    if (!f) {
+      close(fd);
+      free(content);
+      err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+      return false;
+    }
+#else
+    f = fopen(path, "w");
+#endif
+  } else {
+    f = fopen(path, "w");
+  }
+
+  if (!f) {
+    free(content);
+    err_setf(error, "Failed to open %s for writing: %s", path, strerror(errno));
+    return false;
+  }
+
+  /* Set permissions for non-secure writes (connections.c pattern) */
+  if (!secure) {
+#ifndef LACE_OS_WINDOWS
+    chmod(path, 0600);
+#endif
+  }
+
+  size_t len = strlen(content);
+  size_t written = fwrite(content, 1, len, f);
+  fclose(f);
+  free(content);
+
+  if (written != len) {
+    err_setf(error, "Failed to write %s: incomplete write", path);
+    return false;
+  }
+
+  return true;
 }

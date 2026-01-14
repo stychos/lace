@@ -99,8 +99,12 @@ static bool copy_to_clipboard(TuiState *state, const char *text) {
 
   /* Always save to internal buffer for in-app pasting */
   if (state) {
-    free(state->clipboard_buffer);
-    state->clipboard_buffer = strdup(text);
+    char *dup = strdup(text);
+    if (dup) {
+      free(state->clipboard_buffer);
+      state->clipboard_buffer = dup;
+    }
+    /* If strdup fails, keep old buffer (if any) */
   }
 
   /* Try external clipboard */
@@ -164,20 +168,9 @@ void tui_show_history_dialog(TuiState *state) {
   if (height > term_rows - 2)
     height = term_rows - 2;
 
-  int start_y = (term_rows - height) / 2;
-  int start_x = (term_cols - width) / 2;
-
-  /* Clamp coordinates */
-  if (start_y < 0)
-    start_y = 0;
-  if (start_x < 0)
-    start_x = 0;
-
-  WINDOW *dialog = newwin(height, width, start_y, start_x);
+  WINDOW *dialog = dialog_create(height, width, term_rows, term_cols);
   if (!dialog)
     return;
-
-  keypad(dialog, TRUE);
 
   /* Display state */
   size_t selected = 0;
@@ -191,15 +184,10 @@ void tui_show_history_dialog(TuiState *state) {
   while (running) {
     werase(dialog);
 
-    /* Draw border */
-    wattron(dialog, COLOR_PAIR(COLOR_BORDER));
-    box(dialog, 0, 0);
-    wattroff(dialog, COLOR_PAIR(COLOR_BORDER));
-
-    /* Title */
-    wattron(dialog, A_BOLD);
-    mvwprintw(dialog, 0, (width - 16) / 2, " Query History ");
-    wattroff(dialog, A_BOLD);
+    /* Draw border and title */
+    DRAW_BOX(dialog, COLOR_BORDER);
+    WITH_ATTR(dialog, A_BOLD,
+              mvwprintw(dialog, 0, (width - 16) / 2, " Query History "));
 
     /* Entry count */
     char count_str[32];

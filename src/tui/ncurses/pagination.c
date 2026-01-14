@@ -10,59 +10,48 @@
 
 #include "../../async/async.h"
 #include "../../config/config.h"
-#include "../../viewmodel/vm_table.h"
+#include "../../util/mem.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-/* Helper to get VmTable, returns NULL if not valid */
-static VmTable *get_vm_table(TuiState *state) {
-  if (!state || !state->vm_table)
-    return NULL;
-  if (!vm_table_valid(state->vm_table))
-    return NULL;
-  return state->vm_table;
-}
 
 /* Note: History recording is now handled automatically by the database layer
  * via the history callback set up in app_add_connection(). */
 
 /* Calculate column widths based on data */
 void tui_calculate_column_widths(TuiState *state) {
-  if (!state || !state->data)
+  Tab *tab = TUI_TAB(state);
+  ResultSet *data = tab ? tab->data : NULL;
+  if (!data)
     return;
 
   /* Validate columns array exists */
-  if (!state->data->columns || state->data->num_columns == 0)
+  if (!data->columns || data->num_columns == 0)
     return;
 
-  free(state->col_widths);
-  state->num_col_widths = state->data->num_columns;
-  state->col_widths = calloc(state->num_col_widths, sizeof(int));
-
-  if (!state->col_widths)
-    return;
+  free(tab->col_widths);
+  tab->num_col_widths = data->num_columns;
+  tab->col_widths = safe_calloc(tab->num_col_widths, sizeof(int));
 
   /* Start with column name widths */
-  for (size_t i = 0; i < state->data->num_columns; i++) {
-    const char *name = state->data->columns[i].name;
+  for (size_t i = 0; i < data->num_columns; i++) {
+    const char *name = data->columns[i].name;
     int len = name ? (int)strlen(name) : 0;
-    state->col_widths[i] = len < MIN_COL_WIDTH ? MIN_COL_WIDTH : len;
+    tab->col_widths[i] = len < MIN_COL_WIDTH ? MIN_COL_WIDTH : len;
   }
 
   /* Check data widths */
-  for (size_t row = 0; row < state->data->num_rows && row < 100; row++) {
-    Row *r = &state->data->rows[row];
+  for (size_t row = 0; row < data->num_rows && row < 100; row++) {
+    Row *r = &data->rows[row];
     if (!r->cells)
       continue;
-    for (size_t col = 0; col < state->data->num_columns && col < r->num_cells;
-         col++) {
+    for (size_t col = 0; col < data->num_columns && col < r->num_cells; col++) {
       char *str = db_value_to_string(&r->cells[col]);
       if (str) {
         int len = (int)strlen(str);
-        if (len > state->col_widths[col]) {
-          state->col_widths[col] = len;
+        if (len > tab->col_widths[col]) {
+          tab->col_widths[col] = len;
         }
         free(str);
       }
@@ -70,19 +59,22 @@ void tui_calculate_column_widths(TuiState *state) {
   }
 
   /* Apply max width */
-  for (size_t i = 0; i < state->num_col_widths; i++) {
-    if (state->col_widths[i] > MAX_COL_WIDTH) {
-      state->col_widths[i] = MAX_COL_WIDTH;
+  for (size_t i = 0; i < tab->num_col_widths; i++) {
+    if (tab->col_widths[i] > MAX_COL_WIDTH) {
+      tab->col_widths[i] = MAX_COL_WIDTH;
     }
   }
+
+  /* Tab owns column widths - no cache sync needed */
 }
 
 /* Get column width */
 int tui_get_column_width(TuiState *state, size_t col) {
-  if (!state || !state->col_widths || col >= state->num_col_widths) {
+  Tab *tab = TUI_TAB(state);
+  if (!tab || !tab->col_widths || col >= tab->num_col_widths) {
     return DEFAULT_COL_WIDTH;
   }
-  return state->col_widths[col];
+  return tab->col_widths[col];
 }
 
 /* Build WHERE clause for current tab filters */
@@ -91,12 +83,13 @@ static char *build_filter_where(TuiState *state) {
   if (!tab || tab->filters.num_filters == 0)
     return NULL;
 
-  if (!state->schema || !state->conn)
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab->schema || !conn)
     return NULL;
 
   char *err = NULL;
-  char *where = filters_build_where(&tab->filters, state->schema,
-                                    state->conn->driver->name, &err);
+  char *where =
+      filters_build_where(&tab->filters, tab->schema, conn->driver->name, &err);
   free(err);
   return where;
 }
@@ -108,13 +101,14 @@ static char *build_order_clause(TuiState *state) {
   if (!tab || tab->num_sort_entries == 0)
     return NULL;
 
-  if (!state->schema || !state->conn)
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab->schema || !conn)
     return NULL;
 
   /* Determine quote character based on driver */
-  bool use_backtick = state->conn->driver &&
-                      (strcmp(state->conn->driver->name, "mysql") == 0 ||
-                       strcmp(state->conn->driver->name, "mariadb") == 0);
+  bool use_backtick = conn->driver &&
+                      (strcmp(conn->driver->name, "mysql") == 0 ||
+                       strcmp(conn->driver->name, "mariadb") == 0);
 
   /* Build ORDER BY clause */
   StringBuilder *sb = sb_new(128);
@@ -124,10 +118,10 @@ static char *build_order_clause(TuiState *state) {
   bool first_added = false;
   for (size_t i = 0; i < tab->num_sort_entries; i++) {
     SortEntry *entry = &tab->sort_entries[i];
-    if (entry->column >= state->schema->num_columns)
+    if (entry->column >= tab->schema->num_columns)
       continue;
 
-    const char *col_name = state->schema->columns[entry->column].name;
+    const char *col_name = tab->schema->columns[entry->column].name;
     if (!col_name)
       continue;
 
@@ -157,39 +151,41 @@ static char *build_order_clause(TuiState *state) {
 
 /* Load table data */
 bool tui_load_table_data(TuiState *state, const char *table) {
-  if (!state || !state->conn || !table)
+  DbConnection *conn = TUI_CONN(state);
+  if (!state || !conn || !table)
+    return false;
+
+  Tab *tab = TUI_TAB(state);
+  if (!tab)
     return false;
 
   /* Clear any previous error */
-  Tab *tab = TUI_TAB(state);
-  if (tab) {
-    free(tab->table_error);
-    tab->table_error = NULL;
-  }
+  free(tab->table_error);
+  tab->table_error = NULL;
 
   /* Free old data */
-  if (state->data) {
-    db_result_free(state->data);
-    state->data = NULL;
+  if (tab->data) {
+    db_result_free(tab->data);
+    tab->data = NULL;
   }
 
-  if (state->schema) {
-    db_schema_free(state->schema);
-    state->schema = NULL;
+  if (tab->schema) {
+    db_schema_free(tab->schema);
+    tab->schema = NULL;
   }
 
   /* Load schema with progress dialog */
   AsyncOperation schema_op;
   async_init(&schema_op);
   schema_op.op_type = ASYNC_OP_GET_SCHEMA;
-  schema_op.conn = state->conn;
+  schema_op.conn = conn;
   schema_op.table_name = str_dup(table);
 
   if (schema_op.table_name && async_start(&schema_op)) {
     bool completed =
         tui_show_processing_dialog(state, &schema_op, "Loading schema...");
     if (completed && schema_op.state == ASYNC_STATE_COMPLETED) {
-      state->schema = (TableSchema *)schema_op.result;
+      tab->schema = (TableSchema *)schema_op.result;
     } else if (schema_op.state == ASYNC_STATE_CANCELLED) {
       async_free(&schema_op);
       tui_set_status(state, "Operation cancelled");
@@ -199,18 +195,13 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   }
   async_free(&schema_op);
 
-  /* Update tab schema pointer for filter building */
-  if (tab) {
-    tab->schema = state->schema;
-  }
-
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
 
   /* Get total row count with progress dialog (uses approximate if available) */
   AsyncOperation count_op;
   async_init(&count_op);
-  count_op.conn = state->conn;
+  count_op.conn = conn;
   count_op.table_name = str_dup(table);
   bool is_approximate = false;
 
@@ -240,23 +231,19 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   }
   async_free(&count_op);
 
-  state->total_rows = count >= 0 ? (size_t)count : 0;
-  state->page_size = PAGE_SIZE;
-  state->loaded_offset = 0;
+  tab->total_rows = count >= 0 ? (size_t)count : 0;
+  tab->loaded_offset = 0;
+  tab->row_count_approximate = is_approximate;
 
-  /* Store approximate flag and unfiltered count in tab if available */
-  if (tab) {
-    tab->row_count_approximate = is_approximate;
-    /* Store unfiltered total only when loading without filters */
-    if (!where_clause) {
-      tab->unfiltered_total_rows = state->total_rows;
-    }
+  /* Store unfiltered total only when loading without filters */
+  if (!where_clause) {
+    tab->unfiltered_total_rows = tab->total_rows;
   }
 
   /* Load first page of data with progress dialog */
   AsyncOperation data_op;
   async_init(&data_op);
-  data_op.conn = state->conn;
+  data_op.conn = conn;
   data_op.table_name = str_dup(table);
   data_op.offset = 0;
   data_op.limit = PAGE_SIZE * PREFETCH_PAGES;
@@ -290,76 +277,66 @@ bool tui_load_table_data(TuiState *state, const char *table) {
     const char *err_msg = data_op.error ? data_op.error : "Unknown error";
     tui_set_error(state, "Query failed: %s", err_msg);
     /* Store error in tab for display */
-    if (tab) {
-      free(tab->table_error);
-      tab->table_error = str_dup(err_msg);
-    }
+    free(tab->table_error);
+    tab->table_error = str_dup(err_msg);
     async_free(&data_op);
     return false;
   }
 
-  state->data = (ResultSet *)data_op.result;
+  tab->data = (ResultSet *)data_op.result;
   async_free(&data_op);
 
-  if (!state->data) {
+  if (!tab->data) {
     tui_set_error(state, "No data returned");
     return false;
   }
 
-  state->loaded_count = state->data->num_rows;
+  tab->loaded_count = tab->data->num_rows;
 
   /* Apply schema column names to result set */
-  if (state->schema && state->data) {
-    size_t min_cols = state->schema->num_columns;
-    if (state->data->num_columns < min_cols) {
-      min_cols = state->data->num_columns;
+  if (tab->schema && tab->data) {
+    size_t min_cols = tab->schema->num_columns;
+    if (tab->data->num_columns < min_cols) {
+      min_cols = tab->data->num_columns;
     }
     for (size_t i = 0; i < min_cols; i++) {
-      if (state->schema->columns[i].name) {
-        free(state->data->columns[i].name);
-        state->data->columns[i].name = str_dup(state->schema->columns[i].name);
-        state->data->columns[i].type = state->schema->columns[i].type;
+      if (tab->schema->columns[i].name) {
+        free(tab->data->columns[i].name);
+        tab->data->columns[i].name = str_dup(tab->schema->columns[i].name);
+        tab->data->columns[i].type = tab->schema->columns[i].type;
       }
     }
   }
 
   /* Reset cursor */
-  state->cursor_row = 0;
-  state->cursor_col = 0;
-  state->scroll_row = 0;
-  state->scroll_col = 0;
+  tab->cursor_row = 0;
+  tab->cursor_col = 0;
+  tab->scroll_row = 0;
+  tab->scroll_col = 0;
 
   /* Calculate column widths */
   tui_calculate_column_widths(state);
-
-  /* Update current tab's pointers to prevent dangling references */
-  if (tab) {
-    tab->data = state->data;
-    tab->schema = state->schema;
-    tab->col_widths = state->col_widths;
-    tab->num_col_widths = state->num_col_widths;
-    tab->total_rows = state->total_rows;
-    tab->loaded_offset = state->loaded_offset;
-    tab->loaded_count = state->loaded_count;
-    /* Sync cursor/scroll to tab so VmTable reads correct values */
-    tab->cursor_row = state->cursor_row;
-    tab->cursor_col = state->cursor_col;
-    tab->scroll_row = state->scroll_row;
-    tab->scroll_col = state->scroll_col;
-  }
 
   /* Clear any previous status message so column info is shown */
   free(state->status_msg);
   state->status_msg = NULL;
   state->status_is_error = false;
 
+  /* Tab data is accessed directly via TUI_TAB() - no sync needed */
+
   /* Bind VmTable to the current tab so navigation functions work */
-  if (tab && tab->type == TAB_TYPE_TABLE) {
+  if (tab->type == TAB_TYPE_TABLE) {
     if (!state->vm_table) {
       state->vm_table = vm_table_create(state->app, tab, NULL);
     } else {
       vm_table_bind(state->vm_table, tab);
     }
+  }
+
+  /* Rebind FiltersWidget with new schema (schema was freed and reloaded) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui && ui->filters_widget) {
+    filters_widget_bind(ui->filters_widget, &tab->filters, tab->schema);
   }
 
   /* History is recorded automatically by database layer */
@@ -368,24 +345,23 @@ bool tui_load_table_data(TuiState *state, const char *table) {
 
 /* Refresh table data while preserving position */
 bool tui_refresh_table(TuiState *state) {
-  if (!state || !state->conn || !state->tables)
-    return false;
-  if (state->current_table >= state->num_tables)
-    return false;
-
   Tab *tab = TUI_TAB(state);
   if (!tab || tab->type != TAB_TYPE_TABLE || !tab->table_name)
+    return false;
+
+  DbConnection *conn = TUI_CONN(state);
+  if (!conn)
     return false;
 
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
 
-  /* Save current position */
-  size_t saved_cursor_row = state->cursor_row;
-  size_t saved_cursor_col = state->cursor_col;
-  size_t saved_scroll_row = state->scroll_row;
-  size_t saved_scroll_col = state->scroll_col;
-  size_t saved_offset = state->loaded_offset;
+  /* Save current position from tab (authoritative source) */
+  size_t saved_cursor_row = tab->cursor_row;
+  size_t saved_cursor_col = tab->cursor_col;
+  size_t saved_scroll_row = tab->scroll_row;
+  size_t saved_scroll_col = tab->scroll_col;
+  size_t saved_offset = tab->loaded_offset;
 
   /* Calculate absolute row position (offset + cursor) */
   size_t abs_row = saved_offset + saved_cursor_row;
@@ -396,74 +372,94 @@ bool tui_refresh_table(TuiState *state) {
   }
 
   /* Restore position, clamped to new bounds */
-  if (state->data && state->data->num_rows > 0) {
-    /* Try to load at the same offset if we were scrolled */
-    if (saved_offset > 0 && abs_row < state->total_rows) {
-      /* Load data at saved offset */
-      size_t target_offset = saved_offset;
-      if (target_offset >= state->total_rows) {
-        target_offset =
-            state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
-      }
-
-      if (target_offset > 0) {
-        tui_load_rows_at_with_dialog(state, target_offset);
-      }
+  ResultSet *data = tab->data;
+  if (data && data->num_rows > 0) {
+    /* Clamp absolute row to new total */
+    if (abs_row >= tab->total_rows && tab->total_rows > 0) {
+      abs_row = tab->total_rows - 1;
     }
 
-    /* Restore cursor within bounds */
-    if (state->data->num_rows > 0) {
-      state->cursor_row = saved_cursor_row < state->data->num_rows
-                              ? saved_cursor_row
-                              : state->data->num_rows - 1;
+    /* Calculate target offset to load data containing the absolute row */
+    size_t target_offset = (abs_row / PAGE_SIZE) * PAGE_SIZE;
+
+    /* Load data at target offset if not already at offset 0 */
+    if (target_offset > 0 && target_offset != tab->loaded_offset) {
+      tui_load_rows_at_with_dialog(state, target_offset);
+      data = tab->data; /* Re-fetch after reload */
+    }
+
+    /* Calculate local cursor row from absolute position */
+    size_t local_cursor = 0;
+    if (abs_row >= tab->loaded_offset) {
+      local_cursor = abs_row - tab->loaded_offset;
+    }
+    /* Clamp to loaded data bounds */
+    if (data && data->num_rows > 0) {
+      if (local_cursor >= data->num_rows) {
+        local_cursor = data->num_rows - 1;
+      }
+      tab->cursor_row = local_cursor;
     } else {
-      state->cursor_row = 0;
+      tab->cursor_row = 0;
     }
 
-    state->cursor_col =
-        saved_cursor_col < state->data->num_columns
+    /* Restore column position */
+    tab->cursor_col =
+        data && saved_cursor_col < data->num_columns
             ? saved_cursor_col
-            : (state->data->num_columns > 0 ? state->data->num_columns - 1 : 0);
+            : (data && data->num_columns > 0 ? data->num_columns - 1 : 0);
 
-    /* Restore scroll within bounds */
-    size_t max_scroll = state->data->num_rows > (size_t)state->content_rows
-                            ? state->data->num_rows - state->content_rows
-                            : 0;
-    state->scroll_row =
-        saved_scroll_row < max_scroll ? saved_scroll_row : max_scroll;
-    state->scroll_col = saved_scroll_col;
+    /* Calculate scroll position to keep cursor visible */
+    size_t visible_rows =
+        state->content_rows > 0 ? (size_t)state->content_rows : 1;
+    size_t max_scroll =
+        data && data->num_rows > visible_rows ? data->num_rows - visible_rows
+                                              : 0;
+
+    /* Try to restore scroll relative to cursor (same screen position) */
+    if (saved_cursor_row >= saved_scroll_row) {
+      size_t cursor_screen_offset = saved_cursor_row - saved_scroll_row;
+      if (tab->cursor_row >= cursor_screen_offset) {
+        tab->scroll_row = tab->cursor_row - cursor_screen_offset;
+      } else {
+        tab->scroll_row = 0;
+      }
+    } else {
+      tab->scroll_row = tab->cursor_row;
+    }
+
+    /* Clamp scroll to valid range */
+    if (tab->scroll_row > max_scroll) {
+      tab->scroll_row = max_scroll;
+    }
 
     /* Ensure cursor is visible */
-    if (state->cursor_row < state->scroll_row) {
-      state->scroll_row = state->cursor_row;
-    } else if (state->cursor_row >=
-               state->scroll_row + (size_t)state->content_rows) {
-      state->scroll_row = state->cursor_row - state->content_rows + 1;
+    if (tab->cursor_row < tab->scroll_row) {
+      tab->scroll_row = tab->cursor_row;
+    } else if (tab->cursor_row >= tab->scroll_row + visible_rows) {
+      tab->scroll_row = tab->cursor_row - visible_rows + 1;
     }
+
+    tab->scroll_col = saved_scroll_col;
   }
 
-  /* Update tab */
-  tab->cursor_row = state->cursor_row;
-  tab->cursor_col = state->cursor_col;
-  tab->scroll_row = state->scroll_row;
-  tab->scroll_col = state->scroll_col;
+  /* VmTable reads from Tab directly - no sync needed */
 
-  tui_set_status(state, "Table refreshed (%zu rows)", state->total_rows);
+  tui_set_status(state, "Table refreshed (%zu rows)", tab->total_rows);
   return true;
 }
 
 /* Load more rows at end of current data */
 bool tui_load_more_rows(TuiState *state) {
-  if (!state || !state->conn || !state->data || !state->tables)
-    return false;
-  if (state->current_table >= state->num_tables)
+  Tab *tab = TUI_TAB(state);
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !tab->data || !conn || !tab->table_name)
     return false;
 
-  const char *table = state->tables[state->current_table];
-  size_t new_offset = state->loaded_offset + state->loaded_count;
+  size_t new_offset = tab->loaded_offset + tab->loaded_count;
 
   /* Check if there are more rows to load */
-  if (new_offset >= state->total_rows)
+  if (new_offset >= tab->total_rows)
     return false;
 
   /* Build WHERE clause from filters */
@@ -473,10 +469,10 @@ bool tui_load_more_rows(TuiState *state) {
   char *err = NULL;
   ResultSet *more;
   if (where_clause) {
-    more = db_query_page_where(state->conn, table, new_offset, PAGE_SIZE,
+    more = db_query_page_where(conn, tab->table_name, new_offset, PAGE_SIZE,
                                where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, PAGE_SIZE,
+    more = db_query_page(conn, tab->table_name, new_offset, PAGE_SIZE,
                          order_clause, false, &err);
   }
   free(where_clause);
@@ -489,7 +485,7 @@ bool tui_load_more_rows(TuiState *state) {
   }
 
   /* Extend existing rows array */
-  size_t old_count = state->data->num_rows;
+  size_t old_count = tab->data->num_rows;
   size_t new_count = old_count + more->num_rows;
 
   /* Validate source data consistency */
@@ -505,47 +501,39 @@ bool tui_load_more_rows(TuiState *state) {
     return false;
   }
 
-  Row *new_rows = realloc(state->data->rows, new_count * sizeof(Row));
-  if (!new_rows) {
-    db_result_free(more);
-    return false;
-  }
-
-  state->data->rows = new_rows;
+  tab->data->rows = safe_reallocarray(tab->data->rows, new_count, sizeof(Row));
 
   /* Copy new rows */
   for (size_t i = 0; i < more->num_rows; i++) {
-    state->data->rows[old_count + i] = more->rows[i];
+    tab->data->rows[old_count + i] = more->rows[i];
     /* Clear source so free doesn't deallocate the cells we moved */
     more->rows[i].cells = NULL;
     more->rows[i].num_cells = 0;
   }
 
-  state->data->num_rows = new_count;
-  state->loaded_count = new_count;
+  tab->data->num_rows = new_count;
+  tab->loaded_count = new_count;
 
   db_result_free(more);
 
   /* Trim old data to keep memory bounded */
   tui_trim_loaded_data(state);
 
-  tui_set_status(state, "Loaded %zu/%zu rows", state->loaded_count,
-                 state->total_rows);
+  tui_set_status(state, "Loaded %zu/%zu rows", tab->loaded_count,
+                 tab->total_rows);
   return true;
 }
 
 /* Load rows at specific offset (replaces current data) */
 bool tui_load_rows_at(TuiState *state, size_t offset) {
-  if (!state || !state->conn || !state->tables)
+  Tab *tab = TUI_TAB(state);
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !conn || !tab->table_name)
     return false;
-  if (state->current_table >= state->num_tables)
-    return false;
-
-  const char *table = state->tables[state->current_table];
 
   /* Clamp offset */
-  if (offset >= state->total_rows) {
-    offset = state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
+  if (offset >= tab->total_rows) {
+    offset = tab->total_rows > PAGE_SIZE ? tab->total_rows - PAGE_SIZE : 0;
   }
 
   /* Build WHERE clause from filters */
@@ -555,10 +543,10 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
   char *err = NULL;
   ResultSet *data;
   if (where_clause) {
-    data = db_query_page_where(state->conn, table, offset, PAGE_SIZE,
+    data = db_query_page_where(conn, tab->table_name, offset, PAGE_SIZE,
                                where_clause, order_clause, false, &err);
   } else {
-    data = db_query_page(state->conn, table, offset, PAGE_SIZE, order_clause,
+    data = db_query_page(conn, tab->table_name, offset, PAGE_SIZE, order_clause,
                          false, &err);
   }
   free(where_clause);
@@ -570,37 +558,26 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
   }
 
   /* Free old data but keep schema */
-  if (state->data) {
-    db_result_free(state->data);
+  if (tab->data) {
+    db_result_free(tab->data);
   }
-  state->data = data;
-  state->loaded_offset = offset;
-  state->loaded_count = data->num_rows;
+  tab->data = data;
+  tab->loaded_offset = offset;
+  tab->loaded_count = data->num_rows;
 
   /* Apply schema column names */
-  if (state->schema && state->data) {
-    size_t min_cols = state->schema->num_columns;
-    if (state->data->num_columns < min_cols) {
-      min_cols = state->data->num_columns;
+  if (tab->schema && tab->data) {
+    size_t min_cols = tab->schema->num_columns;
+    if (tab->data->num_columns < min_cols) {
+      min_cols = tab->data->num_columns;
     }
     for (size_t i = 0; i < min_cols; i++) {
-      if (state->schema->columns[i].name) {
-        free(state->data->columns[i].name);
-        state->data->columns[i].name = str_dup(state->schema->columns[i].name);
-        state->data->columns[i].type = state->schema->columns[i].type;
+      if (tab->schema->columns[i].name) {
+        free(tab->data->columns[i].name);
+        tab->data->columns[i].name = str_dup(tab->schema->columns[i].name);
+        tab->data->columns[i].type = tab->schema->columns[i].type;
       }
     }
-  }
-
-  /* Update current tab's pointers to prevent dangling references */
-  Tab *tab = TUI_TAB(state);
-  if (tab) {
-    tab->data = state->data;
-    tab->col_widths = state->col_widths;
-    tab->num_col_widths = state->num_col_widths;
-    tab->total_rows = state->total_rows;
-    tab->loaded_offset = state->loaded_offset;
-    tab->loaded_count = state->loaded_count;
   }
 
   return true;
@@ -608,22 +585,20 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
 
 /* Load previous rows (prepend to current data) */
 bool tui_load_prev_rows(TuiState *state) {
-  if (!state || !state->conn || !state->data || !state->tables)
+  Tab *tab = TUI_TAB(state);
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !tab->data || !conn || !tab->table_name)
     return false;
-  if (state->current_table >= state->num_tables)
-    return false;
-  if (state->loaded_offset == 0)
+  if (tab->loaded_offset == 0)
     return false; /* Already at beginning */
-
-  const char *table = state->tables[state->current_table];
 
   /* Calculate how many rows to load before current offset */
   size_t load_count = PAGE_SIZE;
   size_t new_offset = 0;
-  if (state->loaded_offset > load_count) {
-    new_offset = state->loaded_offset - load_count;
+  if (tab->loaded_offset > load_count) {
+    new_offset = tab->loaded_offset - load_count;
   } else {
-    load_count = state->loaded_offset;
+    load_count = tab->loaded_offset;
     new_offset = 0;
   }
 
@@ -634,10 +609,10 @@ bool tui_load_prev_rows(TuiState *state) {
   char *err = NULL;
   ResultSet *more;
   if (where_clause) {
-    more = db_query_page_where(state->conn, table, new_offset, load_count,
+    more = db_query_page_where(conn, tab->table_name, new_offset, load_count,
                                where_clause, order_clause, false, &err);
   } else {
-    more = db_query_page(state->conn, table, new_offset, load_count,
+    more = db_query_page(conn, tab->table_name, new_offset, load_count,
                          order_clause, false, &err);
   }
   free(where_clause);
@@ -650,7 +625,7 @@ bool tui_load_prev_rows(TuiState *state) {
   }
 
   /* Prepend rows to existing data */
-  size_t old_count = state->data->num_rows;
+  size_t old_count = tab->data->num_rows;
   size_t new_count = old_count + more->num_rows;
 
   /* Check for overflow and enforce maximum row limit (1M rows) */
@@ -660,11 +635,7 @@ bool tui_load_prev_rows(TuiState *state) {
     return false;
   }
 
-  Row *new_rows = malloc(new_count * sizeof(Row));
-  if (!new_rows) {
-    db_result_free(more);
-    return false;
-  }
+  Row *new_rows = safe_reallocarray(NULL, new_count, sizeof(Row));
 
   /* Copy new rows first (prepend) */
   for (size_t i = 0; i < more->num_rows; i++) {
@@ -676,75 +647,64 @@ bool tui_load_prev_rows(TuiState *state) {
 
   /* Then copy old rows */
   for (size_t i = 0; i < old_count; i++) {
-    new_rows[more->num_rows + i] = state->data->rows[i];
+    new_rows[more->num_rows + i] = tab->data->rows[i];
   }
 
   /* Free old array (but not the cells which we moved) */
-  free(state->data->rows);
-  state->data->rows = new_rows;
-  state->data->num_rows = new_count;
+  free(tab->data->rows);
+  tab->data->rows = new_rows;
+  tab->data->num_rows = new_count;
 
-  /* Get current cursor/scroll from VmTable if available */
-  size_t cursor_row = state->cursor_row;
-  size_t scroll_row = state->scroll_row;
-  VmTable *vm = get_vm_table(state);
-  if (vm) {
-    vm_table_get_cursor(vm, &cursor_row, NULL);
-    vm_table_get_scroll(vm, &scroll_row, NULL);
-  }
+  /* Get current cursor/scroll from tab (authoritative source) */
+  size_t cursor_row = tab->cursor_row;
+  size_t scroll_row = tab->scroll_row;
 
   /* Adjust cursor position (it's now offset by the prepended rows) */
   cursor_row += more->num_rows;
   scroll_row += more->num_rows;
 
+  /* Update tab cursor/scroll */
+  tab->cursor_row = cursor_row;
+  tab->scroll_row = scroll_row;
+
   /* Update via viewmodel if available */
+  VmTable *vm = tui_vm_table(state);
   if (vm) {
-    size_t cursor_col, scroll_col;
-    vm_table_get_cursor(vm, NULL, &cursor_col);
-    vm_table_get_scroll(vm, NULL, &scroll_col);
-    vm_table_set_cursor(vm, cursor_row, cursor_col);
-    vm_table_set_scroll(vm, scroll_row, scroll_col);
+    vm_table_set_cursor(vm, cursor_row, tab->cursor_col);
+    vm_table_set_scroll(vm, scroll_row, tab->scroll_col);
   }
 
-  /* Sync to compatibility layer */
-  state->cursor_row = cursor_row;
-  state->scroll_row = scroll_row;
-
   /* Update tracking */
-  state->loaded_offset = new_offset;
-  state->loaded_count = new_count;
+  tab->loaded_offset = new_offset;
+  tab->loaded_count = new_count;
 
   db_result_free(more);
 
   /* Trim old data to keep memory bounded */
   tui_trim_loaded_data(state);
 
-  tui_set_status(state, "Loaded %zu/%zu rows", state->loaded_count,
-                 state->total_rows);
+  tui_set_status(state, "Loaded %zu/%zu rows", tab->loaded_count,
+                 tab->total_rows);
   return true;
 }
 
 /* Trim loaded data to keep memory bounded */
 void tui_trim_loaded_data(TuiState *state) {
-  if (!state || !state->data || state->data->num_rows == 0)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || !tab->data || tab->data->num_rows == 0)
     return;
 
   size_t max_rows = MAX_LOADED_PAGES * PAGE_SIZE;
-  if (state->loaded_count <= max_rows)
+  if (tab->loaded_count <= max_rows)
     return;
 
-  /* Get cursor position from VmTable if available */
-  size_t cursor_row = state->cursor_row;
-  size_t scroll_row = state->scroll_row;
-  VmTable *vm = get_vm_table(state);
-  if (vm) {
-    vm_table_get_cursor(vm, &cursor_row, NULL);
-    vm_table_get_scroll(vm, &scroll_row, NULL);
-  }
+  /* Get cursor position from tab (authoritative source) */
+  size_t cursor_row = tab->cursor_row;
+  size_t scroll_row = tab->scroll_row;
 
   /* Calculate cursor's page within loaded data */
   size_t cursor_page = cursor_row / PAGE_SIZE;
-  size_t total_pages = (state->loaded_count + PAGE_SIZE - 1) / PAGE_SIZE;
+  size_t total_pages = (tab->loaded_count + PAGE_SIZE - 1) / PAGE_SIZE;
 
   /* Determine pages to keep: TRIM_DISTANCE_PAGES on each side of cursor */
   size_t keep_start_page = 0;
@@ -775,16 +735,16 @@ void tui_trim_loaded_data(TuiState *state) {
   /* Convert pages to row indices */
   size_t trim_start = keep_start_page * PAGE_SIZE;
   size_t trim_end = keep_end_page * PAGE_SIZE;
-  if (trim_end > state->loaded_count)
-    trim_end = state->loaded_count;
+  if (trim_end > tab->loaded_count)
+    trim_end = tab->loaded_count;
 
   /* Check if we actually need to trim */
-  if (trim_start == 0 && trim_end >= state->loaded_count)
+  if (trim_start == 0 && trim_end >= tab->loaded_count)
     return;
 
   /* Free rows before trim_start */
   for (size_t i = 0; i < trim_start; i++) {
-    Row *row = &state->data->rows[i];
+    Row *row = &tab->data->rows[i];
     for (size_t j = 0; j < row->num_cells; j++) {
       db_value_free(&row->cells[j]);
     }
@@ -792,8 +752,8 @@ void tui_trim_loaded_data(TuiState *state) {
   }
 
   /* Free rows after trim_end */
-  for (size_t i = trim_end; i < state->loaded_count; i++) {
-    Row *row = &state->data->rows[i];
+  for (size_t i = trim_end; i < tab->loaded_count; i++) {
+    Row *row = &tab->data->rows[i];
     for (size_t j = 0; j < row->num_cells; j++) {
       db_value_free(&row->cells[j]);
     }
@@ -803,16 +763,13 @@ void tui_trim_loaded_data(TuiState *state) {
   /* Move remaining rows to beginning of array */
   size_t new_count = trim_end - trim_start;
   if (trim_start > 0) {
-    memmove(state->data->rows, state->data->rows + trim_start,
+    memmove(tab->data->rows, tab->data->rows + trim_start,
             new_count * sizeof(Row));
   }
 
-  /* Resize array (optional, realloc to shrink) */
-  Row *new_rows = realloc(state->data->rows, new_count * sizeof(Row));
-  if (new_rows) {
-    state->data->rows = new_rows;
-  }
-  state->data->num_rows = new_count;
+  /* Resize array (realloc to shrink) */
+  tab->data->rows = safe_reallocarray(tab->data->rows, new_count, sizeof(Row));
+  tab->data->num_rows = new_count;
 
   /* Adjust cursor and scroll positions */
   if (cursor_row >= trim_start) {
@@ -827,56 +784,49 @@ void tui_trim_loaded_data(TuiState *state) {
     scroll_row = 0;
   }
 
+  /* Update tab cursor/scroll */
+  tab->cursor_row = cursor_row;
+  tab->scroll_row = scroll_row;
+
   /* Update via viewmodel if available */
+  VmTable *vm = tui_vm_table(state);
   if (vm) {
-    size_t cursor_col, scroll_col;
-    vm_table_get_cursor(vm, NULL, &cursor_col);
-    vm_table_get_scroll(vm, NULL, &scroll_col);
-    vm_table_set_cursor(vm, cursor_row, cursor_col);
-    vm_table_set_scroll(vm, scroll_row, scroll_col);
+    vm_table_set_cursor(vm, cursor_row, tab->cursor_col);
+    vm_table_set_scroll(vm, scroll_row, tab->scroll_col);
   }
 
-  /* Sync to compatibility layer */
-  state->cursor_row = cursor_row;
-  state->scroll_row = scroll_row;
-
   /* Update tracking */
-  state->loaded_offset += trim_start;
-  state->loaded_count = new_count;
+  tab->loaded_offset += trim_start;
+  tab->loaded_count = new_count;
 }
 
 /* Check if more rows need to be loaded based on cursor position */
 void tui_check_load_more(TuiState *state) {
-  if (!state || !state->data)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || !tab->data)
     return;
 
   /* Don't do synchronous load if background load is in progress */
-  Tab *tab = TUI_TAB(state);
-  if (tab && tab->bg_load_op != NULL)
+  if (tab->bg_load_op != NULL)
     return;
 
-  /* Get cursor position from VmTable if available */
-  size_t cursor_row = state->cursor_row;
-  VmTable *vm = get_vm_table(state);
-  if (vm) {
-    vm_table_get_cursor(vm, &cursor_row, NULL);
-  }
+  /* Get cursor position from tab (authoritative source) */
+  size_t cursor_row = tab->cursor_row;
 
   /* If cursor is within LOAD_THRESHOLD of the END, load more at end */
-  size_t rows_from_end = state->data->num_rows > cursor_row
-                             ? state->data->num_rows - cursor_row
-                             : 0;
+  size_t rows_from_end =
+      tab->data->num_rows > cursor_row ? tab->data->num_rows - cursor_row : 0;
 
   if (rows_from_end < LOAD_THRESHOLD) {
     /* Check if there are more rows to load at end */
-    size_t loaded_end = state->loaded_offset + state->loaded_count;
-    if (loaded_end < state->total_rows) {
+    size_t loaded_end = tab->loaded_offset + tab->loaded_count;
+    if (loaded_end < tab->total_rows) {
       tui_load_more_rows(state);
     }
   }
 
   /* If cursor is within LOAD_THRESHOLD of the BEGINNING, load previous rows */
-  if (cursor_row < LOAD_THRESHOLD && state->loaded_offset > 0) {
+  if (cursor_row < LOAD_THRESHOLD && tab->loaded_offset > 0) {
     tui_load_prev_rows(state);
   }
 }
@@ -889,10 +839,11 @@ void tui_check_load_more(TuiState *state) {
 /* Merge new page result into existing data */
 static bool merge_page_result(TuiState *state, ResultSet *new_data,
                               bool forward) {
-  if (!state || !state->data || !new_data || new_data->num_rows == 0)
+  Tab *tab = TUI_TAB(state);
+  if (!tab || !tab->data || !new_data || new_data->num_rows == 0)
     return false;
 
-  size_t old_count = state->data->num_rows;
+  size_t old_count = tab->data->num_rows;
   size_t new_count = old_count + new_data->num_rows;
 
   /* Check for overflow and enforce maximum row limit */
@@ -903,27 +854,21 @@ static bool merge_page_result(TuiState *state, ResultSet *new_data,
 
   if (forward) {
     /* Append: extend existing rows array */
-    Row *new_rows = realloc(state->data->rows, new_count * sizeof(Row));
-    if (!new_rows)
-      return false;
-
-    state->data->rows = new_rows;
+    tab->data->rows = safe_reallocarray(tab->data->rows, new_count, sizeof(Row));
 
     /* Copy new rows at end */
     for (size_t i = 0; i < new_data->num_rows; i++) {
-      state->data->rows[old_count + i] = new_data->rows[i];
+      tab->data->rows[old_count + i] = new_data->rows[i];
       /* Clear source so free doesn't deallocate cells we moved */
       new_data->rows[i].cells = NULL;
       new_data->rows[i].num_cells = 0;
     }
 
-    state->data->num_rows = new_count;
-    state->loaded_count = new_count;
+    tab->data->num_rows = new_count;
+    tab->loaded_count = new_count;
   } else {
     /* Prepend: allocate new array */
-    Row *new_rows = malloc(new_count * sizeof(Row));
-    if (!new_rows)
-      return false;
+    Row *new_rows = safe_reallocarray(NULL, new_count, sizeof(Row));
 
     /* Copy new rows first */
     for (size_t i = 0; i < new_data->num_rows; i++) {
@@ -934,50 +879,35 @@ static bool merge_page_result(TuiState *state, ResultSet *new_data,
 
     /* Then copy old rows */
     for (size_t i = 0; i < old_count; i++) {
-      new_rows[new_data->num_rows + i] = state->data->rows[i];
+      new_rows[new_data->num_rows + i] = tab->data->rows[i];
     }
 
-    free(state->data->rows);
-    state->data->rows = new_rows;
-    state->data->num_rows = new_count;
+    free(tab->data->rows);
+    tab->data->rows = new_rows;
+    tab->data->num_rows = new_count;
 
-    /* Get current cursor/scroll from VmTable if available */
-    size_t cursor_row = state->cursor_row;
-    size_t scroll_row = state->scroll_row;
-    VmTable *vm = get_vm_table(state);
-    if (vm) {
-      vm_table_get_cursor(vm, &cursor_row, NULL);
-      vm_table_get_scroll(vm, &scroll_row, NULL);
-    }
+    /* Get current cursor/scroll from tab (authoritative source) */
+    size_t cursor_row = tab->cursor_row;
+    size_t scroll_row = tab->scroll_row;
 
     /* Adjust cursor and scroll positions */
     cursor_row += new_data->num_rows;
     scroll_row += new_data->num_rows;
 
+    /* Update tab cursor/scroll */
+    tab->cursor_row = cursor_row;
+    tab->scroll_row = scroll_row;
+
     /* Update via viewmodel if available */
+    VmTable *vm = tui_vm_table(state);
     if (vm) {
-      size_t cursor_col, scroll_col;
-      vm_table_get_cursor(vm, NULL, &cursor_col);
-      vm_table_get_scroll(vm, NULL, &scroll_col);
-      vm_table_set_cursor(vm, cursor_row, cursor_col);
-      vm_table_set_scroll(vm, scroll_row, scroll_col);
+      vm_table_set_cursor(vm, cursor_row, tab->cursor_col);
+      vm_table_set_scroll(vm, scroll_row, tab->scroll_col);
     }
 
-    /* Sync to compatibility layer */
-    state->cursor_row = cursor_row;
-    state->scroll_row = scroll_row;
-
     /* Update offset */
-    state->loaded_offset -= new_data->num_rows;
-    state->loaded_count = new_count;
-  }
-
-  /* Update tab pointers */
-  Tab *tab = TUI_TAB(state);
-  if (tab) {
-    tab->data = state->data;
-    tab->loaded_offset = state->loaded_offset;
-    tab->loaded_count = state->loaded_count;
+    tab->loaded_offset -= new_data->num_rows;
+    tab->loaded_count = new_count;
   }
 
   return true;
@@ -985,26 +915,20 @@ static bool merge_page_result(TuiState *state, ResultSet *new_data,
 
 /* Load rows at specific offset with blocking dialog (for goto/home/end) */
 bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
-  if (!state || !state->conn || !state->tables)
-    return false;
-  if (state->current_table >= state->num_tables)
+  Tab *tab = TUI_TAB(state);
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !conn || !tab->table_name)
     return false;
 
   /* Cancel any pending background load first */
   tui_cancel_background_load(state);
 
-  const char *table = state->tables[state->current_table];
-
   /* Check if we're using approximate count */
-  bool was_approximate = false;
-  Tab *tab = TUI_TAB(state);
-  if (tab) {
-    was_approximate = tab->row_count_approximate;
-  }
+  bool was_approximate = tab->row_count_approximate;
 
   /* Clamp offset */
-  if (offset >= state->total_rows) {
-    offset = state->total_rows > PAGE_SIZE ? state->total_rows - PAGE_SIZE : 0;
+  if (offset >= tab->total_rows) {
+    offset = tab->total_rows > PAGE_SIZE ? tab->total_rows - PAGE_SIZE : 0;
   }
 
   /* Build WHERE clause from filters */
@@ -1014,8 +938,8 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
   /* Setup async operation */
   AsyncOperation op;
   async_init(&op);
-  op.conn = state->conn;
-  op.table_name = str_dup(table);
+  op.conn = conn;
+  op.table_name = str_dup(tab->table_name);
   op.offset = offset;
   op.limit = PAGE_SIZE * PREFETCH_PAGES;
   op.order_by = order_clause; /* Takes ownership */
@@ -1029,7 +953,7 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
   }
   free(where_clause);
 
-  if (!op.table_name || !async_start(&op)) {
+  if (!async_start(&op)) {
     async_free(&op);
     return false;
   }
@@ -1051,11 +975,11 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
       AsyncOperation count_op;
       async_init(&count_op);
       count_op.op_type = ASYNC_OP_COUNT_ROWS;
-      count_op.conn = state->conn;
-      count_op.table_name = str_dup(table);
+      count_op.conn = conn;
+      count_op.table_name = str_dup(tab->table_name);
       count_op.use_approximate = false; /* Force exact count */
 
-      if (!count_op.table_name || !async_start(&count_op)) {
+      if (!async_start(&count_op)) {
         async_free(&count_op);
         tui_set_error(state, "Failed to start count operation");
         return false;
@@ -1075,11 +999,8 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
 
       if (exact_count > 0) {
         /* Update total_rows with exact count */
-        state->total_rows = (size_t)exact_count;
-        if (tab) {
-          tab->total_rows = state->total_rows;
-          tab->row_count_approximate = false;
-        }
+        tab->total_rows = (size_t)exact_count;
+        tab->row_count_approximate = false;
 
         /* Recalculate offset and retry */
         size_t new_offset = (size_t)exact_count > PAGE_SIZE
@@ -1097,34 +1018,27 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
     }
 
     /* Apply schema column names */
-    if (state->schema && new_data) {
-      size_t min_cols = state->schema->num_columns;
+    if (tab->schema && new_data) {
+      size_t min_cols = tab->schema->num_columns;
       if (new_data->num_columns < min_cols) {
         min_cols = new_data->num_columns;
       }
       for (size_t i = 0; i < min_cols; i++) {
-        if (state->schema->columns[i].name) {
+        if (tab->schema->columns[i].name) {
           free(new_data->columns[i].name);
-          new_data->columns[i].name = str_dup(state->schema->columns[i].name);
-          new_data->columns[i].type = state->schema->columns[i].type;
+          new_data->columns[i].name = str_dup(tab->schema->columns[i].name);
+          new_data->columns[i].type = tab->schema->columns[i].type;
         }
       }
     }
 
     /* Free old data and replace */
-    if (state->data) {
-      db_result_free(state->data);
+    if (tab->data) {
+      db_result_free(tab->data);
     }
-    state->data = new_data;
-    state->loaded_offset = offset;
-    state->loaded_count = new_data->num_rows;
-
-    /* Update tab pointers */
-    if (tab) {
-      tab->data = state->data;
-      tab->loaded_offset = state->loaded_offset;
-      tab->loaded_count = state->loaded_count;
-    }
+    tab->data = new_data;
+    tab->loaded_offset = offset;
+    tab->loaded_count = new_data->num_rows;
 
     success = true;
   } else if (op.state == ASYNC_STATE_CANCELLED) {
@@ -1140,13 +1054,9 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
 
 /* Load a page with blocking dialog (for fast scrolling past loaded data) */
 bool tui_load_page_with_dialog(TuiState *state, bool forward) {
-  if (!state || !state->conn || !state->tables)
-    return false;
-  if (state->current_table >= state->num_tables)
-    return false;
-
   Tab *tab = TUI_TAB(state);
-  if (!tab)
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !conn || !tab->table_name)
     return false;
 
   /* Check if a background load is already running in the same direction */
@@ -1162,16 +1072,19 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
       ResultSet *new_data = (ResultSet *)bg_op->result;
 
       /* Apply schema column names */
-      if (state->schema && new_data) {
-        size_t min_cols = state->schema->num_columns;
+      if (tab->schema && new_data) {
+        size_t min_cols = tab->schema->num_columns;
         if (new_data->num_columns < min_cols) {
           min_cols = new_data->num_columns;
         }
         for (size_t i = 0; i < min_cols; i++) {
-          if (state->schema->columns[i].name) {
-            free(new_data->columns[i].name);
-            new_data->columns[i].name = str_dup(state->schema->columns[i].name);
-            new_data->columns[i].type = state->schema->columns[i].type;
+          if (tab->schema->columns[i].name) {
+            char *dup = str_dup(tab->schema->columns[i].name);
+            if (dup) {
+              free(new_data->columns[i].name);
+              new_data->columns[i].name = dup;
+            }
+            new_data->columns[i].type = tab->schema->columns[i].type;
           }
         }
       }
@@ -1180,8 +1093,8 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
       success = merge_page_result(state, new_data, forward);
       if (success) {
         tui_trim_loaded_data(state);
-        tui_set_status(state, "Loaded %zu/%zu rows", state->loaded_count,
-                       state->total_rows);
+        tui_set_status(state, "Loaded %zu/%zu rows", tab->loaded_count,
+                       tab->total_rows);
       }
 
       db_result_free(new_data);
@@ -1204,20 +1117,18 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   /* No compatible background load - cancel any existing and start new */
   tui_cancel_background_load(state);
 
-  const char *table = state->tables[state->current_table];
-
   /* Calculate target offset */
   size_t target_offset;
   if (forward) {
-    target_offset = state->loaded_offset + state->loaded_count;
+    target_offset = tab->loaded_offset + tab->loaded_count;
     /* Check if there are more rows */
-    if (target_offset >= state->total_rows)
+    if (target_offset >= tab->total_rows)
       return false;
   } else {
-    if (state->loaded_offset == 0)
+    if (tab->loaded_offset == 0)
       return false; /* Already at beginning */
-    target_offset = state->loaded_offset >= PAGE_SIZE
-                        ? state->loaded_offset - PAGE_SIZE
+    target_offset = tab->loaded_offset >= PAGE_SIZE
+                        ? tab->loaded_offset - PAGE_SIZE
                         : 0;
   }
 
@@ -1228,8 +1139,8 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   /* Setup async operation */
   AsyncOperation op;
   async_init(&op);
-  op.conn = state->conn;
-  op.table_name = str_dup(table);
+  op.conn = conn;
+  op.table_name = str_dup(tab->table_name);
   op.offset = target_offset;
   op.limit = PAGE_SIZE * PREFETCH_PAGES;
   op.order_by = order_clause; /* Takes ownership */
@@ -1243,7 +1154,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   }
   free(where_clause);
 
-  if (!op.table_name || !async_start(&op)) {
+  if (!async_start(&op)) {
     async_free(&op);
     return false;
   }
@@ -1256,16 +1167,16 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     ResultSet *new_data = (ResultSet *)op.result;
 
     /* Apply schema column names */
-    if (state->schema && new_data) {
-      size_t min_cols = state->schema->num_columns;
+    if (tab->schema && new_data) {
+      size_t min_cols = tab->schema->num_columns;
       if (new_data->num_columns < min_cols) {
         min_cols = new_data->num_columns;
       }
       for (size_t i = 0; i < min_cols; i++) {
-        if (state->schema->columns[i].name) {
+        if (tab->schema->columns[i].name) {
           free(new_data->columns[i].name);
-          new_data->columns[i].name = str_dup(state->schema->columns[i].name);
-          new_data->columns[i].type = state->schema->columns[i].type;
+          new_data->columns[i].name = str_dup(tab->schema->columns[i].name);
+          new_data->columns[i].type = tab->schema->columns[i].type;
         }
       }
     }
@@ -1275,8 +1186,8 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     if (success) {
       /* Trim old data to keep memory bounded */
       tui_trim_loaded_data(state);
-      tui_set_status(state, "Loaded %zu/%zu rows", state->loaded_count,
-                     state->total_rows);
+      tui_set_status(state, "Loaded %zu/%zu rows", tab->loaded_count,
+                     tab->total_rows);
     }
 
     /* Free the result set structure (cells were moved) */
@@ -1299,32 +1210,26 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
 
 /* Start background load (non-blocking) - returns true if started */
 bool tui_start_background_load(TuiState *state, bool forward) {
-  if (!state || !state->conn || !state->tables)
-    return false;
-  if (state->current_table >= state->num_tables)
-    return false;
-
   Tab *tab = TUI_TAB(state);
-  if (!tab)
+  DbConnection *conn = TUI_CONN(state);
+  if (!tab || !conn || !tab->table_name)
     return false;
 
   /* Already have a background load in progress */
   if (tab->bg_load_op != NULL)
     return false;
 
-  const char *table = state->tables[state->current_table];
-
   /* Calculate target offset */
   size_t target_offset;
   if (forward) {
-    target_offset = state->loaded_offset + state->loaded_count;
-    if (target_offset >= state->total_rows)
+    target_offset = tab->loaded_offset + tab->loaded_count;
+    if (target_offset >= tab->total_rows)
       return false; /* No more data */
   } else {
-    if (state->loaded_offset == 0)
+    if (tab->loaded_offset == 0)
       return false; /* Already at beginning */
-    target_offset = state->loaded_offset >= PAGE_SIZE
-                        ? state->loaded_offset - PAGE_SIZE
+    target_offset = tab->loaded_offset >= PAGE_SIZE
+                        ? tab->loaded_offset - PAGE_SIZE
                         : 0;
   }
 
@@ -1333,16 +1238,11 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   char *order_clause = build_order_clause(state);
 
   /* Allocate and setup async operation */
-  AsyncOperation *op = malloc(sizeof(AsyncOperation));
-  if (!op) {
-    free(where_clause);
-    free(order_clause);
-    return false;
-  }
+  AsyncOperation *op = safe_malloc(sizeof(AsyncOperation));
 
   async_init(op);
-  op->conn = state->conn;
-  op->table_name = str_dup(table);
+  op->conn = conn;
+  op->table_name = str_dup(tab->table_name);
   op->offset = target_offset;
   op->limit = PAGE_SIZE * PREFETCH_PAGES;
   op->order_by = order_clause; /* Takes ownership */
@@ -1356,7 +1256,7 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   }
   free(where_clause);
 
-  if (!op->table_name || !async_start(op)) {
+  if (!async_start(op)) {
     async_free(op);
     free(op);
     return false;
@@ -1395,16 +1295,16 @@ bool tui_poll_background_load(TuiState *state) {
     ResultSet *new_data = (ResultSet *)op->result;
 
     /* Apply schema column names */
-    if (state->schema && new_data) {
-      size_t min_cols = state->schema->num_columns;
+    if (tab->schema && new_data) {
+      size_t min_cols = tab->schema->num_columns;
       if (new_data->num_columns < min_cols) {
         min_cols = new_data->num_columns;
       }
       for (size_t i = 0; i < min_cols; i++) {
-        if (state->schema->columns[i].name) {
+        if (tab->schema->columns[i].name) {
           free(new_data->columns[i].name);
-          new_data->columns[i].name = str_dup(state->schema->columns[i].name);
-          new_data->columns[i].type = state->schema->columns[i].type;
+          new_data->columns[i].name = str_dup(tab->schema->columns[i].name);
+          new_data->columns[i].type = tab->schema->columns[i].type;
         }
       }
     }
@@ -1469,11 +1369,8 @@ void tui_cancel_background_load(TuiState *state) {
 
 /* Check if speculative prefetch should start */
 void tui_check_speculative_prefetch(TuiState *state) {
-  if (!state || !state->data)
-    return;
-
   Tab *tab = TUI_TAB(state);
-  if (!tab)
+  if (!tab || !tab->data)
     return;
 
   /* Skip if background load already in progress */
@@ -1484,28 +1381,23 @@ void tui_check_speculative_prefetch(TuiState *state) {
   if (tab->type != TAB_TYPE_TABLE)
     return;
 
-  /* Get cursor position from VmTable if available */
-  size_t cursor_row = state->cursor_row;
-  VmTable *vm = get_vm_table(state);
-  if (vm) {
-    vm_table_get_cursor(vm, &cursor_row, NULL);
-  }
+  /* Get cursor position from tab (authoritative source) */
+  size_t cursor_row = tab->cursor_row;
 
   /* Calculate distance from edges */
-  size_t rows_from_end = state->data->num_rows > cursor_row
-                             ? state->data->num_rows - cursor_row
-                             : 0;
+  size_t rows_from_end =
+      tab->data->num_rows > cursor_row ? tab->data->num_rows - cursor_row : 0;
   size_t rows_from_start = cursor_row;
 
   /* Prefetch forward when within PREFETCH_THRESHOLD of end */
-  size_t loaded_end = state->loaded_offset + state->loaded_count;
-  if (rows_from_end < PREFETCH_THRESHOLD && loaded_end < state->total_rows) {
+  size_t loaded_end = tab->loaded_offset + tab->loaded_count;
+  if (rows_from_end < PREFETCH_THRESHOLD && loaded_end < tab->total_rows) {
     tui_start_background_load(state, true);
     return;
   }
 
   /* Prefetch backward when within PREFETCH_THRESHOLD of start */
-  if (rows_from_start < PREFETCH_THRESHOLD && state->loaded_offset > 0) {
+  if (rows_from_start < PREFETCH_THRESHOLD && tab->loaded_offset > 0) {
     tui_start_background_load(state, false);
   }
 }

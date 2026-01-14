@@ -11,6 +11,7 @@
 #include "../../../core/history.h"
 #include "../../../util/str.h"
 #include "../render_helpers.h"
+#include "../tui_internal.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -636,14 +637,9 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
 static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
                         int *cursor_x) {
   werase(win);
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  box(win, 0, 0);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
-
-  /* Title */
-  wattron(win, A_BOLD);
-  mvwprintw(win, 0, (ds->width - 15) / 2, " Configuration ");
-  wattroff(win, A_BOLD);
+  DRAW_BOX(win, COLOR_BORDER);
+  WITH_ATTR(win, A_BOLD,
+            mvwprintw(win, 0, (ds->width - 15) / 2, " Configuration "));
 
   /* Tab bar */
   draw_tab_bar(win, ds, 2, ds->width);
@@ -722,12 +718,9 @@ static char *capture_hotkey(WINDOW *parent) {
   keypad(dlg, TRUE);
 
   werase(dlg);
-  wattron(dlg, COLOR_PAIR(COLOR_BORDER));
-  box(dlg, 0, 0);
-  wattroff(dlg, COLOR_PAIR(COLOR_BORDER));
-  wattron(dlg, A_BOLD);
-  mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key ");
-  wattroff(dlg, A_BOLD);
+  DRAW_BOX(dlg, COLOR_BORDER);
+  WITH_ATTR(dlg, A_BOLD,
+            mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key "));
   mvwprintw(dlg, 3, (dlg_width - 20) / 2, "Press a key to add...");
   mvwprintw(dlg, 4, (dlg_width - 18) / 2, "(Esc to cancel)");
   wrefresh(dlg);
@@ -1174,20 +1167,11 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
   if (height > MAX_DIALOG_HEIGHT)
     height = MAX_DIALOG_HEIGHT;
 
-  int starty = (term_rows - height) / 2;
-  int startx = (term_cols - width) / 2;
-  if (starty < 0)
-    starty = 0;
-  if (startx < 0)
-    startx = 0;
-
-  WINDOW *dialog = newwin(height, width, starty, startx);
+  WINDOW *dialog = dialog_create(height, width, term_rows, term_cols);
   if (!dialog) {
     config_free(working_config);
     return result;
   }
-
-  keypad(dialog, TRUE);
 
   /* Initialize dialog state */
   DialogState ds = {0};

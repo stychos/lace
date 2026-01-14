@@ -9,21 +9,14 @@
 #ifndef LACE_CONFIG_CONFIG_H
 #define LACE_CONFIG_CONFIG_H
 
+#include "../core/constants.h"
 #include <stdbool.h>
 #include <stddef.h>
 
 #define CONFIG_FILE "config.json"
 
-/* Validation limits */
-#define CONFIG_PAGE_SIZE_MIN 10
-#define CONFIG_PAGE_SIZE_MAX 10000
-#define CONFIG_PAGE_SIZE_DEFAULT 500
-#define CONFIG_PREFETCH_PAGES_MIN 1
-#define CONFIG_PREFETCH_PAGES_MAX 10
-#define CONFIG_PREFETCH_PAGES_DEFAULT 2
-#define CONFIG_MAX_RESULT_ROWS_MIN 1000
-#define CONFIG_MAX_RESULT_ROWS_MAX (10 * 1024 * 1024) /* 10M rows */
-#define CONFIG_MAX_RESULT_ROWS_DEFAULT (1024 * 1024)  /* 1M rows */
+/* Validation limits are in core/constants.h:
+ * CONFIG_PAGE_SIZE_*, CONFIG_PREFETCH_PAGES_*, CONFIG_MAX_RESULT_ROWS_* */
 
 /* ============================================================================
  * Hotkey Categories - for conflict detection and UI grouping
@@ -73,6 +66,8 @@ typedef enum {
   HOTKEY_SHOW_SCHEMA,
   HOTKEY_REFRESH,
   HOTKEY_CYCLE_SORT,
+  HOTKEY_CELL_COPY,
+  HOTKEY_CELL_PASTE,
 
   /* General (HOTKEY_CAT_GENERAL) */
   HOTKEY_PREV_TAB,
@@ -156,6 +151,7 @@ typedef struct {
   int page_size;
   int prefetch_pages;
   bool restore_session;
+  bool restore_cursor_position; /* Restore cursor/scroll on session load */
   bool quit_confirmation;
   bool delete_confirmation;    /* Ask for confirmation before deleting rows */
   int max_result_rows;         /* Maximum rows returned by raw SQL queries */

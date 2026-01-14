@@ -10,9 +10,9 @@
 #include "../core/history.h"
 #include "../db/connstr.h"
 #include "../platform/platform.h"
-#include "../tui/ncurses/render_helpers.h"
 #include "../tui/ncurses/tui.h"
-#include "../tui/ncurses/tui_internal.h"
+#include "../util/json_helpers.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include "connections.h"
 #include <cJSON.h>
@@ -28,6 +28,21 @@
 #endif
 
 /* ============================================================================
+ * Password Callback
+ * ============================================================================
+ */
+
+/* Global password callback (set by UI layer before session_restore) */
+static SessionPasswordCallback s_password_callback = NULL;
+static void *s_password_callback_data = NULL;
+
+void session_set_password_callback(SessionPasswordCallback callback,
+                                   void *user_data) {
+  s_password_callback = callback;
+  s_password_callback_data = user_data;
+}
+
+/* ============================================================================
  * Internal Helpers
  * ============================================================================
  */
@@ -41,16 +56,6 @@ static size_t json_to_size_t(cJSON *num) {
   if (!isfinite(val) || val < 0 || val > (double)SIZE_MAX)
     return 0;
   return (size_t)val;
-}
-
-static void set_error(char **err, const char *fmt, ...) {
-  if (!err)
-    return;
-
-  va_list args;
-  va_start(args, fmt);
-  *err = str_vprintf(fmt, args);
-  va_end(args);
 }
 
 /* Note: History recording is now handled automatically by the database layer
@@ -71,12 +76,7 @@ static void calculate_tab_column_widths(Tab *tab) {
 
   free(tab->col_widths);
   tab->num_col_widths = data->num_columns;
-  tab->col_widths = calloc(tab->num_col_widths, sizeof(int));
-
-  if (!tab->col_widths) {
-    tab->num_col_widths = 0;
-    return;
-  }
+  tab->col_widths = safe_calloc(tab->num_col_widths, sizeof(int));
 
   /* Start with column name widths */
   for (size_t i = 0; i < data->num_columns; i++) {
@@ -133,7 +133,7 @@ static const char *find_connection_id_by_connstr(ConnectionManager *mgr,
       char *saved_connstr = connmgr_build_connstr(&item->connection);
       if (saved_connstr) {
         bool match = str_eq(saved_connstr, connstr);
-        free(saved_connstr);
+        str_secure_free(saved_connstr); /* Connection string may contain password */
         if (match) {
           return item->connection.id;
         }
@@ -264,9 +264,9 @@ static cJSON *serialize_filter(const ColumnFilter *f,
     col_name = schema->columns[f->column_index].name;
   }
 
-  cJSON_AddStringToObject(json, "column", col_name ? col_name : "");
-  cJSON_AddNumberToObject(json, "op", (int)f->op);
-  cJSON_AddStringToObject(json, "value", f->value);
+  JSON_ADD_STR(json, "column", col_name);
+  JSON_ADD_INT(json, "op", (int)f->op);
+  JSON_ADD_STR(json, "value", f->value);
 
   return json;
 }
@@ -287,29 +287,24 @@ static cJSON *serialize_filters(const TableFilters *filters,
   return arr;
 }
 
-static cJSON *serialize_tab_ui(const UITabState *ui) {
+static cJSON *serialize_tab_ui(const UITabState *ui, bool save_cursor) {
   cJSON *json = cJSON_CreateObject();
   if (!json)
     return NULL;
 
-  cJSON_AddBoolToObject(json, "sidebar_visible",
-                        ui ? ui->sidebar_visible : false);
-  cJSON_AddBoolToObject(json, "sidebar_focused",
-                        ui ? ui->sidebar_focused : false);
-  cJSON_AddNumberToObject(json, "sidebar_highlight",
-                          ui ? (int)ui->sidebar_highlight : 0);
-  cJSON_AddBoolToObject(json, "filters_visible",
-                        ui ? ui->filters_visible : false);
-  cJSON_AddBoolToObject(json, "filters_focused",
-                        ui ? ui->filters_focused : false);
-  cJSON_AddNumberToObject(json, "filters_cursor_row",
-                          ui ? (int)ui->filters_cursor_row : 0);
-  cJSON_AddNumberToObject(json, "filters_cursor_col",
-                          ui ? (int)ui->filters_cursor_col : 0);
-  cJSON_AddNumberToObject(json, "filters_scroll",
-                          ui ? (int)ui->filters_scroll : 0);
-  cJSON_AddBoolToObject(json, "query_focus_results",
-                        ui ? ui->query_focus_results : false);
+  JSON_ADD_BOOL(json, "sidebar_visible", ui ? ui->sidebar_visible : false);
+  JSON_ADD_BOOL(json, "sidebar_focused", ui ? ui->sidebar_focused : false);
+  JSON_ADD_BOOL(json, "filters_visible", ui ? ui->filters_visible : false);
+  JSON_ADD_BOOL(json, "filters_focused", ui ? ui->filters_focused : false);
+  JSON_ADD_BOOL(json, "query_focus_results", ui ? ui->query_focus_results : false);
+
+  /* Only save cursor/scroll positions if restore_cursor_position is enabled */
+  if (save_cursor) {
+    JSON_ADD_INT(json, "sidebar_highlight", ui ? (int)ui->sidebar_highlight : 0);
+    JSON_ADD_INT(json, "filters_cursor_row", ui ? (int)ui->filters_cursor_row : 0);
+    JSON_ADD_INT(json, "filters_cursor_col", ui ? (int)ui->filters_cursor_col : 0);
+    JSON_ADD_INT(json, "filters_scroll", ui ? (int)ui->filters_scroll : 0);
+  }
 
   return json;
 }
@@ -333,7 +328,7 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
     type_str = "TABLE";
   else if (tab->type == TAB_TYPE_QUERY)
     type_str = "QUERY";
-  cJSON_AddStringToObject(json, "type", type_str);
+  JSON_ADD_STR(json, "type", type_str);
 
   /* Connection ID - find saved connection matching this tab's connection */
   Connection *conn = app_get_connection(state->app, tab->connection_index);
@@ -345,26 +340,30 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
     /* Fallback: try to match by connection string */
     conn_id = find_connection_id_by_connstr(connmgr, conn->connstr);
   }
-  cJSON_AddStringToObject(json, "connection_id", conn_id ? conn_id : "");
+  JSON_ADD_STR(json, "connection_id", conn_id);
 
   /* Table name (for TABLE tabs) */
   if (tab->type == TAB_TYPE_TABLE && tab->table_name) {
-    cJSON_AddStringToObject(json, "table_name", tab->table_name);
+    JSON_ADD_STR(json, "table_name", tab->table_name);
   }
 
-  /* Cursor/scroll state - save as absolute positions (loaded_offset + relative)
-   */
-  cJSON *cursor = cJSON_CreateArray();
-  size_t abs_cursor_row = tab->loaded_offset + tab->cursor_row;
-  cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)abs_cursor_row));
-  cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)tab->cursor_col));
-  cJSON_AddItemToObject(json, "cursor", cursor);
+  /* Cursor/scroll state - only save if restore_cursor_position is enabled */
+  bool save_cursor = state->app->config &&
+                     state->app->config->general.restore_cursor_position;
+  if (save_cursor) {
+    /* Save as absolute positions (loaded_offset + relative) */
+    cJSON *cursor = cJSON_CreateArray();
+    size_t abs_cursor_row = tab->loaded_offset + tab->cursor_row;
+    cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)abs_cursor_row));
+    cJSON_AddItemToArray(cursor, cJSON_CreateNumber((double)tab->cursor_col));
+    cJSON_AddItemToObject(json, "cursor", cursor);
 
-  cJSON *scroll = cJSON_CreateArray();
-  size_t abs_scroll_row = tab->loaded_offset + tab->scroll_row;
-  cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)abs_scroll_row));
-  cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)tab->scroll_col));
-  cJSON_AddItemToObject(json, "scroll", scroll);
+    cJSON *scroll = cJSON_CreateArray();
+    size_t abs_scroll_row = tab->loaded_offset + tab->scroll_row;
+    cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)abs_scroll_row));
+    cJSON_AddItemToArray(scroll, cJSON_CreateNumber((double)tab->scroll_col));
+    cJSON_AddItemToObject(json, "scroll", scroll);
+  }
 
   /* Sort state (for TABLE tabs) - save column names, not indices */
   if (tab->type == TAB_TYPE_TABLE && tab->num_sort_entries > 0 && tab->schema) {
@@ -377,9 +376,8 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
       if (!col_name)
         continue;
       cJSON *entry = cJSON_CreateObject();
-      cJSON_AddStringToObject(entry, "column", col_name);
-      cJSON_AddNumberToObject(entry, "direction",
-                              tab->sort_entries[i].direction);
+      JSON_ADD_STR(entry, "column", col_name);
+      JSON_ADD_INT(entry, "direction", tab->sort_entries[i].direction);
       cJSON_AddItemToArray(sort_arr, entry);
     }
     cJSON_AddItemToObject(json, "sort", sort_arr);
@@ -395,16 +393,17 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
 
   /* Query text (for QUERY tabs) */
   if (tab->type == TAB_TYPE_QUERY && tab->query_text) {
-    cJSON_AddStringToObject(json, "query_text", tab->query_text);
-    cJSON_AddNumberToObject(json, "query_cursor", (double)tab->query_cursor);
-    cJSON_AddNumberToObject(json, "query_scroll_line",
-                            (double)tab->query_scroll_line);
-    cJSON_AddNumberToObject(json, "query_scroll_col",
-                            (double)tab->query_scroll_col);
+    JSON_ADD_STR(json, "query_text", tab->query_text);
+    /* Only save cursor position if restore_cursor_position is enabled */
+    if (save_cursor) {
+      JSON_ADD_NUM(json, "query_cursor", tab->query_cursor);
+      JSON_ADD_NUM(json, "query_scroll_line", tab->query_scroll_line);
+      JSON_ADD_NUM(json, "query_scroll_col", tab->query_scroll_col);
+    }
   }
 
   /* UI state */
-  cJSON *ui_json = serialize_tab_ui(ui);
+  cJSON *ui_json = serialize_tab_ui(ui, save_cursor);
   if (ui_json) {
     cJSON_AddItemToObject(json, "ui", ui_json);
   }
@@ -423,8 +422,8 @@ static cJSON *serialize_workspace(TuiState *state, size_t ws_idx,
   if (!json)
     return NULL;
 
-  cJSON_AddStringToObject(json, "name", ws->name[0] ? ws->name : "");
-  cJSON_AddNumberToObject(json, "current_tab", (double)ws->current_tab);
+  JSON_ADD_STR(json, "name", ws->name[0] ? ws->name : "");
+  JSON_ADD_NUM(json, "current_tab", ws->current_tab);
 
   cJSON *tabs = cJSON_CreateArray();
   if (!tabs) {
@@ -451,7 +450,7 @@ static cJSON *serialize_workspace(TuiState *state, size_t ws_idx,
 
 bool session_save(struct TuiState *state, char **error) {
   if (!state || !state->app) {
-    set_error(error, "Invalid state");
+    err_setf(error, "Invalid state");
     return false;
   }
 
@@ -479,7 +478,7 @@ bool session_save(struct TuiState *state, char **error) {
   /* Ensure config directory exists */
   const char *config_dir = platform_get_config_dir();
   if (!config_dir) {
-    set_error(error, "Failed to get config directory");
+    err_setf(error, "Failed to get config directory");
     if (connmgr)
       connmgr_free(connmgr);
     return false;
@@ -487,7 +486,7 @@ bool session_save(struct TuiState *state, char **error) {
 
   if (!platform_dir_exists(config_dir)) {
     if (!platform_mkdir(config_dir)) {
-      set_error(error, "Failed to create config directory");
+      err_setf(error, "Failed to create config directory");
       if (connmgr)
         connmgr_free(connmgr);
       return false;
@@ -497,7 +496,7 @@ bool session_save(struct TuiState *state, char **error) {
   /* Build JSON */
   cJSON *json = cJSON_CreateObject();
   if (!json) {
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     if (connmgr)
       connmgr_free(connmgr);
     return false;
@@ -505,9 +504,9 @@ bool session_save(struct TuiState *state, char **error) {
 
   /* Settings */
   cJSON *settings = cJSON_CreateObject();
-  cJSON_AddBoolToObject(settings, "header_visible", state->app->header_visible);
-  cJSON_AddBoolToObject(settings, "status_visible", state->app->status_visible);
-  cJSON_AddNumberToObject(settings, "page_size", (double)state->app->page_size);
+  JSON_ADD_BOOL(settings, "header_visible", state->app->header_visible);
+  JSON_ADD_BOOL(settings, "status_visible", state->app->status_visible);
+  JSON_ADD_NUM(settings, "page_size", state->app->page_size);
   cJSON_AddItemToObject(json, "settings", settings);
 
   /* Workspaces */
@@ -520,8 +519,7 @@ bool session_save(struct TuiState *state, char **error) {
   }
   cJSON_AddItemToObject(json, "workspaces", workspaces);
 
-  cJSON_AddNumberToObject(json, "current_workspace",
-                          (double)state->app->current_workspace);
+  JSON_ADD_NUM(json, "current_workspace", state->app->current_workspace);
 
   if (connmgr)
     connmgr_free(connmgr);
@@ -530,7 +528,7 @@ bool session_save(struct TuiState *state, char **error) {
   char *path = session_get_path();
   if (!path) {
     cJSON_Delete(json);
-    set_error(error, "Failed to get session path");
+    err_setf(error, "Failed to get session path");
     return false;
   }
 
@@ -539,7 +537,7 @@ bool session_save(struct TuiState *state, char **error) {
 
   if (!content) {
     free(path);
-    set_error(error, "Failed to serialize JSON");
+    err_setf(error, "Failed to serialize JSON");
     return false;
   }
 
@@ -549,8 +547,8 @@ bool session_save(struct TuiState *state, char **error) {
 #ifndef LACE_OS_WINDOWS
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (fd < 0) {
-    free(content);
-    set_error(error, "Failed to open %s for writing: %s", path,
+    str_secure_free(content); /* Content may contain connection strings */
+    err_setf(error, "Failed to open %s for writing: %s", path,
               strerror(errno));
     free(path);
     return false;
@@ -558,8 +556,8 @@ bool session_save(struct TuiState *state, char **error) {
   f = fdopen(fd, "w");
   if (!f) {
     close(fd);
-    free(content);
-    set_error(error, "Failed to open %s for writing: %s", path,
+    str_secure_free(content); /* Content may contain connection strings */
+    err_setf(error, "Failed to open %s for writing: %s", path,
               strerror(errno));
     free(path);
     return false;
@@ -567,8 +565,8 @@ bool session_save(struct TuiState *state, char **error) {
 #else
   f = fopen(path, "w");
   if (!f) {
-    free(content);
-    set_error(error, "Failed to open %s for writing: %s", path,
+    str_secure_free(content); /* Content may contain connection strings */
+    err_setf(error, "Failed to open %s for writing: %s", path,
               strerror(errno));
     free(path);
     return false;
@@ -578,11 +576,11 @@ bool session_save(struct TuiState *state, char **error) {
   size_t len = strlen(content);
   size_t written = fwrite(content, 1, len, f);
   fclose(f);
-  free(content);
+  str_secure_free(content); /* Content may contain connection strings */
   free(path);
 
   if (written != len) {
-    set_error(error, "Failed to write all data");
+    err_setf(error, "Failed to write all data");
     return false;
   }
 
@@ -595,15 +593,21 @@ bool session_save(struct TuiState *state, char **error) {
  */
 
 static bool parse_filter(cJSON *json, SessionFilter *f) {
-  cJSON *column = cJSON_GetObjectItem(json, "column");
-  cJSON *op = cJSON_GetObjectItem(json, "op");
-  cJSON *value = cJSON_GetObjectItem(json, "value");
+  f->column_name = json_dup_string_or(json, "column", "");
+  if (!f->column_name)
+    return false;
 
-  f->column_name = str_dup(cJSON_IsString(column) ? column->valuestring : "");
-  f->op = (cJSON_IsNumber(op) && op->valueint >= 0) ? op->valueint : 0;
-  f->value = str_dup(cJSON_IsString(value) ? value->valuestring : "");
+  int op = json_get_int(json, "op", 0);
+  f->op = (op >= 0) ? op : 0;
 
-  return f->column_name && f->value;
+  f->value = json_dup_string_or(json, "value", "");
+  if (!f->value) {
+    free(f->column_name);
+    f->column_name = NULL;
+    return false;
+  }
+
+  return true;
 }
 
 static bool parse_tab_ui(cJSON *json, SessionTabUI *ui) {
@@ -621,43 +625,15 @@ static bool parse_tab_ui(cJSON *json, SessionTabUI *ui) {
     return true;
   }
 
-  cJSON *sidebar_visible = cJSON_GetObjectItem(json, "sidebar_visible");
-  cJSON *sidebar_focused = cJSON_GetObjectItem(json, "sidebar_focused");
-  cJSON *sidebar_highlight = cJSON_GetObjectItem(json, "sidebar_highlight");
-  cJSON *filters_visible = cJSON_GetObjectItem(json, "filters_visible");
-  cJSON *filters_focused = cJSON_GetObjectItem(json, "filters_focused");
-  cJSON *filters_cursor_row = cJSON_GetObjectItem(json, "filters_cursor_row");
-  cJSON *filters_cursor_col = cJSON_GetObjectItem(json, "filters_cursor_col");
-  cJSON *filters_scroll = cJSON_GetObjectItem(json, "filters_scroll");
-  cJSON *query_focus_results = cJSON_GetObjectItem(json, "query_focus_results");
-
-  ui->sidebar_visible =
-      cJSON_IsBool(sidebar_visible) ? cJSON_IsTrue(sidebar_visible) : true;
-  ui->sidebar_focused =
-      cJSON_IsBool(sidebar_focused) ? cJSON_IsTrue(sidebar_focused) : false;
-  ui->sidebar_highlight =
-      (cJSON_IsNumber(sidebar_highlight) && sidebar_highlight->valueint >= 0)
-          ? (size_t)sidebar_highlight->valueint
-          : 0;
-  ui->filters_visible =
-      cJSON_IsBool(filters_visible) ? cJSON_IsTrue(filters_visible) : false;
-  ui->filters_focused =
-      cJSON_IsBool(filters_focused) ? cJSON_IsTrue(filters_focused) : false;
-  ui->filters_cursor_row =
-      (cJSON_IsNumber(filters_cursor_row) && filters_cursor_row->valueint >= 0)
-          ? (size_t)filters_cursor_row->valueint
-          : 0;
-  ui->filters_cursor_col =
-      (cJSON_IsNumber(filters_cursor_col) && filters_cursor_col->valueint >= 0)
-          ? (size_t)filters_cursor_col->valueint
-          : 0;
-  ui->filters_scroll =
-      (cJSON_IsNumber(filters_scroll) && filters_scroll->valueint >= 0)
-          ? (size_t)filters_scroll->valueint
-          : 0;
-  ui->query_focus_results = cJSON_IsBool(query_focus_results)
-                                ? cJSON_IsTrue(query_focus_results)
-                                : false;
+  ui->sidebar_visible = json_get_bool(json, "sidebar_visible", true);
+  ui->sidebar_focused = json_get_bool(json, "sidebar_focused", false);
+  ui->sidebar_highlight = json_get_size(json, "sidebar_highlight", 0);
+  ui->filters_visible = json_get_bool(json, "filters_visible", false);
+  ui->filters_focused = json_get_bool(json, "filters_focused", false);
+  ui->filters_cursor_row = json_get_size(json, "filters_cursor_row", 0);
+  ui->filters_cursor_col = json_get_size(json, "filters_cursor_col", 0);
+  ui->filters_scroll = json_get_size(json, "filters_scroll", 0);
+  ui->query_focus_results = json_get_bool(json, "query_focus_results", false);
 
   return true;
 }
@@ -665,9 +641,7 @@ static bool parse_tab_ui(cJSON *json, SessionTabUI *ui) {
 static bool parse_tab(cJSON *json, SessionTab *tab) {
   memset(tab, 0, sizeof(SessionTab));
 
-  cJSON *type = cJSON_GetObjectItem(json, "type");
-  const char *type_str = cJSON_IsString(type) ? type->valuestring : "";
-
+  const char *type_str = json_get_string(json, "type", "");
   if (str_eq(type_str, "TABLE"))
     tab->type = TAB_TYPE_TABLE;
   else if (str_eq(type_str, "QUERY"))
@@ -675,96 +649,68 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   else
     tab->type = TAB_TYPE_CONNECTION;
 
-  cJSON *conn_id = cJSON_GetObjectItem(json, "connection_id");
-  tab->connection_id =
-      str_dup(cJSON_IsString(conn_id) ? conn_id->valuestring : "");
+  tab->connection_id = json_dup_string_or(json, "connection_id", "");
+  tab->table_name = json_dup_string_or(json, "table_name", "");
 
-  cJSON *table_name = cJSON_GetObjectItem(json, "table_name");
-  tab->table_name =
-      str_dup(cJSON_IsString(table_name) ? table_name->valuestring : "");
-
-  /* Cursor/scroll - safely convert to size_t (validates finite, non-negative)
-   */
-  cJSON *cursor = cJSON_GetObjectItem(json, "cursor");
-  if (cJSON_IsArray(cursor) && cJSON_GetArraySize(cursor) >= 2) {
-    tab->cursor_row = json_to_size_t(cJSON_GetArrayItem(cursor, 0));
-    tab->cursor_col = json_to_size_t(cJSON_GetArrayItem(cursor, 1));
+  /* Cursor/scroll - safely convert to size_t */
+  cJSON *cursor = json_get_array(json, "cursor");
+  if (cursor && json_array_size(cursor) >= 2) {
+    tab->cursor_row = json_to_size_t(json_get_array_item(cursor, 0));
+    tab->cursor_col = json_to_size_t(json_get_array_item(cursor, 1));
   }
 
-  cJSON *scroll = cJSON_GetObjectItem(json, "scroll");
-  if (cJSON_IsArray(scroll) && cJSON_GetArraySize(scroll) >= 2) {
-    tab->scroll_row = json_to_size_t(cJSON_GetArrayItem(scroll, 0));
-    tab->scroll_col = json_to_size_t(cJSON_GetArrayItem(scroll, 1));
+  cJSON *scroll = json_get_array(json, "scroll");
+  if (scroll && json_array_size(scroll) >= 2) {
+    tab->scroll_row = json_to_size_t(json_get_array_item(scroll, 0));
+    tab->scroll_col = json_to_size_t(json_get_array_item(scroll, 1));
   }
 
   /* Sort state (multi-column) - loads column names */
-  cJSON *sort_arr = cJSON_GetObjectItem(json, "sort");
-  if (cJSON_IsArray(sort_arr)) {
-    size_t count = (size_t)cJSON_GetArraySize(sort_arr);
+  cJSON *sort_arr = json_get_array(json, "sort");
+  if (sort_arr) {
+    size_t count = (size_t)json_array_size(sort_arr);
     if (count > 0 && count <= MAX_SORT_COLUMNS) {
-      tab->sort_entries = calloc(count, sizeof(SessionSortEntry));
-      if (tab->sort_entries) {
-        cJSON *entry;
-        cJSON_ArrayForEach(entry, sort_arr) {
-          if (tab->num_sort_entries >= count)
-            break;
-          cJSON *col = cJSON_GetObjectItem(entry, "column");
-          cJSON *dir = cJSON_GetObjectItem(entry, "direction");
-          if (cJSON_IsString(col) && cJSON_IsNumber(dir)) {
-            char *col_name = str_dup(col->valuestring);
-            if (!col_name)
-              continue; /* Skip on allocation failure */
-            tab->sort_entries[tab->num_sort_entries].column_name = col_name;
-            tab->sort_entries[tab->num_sort_entries].direction = dir->valueint;
-            tab->num_sort_entries++;
-          }
+      tab->sort_entries = safe_calloc(count, sizeof(SessionSortEntry));
+      cJSON *entry;
+      cJSON_ArrayForEach(entry, sort_arr) {
+        if (tab->num_sort_entries >= count)
+          break;
+        const char *col_str = json_get_string(entry, "column", NULL);
+        int dir = json_get_int(entry, "direction", -1);
+        if (col_str && dir >= 0) {
+          tab->sort_entries[tab->num_sort_entries].column_name = str_dup(col_str);
+          tab->sort_entries[tab->num_sort_entries].direction = dir;
+          tab->num_sort_entries++;
         }
       }
     }
   }
 
   /* Filters */
-  cJSON *filters = cJSON_GetObjectItem(json, "filters");
-  if (cJSON_IsArray(filters)) {
-    size_t count = (size_t)cJSON_GetArraySize(filters);
+  cJSON *filters = json_get_array(json, "filters");
+  if (filters) {
+    size_t count = (size_t)json_array_size(filters);
     if (count > 0) {
-      tab->filters = calloc(count, sizeof(SessionFilter));
-      if (tab->filters) {
-        cJSON *f;
-        cJSON_ArrayForEach(f, filters) {
-          if (parse_filter(f, &tab->filters[tab->num_filters])) {
-            tab->num_filters++;
-          }
+      tab->filters = safe_calloc(count, sizeof(SessionFilter));
+      cJSON *f;
+      cJSON_ArrayForEach(f, filters) {
+        if (tab->num_filters >= count)
+          break; /* Safety check: don't exceed allocated capacity */
+        if (parse_filter(f, &tab->filters[tab->num_filters])) {
+          tab->num_filters++;
         }
       }
     }
   }
 
   /* Query state */
-  cJSON *query_text = cJSON_GetObjectItem(json, "query_text");
-  tab->query_text =
-      str_dup(cJSON_IsString(query_text) ? query_text->valuestring : "");
-
-  cJSON *query_cursor = cJSON_GetObjectItem(json, "query_cursor");
-  tab->query_cursor =
-      (cJSON_IsNumber(query_cursor) && query_cursor->valueint >= 0)
-          ? (size_t)query_cursor->valueint
-          : 0;
-
-  cJSON *query_scroll_line = cJSON_GetObjectItem(json, "query_scroll_line");
-  tab->query_scroll_line =
-      (cJSON_IsNumber(query_scroll_line) && query_scroll_line->valueint >= 0)
-          ? (size_t)query_scroll_line->valueint
-          : 0;
-
-  cJSON *query_scroll_col = cJSON_GetObjectItem(json, "query_scroll_col");
-  tab->query_scroll_col =
-      (cJSON_IsNumber(query_scroll_col) && query_scroll_col->valueint >= 0)
-          ? (size_t)query_scroll_col->valueint
-          : 0;
+  tab->query_text = json_dup_string_or(json, "query_text", "");
+  tab->query_cursor = json_get_size(json, "query_cursor", 0);
+  tab->query_scroll_line = json_get_size(json, "query_scroll_line", 0);
+  tab->query_scroll_col = json_get_size(json, "query_scroll_col", 0);
 
   /* UI state */
-  cJSON *ui = cJSON_GetObjectItem(json, "ui");
+  cJSON *ui = json_get_object(json, "ui");
   parse_tab_ui(ui, &tab->ui);
 
   /* Require non-empty connection_id for valid tab */
@@ -774,25 +720,18 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
 static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
   memset(ws, 0, sizeof(SessionWorkspace));
 
-  cJSON *name = cJSON_GetObjectItem(json, "name");
-  ws->name = str_dup(cJSON_IsString(name) ? name->valuestring : "");
+  ws->name = json_dup_string_or(json, "name", "");
+  ws->current_tab = json_get_size(json, "current_tab", 0);
 
-  cJSON *current_tab = cJSON_GetObjectItem(json, "current_tab");
-  ws->current_tab = (cJSON_IsNumber(current_tab) && current_tab->valueint >= 0)
-                        ? (size_t)current_tab->valueint
-                        : 0;
-
-  cJSON *tabs = cJSON_GetObjectItem(json, "tabs");
-  if (cJSON_IsArray(tabs)) {
-    size_t count = (size_t)cJSON_GetArraySize(tabs);
+  cJSON *tabs = json_get_array(json, "tabs");
+  if (tabs) {
+    size_t count = (size_t)json_array_size(tabs);
     if (count > 0) {
-      ws->tabs = calloc(count, sizeof(SessionTab));
-      if (ws->tabs) {
-        cJSON *t;
-        cJSON_ArrayForEach(t, tabs) {
-          if (parse_tab(t, &ws->tabs[ws->num_tabs])) {
-            ws->num_tabs++;
-          }
+      ws->tabs = safe_calloc(count, sizeof(SessionTab));
+      cJSON *t;
+      cJSON_ArrayForEach(t, tabs) {
+        if (parse_tab(t, &ws->tabs[ws->num_tabs])) {
+          ws->num_tabs++;
         }
       }
     }
@@ -809,7 +748,7 @@ static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
 Session *session_load(char **error) {
   char *path = session_get_path();
   if (!path) {
-    set_error(error, "Failed to get config directory");
+    err_setf(error, "Failed to get config directory");
     return NULL;
   }
 
@@ -823,7 +762,7 @@ Session *session_load(char **error) {
   /* Read file */
   FILE *f = fopen(path, "r");
   if (!f) {
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return NULL;
   }
@@ -834,25 +773,19 @@ Session *session_load(char **error) {
 
   if (size <= 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
     fclose(f);
-    set_error(error, "Invalid file size");
+    err_setf(error, "Invalid file size");
     free(path);
     return NULL;
   }
 
-  char *content = malloc((size_t)size + 1);
-  if (!content) {
-    fclose(f);
-    set_error(error, "Out of memory");
-    free(path);
-    return NULL;
-  }
+  char *content = safe_malloc((size_t)size + 1);
 
   size_t read_bytes = fread(content, 1, (size_t)size, f);
   fclose(f);
 
   if (read_bytes != (size_t)size) {
-    free(content);
-    set_error(error, "Failed to read complete file (got %zu of %ld bytes)",
+    str_secure_free(content); /* Content may contain connection strings */
+    err_setf(error, "Failed to read complete file (got %zu of %ld bytes)",
               read_bytes, size);
     free(path);
     return NULL;
@@ -863,36 +796,25 @@ Session *session_load(char **error) {
 
   /* Parse JSON */
   cJSON *json = cJSON_Parse(content);
-  free(content);
+  str_secure_free(content); /* Content may contain connection strings */
 
   if (!json) {
     const char *err_ptr = cJSON_GetErrorPtr();
-    set_error(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
+    err_setf(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
     return NULL;
   }
 
   /* Create session */
-  Session *session = calloc(1, sizeof(Session));
-  if (!session) {
-    cJSON_Delete(json);
-    set_error(error, "Out of memory");
-    return NULL;
-  }
+  Session *session = safe_calloc(1, sizeof(Session));
 
   /* Parse settings */
-  cJSON *settings = cJSON_GetObjectItem(json, "settings");
-  if (cJSON_IsObject(settings)) {
-    cJSON *header = cJSON_GetObjectItem(settings, "header_visible");
-    cJSON *status = cJSON_GetObjectItem(settings, "status_visible");
-    cJSON *page_size = cJSON_GetObjectItem(settings, "page_size");
-
-    session->header_visible =
-        cJSON_IsBool(header) ? cJSON_IsTrue(header) : true;
-    session->status_visible =
-        cJSON_IsBool(status) ? cJSON_IsTrue(status) : true;
-    session->page_size = (cJSON_IsNumber(page_size) && page_size->valueint > 0)
-                             ? (size_t)page_size->valueint
-                             : 500;
+  cJSON *settings = json_get_object(json, "settings");
+  if (settings) {
+    session->header_visible = json_get_bool(settings, "header_visible", true);
+    session->status_visible = json_get_bool(settings, "status_visible", true);
+    session->page_size = json_get_size(settings, "page_size", 500);
+    if (session->page_size == 0)
+      session->page_size = 500;
   } else {
     session->header_visible = true;
     session->status_visible = true;
@@ -900,28 +822,24 @@ Session *session_load(char **error) {
   }
 
   /* Parse workspaces */
-  cJSON *workspaces = cJSON_GetObjectItem(json, "workspaces");
-  if (cJSON_IsArray(workspaces)) {
-    size_t count = (size_t)cJSON_GetArraySize(workspaces);
+  cJSON *workspaces = json_get_array(json, "workspaces");
+  if (workspaces) {
+    size_t count = (size_t)json_array_size(workspaces);
     if (count > 0) {
-      session->workspaces = calloc(count, sizeof(SessionWorkspace));
-      if (session->workspaces) {
-        cJSON *ws;
-        cJSON_ArrayForEach(ws, workspaces) {
-          if (parse_workspace(ws,
-                              &session->workspaces[session->num_workspaces])) {
-            session->num_workspaces++;
-          }
+      session->workspaces = safe_calloc(count, sizeof(SessionWorkspace));
+      cJSON *ws;
+      cJSON_ArrayForEach(ws, workspaces) {
+        if (session->num_workspaces >= count)
+          break; /* Safety check: don't exceed allocated capacity */
+        if (parse_workspace(ws,
+                            &session->workspaces[session->num_workspaces])) {
+          session->num_workspaces++;
         }
       }
     }
   }
 
-  cJSON *current_ws = cJSON_GetObjectItem(json, "current_workspace");
-  session->current_workspace =
-      (cJSON_IsNumber(current_ws) && current_ws->valueint >= 0)
-          ? (size_t)current_ws->valueint
-          : 0;
+  session->current_workspace = json_get_size(json, "current_workspace", 0);
 
   cJSON_Delete(json);
   return session;
@@ -954,184 +872,6 @@ static bool is_auth_error(const char *err) {
   return false;
 }
 
-/* Password input dialog (masks input with asterisks) */
-static char *show_password_dialog(TuiState *state, const char *title,
-                                  const char *label, const char *error_msg) {
-  (void)state;
-
-  int screen_h, screen_w;
-  getmaxyx(stdscr, screen_h, screen_w);
-
-  /* Ensure minimum usable size */
-  if (screen_h < 12 || screen_w < 40)
-    return NULL;
-
-  /* Clear screen for clean dialog display */
-  clear();
-  refresh();
-
-  int dlg_height = 9;
-  int dlg_width = 55;
-  if (dlg_width > screen_w - 4)
-    dlg_width = screen_w - 4;
-
-  int dlg_y = (screen_h - dlg_height) / 2;
-  int dlg_x = (screen_w - dlg_width) / 2;
-  if (dlg_y < 0)
-    dlg_y = 0;
-  if (dlg_x < 0)
-    dlg_x = 0;
-
-  /* Create dialog window */
-  WINDOW *dlg = newwin(dlg_height, dlg_width, dlg_y, dlg_x);
-  if (!dlg)
-    return NULL;
-
-  keypad(dlg, TRUE);
-
-  char buf[128];
-  size_t len = 0;
-  size_t cursor = 0;
-  buf[0] = '\0';
-
-  /* Focus: 0 = input, 1 = OK button, 2 = Cancel button */
-  int focus = 0;
-
-  char *result = NULL;
-  bool running = true;
-
-  while (running) {
-    werase(dlg);
-    box(dlg, 0, 0);
-
-    /* Title */
-    int title_len = (int)strlen(title) + 2;
-    wattron(dlg, A_BOLD);
-    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
-    wattroff(dlg, A_BOLD);
-
-    /* Label */
-    mvwprintw(dlg, 2, 2, "%s", label);
-
-    /* Password input field */
-    if (focus == 0) {
-      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
-    mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
-    /* Show asterisks instead of actual password */
-    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
-      mvwaddch(dlg, 3, 2 + (int)i, '*');
-    }
-    if (focus == 0) {
-      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
-    }
-
-    /* Error message */
-    if (error_msg && error_msg[0]) {
-      wattron(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
-      int max_err_len = dlg_width - 4;
-      mvwprintw(dlg, 4, 2, "%.*s", max_err_len, error_msg);
-      wattroff(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
-    }
-
-    /* Separator line */
-    wattron(dlg, A_DIM);
-    mvwaddch(dlg, 5, 0, ACS_LTEE);
-    mvwhline(dlg, 5, 1, ACS_HLINE, dlg_width - 2);
-    mvwaddch(dlg, 5, dlg_width - 1, ACS_RTEE);
-    wattroff(dlg, A_DIM);
-
-    /* Buttons */
-    int btn_x = dlg_width / 2 - 10;
-    if (focus == 1)
-      wattron(dlg, A_REVERSE);
-    mvwprintw(dlg, 7, btn_x, "[ OK ]");
-    if (focus == 1)
-      wattroff(dlg, A_REVERSE);
-    if (focus == 2)
-      wattron(dlg, A_REVERSE);
-    mvwprintw(dlg, 7, btn_x + 8, "[ Cancel ]");
-    if (focus == 2)
-      wattroff(dlg, A_REVERSE);
-
-    if (focus == 0) {
-      wmove(dlg, 3, 2 + (int)cursor);
-      curs_set(1);
-    } else {
-      curs_set(0);
-    }
-    wrefresh(dlg);
-
-    int ch = wgetch(dlg);
-    UiEvent event;
-    render_translate_key(ch, &event);
-
-    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
-      running = false;
-    } else if (render_event_is_special(&event, UI_KEY_TAB) ||
-               render_event_is_special(&event, UI_KEY_DOWN)) {
-      focus = (focus + 1) % 3;
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
-      focus = (focus + 2) % 3;
-    } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
-      if (focus == 2) {
-        /* Cancel */
-        running = false;
-      } else {
-        /* OK - return even if empty (user might want empty password) */
-        result = str_dup(buf);
-        running = false;
-      }
-    } else if (focus == 0) {
-      /* Input field handling */
-      if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
-        if (cursor > 0 && cursor <= len) {
-          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
-          cursor--;
-          len--;
-        }
-      } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0)
-          cursor--;
-      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len)
-          cursor++;
-      } else if (render_event_is_special(&event, UI_KEY_HOME)) {
-        cursor = 0;
-      } else if (render_event_is_special(&event, UI_KEY_END)) {
-        cursor = len;
-      } else {
-        int key_char = render_event_get_char(&event);
-        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
-            len < sizeof(buf) - 1) {
-          memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
-          buf[cursor] = (char)key_char;
-          cursor++;
-          len++;
-        }
-      }
-    } else {
-      /* Button navigation with left/right */
-      if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (focus == 2)
-          focus = 1;
-      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (focus == 1)
-          focus = 2;
-      }
-    }
-  }
-
-  curs_set(0);
-  delwin(dlg);
-
-  /* Force screen refresh to clear dialog remnants */
-  touchwin(stdscr);
-  refresh();
-
-  return result;
-}
-
 /* ============================================================================
  * Restore Session
  * ============================================================================
@@ -1142,21 +882,21 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
                                  ConnectionManager *connmgr, char **error) {
 
   if (!conn_id || !conn_id[0]) {
-    set_error(error, "Empty connection ID");
+    err_setf(error, "Empty connection ID");
     return (size_t)-1;
   }
 
   /* Find saved connection by ID */
   ConnectionItem *item = connmgr_find_by_id(connmgr, conn_id);
   if (!item || !connmgr_is_connection(item)) {
-    set_error(error, "Connection not found: %s", conn_id);
+    err_setf(error, "Connection not found: %s", conn_id);
     return (size_t)-1;
   }
 
   /* Build connection string */
   char *connstr = connmgr_build_connstr(&item->connection);
   if (!connstr) {
-    set_error(error, "Failed to build connection string");
+    err_setf(error, "Failed to build connection string");
     return (size_t)-1;
   }
 
@@ -1164,7 +904,7 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
   for (size_t i = 0; i < state->app->num_connections; i++) {
     Connection *conn = &state->app->connections[i];
     if (conn->active && conn->connstr && str_eq(conn->connstr, connstr)) {
-      free(connstr);
+      str_secure_free(connstr); /* Connection string may contain password */
       return i;
     }
   }
@@ -1184,20 +924,25 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
       saved->driver && saved->driver[0] && strcmp(saved->driver, "sqlite") != 0;
 
   while (!db_conn && is_network_db && is_auth_error(conn_err)) {
-    /* Auth error - prompt for password */
+    /* Auth error - prompt for password via callback */
+    if (!s_password_callback) {
+      /* No callback set - cannot prompt for password */
+      break;
+    }
+
     char title[128];
     snprintf(title, sizeof(title), "Password for %s",
              saved->name && saved->name[0] ? saved->name : "connection");
 
-    char *password =
-        show_password_dialog(state, title, "Enter password:", conn_err);
+    char *password = s_password_callback(s_password_callback_data, title,
+                                         "Enter password:", conn_err);
     if (!password) {
       /* User cancelled - stop trying */
       break;
     }
 
     /* Rebuild connection string with password */
-    free(connstr);
+    str_secure_free(connstr); /* Connection string may contain password */
     free(conn_err);
     conn_err = NULL;
 
@@ -1211,7 +956,7 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     str_secure_free(password);
 
     if (!connstr) {
-      set_error(error, "Failed to build connection string");
+      err_setf(error, "Failed to build connection string");
       return (size_t)-1;
     }
 
@@ -1221,10 +966,10 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
   }
 
   if (!db_conn) {
-    set_error(error, "Connection failed: %s",
+    err_setf(error, "Connection failed: %s",
               conn_err ? conn_err : "Unknown error");
     free(conn_err);
-    free(connstr);
+    str_secure_free(connstr); /* Connection string may contain password */
     return (size_t)-1;
   }
 
@@ -1236,11 +981,11 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
 
   /* Add to connection pool */
   Connection *conn = app_add_connection(state->app, db_conn, connstr);
-  free(connstr);
+  str_secure_free(connstr); /* Connection string may contain password */
 
   if (!conn) {
     db_disconnect(db_conn);
-    set_error(error, "Failed to add connection to pool");
+    err_setf(error, "Failed to add connection to pool");
     return (size_t)-1;
   }
 
@@ -1291,7 +1036,7 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
 
   Connection *conn = app_get_connection(state->app, conn_idx);
   if (!conn || !conn->conn) {
-    set_error(error, "Invalid connection");
+    err_setf(error, "Invalid connection");
     return false;
   }
 
@@ -1316,17 +1061,20 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
   }
 
   if (!tab) {
-    set_error(error, "Failed to create tab");
+    err_setf(error, "Failed to create tab");
     return false;
   }
 
+  /* Check if we should restore cursor positions */
+  bool restore_cursor = state->app->config &&
+                        state->app->config->general.restore_cursor_position;
+
   /* Store absolute cursor/scroll positions - will convert to relative after
-   * loading */
-  size_t abs_cursor_row =
-      stab->cursor_row; /* These are absolute positions from session */
-  size_t abs_scroll_row = stab->scroll_row;
-  tab->cursor_col = stab->cursor_col;
-  tab->scroll_col = stab->scroll_col;
+   * loading. If restore_cursor is disabled, default to 0. */
+  size_t abs_cursor_row = restore_cursor ? stab->cursor_row : 0;
+  size_t abs_scroll_row = restore_cursor ? stab->scroll_row : 0;
+  tab->cursor_col = restore_cursor ? stab->cursor_col : 0;
+  tab->scroll_col = restore_cursor ? stab->scroll_col : 0;
 
   /* Note: Sort state is restored later, after schema is loaded */
 
@@ -1337,12 +1085,19 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     tab->query_len = tab->query_text ? strlen(tab->query_text) : 0;
     tab->query_capacity = tab->query_len + 1;
 
-    /* Clamp query cursor to text length */
-    tab->query_cursor = (stab->query_cursor <= tab->query_len)
-                            ? stab->query_cursor
-                            : tab->query_len;
-    tab->query_scroll_line = stab->query_scroll_line;
-    tab->query_scroll_col = stab->query_scroll_col;
+    /* Only restore query cursor position if enabled */
+    if (restore_cursor) {
+      /* Clamp query cursor to text length */
+      tab->query_cursor = (stab->query_cursor <= tab->query_len)
+                              ? stab->query_cursor
+                              : tab->query_len;
+      tab->query_scroll_line = stab->query_scroll_line;
+      tab->query_scroll_col = stab->query_scroll_col;
+    } else {
+      tab->query_cursor = 0;
+      tab->query_scroll_line = 0;
+      tab->query_scroll_col = 0;
+    }
   }
 
   /* Load table data for TABLE tabs */
@@ -1362,7 +1117,7 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
 
     /* Restore filters (need schema to resolve column names) */
-    if (tab->schema && stab->num_filters > 0) {
+    if (tab->schema && stab->num_filters > 0 && stab->filters) {
       for (size_t i = 0; i < stab->num_filters; i++) {
         SessionFilter *sf = &stab->filters[i];
         size_t col_idx = find_column_index(tab->schema, sf->column_name);
@@ -1534,14 +1289,25 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
   if (tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx)) {
     UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
     if (ui) {
+      /* Always restore visibility state */
       ui->sidebar_visible = stab->ui.sidebar_visible;
       ui->sidebar_focused = stab->ui.sidebar_focused;
-      ui->sidebar_highlight = stab->ui.sidebar_highlight;
       ui->filters_visible = stab->ui.filters_visible;
       ui->filters_focused = stab->ui.filters_focused;
-      ui->filters_cursor_row = stab->ui.filters_cursor_row;
-      ui->filters_cursor_col = stab->ui.filters_cursor_col;
-      ui->filters_scroll = stab->ui.filters_scroll;
+
+      /* Only restore cursor positions if enabled */
+      if (restore_cursor) {
+        ui->sidebar_highlight = stab->ui.sidebar_highlight;
+        ui->filters_cursor_row = stab->ui.filters_cursor_row;
+        ui->filters_cursor_col = stab->ui.filters_cursor_col;
+        ui->filters_scroll = stab->ui.filters_scroll;
+      } else {
+        ui->sidebar_highlight = 0;
+        ui->filters_cursor_row = 0;
+        ui->filters_cursor_col = 0;
+        ui->filters_scroll = 0;
+      }
+
       /* Query tabs: focus editor (not results) since we don't execute on
        * restore */
       ui->query_focus_results = false;
@@ -1554,7 +1320,7 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
 bool session_restore(struct TuiState *state, Session *session, char **error) {
 
   if (!state || !session) {
-    set_error(error, "Invalid arguments");
+    err_setf(error, "Invalid arguments");
     return false;
   }
 
@@ -1565,7 +1331,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   /* Load connection manager */
   ConnectionManager *connmgr = connmgr_load(NULL);
   if (!connmgr) {
-    set_error(error, "Failed to load saved connections");
+    err_setf(error, "Failed to load saved connections");
     return false;
   }
 
@@ -1639,7 +1405,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   connmgr_free(connmgr);
 
   if (restored_workspaces == 0) {
-    set_error(error, "No workspaces could be restored");
+    err_setf(error, "No workspaces could be restored");
     return false;
   }
 

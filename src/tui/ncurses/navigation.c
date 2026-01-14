@@ -9,20 +9,10 @@
  * https://github.com/stychos/lace
  */
 
-#include "../../viewmodel/vm_table.h"
 #include "tui_internal.h"
 
-/* Helper to get VmTable, returns NULL if not valid for table navigation */
-static VmTable *get_vm_table(TuiState *state) {
-  if (!state || !state->vm_table)
-    return NULL;
-  if (!vm_table_valid(state->vm_table))
-    return NULL;
-  return state->vm_table;
-}
-
 void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm)
     return;
 
@@ -68,18 +58,8 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   /* Update cursor via viewmodel */
   vm_table_set_cursor(vm, cursor_row, cursor_col);
 
-  /* Get actual main window dimensions (TUI-specific) */
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-
-  /* Account for filters panel if visible */
-  int filters_height =
-      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
-
-  /* Visible rows = main window height - 3 header rows - filters panel */
-  int visible_rows = win_rows - 3 - filters_height;
-  if (visible_rows < 1)
-    visible_rows = 1;
+  /* Get layout info (TUI-specific) */
+  LayoutInfo layout = tui_get_layout_info(state);
 
   /* Get current scroll position from viewmodel */
   size_t scroll_row, scroll_col;
@@ -88,8 +68,8 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   /* Adjust scroll to keep cursor visible */
   if (cursor_row < scroll_row) {
     scroll_row = cursor_row;
-  } else if (cursor_row >= scroll_row + (size_t)visible_rows) {
-    scroll_row = cursor_row - visible_rows + 1;
+  } else if (cursor_row >= scroll_row + (size_t)layout.visible_rows) {
+    scroll_row = cursor_row - layout.visible_rows + 1;
   }
 
   /* Calculate visible columns using actual window width */
@@ -99,7 +79,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
 
   for (size_t col = scroll_col; col < num_cols; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > win_cols)
+    if (x + width + 3 > layout.win_cols)
       break;
     x += width + 1;
     last_visible_col = col;
@@ -114,7 +94,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     x = 1;
     while (scroll_col > 0) {
       int width = tui_get_column_width(state, scroll_col);
-      if (x + width + 3 > win_cols)
+      if (x + width + 3 > layout.win_cols)
         break;
       x += width + 1;
       if (scroll_col == cursor_col)
@@ -126,33 +106,18 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   /* Update scroll via viewmodel */
   vm_table_set_scroll(vm, scroll_row, scroll_col);
 
-  /* Sync to compatibility layer (temporary - will be removed) */
-  state->cursor_row = cursor_row;
-  state->cursor_col = cursor_col;
-  state->scroll_row = scroll_row;
-  state->scroll_col = scroll_col;
-
   /* Check if we need to load more rows */
   tui_check_load_more(state);
 }
 
 void tui_page_up(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm || !state->main_win)
     return;
 
-  /* Get actual main window height (TUI-specific) */
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_cols;
-
-  /* Account for filters panel if visible */
-  int filters_height =
-      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
-
-  int page_size = win_rows - 3 - filters_height;
-  if (page_size < 1)
-    page_size = 1;
+  /* Get layout info */
+  LayoutInfo layout = tui_get_layout_info(state);
+  int page_size = layout.visible_rows;
 
   size_t cursor_row, cursor_col;
   vm_table_get_cursor(vm, &cursor_row, &cursor_col);
@@ -192,31 +157,18 @@ void tui_page_up(TuiState *state) {
   vm_table_set_cursor(vm, cursor_row, cursor_col);
   vm_table_set_scroll(vm, scroll_row, scroll_col);
 
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_row = cursor_row;
-  state->scroll_row = scroll_row;
-
   /* Check if we need to load previous rows (for speculative loading) */
   tui_check_load_more(state);
 }
 
 void tui_page_down(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm || !state->main_win)
     return;
 
-  /* Get actual main window height (TUI-specific) */
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_cols;
-
-  /* Account for filters panel if visible */
-  int filters_height =
-      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
-
-  int page_size = win_rows - 3 - filters_height;
-  if (page_size < 1)
-    page_size = 1;
+  /* Get layout info */
+  LayoutInfo layout = tui_get_layout_info(state);
+  int page_size = layout.visible_rows;
 
   size_t cursor_row, cursor_col;
   vm_table_get_cursor(vm, &cursor_row, &cursor_col);
@@ -262,16 +214,12 @@ void tui_page_down(TuiState *state) {
   vm_table_set_cursor(vm, cursor_row, cursor_col);
   vm_table_set_scroll(vm, scroll_row, scroll_col);
 
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_row = cursor_row;
-  state->scroll_row = scroll_row;
-
   /* Check if we need to load more rows (for speculative loading) */
   tui_check_load_more(state);
 }
 
 void tui_home(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm)
     return;
 
@@ -286,16 +234,10 @@ void tui_home(TuiState *state) {
   /* Update via viewmodel */
   vm_table_set_cursor(vm, 0, 0);
   vm_table_set_scroll(vm, 0, 0);
-
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_row = 0;
-  state->cursor_col = 0;
-  state->scroll_row = 0;
-  state->scroll_col = 0;
 }
 
 void tui_end(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm || !state->main_win)
     return;
 
@@ -317,21 +259,11 @@ void tui_end(TuiState *state) {
   size_t loaded_rows = vm_table_row_count(vm);
   size_t cursor_row = loaded_rows > 0 ? loaded_rows - 1 : 0;
 
-  /* Get actual main window height (TUI-specific) */
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_cols;
-
-  /* Account for filters panel if visible */
-  int filters_height =
-      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
-
-  int visible_rows = win_rows - 3 - filters_height;
-  if (visible_rows < 1)
-    visible_rows = 1;
+  /* Get layout info */
+  LayoutInfo layout = tui_get_layout_info(state);
 
   size_t scroll_row =
-      loaded_rows > (size_t)visible_rows ? loaded_rows - visible_rows : 0;
+      loaded_rows > (size_t)layout.visible_rows ? loaded_rows - layout.visible_rows : 0;
 
   /* Get current column */
   size_t cursor_col;
@@ -340,31 +272,24 @@ void tui_end(TuiState *state) {
   /* Update via viewmodel */
   vm_table_set_cursor(vm, cursor_row, cursor_col);
   vm_table_set_scroll(vm, scroll_row, 0);
-
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_row = cursor_row;
-  state->scroll_row = scroll_row;
 }
 
 void tui_column_first(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm)
     return;
 
-  size_t cursor_row;
+  size_t cursor_row, scroll_row;
   vm_table_get_cursor(vm, &cursor_row, NULL);
+  vm_table_get_scroll(vm, &scroll_row, NULL);
 
   /* Update via viewmodel */
   vm_table_set_cursor(vm, cursor_row, 0);
-  vm_table_set_scroll(vm, state->scroll_row, 0);
-
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_col = 0;
-  state->scroll_col = 0;
+  vm_table_set_scroll(vm, scroll_row, 0);
 }
 
 void tui_column_last(TuiState *state) {
-  VmTable *vm = get_vm_table(state);
+  VmTable *vm = tui_vm_table(state);
   if (!vm)
     return;
 
@@ -379,20 +304,18 @@ void tui_column_last(TuiState *state) {
   /* Check if cursor is already visible - no scroll needed (TUI-specific) */
   if (!state->main_win) {
     vm_table_set_cursor(vm, cursor_row, cursor_col);
-    state->cursor_col = cursor_col;
     return;
   }
 
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_rows;
+  /* Get layout info */
+  LayoutInfo layout = tui_get_layout_info(state);
 
   /* Calculate last visible column with current scroll */
   int x = 1;
   size_t last_visible_col = scroll_col;
   for (size_t col = scroll_col; col < num_cols; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > win_cols)
+    if (x + width + 3 > layout.win_cols)
       break;
     x += width + 1;
     last_visible_col = col;
@@ -404,7 +327,7 @@ void tui_column_last(TuiState *state) {
     x = 1;
     while (scroll_col > 0) {
       int width = tui_get_column_width(state, scroll_col);
-      if (x + width + 3 > win_cols)
+      if (x + width + 3 > layout.win_cols)
         break;
       x += width + 1;
       if (scroll_col == cursor_col)
@@ -416,45 +339,49 @@ void tui_column_last(TuiState *state) {
   /* Update via viewmodel */
   vm_table_set_cursor(vm, cursor_row, cursor_col);
   vm_table_set_scroll(vm, scroll_row, scroll_col);
-
-  /* Sync to compatibility layer (temporary) */
-  state->cursor_col = cursor_col;
-  state->scroll_col = scroll_col;
 }
 
 void tui_next_table(TuiState *state) {
-  if (!state || !state->tables || state->num_tables == 0)
+  Tab *tab = TUI_TAB(state);
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  if (!tab || !tables || num_tables == 0)
     return;
 
-  state->current_table++;
-  if (state->current_table >= state->num_tables) {
-    state->current_table = 0;
+  size_t current = tab->table_index;
+  current++;
+  if (current >= num_tables) {
+    current = 0;
   }
+  tab->table_index = current;
 
   /* Clear filters when switching tables */
-  Tab *tab = TUI_TAB(state);
-  if (tab && tab->type == TAB_TYPE_TABLE) {
+  if (tab->type == TAB_TYPE_TABLE) {
     filters_clear(&tab->filters);
   }
 
-  tui_load_table_data(state, state->tables[state->current_table]);
+  tui_load_table_data(state, tables[current]);
 }
 
 void tui_prev_table(TuiState *state) {
-  if (!state || !state->tables || state->num_tables == 0)
+  Tab *tab = TUI_TAB(state);
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  if (!tab || !tables || num_tables == 0)
     return;
 
-  if (state->current_table == 0) {
-    state->current_table = state->num_tables - 1;
+  size_t current = tab->table_index;
+  if (current == 0) {
+    current = num_tables - 1;
   } else {
-    state->current_table--;
+    current--;
   }
+  tab->table_index = current;
 
   /* Clear filters when switching tables */
-  Tab *tab = TUI_TAB(state);
-  if (tab && tab->type == TAB_TYPE_TABLE) {
+  if (tab->type == TAB_TYPE_TABLE) {
     filters_clear(&tab->filters);
   }
 
-  tui_load_table_data(state, state->tables[state->current_table]);
+  tui_load_table_data(state, tables[current]);
 }

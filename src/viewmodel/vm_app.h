@@ -13,9 +13,8 @@
 #define LACE_VM_APP_H
 
 #include "../core/app_state.h"
-#include "vm_query.h"
-#include "vm_sidebar.h"
-#include "vm_table.h"
+#include "table_viewmodel.h"
+/* vm_query.h, vm_table.h removed - use TableViewModel/QueryViewModel instead */
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -79,9 +78,7 @@ struct VmApp {
   VmAppCallbacks callbacks;
 
   /* Child view models (owned) */
-  VmSidebar *sidebar_vm;
-  VmTable *table_vm;
-  VmQuery *query_vm;
+  TableViewModel *table_vm;
 
   /* Status */
   VmStatus status;
@@ -178,12 +175,8 @@ const char *vm_app_tab_name(const VmApp *vm, size_t index);
  * ============================================================================
  */
 
-/* Get viewmodel for current tab (either table or query) */
-VmTable *vm_app_current_table_vm(VmApp *vm);
-VmQuery *vm_app_current_query_vm(VmApp *vm);
-
-/* Get sidebar viewmodel */
-VmSidebar *vm_app_sidebar_vm(VmApp *vm);
+/* Get viewmodel for current tab */
+TableViewModel *vm_app_current_table_vm(VmApp *vm);
 
 /* ============================================================================
  * Layout

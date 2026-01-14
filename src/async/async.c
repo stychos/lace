@@ -244,7 +244,7 @@ void async_free(AsyncOperation *op) {
   lace_cond_destroy(&op->cond);
 
   /* Free and NULL each pointer immediately for defensive safety */
-  free(op->connstr);
+  str_secure_free(op->connstr); /* Connection string may contain password */
   op->connstr = NULL;
 
   free(op->table_name);

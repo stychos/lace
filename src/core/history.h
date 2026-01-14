@@ -9,6 +9,7 @@
 #ifndef LACE_HISTORY_H
 #define LACE_HISTORY_H
 
+#include "constants.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <time.h>
@@ -18,13 +19,9 @@
 #define HISTORY_MODE_SESSION 1
 #define HISTORY_MODE_PERSISTENT 2
 
-/* History limits */
-#define HISTORY_SIZE_MIN 10
-#define HISTORY_SIZE_MAX 100000
-#define HISTORY_SIZE_DEFAULT 1000
-
-/* Initial capacity for history entries array */
-#define HISTORY_INITIAL_CAPACITY 32
+/* History limits and initial capacity are in constants.h:
+ * HISTORY_SIZE_MIN, HISTORY_SIZE_MAX, HISTORY_SIZE_DEFAULT,
+ * HISTORY_INITIAL_CAPACITY */
 
 /* History entry types */
 typedef enum {

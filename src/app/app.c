@@ -37,10 +37,6 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
       break;
     case 'q':
       config->query = str_dup(optarg);
-      if (!config->query) {
-        fprintf(stderr, "Memory allocation failed\n");
-        return false;
-      }
       break;
     case 's':
       config->skip_session = true;
@@ -82,6 +78,26 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
       fprintf(stderr, "Memory allocation failed\n");
       str_secure_free(config->query);
       return false;
+    }
+
+    /* Securely clear password in argv to prevent leakage via /proc/cmdline.
+     * Password is between first ':' after '://' and '@'.
+     * Format: scheme://user:password@host/db */
+    char *scheme_end = strstr(argv[optind], "://");
+    if (scheme_end) {
+      char *user_start = scheme_end + 3;
+      char *pass_start = strchr(user_start, ':');
+      if (pass_start) {
+        pass_start++; /* Move past ':' */
+        char *pass_end = strchr(pass_start, '@');
+        if (pass_end && pass_end > pass_start) {
+          /* Use volatile to prevent compiler from optimizing away the write */
+          volatile char *vpass = pass_start;
+          while (vpass < (volatile char *)pass_end) {
+            *vpass++ = 'x';
+          }
+        }
+      }
     }
   }
 
@@ -188,6 +204,13 @@ static int run_query_mode(AppConfig *config) {
   return 0;
 }
 
+/* Password callback for session restore - wraps TUI password dialog */
+static char *tui_password_callback(void *user_data, const char *title,
+                                   const char *label, const char *error_msg) {
+  TuiState *state = (TuiState *)user_data;
+  return tui_show_password_dialog(state, title, label, error_msg);
+}
+
 static int run_tui_mode(AppConfig *config) {
   AppState app;
   TuiState state = {
@@ -214,9 +237,14 @@ static int run_tui_mode(AppConfig *config) {
     Session *session = session_load(&session_err);
 
     if (session) {
+      /* Register password callback for session restore */
+      session_set_password_callback(tui_password_callback, &state);
+
       char *restore_err = NULL;
       if (session_restore(&state, session, &restore_err)) {
         session_restored = true;
+        /* Initialize widgets and sync state for restored tab */
+        tab_restore(&state);
         tui_refresh(&state);
       } else {
         /* Restoration failed - show error and fall through to connect dialog */

@@ -14,37 +14,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Tab state field mappings - used by save/restore */
-#define TAB_COPY_TO_TAB(field) tab->field = state->field
-#define TAB_COPY_TO_STATE(field) state->field = tab->field
-
 /* Save current TUI state to tab */
 void tab_save(TuiState *state) {
   Tab *tab = TUI_TAB(state);
   if (!tab)
     return;
 
-  /* Cursor and scroll */
-  TAB_COPY_TO_TAB(cursor_row);
-  TAB_COPY_TO_TAB(cursor_col);
-  TAB_COPY_TO_TAB(scroll_row);
-  TAB_COPY_TO_TAB(scroll_col);
-
-  /* Pagination */
-  TAB_COPY_TO_TAB(total_rows);
-  TAB_COPY_TO_TAB(loaded_offset);
-  TAB_COPY_TO_TAB(loaded_count);
-  TAB_COPY_TO_TAB(row_count_approximate);
-  TAB_COPY_TO_TAB(unfiltered_total_rows);
-
-  /* Data pointers */
-  TAB_COPY_TO_TAB(data);
-  TAB_COPY_TO_TAB(schema);
-  TAB_COPY_TO_TAB(col_widths);
-  TAB_COPY_TO_TAB(num_col_widths);
-
   /* UI state to UITabState (source of truth) */
   UITabState *ui = TUI_TAB_UI(state);
+
+  /* Sync widget state to Tab before saving (widget may have been modified) */
+  if (ui && ui->table_widget && tab->type == TAB_TYPE_TABLE) {
+    table_widget_sync_to_tab(ui->table_widget);
+  }
+  /* TODO: Add query_widget_sync_to_tab when QueryWidget is migrated */
+
+  /* Sync TUI-specific UI state to UITabState */
   if (ui) {
     ui->filters_visible = state->filters_visible;
     ui->filters_focused = state->filters_focused;
@@ -74,40 +59,10 @@ void tab_restore(TuiState *state) {
   bool header_was_visible = state->header_visible;
   bool status_was_visible = state->status_visible;
 
-  /* Update connection state from tab's connection_index */
-  if (state->app) {
-    Connection *conn = app_get_connection(state->app, tab->connection_index);
-    if (conn && conn->active) {
-      state->conn = conn->conn;
-      state->tables = conn->tables;
-      state->num_tables = conn->num_tables;
-    } else {
-      /* Connection invalid - clear stale pointers to prevent use-after-free */
-      state->conn = NULL;
-      state->tables = NULL;
-      state->num_tables = 0;
-    }
+  /* Rebind VmTable to new Tab so cursor/scroll reads work correctly */
+  if (state->vm_table) {
+    vm_table_bind(state->vm_table, tab);
   }
-
-  /* Cursor and scroll */
-  TAB_COPY_TO_STATE(cursor_row);
-  TAB_COPY_TO_STATE(cursor_col);
-  TAB_COPY_TO_STATE(scroll_row);
-  TAB_COPY_TO_STATE(scroll_col);
-
-  /* Pagination */
-  TAB_COPY_TO_STATE(total_rows);
-  TAB_COPY_TO_STATE(loaded_offset);
-  TAB_COPY_TO_STATE(loaded_count);
-  TAB_COPY_TO_STATE(row_count_approximate);
-  TAB_COPY_TO_STATE(unfiltered_total_rows);
-
-  /* Data pointers */
-  TAB_COPY_TO_STATE(data);
-  TAB_COPY_TO_STATE(schema);
-  TAB_COPY_TO_STATE(col_widths);
-  TAB_COPY_TO_STATE(num_col_widths);
-  state->current_table = tab->table_index;
 
   /* UI state from UITabState (source of truth) */
   UITabState *ui = TUI_TAB_UI(state);
@@ -126,6 +81,32 @@ void tab_restore(TuiState *state) {
     state->sidebar_filter_len = ui->sidebar_filter_len;
     memcpy(state->sidebar_filter, ui->sidebar_filter,
            sizeof(state->sidebar_filter));
+
+    /* Initialize widgets if not already done (lazy initialization) */
+    if (tab->type == TAB_TYPE_TABLE && !ui->table_widget) {
+      tui_init_table_tab_widgets(state, ui, tab);
+      /* New widget synced via table_widget_bind -> sync_from_tab */
+    } else if (tab->type == TAB_TYPE_TABLE && ui->table_widget) {
+      /* Existing widget - sync from Tab */
+      table_widget_sync_from_tab(ui->table_widget);
+    } else if (tab->type == TAB_TYPE_QUERY && !ui->query_widget) {
+      tui_init_query_tab_widgets(state, ui, tab);
+    }
+    /* TODO: Add query_widget_sync_from_tab when QueryWidget is migrated */
+
+    /* Sync sidebar widget state from UITabState */
+    if (ui->sidebar_widget) {
+      ui->sidebar_widget->base.state.visible = ui->sidebar_visible;
+      ui->sidebar_widget->base.state.focused = ui->sidebar_focused;
+      ui->sidebar_widget->base.state.cursor_row = ui->sidebar_highlight;
+      ui->sidebar_widget->base.state.scroll_row = ui->sidebar_scroll;
+    }
+
+    /* Sync filters widget state from UITabState */
+    if (ui->filters_widget) {
+      ui->filters_widget->base.state.visible = ui->filters_visible;
+      ui->filters_widget->base.state.focused = ui->filters_focused;
+    }
   } else {
     /* No UITabState - use defaults */
     state->filters_visible = false;
@@ -287,7 +268,7 @@ bool tab_create(TuiState *state, size_t table_index) {
     ui->filters_scroll = 0;
   }
 
-  /* Reset TUI state cache for new tab - all panels start unfocused */
+  /* Reset TUI state for new tab - all panels start unfocused */
   state->sidebar_focused = false;
   state->filters_visible = false;
   state->filters_focused = false;
@@ -297,17 +278,9 @@ bool tab_create(TuiState *state, size_t table_index) {
   state->filters_cursor_col = 0;
   state->filters_scroll = 0;
 
-  /* Clear data state for new tab */
-  state->data = NULL;
-  state->schema = NULL;
-  state->col_widths = NULL;
-  state->num_col_widths = 0;
-  state->cursor_row = 0;
-  state->cursor_col = 0;
-  state->scroll_row = 0;
-  state->scroll_col = 0;
+  /* Tab cursor/scroll/data is initialized by tui_load_table_data */
 
-  /* Load the table data */
+  /* Load the table data (updates Tab directly) */
   if (!tui_load_table_data(state, state->tables[table_index])) {
     /* Failed - remove the tab */
     workspace_close_tab(ws, ws->current_tab);
@@ -319,16 +292,12 @@ bool tab_create(TuiState *state, size_t table_index) {
     return false;
   }
 
-  /* Save the loaded data to tab */
-  tab->data = state->data;
-  tab->schema = state->schema;
-  tab->col_widths = state->col_widths;
-  tab->num_col_widths = state->num_col_widths;
-  tab->total_rows = state->total_rows;
-  tab->loaded_offset = state->loaded_offset;
-  tab->loaded_count = state->loaded_count;
+  /* Tab stores table_index - no cache sync needed */
 
-  state->current_table = table_index;
+  /* Initialize widgets for the new tab */
+  if (ui) {
+    tui_init_table_tab_widgets(state, ui, tab);
+  }
 
   return true;
 }
@@ -419,6 +388,10 @@ void tab_close(TuiState *state) {
   /* Free UITabState resources for the closing tab */
   UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
   if (ui) {
+    /* Clean up widgets */
+    tui_cleanup_tab_widgets(ui);
+
+    /* Free legacy resources */
     free(ui->query_result_edit_buf);
     ui->query_result_edit_buf = NULL;
   }
@@ -438,11 +411,15 @@ void tab_close(TuiState *state) {
     /* Close the tab first */
     workspace_close_tab(ws, tab_idx);
 
-    /* Shift UITabState entries */
-    for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
-      state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+    /* Shift UITabState entries (with bounds checking) */
+    if (old_num_tabs > 0 && state->tab_ui &&
+        ws_idx < state->tab_ui_ws_capacity && state->tab_ui[ws_idx] &&
+        old_num_tabs <= state->tab_ui_capacity[ws_idx]) {
+      for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
+        state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+      }
+      memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
     }
-    memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
     if (other_tabs_same_conn > 0) {
       /* Other tabs still use this connection - just restore the next tab */
@@ -462,23 +439,17 @@ void tab_close(TuiState *state) {
     state->tables = NULL;
     state->num_tables = 0;
 
+    /* Unbind sidebar widget from connection before closing to prevent dangling
+     * pointer */
+    UITabState *ui = TUI_TAB_UI(state);
+    if (ui && ui->sidebar_widget) {
+      sidebar_widget_bind(ui->sidebar_widget, NULL);
+    }
+
     /* Close the connection in app state - this frees everything */
     app_close_connection(state->app, conn_idx);
 
-    /* Clear all state */
-    state->data = NULL;
-    state->schema = NULL;
-    state->col_widths = NULL;
-    state->num_col_widths = 0;
-    state->cursor_row = 0;
-    state->cursor_col = 0;
-    state->scroll_row = 0;
-    state->scroll_col = 0;
-    state->total_rows = 0;
-    state->loaded_offset = 0;
-    state->loaded_count = 0;
-    state->current_table = 0;
-
+    /* Tab data fields are managed per-tab, cleared by workspace_close_tab */
     /* Hide sidebar since there's no connection */
     state->sidebar_visible = false;
     state->sidebar_focused = false;
@@ -514,11 +485,14 @@ void tab_close(TuiState *state) {
   /* Close the tab */
   workspace_close_tab(ws, tab_idx);
 
-  /* Shift UITabState entries to match */
-  for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
-    state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+  /* Shift UITabState entries to match (with bounds checking) */
+  if (old_num_tabs > 0 && state->tab_ui && ws_idx < state->tab_ui_ws_capacity &&
+      state->tab_ui[ws_idx] && old_num_tabs <= state->tab_ui_capacity[ws_idx]) {
+    for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
+      state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+    }
+    memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
   }
-  memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
 
   /* If this was the last content tab for this connection, create a connection
    * tab (unless close_conn_on_last_tab is enabled, in which case close the
@@ -539,27 +513,7 @@ void tab_close(TuiState *state) {
         /* Switch to the new connection tab */
         ws->current_tab = ws->num_tabs - 1;
 
-        /* Update TuiState to point to this connection's data */
-        Connection *app_conn = app_get_connection(state->app, conn_idx);
-        if (app_conn) {
-          state->conn = app_conn->conn;
-          state->tables = app_conn->tables;
-          state->num_tables = app_conn->num_tables;
-        }
-
-        /* Clear data state but keep connection */
-        state->data = NULL;
-        state->schema = NULL;
-        state->col_widths = NULL;
-        state->num_col_widths = 0;
-        state->cursor_row = 0;
-        state->cursor_col = 0;
-        state->scroll_row = 0;
-        state->scroll_col = 0;
-        state->total_rows = 0;
-        state->loaded_offset = 0;
-        state->loaded_count = 0;
-        state->current_table = 0;
+        /* Connection tab has no table data - Tab fields are clean */
 
         /* Focus sidebar to select a new table */
         state->sidebar_visible = true;
@@ -607,6 +561,10 @@ void workspace_close(TuiState *state) {
   /* Free UITabState resources for all tabs in this workspace */
   if (ws_idx < state->tab_ui_ws_capacity && state->tab_ui[ws_idx]) {
     for (size_t i = 0; i < state->tab_ui_capacity[ws_idx]; i++) {
+      /* Clean up widgets for this tab */
+      tui_cleanup_tab_widgets(&state->tab_ui[ws_idx][i]);
+
+      /* Free legacy resources */
       free(state->tab_ui[ws_idx][i].query_result_edit_buf);
       state->tab_ui[ws_idx][i].query_result_edit_buf = NULL;
     }
@@ -628,22 +586,7 @@ void workspace_close(TuiState *state) {
   /* Close workspace in app state (frees tabs and data) */
   app_close_workspace(state->app, ws_idx);
 
-  /* Clear TuiState pointers */
-  state->conn = NULL;
-  state->tables = NULL;
-  state->num_tables = 0;
-  state->data = NULL;
-  state->schema = NULL;
-  state->col_widths = NULL;
-  state->num_col_widths = 0;
-  state->cursor_row = 0;
-  state->cursor_col = 0;
-  state->scroll_row = 0;
-  state->scroll_col = 0;
-  state->total_rows = 0;
-  state->loaded_offset = 0;
-  state->loaded_count = 0;
-  state->current_table = 0;
+  /* Tab data fields are freed by app_close_workspace */
 
   /* Reset UI state */
   state->sidebar_visible = false;

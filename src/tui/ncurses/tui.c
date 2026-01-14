@@ -8,6 +8,7 @@
 
 #include "../../config/session.h"
 #include "../../core/actions.h"
+#include "../../util/mem.h"
 #include "tui_internal.h"
 #include "views/config_view.h"
 #include <ctype.h>
@@ -34,22 +35,28 @@ bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx,
 
   /* Ensure workspace dimension capacity */
   if (ws_idx >= state->tab_ui_ws_capacity) {
-    size_t new_ws_cap = state->tab_ui_ws_capacity == 0
-                            ? INITIAL_TAB_UI_WS_CAPACITY
-                            : state->tab_ui_ws_capacity * 2;
-    while (new_ws_cap <= ws_idx)
-      new_ws_cap *= 2;
-
-    /* Use malloc+memcpy+free for atomic all-or-nothing allocation */
-    UITabState **new_tab_ui = malloc(new_ws_cap * sizeof(UITabState *));
-    if (!new_tab_ui)
-      return false;
-
-    size_t *new_capacity = malloc(new_ws_cap * sizeof(size_t));
-    if (!new_capacity) {
-      free(new_tab_ui);
-      return false;
+    size_t new_ws_cap;
+    if (state->tab_ui_ws_capacity == 0) {
+      new_ws_cap = INITIAL_TAB_UI_WS_CAPACITY;
+    } else if (state->tab_ui_ws_capacity > SIZE_MAX / 2) {
+      return false; /* Would overflow */
+    } else {
+      new_ws_cap = state->tab_ui_ws_capacity * 2;
     }
+    while (new_ws_cap <= ws_idx) {
+      if (new_ws_cap > SIZE_MAX / 2)
+        return false; /* Would overflow */
+      new_ws_cap *= 2;
+    }
+
+    /* Check for overflow in allocation size calculations */
+    if (new_ws_cap > SIZE_MAX / sizeof(UITabState *) ||
+        new_ws_cap > SIZE_MAX / sizeof(size_t))
+      return false;
+
+    /* Use safe_malloc+memcpy+free for atomic all-or-nothing allocation */
+    UITabState **new_tab_ui = safe_malloc(new_ws_cap * sizeof(UITabState *));
+    size_t *new_capacity = safe_malloc(new_ws_cap * sizeof(size_t));
 
     /* Copy existing data */
     if (state->tab_ui && state->tab_ui_ws_capacity > 0) {
@@ -78,15 +85,26 @@ bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx,
   /* Ensure tab dimension capacity for this workspace */
   if (!state->tab_ui[ws_idx] || tab_idx >= state->tab_ui_capacity[ws_idx]) {
     size_t old_cap = state->tab_ui_capacity[ws_idx];
-    size_t new_tab_cap =
-        old_cap == 0 ? INITIAL_TAB_UI_TAB_CAPACITY : old_cap * 2;
-    while (new_tab_cap <= tab_idx)
+    size_t new_tab_cap;
+    if (old_cap == 0) {
+      new_tab_cap = INITIAL_TAB_UI_TAB_CAPACITY;
+    } else if (old_cap > SIZE_MAX / 2) {
+      return false; /* Would overflow */
+    } else {
+      new_tab_cap = old_cap * 2;
+    }
+    while (new_tab_cap <= tab_idx) {
+      if (new_tab_cap > SIZE_MAX / 2)
+        return false; /* Would overflow */
       new_tab_cap *= 2;
+    }
+
+    /* Check for overflow in allocation size */
+    if (new_tab_cap > SIZE_MAX / sizeof(UITabState))
+      return false;
 
     UITabState *new_tabs =
-        realloc(state->tab_ui[ws_idx], new_tab_cap * sizeof(UITabState));
-    if (!new_tabs)
-      return false;
+        safe_reallocarray(state->tab_ui[ws_idx], new_tab_cap, sizeof(UITabState));
 
     /* Zero new entries */
     memset(&new_tabs[old_cap], 0, (new_tab_cap - old_cap) * sizeof(UITabState));
@@ -106,6 +124,9 @@ static void tui_free_tab_ui(TuiState *state) {
   for (size_t ws = 0; ws < state->tab_ui_ws_capacity; ws++) {
     if (state->tab_ui[ws]) {
       for (size_t tab = 0; tab < state->tab_ui_capacity[ws]; tab++) {
+        /* Clean up widgets for this tab */
+        tui_cleanup_tab_widgets(&state->tab_ui[ws][tab]);
+        /* Free legacy resources */
         free(state->tab_ui[ws][tab].query_result_edit_buf);
       }
       free(state->tab_ui[ws]);
@@ -128,9 +149,7 @@ char *tui_sanitize_for_display(const char *str) {
     return NULL;
 
   size_t len = strlen(str);
-  char *result = malloc(len + 1);
-  if (!result)
-    return NULL;
+  char *result = safe_malloc(len + 1);
 
   for (size_t i = 0; i < len; i++) {
     unsigned char c = (unsigned char)str[i];
@@ -223,70 +242,42 @@ void tui_sync_from_app(TuiState *state) {
   state->header_visible = app->header_visible;
   state->status_visible = app->status_visible;
 
-  /* Sync from current tab for data state */
+  /* Tab data fields (cursor, scroll, data, schema) are accessed directly via
+   * TUI_TAB() and VmTable - no sync needed. Only sync TUI-specific UI state. */
   Tab *tab = app_current_tab(app);
-  if (tab) {
-    state->current_table = tab->table_index;
-    state->data = tab->data;
-    state->schema = tab->schema;
-    state->cursor_row = tab->cursor_row;
-    state->cursor_col = tab->cursor_col;
-    state->scroll_row = tab->scroll_row;
-    state->scroll_col = tab->scroll_col;
-    state->total_rows = tab->total_rows;
-    state->loaded_offset = tab->loaded_offset;
-    state->loaded_count = tab->loaded_count;
-    state->row_count_approximate = tab->row_count_approximate;
-    state->unfiltered_total_rows = tab->unfiltered_total_rows;
-    state->col_widths = tab->col_widths;
-    state->num_col_widths = tab->num_col_widths;
 
-    /* UI state from UITabState (source of truth) */
-    UITabState *ui = TUI_TAB_UI(state);
-    if (ui) {
-      state->filters_visible = ui->filters_visible;
-      state->filters_focused = ui->filters_focused;
-      state->filters_was_focused = ui->filters_was_focused;
-      state->filters_cursor_row = ui->filters_cursor_row;
-      state->filters_cursor_col = ui->filters_cursor_col;
-      state->filters_scroll = ui->filters_scroll;
-      state->sidebar_visible = ui->sidebar_visible;
-      state->sidebar_focused = ui->sidebar_focused;
-      state->sidebar_highlight = ui->sidebar_highlight;
-      state->sidebar_scroll = ui->sidebar_scroll;
-      state->sidebar_filter_len = ui->sidebar_filter_len;
-      memcpy(state->sidebar_filter, ui->sidebar_filter,
-             sizeof(state->sidebar_filter));
-    } else {
-      /* No UITabState - use defaults */
-      state->filters_visible = false;
-      state->filters_focused = false;
-      state->filters_was_focused = false;
-      state->filters_cursor_row = 0;
-      state->filters_cursor_col = 0;
-      state->filters_scroll = 0;
-      state->sidebar_visible = true; /* Default: sidebar visible */
-      state->sidebar_focused = false;
-      state->sidebar_highlight = 0;
-      state->sidebar_scroll = 0;
-      state->sidebar_filter[0] = '\0';
-      state->sidebar_filter_len = 0;
-    }
+  /* UI state from UITabState (source of truth) */
+  UITabState *ui = TUI_TAB_UI(state);
+  if (ui) {
+    state->filters_visible = ui->filters_visible;
+    state->filters_focused = ui->filters_focused;
+    state->filters_was_focused = ui->filters_was_focused;
+    state->filters_cursor_row = ui->filters_cursor_row;
+    state->filters_cursor_col = ui->filters_cursor_col;
+    state->filters_scroll = ui->filters_scroll;
+    state->sidebar_visible = ui->sidebar_visible;
+    state->sidebar_focused = ui->sidebar_focused;
+    state->sidebar_highlight = ui->sidebar_highlight;
+    state->sidebar_scroll = ui->sidebar_scroll;
+    state->sidebar_filter_len = ui->sidebar_filter_len;
+    memcpy(state->sidebar_filter, ui->sidebar_filter,
+           sizeof(state->sidebar_filter));
+  } else if (tab) {
+    /* No UITabState but have tab - use defaults */
+    state->filters_visible = false;
+    state->filters_focused = false;
+    state->filters_was_focused = false;
+    state->filters_cursor_row = 0;
+    state->filters_cursor_col = 0;
+    state->filters_scroll = 0;
+    state->sidebar_visible = true; /* Default: sidebar visible */
+    state->sidebar_focused = false;
+    state->sidebar_highlight = 0;
+    state->sidebar_scroll = 0;
+    state->sidebar_filter[0] = '\0';
+    state->sidebar_filter_len = 0;
   } else {
-    state->current_table = 0;
-    state->data = NULL;
-    state->schema = NULL;
-    state->cursor_row = 0;
-    state->cursor_col = 0;
-    state->scroll_row = 0;
-    state->scroll_col = 0;
-    state->total_rows = 0;
-    state->loaded_offset = 0;
-    state->loaded_count = 0;
-    state->row_count_approximate = false;
-    state->unfiltered_total_rows = 0;
-    state->col_widths = NULL;
-    state->num_col_widths = 0;
+    /* No tab - clear UI state */
     state->filters_visible = false;
     state->filters_focused = false;
     state->filters_was_focused = false;
@@ -301,22 +292,11 @@ void tui_sync_from_app(TuiState *state) {
     state->sidebar_filter_len = 0;
   }
 
-  /* Sync workspace cache fields for legacy code compatibility */
-  state->workspaces = app->workspaces;
-  state->num_workspaces = app->num_workspaces;
-  state->current_workspace = app->current_workspace;
-
   state->page_size = app->page_size;
 
   /* Bind ViewModels to current tab */
   Tab *current_tab = app_current_tab(app);
   if (current_tab) {
-    /* Bind sidebar to current connection */
-    Connection *current_conn = app_get_tab_connection(app, current_tab);
-    if (state->vm_sidebar && current_conn) {
-      vm_sidebar_bind(state->vm_sidebar, current_conn);
-    }
-
     /* Bind or create appropriate ViewModel based on tab type */
     if (current_tab->type == TAB_TYPE_TABLE) {
       if (!state->vm_table) {
@@ -324,12 +304,18 @@ void tui_sync_from_app(TuiState *state) {
       } else {
         vm_table_bind(state->vm_table, current_tab);
       }
-    } else if (current_tab->type == TAB_TYPE_QUERY) {
-      if (!state->vm_query) {
-        state->vm_query = vm_query_create(app, current_tab, NULL);
-      } else {
-        vm_query_bind(state->vm_query, current_tab);
-      }
+    }
+    /* VmQuery removed - use QueryWidget instead */
+  }
+
+  /* Initialize/sync widgets for current tab (same logic as tab_restore) */
+  if (ui && current_tab) {
+    if (current_tab->type == TAB_TYPE_TABLE && !ui->table_widget) {
+      tui_init_table_tab_widgets(state, ui, current_tab);
+    } else if (current_tab->type == TAB_TYPE_TABLE && ui->table_widget) {
+      table_widget_sync_from_tab(ui->table_widget);
+    } else if (current_tab->type == TAB_TYPE_QUERY && !ui->query_widget) {
+      tui_init_query_tab_widgets(state, ui, current_tab);
     }
   }
 
@@ -345,6 +331,8 @@ void tui_sync_from_app(TuiState *state) {
     refresh_tab->needs_refresh = false;
     tui_refresh_table(state);
   }
+
+  /* Widgets read directly from Tab fields - no legacy sync needed */
 }
 
 /* Sync current tab/workspace from view cache - call before tab/workspace switch
@@ -362,27 +350,8 @@ void tui_sync_to_workspace(TuiState *state) {
   app->header_visible = state->header_visible;
   app->status_visible = state->status_visible;
 
-  /* Save data state to current tab */
-  Tab *tab = app_current_tab(app);
-  if (!tab)
-    return;
-
-  /* Data pointers - sync in case they were updated */
-  tab->data = state->data;
-  tab->schema = state->schema;
-  tab->col_widths = state->col_widths;
-  tab->num_col_widths = state->num_col_widths;
-  tab->total_rows = state->total_rows;
-  tab->loaded_offset = state->loaded_offset;
-  tab->loaded_count = state->loaded_count;
-  tab->row_count_approximate = state->row_count_approximate;
-  tab->unfiltered_total_rows = state->unfiltered_total_rows;
-
-  /* Cursor and scroll */
-  tab->cursor_row = state->cursor_row;
-  tab->cursor_col = state->cursor_col;
-  tab->scroll_row = state->scroll_row;
-  tab->scroll_col = state->scroll_col;
+  /* Tab data fields (cursor, scroll, data, schema) are modified directly by
+   * VmTable and navigation functions - no sync needed. Only sync UI state. */
 
   /* UI state to UITabState (source of truth) */
   UITabState *ui = TUI_TAB_UI(state);
@@ -442,6 +411,10 @@ static void ui_set_cell_empty(void *ctx) {
   tui_set_cell_direct((TuiState *)ctx, false);
 }
 
+static void ui_cell_copy(void *ctx) { tui_cell_copy((TuiState *)ctx); }
+
+static void ui_cell_paste(void *ctx) { tui_cell_paste((TuiState *)ctx); }
+
 static void ui_delete_row(void *ctx) { tui_delete_row((TuiState *)ctx); }
 
 static void ui_recreate_layout(void *ctx) {
@@ -487,56 +460,37 @@ static size_t ui_get_sidebar_highlight_for_table(void *ctx, size_t table_idx) {
 
 static bool ui_is_sidebar_visible(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  return ui ? ui->sidebar_visible : state->sidebar_visible;
+  return tui_sidebar_visible(state);
 }
 
 static bool ui_is_sidebar_focused(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  return ui ? ui->sidebar_focused : state->sidebar_focused;
+  return tui_sidebar_focused(state);
 }
 
 static void ui_set_sidebar_visible(void *ctx, bool visible) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->sidebar_visible = visible;
-  /* Sync to TuiState cache for legacy code */
-  state->sidebar_visible = visible;
+  tui_set_sidebar_visible(state, visible);
 }
 
 static void ui_set_sidebar_focused(void *ctx, bool focused) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->sidebar_focused = focused;
-  /* Sync to TuiState cache for legacy code */
-  state->sidebar_focused = focused;
+  tui_set_sidebar_focused(state, focused);
 }
 
 static size_t ui_get_sidebar_highlight(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  return ui ? ui->sidebar_highlight : state->sidebar_highlight;
+  return tui_sidebar_highlight(state);
 }
 
 static void ui_set_sidebar_highlight(void *ctx, size_t highlight) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->sidebar_highlight = highlight;
-  /* Sync to TuiState cache for legacy code */
-  state->sidebar_highlight = highlight;
+  tui_set_sidebar_highlight(state, highlight);
 }
 
 static void ui_set_sidebar_scroll(void *ctx, size_t scroll) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->sidebar_scroll = scroll;
-  /* Sync to TuiState cache for legacy code */
-  state->sidebar_scroll = scroll;
+  tui_set_sidebar_scroll(state, scroll);
 }
 
 static size_t ui_get_sidebar_last_position(void *ctx) {
@@ -561,32 +515,22 @@ static void ui_set_sidebar_last_position(void *ctx, size_t position) {
 
 static bool ui_is_filters_visible(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  return ui ? ui->filters_visible : state->filters_visible;
+  return tui_filters_visible(state);
 }
 
 static bool ui_is_filters_focused(void *ctx) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  return ui ? ui->filters_focused : state->filters_focused;
+  return tui_filters_focused(state);
 }
 
 static void ui_set_filters_visible(void *ctx, bool visible) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->filters_visible = visible;
-  /* Sync to TuiState cache for legacy code */
-  state->filters_visible = visible;
+  tui_set_filters_visible(state, visible);
 }
 
 static void ui_set_filters_focused(void *ctx, bool focused) {
   TuiState *state = (TuiState *)ctx;
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui)
-    ui->filters_focused = focused;
-  /* Sync to TuiState cache for legacy code */
-  state->filters_focused = focused;
+  tui_set_filters_focused(state, focused);
 }
 
 static void ui_set_filters_editing(void *ctx, bool editing) {
@@ -629,6 +573,8 @@ static UICallbacks tui_make_callbacks(TuiState *state) {
       .cancel_edit = ui_cancel_edit,
       .set_cell_null = ui_set_cell_null,
       .set_cell_empty = ui_set_cell_empty,
+      .cell_copy = ui_cell_copy,
+      .cell_paste = ui_cell_paste,
       .delete_row = ui_delete_row,
       .recreate_layout = ui_recreate_layout,
       .recalculate_widths = ui_recalculate_widths,
@@ -666,10 +612,8 @@ bool tui_init(TuiState *state, AppState *app) {
 
   /* Initialize ViewModels */
   state->vm_app = vm_app_create(app, NULL);
-  if (state->vm_app) {
-    state->vm_sidebar = vm_app_sidebar_vm(state->vm_app);
-  }
   /* vm_table and vm_query are created on-demand when tabs are accessed */
+  /* SidebarWidget is used instead of VmSidebar */
 
   /* Set locale for UTF-8 support */
   setlocale(LC_ALL, "");
@@ -712,6 +656,10 @@ bool tui_init(TuiState *state, AppState *app) {
     init_pair(COLOR_PK, COLOR_YELLOW, -1);
   }
 
+  /* Create render context for backend abstraction (wraps existing ncurses
+   * session) */
+  state->render_ctx = render_context_wrap_ncurses();
+
   /* Get terminal dimensions */
   getmaxyx(stdscr, state->term_rows, state->term_cols);
 
@@ -745,6 +693,17 @@ bool tui_init(TuiState *state, AppState *app) {
   scrollok(state->main_win, FALSE);
   keypad(state->main_win, TRUE);
 
+  /* Register windows with render backend for abstraction layer */
+  if (state->render_ctx) {
+    render_set_region_handle(state->render_ctx, UI_REGION_MAIN, state->main_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_HEADER,
+                             state->header_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_STATUS,
+                             state->status_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_TABS, state->tab_win);
+    /* sidebar_win is NULL initially */
+  }
+
   state->running = true;
   state->app->running = true;
   state->header_visible = true;
@@ -762,6 +721,9 @@ void tui_cleanup(TuiState *state) {
   /* Save session before cleanup (only if restore_session is enabled) */
   if (state->app && state->app->config &&
       state->app->config->general.restore_session) {
+    /* Sync widget state to Tab before saving (ensures cursor/scroll persisted) */
+    tab_save(state);
+
     char *session_err = NULL;
     if (!session_save(state, &session_err)) {
       /* Log error but don't block quit */
@@ -775,10 +737,6 @@ void tui_cleanup(TuiState *state) {
   /* Cleanup ViewModels */
   vm_table_destroy(state->vm_table);
   state->vm_table = NULL;
-  vm_query_destroy(state->vm_query);
-  state->vm_query = NULL;
-  /* vm_sidebar is owned by vm_app, don't destroy separately */
-  state->vm_sidebar = NULL;
   vm_app_destroy(state->vm_app);
   state->vm_app = NULL;
 
@@ -802,6 +760,10 @@ void tui_cleanup(TuiState *state) {
     delwin(state->sidebar_win);
   if (state->tab_win)
     delwin(state->tab_win);
+
+  /* Free render context */
+  free(state->render_ctx);
+  state->render_ctx = NULL;
 
   /* End ncurses */
   endwin();
@@ -883,6 +845,18 @@ void tui_recreate_windows(TuiState *state) {
 
   /* Update content dimensions */
   state->content_cols = main_width - 2;
+
+  /* Register windows with render backend for abstraction layer */
+  if (state->render_ctx) {
+    render_set_region_handle(state->render_ctx, UI_REGION_MAIN, state->main_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_HEADER,
+                             state->header_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_STATUS,
+                             state->status_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_SIDEBAR,
+                             state->sidebar_win);
+    render_set_region_handle(state->render_ctx, UI_REGION_TABS, state->tab_win);
+  }
 }
 
 bool tui_connect(TuiState *state, const char *connstr) {
@@ -944,24 +918,17 @@ bool tui_connect(TuiState *state, const char *connstr) {
       size_t tab_idx_ui = ws->current_tab;
       tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx_ui);
 
-      /* Load table data */
-      state->current_table = table_idx;
+      /* Load table data (updates Tab directly) */
       tui_load_table_data(state, state->tables[table_idx]);
-
-      /* Save to tab */
-      tab->data = state->data;
-      tab->schema = state->schema;
-      tab->col_widths = state->col_widths;
-      tab->num_col_widths = state->num_col_widths;
-      tab->total_rows = state->total_rows;
-      tab->loaded_offset = state->loaded_offset;
-      tab->loaded_count = state->loaded_count;
 
       /* Initialize UI state */
       UITabState *ui = TUI_TAB_UI(state);
       if (ui) {
         ui->sidebar_visible = true;
         ui->sidebar_focused = false;
+
+        /* Initialize widgets for the new table tab */
+        tui_init_table_tab_widgets(state, ui, tab);
       }
       state->sidebar_visible = true;
       state->sidebar_focused = false;
@@ -1002,11 +969,7 @@ bool tui_connect(TuiState *state, const char *connstr) {
       state->sidebar_highlight = 0;
       state->sidebar_scroll = 0;
 
-      /* Clear data pointers - connection tab has no table data */
-      state->data = NULL;
-      state->schema = NULL;
-      state->col_widths = NULL;
-      state->num_col_widths = 0;
+      /* Connection tab has no table data - Tab fields stay NULL */
 
       /* Sync workspace cache */
       state->workspaces = state->app->workspaces;
@@ -1074,22 +1037,12 @@ void tui_disconnect(TuiState *state) {
     tui_recreate_windows(state);
   }
 
-  /* Clear all cached state pointers (memory was freed by app_state_cleanup) */
+  /* Clear connection cache (memory was freed by app_state_cleanup) */
   state->conn = NULL;
   state->tables = NULL;
   state->num_tables = 0;
-  state->data = NULL;
-  state->schema = NULL;
-  state->col_widths = NULL;
-  state->num_col_widths = 0;
-  state->current_table = 0;
-  state->cursor_row = 0;
-  state->cursor_col = 0;
-  state->scroll_row = 0;
-  state->scroll_col = 0;
-  state->total_rows = 0;
-  state->loaded_offset = 0;
-  state->loaded_count = 0;
+
+  /* Clear TUI-specific UI state */
   state->filters_visible = false;
   state->filters_focused = false;
   state->sidebar_highlight = 0;
@@ -1185,12 +1138,18 @@ bool tui_load_tables(TuiState *state) {
 }
 
 void tui_refresh(TuiState *state) {
+  /* Sync TableWidget from Tab before drawing (Tab is modified by pagination) */
+  Tab *tab = TUI_TAB(state);
+  TableWidget *widget = TUI_TABLE_WIDGET(state);
+  if (widget && tab && tab->type == TAB_TYPE_TABLE) {
+    table_widget_sync_from_tab(widget);
+  }
+
   tui_draw_header(state);
   tui_draw_tabs(state);
   tui_draw_sidebar(state);
 
   /* Dispatch drawing based on tab type */
-  Tab *tab = TUI_TAB(state);
   if (tab) {
     if (tab->type == TAB_TYPE_QUERY) {
       tui_draw_query(state);
@@ -1243,6 +1202,458 @@ void tui_set_error(TuiState *state, const char *fmt, ...) {
   va_end(args);
 
   state->status_is_error = true;
+}
+
+/* ============================================================================
+ * Hotkey Dispatch Tables
+ * ============================================================================
+ * Tables for dispatching hotkeys to handlers. Reduces if-else boilerplate.
+ */
+
+/* Simple action table - hotkeys that map directly to Action constructors */
+typedef Action (*SimpleActionFn)(void);
+
+typedef struct {
+  HotkeyAction hotkey;
+  SimpleActionFn action_fn;
+} SimpleHotkeyEntry;
+
+static const SimpleHotkeyEntry simple_hotkey_table[] = {
+    /* Navigation */
+    {HOTKEY_PAGE_UP, action_page_up},
+    {HOTKEY_PAGE_DOWN, action_page_down},
+    {HOTKEY_FIRST_COL, action_column_first},
+    {HOTKEY_LAST_COL, action_column_last},
+    {HOTKEY_FIRST_ROW, action_home},
+    {HOTKEY_LAST_ROW, action_end},
+    /* Editing */
+    {HOTKEY_EDIT_INLINE, action_edit_start},
+    {HOTKEY_EDIT_MODAL, action_edit_start_modal},
+    {HOTKEY_SET_NULL, action_cell_set_null},
+    {HOTKEY_SET_EMPTY, action_cell_set_empty},
+    {HOTKEY_DELETE_ROW, action_row_delete},
+    /* Tabs */
+    {HOTKEY_NEXT_TAB, action_tab_next},
+    {HOTKEY_PREV_TAB, action_tab_prev},
+    {HOTKEY_NEXT_WORKSPACE, action_workspace_next},
+    {HOTKEY_PREV_WORKSPACE, action_workspace_prev},
+    /* UI Toggles */
+    {HOTKEY_TOGGLE_HEADER, action_toggle_header},
+    {HOTKEY_TOGGLE_STATUS, action_toggle_status},
+};
+
+/* Lookup simple hotkey action. Returns true if found, sets *action. */
+static bool lookup_simple_hotkey(const Config *config, const UiEvent *event,
+                                 Action *action) {
+  for (size_t i = 0; i < ARRAY_LEN(simple_hotkey_table); i++) {
+    if (hotkey_matches(config, event, simple_hotkey_table[i].hotkey)) {
+      *action = simple_hotkey_table[i].action_fn();
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Dialog handler table - hotkeys that open dialogs (no Action, direct call) */
+typedef void (*DialogHandlerFn)(TuiState *);
+
+typedef struct {
+  HotkeyAction hotkey;
+  DialogHandlerFn handler;
+} DialogHotkeyEntry;
+
+static const DialogHotkeyEntry dialog_hotkey_table[] = {
+    {HOTKEY_SHOW_SCHEMA, tui_show_schema},
+    {HOTKEY_GOTO_ROW, tui_show_goto_dialog},
+    {HOTKEY_CONNECT_DIALOG, tui_show_connect_dialog},
+    {HOTKEY_TOGGLE_HISTORY, tui_show_history_dialog},
+    {HOTKEY_CONFIG, tui_show_config},
+};
+
+/* Lookup dialog hotkey handler. Returns true if found and executed. */
+static bool lookup_dialog_hotkey(TuiState *state, const Config *config,
+                                 const UiEvent *event) {
+  for (size_t i = 0; i < ARRAY_LEN(dialog_hotkey_table); i++) {
+    if (hotkey_matches(config, event, dialog_hotkey_table[i].hotkey)) {
+      dialog_hotkey_table[i].handler(state);
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ==========================================================================
+ * Context-Aware Input Dispatch Tables
+ *
+ * These tables handle hotkeys that need to check focus state or produce
+ * different actions based on context. Each handler returns an Action.
+ * ========================================================================== */
+
+/* Focus guard flags - which focus states allow the action */
+typedef enum {
+  FOCUS_ANY = 0,             /* Works in any focus state */
+  FOCUS_TABLE = 1 << 0,      /* Must be focused on table (not sidebar/filters) */
+  FOCUS_NOT_SIDEBAR = 1 << 1, /* Must not be in sidebar */
+  FOCUS_NOT_FILTERS = 1 << 2, /* Must not be in filters */
+  FOCUS_TABLE_ONLY = FOCUS_NOT_SIDEBAR | FOCUS_NOT_FILTERS,
+} FocusGuard;
+
+/* Context-aware action handler - returns Action based on state */
+typedef Action (*ContextActionFn)(TuiState *state);
+
+typedef struct {
+  HotkeyAction hotkey;
+  FocusGuard guard;
+  ContextActionFn handler;
+} ContextHotkeyEntry;
+
+/* Forward declarations for context handlers */
+static Action handle_move_up(TuiState *state);
+static Action handle_move_down(TuiState *state);
+static Action handle_move_left(TuiState *state);
+static Action handle_move_right(TuiState *state);
+static Action handle_toggle_sidebar(TuiState *state);
+static Action handle_toggle_filters(TuiState *state);
+static Action handle_filters_switch_focus(TuiState *state);
+
+/* Wrappers for parameterless action constructors */
+static Action handle_cell_copy(TuiState *state) {
+  (void)state;
+  return action_cell_copy();
+}
+static Action handle_cell_paste(TuiState *state) {
+  (void)state;
+  return action_cell_paste();
+}
+static Action handle_toggle_selection(TuiState *state) {
+  (void)state;
+  return action_row_toggle_select();
+}
+
+static const ContextHotkeyEntry context_hotkey_table[] = {
+    /* Navigation - context-aware cursor movement */
+    {HOTKEY_MOVE_UP, FOCUS_ANY, handle_move_up},
+    {HOTKEY_MOVE_DOWN, FOCUS_ANY, handle_move_down},
+    {HOTKEY_MOVE_LEFT, FOCUS_ANY, handle_move_left},
+    {HOTKEY_MOVE_RIGHT, FOCUS_ANY, handle_move_right},
+    /* Editing - requires table focus */
+    {HOTKEY_CELL_COPY, FOCUS_TABLE_ONLY, handle_cell_copy},
+    {HOTKEY_CELL_PASTE, FOCUS_TABLE_ONLY, handle_cell_paste},
+    /* Selection - requires table focus */
+    {HOTKEY_TOGGLE_SELECTION, FOCUS_TABLE_ONLY, handle_toggle_selection},
+    /* UI Focus */
+    {HOTKEY_TOGGLE_SIDEBAR, FOCUS_ANY, handle_toggle_sidebar},
+    {HOTKEY_TOGGLE_FILTERS, FOCUS_ANY, handle_toggle_filters},
+    {HOTKEY_FILTERS_SWITCH_FOCUS, FOCUS_ANY, handle_filters_switch_focus},
+};
+
+/* Check if focus state passes guard requirements */
+static bool check_focus_guard(TuiState *state, FocusGuard guard) {
+  if (guard == FOCUS_ANY)
+    return true;
+  if ((guard & FOCUS_NOT_SIDEBAR) && tui_sidebar_focused(state))
+    return false;
+  if ((guard & FOCUS_NOT_FILTERS) && tui_filters_focused(state))
+    return false;
+  return true;
+}
+
+/* Lookup context-aware hotkey. Returns true if found, sets *action. */
+static bool lookup_context_hotkey(TuiState *state, const Config *config,
+                                  const UiEvent *event, Action *action) {
+  for (size_t i = 0; i < ARRAY_LEN(context_hotkey_table); i++) {
+    const ContextHotkeyEntry *entry = &context_hotkey_table[i];
+    if (hotkey_matches(config, event, entry->hotkey)) {
+      if (check_focus_guard(state, entry->guard)) {
+        *action = entry->handler(state);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/* ==========================================================================
+ * Stateful Input Handlers
+ *
+ * These handlers need full TuiState access and may have side effects beyond
+ * returning an Action. They return true if handled (with optional action).
+ * ========================================================================== */
+
+typedef bool (*StatefulHandlerFn)(TuiState *state, Action *action);
+
+typedef struct {
+  HotkeyAction hotkey;
+  FocusGuard guard;
+  StatefulHandlerFn handler;
+} StatefulHotkeyEntry;
+
+/* Forward declarations for stateful handlers */
+static bool handle_quit(TuiState *state, Action *action);
+static bool handle_clear_selections(TuiState *state, Action *action);
+static bool handle_row_add(TuiState *state, Action *action);
+static bool handle_open_query(TuiState *state, Action *action);
+static bool handle_close_tab(TuiState *state, Action *action);
+static bool handle_refresh(TuiState *state, Action *action);
+static bool handle_cycle_sort(TuiState *state, Action *action);
+static bool handle_help(TuiState *state, Action *action);
+
+static const StatefulHotkeyEntry stateful_hotkey_table[] = {
+    /* Application */
+    {HOTKEY_QUIT, FOCUS_ANY, handle_quit},
+    /* Editing */
+    {HOTKEY_ROW_ADD, FOCUS_TABLE_ONLY, handle_row_add},
+    {HOTKEY_CLEAR_SELECTIONS, FOCUS_TABLE_ONLY, handle_clear_selections},
+    /* Workspaces */
+    {HOTKEY_OPEN_QUERY, FOCUS_ANY, handle_open_query},
+    {HOTKEY_CLOSE_TAB, FOCUS_ANY, handle_close_tab},
+    /* Table Operations */
+    {HOTKEY_REFRESH, FOCUS_ANY, handle_refresh},
+    {HOTKEY_CYCLE_SORT, FOCUS_ANY, handle_cycle_sort},
+    /* Help */
+    {HOTKEY_HELP, FOCUS_ANY, handle_help},
+};
+
+/* Lookup stateful hotkey. Returns true if found and handled. */
+static bool lookup_stateful_hotkey(TuiState *state, const Config *config,
+                                   const UiEvent *event, Action *action) {
+  for (size_t i = 0; i < ARRAY_LEN(stateful_hotkey_table); i++) {
+    const StatefulHotkeyEntry *entry = &stateful_hotkey_table[i];
+    if (hotkey_matches(config, event, entry->hotkey)) {
+      if (check_focus_guard(state, entry->guard)) {
+        return entry->handler(state, action);
+      }
+    }
+  }
+  return false;
+}
+
+/* ==========================================================================
+ * Context Handler Implementations
+ * ========================================================================== */
+
+static Action handle_move_up(TuiState *state) {
+  /* At first row with filters visible - focus filters */
+  if (tui_cursor_row(state) == 0 && state->filters_visible) {
+    Tab *tab = TUI_TAB(state);
+    state->filters_cursor_row = tab ? tab->filters.num_filters - 1 : 0;
+    if (state->filters_cursor_row == (size_t)-1)
+      state->filters_cursor_row = 0;
+    return action_filters_focus();
+  }
+  return action_cursor_move(-1, 0);
+}
+
+static Action handle_move_down(TuiState *state) {
+  (void)state;
+  return action_cursor_move(1, 0);
+}
+
+static Action handle_move_left(TuiState *state) {
+  /* At leftmost column with sidebar visible - focus sidebar */
+  if (tui_cursor_col(state) == 0 && state->sidebar_visible) {
+    return action_sidebar_focus();
+  }
+  return action_cursor_move(0, -1);
+}
+
+static Action handle_move_right(TuiState *state) {
+  (void)state;
+  return action_cursor_move(0, 1);
+}
+
+static Action handle_toggle_sidebar(TuiState *state) {
+  /* If sidebar visible but not focused, focus it; otherwise toggle */
+  if (state->sidebar_visible && !state->sidebar_focused) {
+    return action_sidebar_focus();
+  }
+  return action_sidebar_toggle();
+}
+
+static Action handle_toggle_filters(TuiState *state) {
+  /* If filters visible but not focused, focus them; otherwise toggle */
+  bool focusing = state->filters_visible && !state->filters_focused;
+  size_t table_col = tui_cursor_col(state);
+  Tab *tab = TUI_TAB(state);
+
+  Action action = focusing ? action_filters_focus() : action_filters_toggle();
+
+  /* Smart filter positioning when opening or focusing from table */
+  bool closing = (!focusing && state->filters_visible);
+  if (!closing && tab && tab->schema && table_col < tab->schema->num_columns) {
+    if (tab->type == TAB_TYPE_TABLE) {
+      TableFilters *f = &tab->filters;
+
+      /* Check if column already exists in filters */
+      size_t found_idx = SIZE_MAX;
+      for (size_t i = 0; i < f->num_filters; i++) {
+        if (f->filters[i].column_index == table_col) {
+          found_idx = i;
+          break;
+        }
+      }
+
+      if (found_idx != SIZE_MAX) {
+        /* Column exists - move cursor to that filter row */
+        ColumnFilter *cf = &f->filters[found_idx];
+        state->filters_cursor_row = found_idx;
+        state->filters_cursor_col = filter_op_needs_value(cf->op) ? 2 : 0;
+        if (found_idx < state->filters_scroll) {
+          state->filters_scroll = found_idx;
+        } else if (found_idx >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
+          state->filters_scroll = found_idx - MAX_VISIBLE_FILTERS + 1;
+        }
+      } else if (f->num_filters == 1) {
+        /* Single filter - check if inactive, update its column */
+        ColumnFilter *cf = &f->filters[0];
+        bool is_raw = (cf->column_index == SIZE_MAX);
+        bool is_inactive =
+            (cf->value[0] == '\0' && (is_raw || filter_op_needs_value(cf->op)));
+        if (is_inactive) {
+          cf->column_index = table_col;
+          state->filters_cursor_row = 0;
+          state->filters_cursor_col = 2;
+        } else {
+          filters_add(f, table_col, FILTER_OP_EQ, "");
+          state->filters_cursor_row = f->num_filters - 1;
+          state->filters_cursor_col = 2;
+        }
+      } else if (f->num_filters == 0) {
+        filters_add(f, table_col, FILTER_OP_EQ, "");
+        state->filters_cursor_row = 0;
+        state->filters_cursor_col = 2;
+      } else {
+        filters_add(f, table_col, FILTER_OP_EQ, "");
+        state->filters_cursor_row = f->num_filters - 1;
+        state->filters_cursor_col = 2;
+        if (state->filters_cursor_row >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
+          state->filters_scroll = state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
+        }
+      }
+    }
+  }
+  return action;
+}
+
+static Action handle_filters_switch_focus(TuiState *state) {
+  if (state->filters_visible) {
+    return action_filters_focus();
+  }
+  return (Action){0};
+}
+
+/* ==========================================================================
+ * Stateful Handler Implementations
+ * ========================================================================== */
+
+static bool handle_quit(TuiState *state, Action *action) {
+  bool needs_confirm = state->app && state->app->config &&
+                       state->app->config->general.quit_confirmation;
+  if (!needs_confirm || tui_show_confirm_dialog(state, "Quit application?")) {
+    *action = action_quit_force();
+    return true;
+  }
+  return false;
+}
+
+static bool handle_clear_selections(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->num_selected > 0) {
+    *action = action_rows_clear_select();
+    return true;
+  }
+  return false;
+}
+
+static bool handle_row_add(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE && tab->data) {
+    if (tui_start_add_row(state)) {
+      tui_refresh(state);
+    }
+    return true;
+  }
+  (void)action;
+  return false;
+}
+
+static bool handle_open_query(TuiState *state, Action *action) {
+  workspace_create_query(state);
+  (void)action;
+  return true;
+}
+
+static bool handle_close_tab(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  if (tab) {
+    if (tab->type == TAB_TYPE_QUERY &&
+        ((tab->query_text && tab->query_len > 0) || tab->query_results)) {
+      if (!tui_show_confirm_dialog(state,
+                                   "Close query tab with unsaved content?")) {
+        return false;
+      }
+    }
+    tab_close(state);
+    return true;
+  }
+  (void)action;
+  return false;
+}
+
+static bool handle_refresh(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE) {
+    tui_refresh_table(state);
+    return true;
+  }
+  (void)action;
+  return false;
+}
+
+static bool handle_cycle_sort(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE && tab->schema) {
+    size_t col = tab->cursor_col;
+    if (col < tab->schema->num_columns) {
+      /* Find if column is already in sort list */
+      size_t existing_idx = SIZE_MAX;
+      for (size_t i = 0; i < tab->num_sort_entries; i++) {
+        if (tab->sort_entries[i].column == col) {
+          existing_idx = i;
+          break;
+        }
+      }
+
+      if (existing_idx == SIZE_MAX) {
+        /* Column not in list - add with ASC if room */
+        if (tab->num_sort_entries < MAX_SORT_COLUMNS) {
+          tab->sort_entries[tab->num_sort_entries].column = col;
+          tab->sort_entries[tab->num_sort_entries].direction = SORT_ASC;
+          tab->num_sort_entries++;
+        }
+      } else if (tab->sort_entries[existing_idx].direction == SORT_ASC) {
+        /* Was ascending -> descending */
+        tab->sort_entries[existing_idx].direction = SORT_DESC;
+      } else {
+        /* Was descending -> remove from list */
+        for (size_t i = existing_idx; i < tab->num_sort_entries - 1; i++) {
+          tab->sort_entries[i] = tab->sort_entries[i + 1];
+        }
+        tab->num_sort_entries--;
+      }
+      tui_refresh_table(state);
+      return true;
+    }
+  }
+  (void)action;
+  return false;
+}
+
+static bool handle_help(TuiState *state, Action *action) {
+  config_view_show_tab(state, CONFIG_TAB_HOTKEYS);
+  tui_refresh(state);
+  (void)action;
+  return true;
 }
 
 void tui_run(TuiState *state) {
@@ -1324,6 +1735,16 @@ void tui_run(TuiState *state) {
       continue;
     }
 
+    /* Try FocusManager routing first (for widgets that implement handle_event).
+     * This is the future path - as widgets implement handle_event, they'll
+     * consume events here. For now, most fall through to legacy handlers below.
+     */
+    UITabState *ui_tab = tui_current_tab_ui(state);
+    if (ui_tab && focus_manager_route_event(&ui_tab->focus_mgr, &event)) {
+      tui_refresh(state);
+      continue;
+    }
+
     /* Handle query tab input */
     Tab *query_tab = TUI_TAB(state);
     if (query_tab && !state->sidebar_focused) {
@@ -1354,286 +1775,20 @@ void tui_run(TuiState *state) {
     (void)render_event_get_char(&event); /* May be used for debugging */
     (void)render_event_get_fkey(&event); /* May be used for debugging */
 
-    /* ========== Application ========== */
-    if (hotkey_matches(state->app->config, &event, HOTKEY_QUIT)) {
-      /* Quit with confirmation only if configured */
-      bool needs_confirm = false;
-      if (state->app && state->app->config &&
-          state->app->config->general.quit_confirmation) {
-        needs_confirm = true;
-      }
-      if (!needs_confirm ||
-          tui_show_confirm_dialog(state, "Quit application?")) {
-        action = action_quit_force();
-      }
-    }
-    /* ========== Navigation ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_UP)) {
-      /* At first row with filters visible - focus filters */
-      if (state->cursor_row == 0 && state->filters_visible) {
-        action = action_filters_focus();
-        Tab *filters_tab = TUI_TAB(state);
-        state->filters_cursor_row =
-            filters_tab ? filters_tab->filters.num_filters - 1 : 0;
-        if (state->filters_cursor_row == (size_t)-1)
-          state->filters_cursor_row = 0;
-      } else {
-        action = action_cursor_move(-1, 0);
-      }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_DOWN)) {
-      action = action_cursor_move(1, 0);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_LEFT)) {
-      /* At leftmost column with sidebar visible - focus sidebar */
-      if (state->cursor_col == 0 && state->sidebar_visible) {
-        action = action_sidebar_focus();
-      } else {
-        action = action_cursor_move(0, -1);
-      }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_MOVE_RIGHT)) {
-      action = action_cursor_move(0, 1);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PAGE_UP)) {
-      action = action_page_up();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PAGE_DOWN)) {
-      action = action_page_down();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FIRST_COL)) {
-      action = action_column_first();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_LAST_COL)) {
-      action = action_column_last();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_FIRST_ROW)) {
-      action = action_home();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_LAST_ROW)) {
-      action = action_end();
-    }
-    /* ========== Editing ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_EDIT_INLINE)) {
-      action = action_edit_start();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_EDIT_MODAL)) {
-      action = action_edit_start_modal();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_SET_NULL)) {
-      action = action_cell_set_null();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_SET_EMPTY)) {
-      action = action_cell_set_empty();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_DELETE_ROW)) {
-      action = action_row_delete();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_ROW_ADD) &&
-               !state->sidebar_focused && !state->filters_focused) {
-      /* Start add-row mode */
-      Tab *add_tab = TUI_TAB(state);
-      if (add_tab && add_tab->type == TAB_TYPE_TABLE && state->data) {
-        if (tui_start_add_row(state)) {
-          tui_refresh(state);
-        }
-      }
-    }
-    /* ========== Row Selection ========== */
-    else if (hotkey_matches(state->app->config, &event,
-                            HOTKEY_TOGGLE_SELECTION) &&
-             !state->sidebar_focused && !state->filters_focused) {
-      action = action_row_toggle_select();
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_CLEAR_SELECTIONS) &&
-               !state->sidebar_focused && !state->filters_focused) {
-      Tab *tab = TUI_TAB(state);
-      if (tab && tab->num_selected > 0) {
-        action = action_rows_clear_select();
-      }
-    }
-    /* ========== Workspaces ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_OPEN_QUERY)) {
-      workspace_create_query(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_NEXT_TAB)) {
-      action = action_tab_next();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_PREV_TAB)) {
-      action = action_tab_prev();
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_NEXT_WORKSPACE)) {
-      action = action_workspace_next();
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_PREV_WORKSPACE)) {
-      action = action_workspace_prev();
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CLOSE_TAB)) {
-      /* Close with confirmation for query tabs with content */
-      Tab *close_tab = TUI_TAB(state);
-      if (close_tab) {
-        if (close_tab->type == TAB_TYPE_QUERY &&
-            ((close_tab->query_text && close_tab->query_len > 0) ||
-             close_tab->query_results)) {
-          if (!tui_show_confirm_dialog(
-                  state, "Close query tab with unsaved content?")) {
-            handled = false;
-          } else {
-            tab_close(state);
-          }
-        } else {
-          tab_close(state);
-        }
-      }
-    }
-    /* ========== Sidebar ========== */
-    else if (hotkey_matches(state->app->config, &event,
-                            HOTKEY_TOGGLE_SIDEBAR)) {
-      /* If sidebar visible but not focused, focus it; otherwise toggle */
-      if (state->sidebar_visible && !state->sidebar_focused) {
-        action = action_sidebar_focus();
-      } else {
-        action = action_sidebar_toggle();
-      }
-    }
-    /* ========== Filters ========== */
-    else if (hotkey_matches(state->app->config, &event,
-                            HOTKEY_TOGGLE_FILTERS)) {
-      /* If filters visible but not focused, focus them; otherwise toggle */
-      bool focusing = state->filters_visible && !state->filters_focused;
-      size_t table_col = state->cursor_col;
-
-      if (focusing) {
-        action = action_filters_focus();
-      } else {
-        action = action_filters_toggle();
-      }
-
-      /* Smart filter positioning when opening or focusing from table */
-      bool dominated = (!focusing && state->filters_visible); /* closing */
-      if (!dominated && state->schema && table_col < state->schema->num_columns) {
-        Tab *ftab = TUI_TAB(state);
-        if (ftab && ftab->type == TAB_TYPE_TABLE) {
-          TableFilters *f = &ftab->filters;
-
-          /* Check if column already exists in filters */
-          size_t found_idx = SIZE_MAX;
-          for (size_t i = 0; i < f->num_filters; i++) {
-            if (f->filters[i].column_index == table_col) {
-              found_idx = i;
-              break;
-            }
-          }
-
-          if (found_idx != SIZE_MAX) {
-            /* Column exists - move cursor to that filter row */
-            ColumnFilter *cf = &f->filters[found_idx];
-            state->filters_cursor_row = found_idx;
-            /* If op needs value, go to value field; otherwise column selector */
-            state->filters_cursor_col = filter_op_needs_value(cf->op) ? 2 : 0;
-            /* Adjust scroll if needed */
-            if (found_idx < state->filters_scroll) {
-              state->filters_scroll = found_idx;
-            } else if (found_idx >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
-              state->filters_scroll = found_idx - MAX_VISIBLE_FILTERS + 1;
-            }
-          } else if (f->num_filters == 1) {
-            /* Single filter - check if inactive, update its column */
-            ColumnFilter *cf = &f->filters[0];
-            bool is_raw = (cf->column_index == SIZE_MAX);
-            bool is_inactive =
-                (cf->value[0] == '\0' && (is_raw || filter_op_needs_value(cf->op)));
-            if (is_inactive) {
-              cf->column_index = table_col;
-              state->filters_cursor_row = 0;
-              state->filters_cursor_col = 2;
-            } else {
-              /* Single active filter for different column - add new filter */
-              filters_add(f, table_col, FILTER_OP_EQ, "");
-              state->filters_cursor_row = f->num_filters - 1;
-              state->filters_cursor_col = 2;
-            }
-          } else if (f->num_filters == 0) {
-            /* No filters - add one with current column */
-            filters_add(f, table_col, FILTER_OP_EQ, "");
-            state->filters_cursor_row = 0;
-            state->filters_cursor_col = 2;
-          } else {
-            /* Multiple filters, column not found - add new filter */
-            filters_add(f, table_col, FILTER_OP_EQ, "");
-            state->filters_cursor_row = f->num_filters - 1;
-            state->filters_cursor_col = 2;
-            /* Scroll to show new filter */
-            if (state->filters_cursor_row >= state->filters_scroll + MAX_VISIBLE_FILTERS) {
-              state->filters_scroll = state->filters_cursor_row - MAX_VISIBLE_FILTERS + 1;
-            }
-          }
-        }
-      }
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_FILTERS_SWITCH_FOCUS)) {
-      if (state->filters_visible) {
-        action = action_filters_focus();
-      }
-    }
-    /* ========== UI Toggles ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_TOGGLE_HEADER)) {
-      action = action_toggle_header();
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_TOGGLE_STATUS)) {
-      action = action_toggle_status();
-    }
-    /* ========== Table Operations ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_REFRESH)) {
-      /* Refresh table (only for table tabs, not query) */
-      Tab *refresh_tab = TUI_TAB(state);
-      if (refresh_tab && refresh_tab->type == TAB_TYPE_TABLE) {
-        tui_refresh_table(state);
-      }
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CYCLE_SORT)) {
-      /* Cycle sort on current column: not in list -> asc -> desc -> remove */
-      Tab *sort_tab = TUI_TAB(state);
-      if (sort_tab && sort_tab->type == TAB_TYPE_TABLE && sort_tab->schema) {
-        size_t col = state->cursor_col;
-        if (col < sort_tab->schema->num_columns) {
-          /* Find if column is already in sort list */
-          size_t existing_idx = SIZE_MAX;
-          for (size_t i = 0; i < sort_tab->num_sort_entries; i++) {
-            if (sort_tab->sort_entries[i].column == col) {
-              existing_idx = i;
-              break;
-            }
-          }
-
-          if (existing_idx == SIZE_MAX) {
-            /* Column not in list - add with ASC if room */
-            if (sort_tab->num_sort_entries < MAX_SORT_COLUMNS) {
-              sort_tab->sort_entries[sort_tab->num_sort_entries].column = col;
-              sort_tab->sort_entries[sort_tab->num_sort_entries].direction =
-                  SORT_ASC;
-              sort_tab->num_sort_entries++;
-            }
-          } else if (sort_tab->sort_entries[existing_idx].direction ==
-                     SORT_ASC) {
-            /* Was ascending -> descending */
-            sort_tab->sort_entries[existing_idx].direction = SORT_DESC;
-          } else {
-            /* Was descending -> remove from list */
-            for (size_t i = existing_idx; i < sort_tab->num_sort_entries - 1;
-                 i++) {
-              sort_tab->sort_entries[i] = sort_tab->sort_entries[i + 1];
-            }
-            sort_tab->num_sort_entries--;
-          }
-          /* Reload table with new sort order */
-          tui_refresh_table(state);
-        }
-      }
-    }
-    /* ========== Dialogs (handled directly by TUI) ========== */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_SHOW_SCHEMA)) {
-      tui_show_schema(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_GOTO_ROW)) {
-      tui_show_goto_dialog(state);
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_CONNECT_DIALOG)) {
-      tui_show_connect_dialog(state);
-    } else if (hotkey_matches(state->app->config, &event,
-                              HOTKEY_TOGGLE_HISTORY)) {
-      tui_show_history_dialog(state);
+    /* Dispatch via lookup tables - order matters for priority */
+    if (lookup_simple_hotkey(state->app->config, &event, &action)) {
+      /* Simple hotkey matched - action already set */
+    } else if (lookup_dialog_hotkey(state, state->app->config, &event)) {
+      /* Dialog hotkey handled directly */
       tui_refresh(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_HELP)) {
-      /* Help opens config dialog on hotkeys tab */
-      config_view_show_tab(state, CONFIG_TAB_HOTKEYS);
-      tui_refresh(state);
-    } else if (hotkey_matches(state->app->config, &event, HOTKEY_CONFIG)) {
-      tui_show_config(state);
-    }
-    /* ========== Unhandled ========== */
-    else {
+      continue;
+    } else if (lookup_context_hotkey(state, state->app->config, &event,
+                                     &action)) {
+      /* Context-aware hotkey matched - action set by handler */
+    } else if (lookup_stateful_hotkey(state, state->app->config, &event,
+                                      &action)) {
+      /* Stateful hotkey handled - may or may not set action */
+    } else {
       handled = false;
     }
 
@@ -1651,24 +1806,7 @@ void tui_run(TuiState *state) {
                      CHANGED_LAYOUT)) {
         tui_sync_from_app(state);
       }
-
-      /* Sync Tab with TuiState cursor/scroll after action
-       * This handles both:
-       * - Callback-based actions that modified TuiState (sync to Tab)
-       * - Core actions that modified Tab (sync to TuiState)
-       * We use Tab as authority for core actions, TuiState for callbacks.
-       * Navigation callbacks now update Tab directly, so Tab is always current.
-       */
-      if (changes & (CHANGED_CURSOR | CHANGED_SCROLL)) {
-        Tab *tab = app_current_tab(state->app);
-        if (tab) {
-          /* Sync TuiState to Tab (for callback-based changes) */
-          tab->cursor_row = state->cursor_row;
-          tab->cursor_col = state->cursor_col;
-          tab->scroll_row = state->scroll_row;
-          tab->scroll_col = state->scroll_col;
-        }
-      }
+      /* Tab is now the source of truth - draw code reads from Tab directly */
     }
 
     tui_refresh(state);

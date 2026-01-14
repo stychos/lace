@@ -9,14 +9,14 @@
 #include "app_state.h"
 #include "../async/async.h"
 #include "../db/db.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include "history.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-/* Default page size for data loading */
-#define DEFAULT_PAGE_SIZE 500
+/* Default page size uses config constant from config.h */
 
 /* ============================================================================
  * History Callback for Database Layer
@@ -58,15 +58,12 @@ static bool workspace_ensure_tab_capacity(Workspace *ws) {
 
   size_t new_capacity =
       ws->tab_capacity == 0 ? INITIAL_TAB_CAPACITY : ws->tab_capacity * 2;
-  Tab *new_tabs = realloc(ws->tabs, new_capacity * sizeof(Tab));
-  if (!new_tabs)
-    return false;
+  ws->tabs = safe_reallocarray(ws->tabs, new_capacity, sizeof(Tab));
 
   /* Zero new entries */
-  memset(&new_tabs[ws->tab_capacity], 0,
+  memset(&ws->tabs[ws->tab_capacity], 0,
          (new_capacity - ws->tab_capacity) * sizeof(Tab));
 
-  ws->tabs = new_tabs;
   ws->tab_capacity = new_capacity;
   return true;
 }
@@ -82,15 +79,12 @@ static bool app_ensure_connection_capacity(AppState *app) {
   size_t new_capacity = app->connection_capacity == 0
                             ? INITIAL_CONNECTION_CAPACITY
                             : app->connection_capacity * 2;
-  Connection *new_conns =
-      realloc(app->connections, new_capacity * sizeof(Connection));
-  if (!new_conns)
-    return false;
+  app->connections =
+      safe_reallocarray(app->connections, new_capacity, sizeof(Connection));
 
-  memset(&new_conns[app->connection_capacity], 0,
+  memset(&app->connections[app->connection_capacity], 0,
          (new_capacity - app->connection_capacity) * sizeof(Connection));
 
-  app->connections = new_conns;
   app->connection_capacity = new_capacity;
   return true;
 }
@@ -106,15 +100,12 @@ static bool app_ensure_workspace_capacity(AppState *app) {
   size_t new_capacity = app->workspace_capacity == 0
                             ? INITIAL_WORKSPACE_CAPACITY
                             : app->workspace_capacity * 2;
-  Workspace *new_ws =
-      realloc(app->workspaces, new_capacity * sizeof(Workspace));
-  if (!new_ws)
-    return false;
+  app->workspaces =
+      safe_reallocarray(app->workspaces, new_capacity, sizeof(Workspace));
 
-  memset(&new_ws[app->workspace_capacity], 0,
+  memset(&app->workspaces[app->workspace_capacity], 0,
          (new_capacity - app->workspace_capacity) * sizeof(Workspace));
 
-  app->workspaces = new_ws;
   app->workspace_capacity = new_capacity;
   return true;
 }
@@ -163,50 +154,31 @@ void tab_free_data(Tab *tab) {
   }
 
   /* Free table data */
-  free(tab->table_name);
-  tab->table_name = NULL;
-  free(tab->table_error);
-  tab->table_error = NULL;
-
+  FREE_NULL(tab->table_name);
+  FREE_NULL(tab->table_error);
   db_result_free(tab->data);
   tab->data = NULL;
-
   db_schema_free(tab->schema);
   tab->schema = NULL;
-
-  free(tab->col_widths);
-  tab->col_widths = NULL;
+  FREE_NULL(tab->col_widths);
   tab->num_col_widths = 0;
-
   filters_free(&tab->filters);
 
   /* Free query data */
-  free(tab->query_text);
-  tab->query_text = NULL;
-
+  FREE_NULL(tab->query_text);
   db_result_free(tab->query_results);
   tab->query_results = NULL;
-
-  free(tab->query_error);
-  tab->query_error = NULL;
-
-  free(tab->query_result_col_widths);
-  tab->query_result_col_widths = NULL;
+  FREE_NULL(tab->query_error);
+  FREE_NULL(tab->query_result_col_widths);
 
   /* Note: query_result_edit_buf is now in UITabState (TUI layer) */
-
-  free(tab->query_source_table);
-  tab->query_source_table = NULL;
-
+  FREE_NULL(tab->query_source_table);
   db_schema_free(tab->query_source_schema);
   tab->query_source_schema = NULL;
-
-  free(tab->query_base_sql);
-  tab->query_base_sql = NULL;
+  FREE_NULL(tab->query_base_sql);
 
   /* Free row selections */
-  free(tab->selected_rows);
-  tab->selected_rows = NULL;
+  FREE_NULL(tab->selected_rows);
   tab->num_selected = 0;
   tab->selected_capacity = 0;
 }
@@ -236,11 +208,6 @@ Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
   tab->connection_index = connection_index;
   tab->table_index = table_index;
   tab->table_name = str_dup(table_name);
-  if (!tab->table_name) {
-    /* str_dup failed - reset tab and return NULL */
-    memset(tab, 0, sizeof(Tab));
-    return NULL;
-  }
 
   ws->num_tabs++;
   ws->current_tab = new_idx;
@@ -262,19 +229,10 @@ Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index) {
   tab->type = TAB_TYPE_QUERY;
   tab->connection_index = connection_index;
   tab->table_name = str_dup("Query");
-  if (!tab->table_name) {
-    memset(tab, 0, sizeof(Tab));
-    return NULL;
-  }
 
   /* Initialize query buffer */
   tab->query_capacity = 1024;
-  tab->query_text = malloc(tab->query_capacity);
-  if (!tab->query_text) {
-    free(tab->table_name);
-    memset(tab, 0, sizeof(Tab));
-    return NULL;
-  }
+  tab->query_text = safe_malloc(tab->query_capacity);
   tab->query_text[0] = '\0';
   tab->query_len = 0;
 
@@ -312,11 +270,9 @@ Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
       const char *query = strchr(db_name, '?');
       if (query) {
         size_t len = query - db_name;
-        tab->table_name = malloc(len + 1);
-        if (tab->table_name) {
-          memcpy(tab->table_name, db_name, len);
-          tab->table_name[len] = '\0';
-        }
+        tab->table_name = safe_malloc(len + 1);
+        memcpy(tab->table_name, db_name, len);
+        tab->table_name[len] = '\0';
       } else {
         tab->table_name = str_dup(db_name);
       }
@@ -326,10 +282,6 @@ Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
     }
   } else {
     tab->table_name = str_dup("Connection");
-  }
-  if (!tab->table_name) {
-    memset(tab, 0, sizeof(Tab));
-    return NULL;
   }
 
   tab->active = true;
@@ -390,10 +342,8 @@ void workspace_init(Workspace *ws) {
   memset(ws, 0, sizeof(Workspace));
 
   /* Allocate initial tabs array */
-  ws->tabs = calloc(INITIAL_TAB_CAPACITY, sizeof(Tab));
-  if (ws->tabs) {
-    ws->tab_capacity = INITIAL_TAB_CAPACITY;
-  }
+  ws->tabs = safe_calloc(INITIAL_TAB_CAPACITY, sizeof(Tab));
+  ws->tab_capacity = INITIAL_TAB_CAPACITY;
 }
 
 void workspace_free_data(Workspace *ws) {
@@ -503,10 +453,8 @@ void connection_free_data(Connection *conn) {
   conn->num_tables = 0;
 
   /* Free connection string and saved connection ID */
-  free(conn->connstr);
-  conn->connstr = NULL;
-  free(conn->saved_conn_id);
-  conn->saved_conn_id = NULL;
+  FREE_NULL(conn->connstr);
+  FREE_NULL(conn->saved_conn_id);
 
   /* Free query history */
   history_free(conn->history);
@@ -518,8 +466,7 @@ void connection_free_data(Connection *conn) {
     conn->conn->history_callback = NULL;
 
     /* Now safe to free the context */
-    free(conn->conn->history_context);
-    conn->conn->history_context = NULL;
+    FREE_NULL(conn->conn->history_context);
 
     db_disconnect(conn->conn);
     conn->conn = NULL;
@@ -550,13 +497,11 @@ Connection *app_add_connection(AppState *app, DbConnection *db_conn,
 
     /* Set up history callback in the database connection */
     if (conn->history && db_conn) {
-      HistoryCallbackContext *ctx = malloc(sizeof(HistoryCallbackContext));
-      if (ctx) {
-        ctx->conn = conn;
-        ctx->max_size = app->config->general.history_max_size;
-        db_conn->history_callback = history_callback;
-        db_conn->history_context = ctx;
-      }
+      HistoryCallbackContext *ctx = safe_malloc(sizeof(HistoryCallbackContext));
+      ctx->conn = conn;
+      ctx->max_size = app->config->general.history_max_size;
+      db_conn->history_callback = history_callback;
+      db_conn->history_context = ctx;
     }
   }
 
@@ -666,21 +611,17 @@ void app_state_init(AppState *app) {
     app->status_visible = app->config->general.show_status_bar;
   } else {
     /* Fallback defaults if config failed to load */
-    app->page_size = DEFAULT_PAGE_SIZE;
+    app->page_size = CONFIG_PAGE_SIZE_DEFAULT;
     app->header_visible = true;
     app->status_visible = true;
   }
 
   /* Allocate initial dynamic arrays */
-  app->connections = calloc(INITIAL_CONNECTION_CAPACITY, sizeof(Connection));
-  if (app->connections) {
-    app->connection_capacity = INITIAL_CONNECTION_CAPACITY;
-  }
+  app->connections = safe_calloc(INITIAL_CONNECTION_CAPACITY, sizeof(Connection));
+  app->connection_capacity = INITIAL_CONNECTION_CAPACITY;
 
-  app->workspaces = calloc(INITIAL_WORKSPACE_CAPACITY, sizeof(Workspace));
-  if (app->workspaces) {
-    app->workspace_capacity = INITIAL_WORKSPACE_CAPACITY;
-  }
+  app->workspaces = safe_calloc(INITIAL_WORKSPACE_CAPACITY, sizeof(Workspace));
+  app->workspace_capacity = INITIAL_WORKSPACE_CAPACITY;
 }
 
 void app_state_cleanup(AppState *app) {
@@ -742,15 +683,14 @@ Connection *app_current_tab_connection(AppState *app) {
  * ============================================================================
  */
 
-/* Initial capacity for selections array */
-#define INITIAL_SELECTION_CAPACITY 16
-
 /* Toggle selection of a row by global index */
 bool tab_toggle_selection(Tab *tab, size_t global_row) {
   if (!tab)
     return false;
 
   /* Check if already selected - if so, remove */
+  if (!tab->selected_rows && tab->num_selected > 0)
+    return false; /* Invalid state */
   for (size_t i = 0; i < tab->num_selected; i++) {
     if (tab->selected_rows[i] == global_row) {
       /* Remove by shifting remaining elements */
@@ -763,14 +703,12 @@ bool tab_toggle_selection(Tab *tab, size_t global_row) {
   }
 
   /* Not selected - add it */
-  /* Ensure capacity */
-  if (tab->num_selected >= tab->selected_capacity) {
+  /* Ensure capacity (also handle NULL selected_rows) */
+  if (tab->num_selected >= tab->selected_capacity || !tab->selected_rows) {
     size_t new_cap = tab->selected_capacity == 0 ? INITIAL_SELECTION_CAPACITY
                                                  : tab->selected_capacity * 2;
-    size_t *new_arr = realloc(tab->selected_rows, new_cap * sizeof(size_t));
-    if (!new_arr)
-      return false;
-    tab->selected_rows = new_arr;
+    tab->selected_rows =
+        safe_reallocarray(tab->selected_rows, new_cap, sizeof(size_t));
     tab->selected_capacity = new_cap;
   }
 

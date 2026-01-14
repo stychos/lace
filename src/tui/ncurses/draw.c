@@ -12,7 +12,6 @@
 #include "../../config/config.h"
 #include "../../core/app_state.h"
 #include "../../db/connstr.h"
-#include "../../viewmodel/vm_table.h"
 #include "render_helpers.h"
 #include "tui_internal.h"
 #include <stdlib.h>
@@ -25,15 +24,6 @@
  * Helper Functions
  * ============================================================================
  */
-
-/* Helper to get VmTable, returns NULL if not valid for table navigation */
-static VmTable *get_vm_table(TuiState *state) {
-  if (!state || !state->vm_table)
-    return NULL;
-  if (!vm_table_valid(state->vm_table))
-    return NULL;
-  return state->vm_table;
-}
 
 /* Check if tab has active filters (filters that affect the query) */
 static bool has_active_filters(Tab *tab) {
@@ -224,8 +214,8 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
     TableSchema *effective_schema = NULL;
     if (tab && tab->type == TAB_TYPE_QUERY && tab->query_source_schema) {
       effective_schema = tab->query_source_schema;
-    } else if (state) {
-      effective_schema = state->schema;
+    } else if (tab) {
+      effective_schema = tab->schema;
     }
 
     /* Apply row-level styling */
@@ -445,9 +435,11 @@ void tui_draw_header(TuiState *state) {
 static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
                               TuiState *state, size_t col, bool is_selected,
                               bool is_editing) {
+  Tab *tab = TUI_TAB(state);
+  TableSchema *schema = tab ? tab->schema : NULL;
   bool is_edited = state->new_row_edited && state->new_row_edited[col];
-  bool is_auto_increment = state->schema && col < state->schema->num_columns &&
-                           state->schema->columns[col].auto_increment;
+  bool is_auto_increment = schema && col < schema->num_columns &&
+                           schema->columns[col].auto_increment;
   bool is_placeholder = state->new_row_placeholders[col] && !is_edited;
 
   if (is_editing) {
@@ -493,7 +485,7 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
     if (is_placeholder && is_auto_increment) {
       /* Auto-increment placeholder - show in dim */
       wattron(win, A_DIM);
-      mvwprintw(win, y, x, "%-*.*s", width, width, "ai");
+      mvwprintw(win, y, x, "%-*.*s", width, width, "AI");
       wattroff(win, A_DIM);
     } else if (is_placeholder) {
       /* Default value placeholder - show in dim */
@@ -523,7 +515,7 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
     if (is_placeholder && is_auto_increment) {
       /* Auto-increment placeholder - gray/dim */
       wattron(win, A_DIM);
-      mvwprintw(win, y, x, "%-*.*s", width, width, "ai");
+      mvwprintw(win, y, x, "%-*.*s", width, width, "AI");
       wattroff(win, A_DIM);
     } else if (is_placeholder) {
       /* Default value placeholder - gray/dim */
@@ -575,7 +567,8 @@ static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
   int row_y = overlay_y + 1;
 
   /* Use the table's scroll_col for horizontal alignment */
-  size_t scroll_col = state->scroll_col;
+  TableWidget *widget = TUI_TABLE_WIDGET(state);
+  size_t scroll_col = widget ? widget->base.state.scroll_col : 0;
 
   /* Draw cells aligned with the main table */
   int x = params->start_x + 1;
@@ -626,27 +619,26 @@ void tui_draw_table(TuiState *state) {
     tui_draw_filters_panel(state);
   }
 
-  /*
-   * During the ViewModel migration, we use TuiState as the source of truth
-   * for UI state (cursor, scroll, editing). VmTable is available for future
-   * native GUI use but TUI continues to use its own state.
-   *
-   * This avoids the bug where VmTable reads stale cursor/scroll from Tab
-   * while TuiState has the live values being updated by input handlers.
-   */
-  ResultSet *data = state->data;
-  int *col_widths = state->col_widths;
-  size_t num_col_widths = state->num_col_widths;
-  size_t cursor_row = state->cursor_row;
-  size_t cursor_col = state->cursor_col;
-  size_t scroll_row = state->scroll_row;
-  size_t scroll_col = state->scroll_col;
+  /* Get tab for model data, widget for view state */
+  Tab *tab = TUI_TAB(state);
+  TableWidget *widget = TUI_TABLE_WIDGET(state);
+  if (!tab)
+    return;
+
+  /* Read model data from Tab */
+  ResultSet *data = tab->data;
+
+  /* Read view state from TableWidget (source of truth) */
+  int *col_widths = widget ? widget->col_widths : tab->col_widths;
+  size_t num_col_widths = widget ? widget->num_col_widths : tab->num_col_widths;
+  size_t cursor_row = widget ? widget->base.state.cursor_row : 0;
+  size_t cursor_col = widget ? widget->base.state.cursor_col : 0;
+  size_t scroll_row = widget ? widget->base.state.scroll_row : 0;
+  size_t scroll_col = widget ? widget->base.state.scroll_col : 0;
+
   bool is_editing = state->editing;
   char *edit_buffer = state->edit_buffer;
   size_t edit_pos = state->edit_pos;
-
-  /* Get tab for error checking */
-  Tab *tab = TUI_TAB(state);
 
   /* Check if there's a table error (e.g., table doesn't exist) */
   if (tab && tab->table_error) {
@@ -694,9 +686,9 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = cursor_col,
                            .scroll_row = scroll_row,
                            .scroll_col = scroll_col,
-                           .selection_offset = tab ? tab->loaded_offset : 0,
-                           .is_focused = !state->sidebar_focused &&
-                                         !state->filters_focused,
+                           .selection_offset = widget ? widget->loaded_offset : 0,
+                           .is_focused = !tui_sidebar_focused(state) &&
+                                         !tui_filters_focused(state),
                            .is_editing = is_editing,
                            .edit_buffer = edit_buffer,
                            .edit_pos = edit_pos,
@@ -817,6 +809,7 @@ void tui_draw_status(TuiState *state) {
   /* Check if we're in a query tab with results focus */
   Tab *tab = TUI_TAB(state);
   UITabState *ui = TUI_TAB_UI(state);
+  TableWidget *widget = TUI_TABLE_WIDGET(state);
   bool query_results_active = false;
   if (tab && ui) {
     query_results_active = (tab->type == TAB_TYPE_QUERY &&
@@ -824,12 +817,14 @@ void tui_draw_status(TuiState *state) {
   }
 
   /* Left: show table name when sidebar focused, otherwise column info */
-  if (state->sidebar_focused && state->tables && state->num_tables > 0) {
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  if (tui_sidebar_focused(state) && tables && num_tables > 0) {
     /* Show highlighted table name */
     size_t actual_idx =
-        tui_get_filtered_table_index(state, state->sidebar_highlight);
-    if (actual_idx < state->num_tables && state->tables[actual_idx]) {
-      const char *name = state->tables[actual_idx];
+        tui_get_filtered_table_index(state, tui_sidebar_highlight(state));
+    if (actual_idx < num_tables && tables[actual_idx]) {
+      const char *name = tables[actual_idx];
       mvwprintw(state->status_win, 0, 1, "%s", name);
     }
   } else if (query_results_active && tab->query_results->columns &&
@@ -879,10 +874,10 @@ void tui_draw_status(TuiState *state) {
     }
 
     mvwprintw(state->status_win, 0, 1, "%s", info);
-  } else if (state->adding_row && state->schema &&
-             state->new_row_cursor_col < state->schema->num_columns) {
+  } else if (state->adding_row && tab && tab->schema &&
+             state->new_row_cursor_col < tab->schema->num_columns) {
     /* Add-row mode: show column info for current cursor position */
-    ColumnDef *col = &state->schema->columns[state->new_row_cursor_col];
+    ColumnDef *col = &tab->schema->columns[state->new_row_cursor_col];
 
     /* Build column info string */
     char info[256];
@@ -912,8 +907,9 @@ void tui_draw_status(TuiState *state) {
     }
 
     mvwprintw(state->status_win, 0, 1, "%s", info);
-  } else if (state->schema && state->cursor_col < state->schema->num_columns) {
-    ColumnDef *col = &state->schema->columns[state->cursor_col];
+  } else if (tab && tab->schema && widget &&
+             widget->base.state.cursor_col < tab->schema->num_columns) {
+    ColumnDef *col = &tab->schema->columns[widget->base.state.cursor_col];
 
     /* Build column info string */
     char info[256];
@@ -979,15 +975,15 @@ void tui_draw_status(TuiState *state) {
     }
     int pos_len = (int)strlen(pos);
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
-  } else if (state->data) {
+  } else if (tab && tab->data && widget) {
     char pos[96];
-    size_t actual_row = state->loaded_offset + state->cursor_row + 1;
+    size_t actual_row = widget->loaded_offset + widget->base.state.cursor_row + 1;
     size_t total =
-        state->total_rows > 0 ? state->total_rows : state->data->num_rows;
+        widget->total_rows > 0 ? widget->total_rows : tab->data->num_rows;
     /* Show ~ prefix for approximate counts */
-    bool approx = tab && tab->row_count_approximate;
+    bool approx = widget->row_count_approximate;
     bool filtered = has_active_filters(tab);
-    if (filtered && tab && tab->unfiltered_total_rows > 0) {
+    if (filtered && tab->unfiltered_total_rows > 0) {
       snprintf(pos, sizeof(pos), "Row %zu/%s%zu [%zu]", actual_row,
                approx ? "~" : "", total, tab->unfiltered_total_rows);
     } else {
@@ -1049,13 +1045,13 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
             scroll_ui->query_focus_results = true;
           int delta = is_scroll_up ? -scroll_amount : scroll_amount;
           tui_query_scroll_results(state, delta);
-          state->sidebar_focused = false;
+          tui_set_sidebar_focused(state, false);
           return true;
         }
       }
 
       /* Handle table data scrolling via VmTable */
-      VmTable *scroll_vm = get_vm_table(state);
+      VmTable *scroll_vm = tui_vm_table(state);
       if (scroll_vm) {
         size_t cursor_row, cursor_col;
         vm_table_get_cursor(scroll_vm, &cursor_row, &cursor_col);
@@ -1096,15 +1092,11 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         vm_table_set_cursor(scroll_vm, cursor_row, cursor_col);
         vm_table_set_scroll(scroll_vm, scroll_row, scroll_col);
 
-        /* Sync to compatibility layer (temporary) */
-        state->cursor_row = cursor_row;
-        state->scroll_row = scroll_row;
-
         /* Check if we need to load more rows (pagination) */
         tui_check_load_more(state);
 
-        state->sidebar_focused = false;
-        state->filters_focused = false;
+        tui_set_sidebar_focused(state, false);
+        tui_set_filters_focused(state, false);
       }
     }
     return true;
@@ -1155,14 +1147,14 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
             tab_switch(state, i);
           }
           tab_close(state);
-          state->sidebar_focused = false;
-          state->filters_focused = false;
+          tui_set_sidebar_focused(state, false);
+          tui_set_filters_focused(state, false);
         } else {
           /* Single click: switch to tab */
           if (i != click_ws->current_tab) {
             tab_switch(state, i);
-            state->sidebar_focused = false;
-            state->filters_focused = false;
+            tui_set_sidebar_focused(state, false);
+            tui_set_filters_focused(state, false);
           }
         }
         return true;
@@ -1194,15 +1186,15 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
     /* Click on filter field (row 1 in sidebar_win = screen row 2) */
     if (sidebar_row == 1) {
-      state->sidebar_focused = true;
+      tui_set_sidebar_focused(state, true);
       state->sidebar_filter_active = true;
-      state->filters_focused = false;
+      tui_set_filters_focused(state, false);
       return true;
     }
 
     /* Clicking elsewhere in sidebar deactivates filter */
     state->sidebar_filter_active = false;
-    state->filters_focused = false;
+    tui_set_filters_focused(state, false);
 
     /* Click on table list */
     int list_start_y = 3; /* First table entry row in sidebar window */
@@ -1210,20 +1202,22 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
     if (clicked_row >= 0) {
       size_t filtered_count = tui_count_filtered_tables(state);
+      char **tables = TUI_TABLES(state);
+      size_t num_tables = TUI_NUM_TABLES(state);
 
-      size_t target_idx = state->sidebar_scroll + (size_t)clicked_row;
+      size_t target_idx = tui_sidebar_scroll(state) + (size_t)clicked_row;
       if (target_idx < filtered_count) {
         /* Find the actual table index */
         size_t actual_idx = tui_get_filtered_table_index(state, target_idx);
-        if (actual_idx < state->num_tables) {
+        if (actual_idx < num_tables && tables) {
           /* Update sidebar highlight */
-          state->sidebar_highlight = target_idx;
-          state->sidebar_focused = true;
+          tui_set_sidebar_highlight(state, target_idx);
+          tui_set_sidebar_focused(state, true);
 
           if (is_double) {
             /* Double-click: always open in new tab */
             tab_create(state, actual_idx);
-            state->sidebar_focused = false;
+            tui_set_sidebar_focused(state, false);
           } else {
             /* Single click: change current tab's table or switch to existing */
             Workspace *curr_ws = TUI_WORKSPACE(state);
@@ -1246,70 +1240,34 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
                   /* No existing tab - create new one */
                   tab_create(state, actual_idx);
                 }
-                state->sidebar_focused = false;
+                tui_set_sidebar_focused(state, false);
               } else if (curr_tab->type == TAB_TYPE_CONNECTION) {
                 /* Connection tab active - convert to table tab */
                 free(curr_tab->table_name);
-                curr_tab->table_name = str_dup(state->tables[actual_idx]);
+                curr_tab->table_name = str_dup(tables[actual_idx]);
                 curr_tab->type = TAB_TYPE_TABLE;
                 curr_tab->table_index = actual_idx;
 
-                /* Clear state and load table */
-                state->data = NULL;
-                state->schema = NULL;
-                state->col_widths = NULL;
-                state->num_col_widths = 0;
-                state->current_table = actual_idx;
-                state->sidebar_highlight = actual_idx;
+                /* Tab data will be loaded by tui_load_table_data */
+                tui_set_sidebar_highlight(state, actual_idx);
 
-                /* Update UITabState sidebar state too */
-                UITabState *ui = TUI_TAB_UI(state);
-                if (ui) {
-                  ui->sidebar_highlight = actual_idx;
-                  ui->sidebar_last_position = actual_idx;
-                }
+                /* Update sidebar last position */
                 state->sidebar_last_position = actual_idx;
 
-                tui_load_table_data(state, state->tables[actual_idx]);
-
-                /* Save to tab */
-                curr_tab->data = state->data;
-                curr_tab->schema = state->schema;
-                curr_tab->col_widths = state->col_widths;
-                curr_tab->num_col_widths = state->num_col_widths;
-                curr_tab->total_rows = state->total_rows;
-                curr_tab->loaded_offset = state->loaded_offset;
-                curr_tab->loaded_count = state->loaded_count;
-                curr_tab->cursor_row = state->cursor_row;
-                curr_tab->cursor_col = state->cursor_col;
-                curr_tab->scroll_row = state->scroll_row;
-                curr_tab->scroll_col = state->scroll_col;
-                state->sidebar_focused = false;
-              } else if (state->current_table != actual_idx) {
+                tui_load_table_data(state, tables[actual_idx]);
+                tui_set_sidebar_focused(state, false);
+              } else if (curr_tab->table_index != actual_idx) {
                 /* Table tab - update current tab with new table */
-                state->current_table = actual_idx;
                 /* Update table name safely (copy first to avoid use-after-free
                  * if pointers were ever aliased) */
-                char *new_name = str_dup(state->tables[actual_idx]);
+                char *new_name = str_dup(tables[actual_idx]);
                 free(curr_tab->table_name);
                 curr_tab->table_name = new_name;
                 curr_tab->table_index = actual_idx;
                 /* Clear filters when switching tables */
                 filters_clear(&curr_tab->filters);
                 /* Load new table data */
-                tui_load_table_data(state, state->tables[actual_idx]);
-                /* Update tab with new data */
-                curr_tab->data = state->data;
-                curr_tab->schema = state->schema;
-                curr_tab->col_widths = state->col_widths;
-                curr_tab->num_col_widths = state->num_col_widths;
-                curr_tab->total_rows = state->total_rows;
-                curr_tab->loaded_offset = state->loaded_offset;
-                curr_tab->loaded_count = state->loaded_count;
-                curr_tab->cursor_row = 0;
-                curr_tab->cursor_col = 0;
-                curr_tab->scroll_row = 0;
-                curr_tab->scroll_col = 0;
+                tui_load_table_data(state, tables[actual_idx]);
               }
             } else {
               /* No tabs yet - create first one */
@@ -1329,8 +1287,8 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   if (mouse_x >= sidebar_width && query_click_tab && query_click_ui &&
       query_click_tab->type == TAB_TYPE_QUERY) {
     state->sidebar_filter_active = false;
-    state->sidebar_focused = false;
-    state->filters_focused = false;
+    tui_set_sidebar_focused(state, false);
+    tui_set_filters_focused(state, false);
 
     /* If currently editing query results, save the edit first */
     if (query_click_ui->query_result_editing) {
@@ -1435,8 +1393,8 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
     /* Clicking in main area deactivates sidebar filter and unfocuses panels */
     state->sidebar_filter_active = false;
-    state->sidebar_focused = false;
-    state->filters_focused = false;
+    tui_set_sidebar_focused(state, false);
+    tui_set_filters_focused(state, false);
 
     /* If currently editing, save the edit first */
     if (state->editing) {
@@ -1444,7 +1402,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     }
 
     /* Use VmTable for cursor/scroll access */
-    VmTable *click_vm = get_vm_table(state);
+    VmTable *click_vm = tui_vm_table(state);
     if (!click_vm) {
       return true; /* No data to select, but focus is updated */
     }
@@ -1512,12 +1470,8 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         if (target_col < num_cols) {
           /* Update cursor position via viewmodel */
           vm_table_set_cursor(click_vm, target_row, target_col);
-
-          /* Sync to compatibility layer (temporary) */
-          state->cursor_row = target_row;
-          state->cursor_col = target_col;
-          state->sidebar_focused = false;
-          state->filters_focused = false;
+          tui_set_sidebar_focused(state, false);
+          tui_set_filters_focused(state, false);
 
           /* Check if we need to load more rows (pagination) */
           tui_check_load_more(state);

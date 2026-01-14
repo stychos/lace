@@ -9,6 +9,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../util/mem.h"
 #include "../util/str.h"
 #include "app_state.h"
 #include <ctype.h>
@@ -58,8 +59,7 @@ void filters_init(TableFilters *f) {
 void filters_free(TableFilters *f) {
   if (!f)
     return;
-  free(f->filters);
-  f->filters = NULL;
+  FREE_NULL(f->filters);
   f->num_filters = 0;
   f->filters_cap = 0;
 }
@@ -78,11 +78,7 @@ bool filters_add(TableFilters *f, size_t col_idx, FilterOperator op,
   /* Grow array if needed */
   if (f->num_filters >= f->filters_cap) {
     size_t new_cap = f->filters_cap == 0 ? 4 : f->filters_cap * 2;
-    ColumnFilter *new_filters =
-        realloc(f->filters, new_cap * sizeof(ColumnFilter));
-    if (!new_filters)
-      return false;
-    f->filters = new_filters;
+    f->filters = safe_reallocarray(f->filters, new_cap, sizeof(ColumnFilter));
     f->filters_cap = new_cap;
   }
 
@@ -154,11 +150,24 @@ static char *escape_sql_value(const char *value) {
   if (!sb)
     return NULL;
 
+  bool failed = false;
   for (const char *p = value; *p; p++) {
-    if (*p == '\'')
-      sb_append(sb, "''");
-    else
-      sb_append_char(sb, *p);
+    if (*p == '\'') {
+      if (!sb_append(sb, "''")) {
+        failed = true;
+        break;
+      }
+    } else {
+      if (!sb_append_char(sb, *p)) {
+        failed = true;
+        break;
+      }
+    }
+  }
+
+  if (failed) {
+    sb_free(sb);
+    return NULL;
   }
 
   return sb_to_string(sb);
@@ -186,12 +195,12 @@ char *filters_parse_in_values(const char *input, char **err) {
   if (*p == '(')
     p++;
 
-/* Limit number of values to prevent DoS */
-#define MAX_IN_VALUES 1000
+/* Limit number of values to prevent DoS (MAX_IN_VALUES from constants.h) */
   size_t value_count = 0;
 
   bool first = true;
-  while (*p) {
+  bool ok = true; /* Track StringBuilder operation success */
+  while (*p && ok) {
     /* Skip whitespace */
     while (*p && isspace((unsigned char)*p))
       p++;
@@ -208,7 +217,7 @@ char *filters_parse_in_values(const char *input, char **err) {
     value_count++;
 
     if (!first)
-      sb_append(sb, ", ");
+      ok = sb_append(sb, ", ");
     first = false;
 
     if (*p == '\'' || *p == '"') {
@@ -221,15 +230,15 @@ char *filters_parse_in_values(const char *input, char **err) {
           p++; /* Skip escaped chars */
         p++;
       }
-      sb_append_char(sb, '\'');
+      ok = ok && sb_append_char(sb, '\'');
       /* Copy and escape single quotes */
-      for (const char *c = start; c < p; c++) {
+      for (const char *c = start; c < p && ok; c++) {
         if (*c == '\'')
-          sb_append(sb, "''");
+          ok = sb_append(sb, "''");
         else
-          sb_append_char(sb, *c);
+          ok = sb_append_char(sb, *c);
       }
-      sb_append_char(sb, '\'');
+      ok = ok && sb_append_char(sb, '\'');
       if (*p == quote)
         p++;
     } else {
@@ -254,17 +263,17 @@ char *filters_parse_in_values(const char *input, char **err) {
         }
 
         if (is_numeric) {
-          sb_append_len(sb, start, end - start);
+          ok = sb_append_len(sb, start, (size_t)(end - start));
         } else {
-          sb_append_char(sb, '\'');
+          ok = sb_append_char(sb, '\'');
           /* Escape single quotes in value */
-          for (const char *c = start; c < end; c++) {
+          for (const char *c = start; c < end && ok; c++) {
             if (*c == '\'')
-              sb_append(sb, "''");
+              ok = sb_append(sb, "''");
             else
-              sb_append_char(sb, *c);
+              ok = sb_append_char(sb, *c);
           }
-          sb_append_char(sb, '\'');
+          ok = ok && sb_append_char(sb, '\'');
         }
       }
     }
@@ -274,6 +283,13 @@ char *filters_parse_in_values(const char *input, char **err) {
       p++;
     if (*p == ',')
       p++;
+  }
+
+  if (!ok) {
+    sb_free(sb);
+    if (err)
+      *err = str_dup("Out of memory");
+    return NULL;
   }
 
   return sb_to_string(sb);
@@ -301,11 +317,18 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
   }
 
   bool first = true;
+  bool ok = true; /* Track StringBuilder operation success */
   bool use_backticks =
       str_eq(driver_name, "mysql") || str_eq(driver_name, "mariadb");
 
   /* Process each column filter */
-  for (size_t i = 0; i < f->num_filters; i++) {
+  if (!f->filters && f->num_filters > 0) {
+    sb_free(sb);
+    if (err)
+      *err = str_dup("Invalid filter state");
+    return NULL;
+  }
+  for (size_t i = 0; i < f->num_filters && ok; i++) {
     ColumnFilter *cf = &f->filters[i];
 
     /* Skip filters with empty values if the operator requires a value.
@@ -321,13 +344,13 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     }
 
     if (!first)
-      sb_append(sb, " AND ");
+      ok = sb_append(sb, " AND ");
     first = false;
 
     /* Handle RAW filters (virtual column) - advanced feature for SQL-savvy
      * users */
     if (cf->column_index == SIZE_MAX) {
-      sb_printf(sb, "(%s)", cf->value);
+      ok = ok && sb_printf(sb, "(%s)", cf->value);
       continue;
     }
 
@@ -355,8 +378,8 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     case FILTER_OP_LT:
     case FILTER_OP_LE: {
       char *escaped_val = escape_sql_value(cf->value);
-      sb_printf(sb, "%s %s '%s'", escaped_col, filter_op_sql(cf->op),
-                escaped_val ? escaped_val : "");
+      ok = sb_printf(sb, "%s %s '%s'", escaped_col, filter_op_sql(cf->op),
+                     escaped_val ? escaped_val : "");
       free(escaped_val);
       break;
     }
@@ -365,11 +388,11 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
       char *in_err = NULL;
       char *in_list = filters_parse_in_values(cf->value, &in_err);
       if (in_list) {
-        sb_printf(sb, "%s IN (%s)", escaped_col, in_list);
+        ok = sb_printf(sb, "%s IN (%s)", escaped_col, in_list);
         free(in_list);
       } else {
         /* Fall back to empty IN */
-        sb_printf(sb, "%s IN (NULL)", escaped_col);
+        ok = sb_printf(sb, "%s IN (NULL)", escaped_col);
         free(in_err);
       }
       break;
@@ -378,8 +401,8 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     case FILTER_OP_CONTAINS: {
       char *escaped_val = escape_sql_value(cf->value);
       /* Escape LIKE wildcards */
-      sb_printf(sb, "%s LIKE '%%%s%%'", escaped_col,
-                escaped_val ? escaped_val : "");
+      ok = sb_printf(sb, "%s LIKE '%%%s%%'", escaped_col,
+                     escaped_val ? escaped_val : "");
       free(escaped_val);
       break;
     }
@@ -388,16 +411,17 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
       char *escaped_val = escape_sql_value(cf->value);
       /* Driver-specific regex */
       if (str_eq(driver_name, "mysql") || str_eq(driver_name, "mariadb")) {
-        sb_printf(sb, "%s REGEXP '%s'", escaped_col,
-                  escaped_val ? escaped_val : "");
+        ok = sb_printf(sb, "%s REGEXP '%s'", escaped_col,
+                       escaped_val ? escaped_val : "");
       } else if (str_eq(driver_name, "postgres") ||
                  str_eq(driver_name, "postgresql") ||
                  str_eq(driver_name, "pg")) {
-        sb_printf(sb, "%s ~ '%s'", escaped_col, escaped_val ? escaped_val : "");
+        ok = sb_printf(sb, "%s ~ '%s'", escaped_col,
+                       escaped_val ? escaped_val : "");
       } else {
         /* SQLite - use GLOB as fallback (not true regex) */
-        sb_printf(sb, "%s GLOB '*%s*'", escaped_col,
-                  escaped_val ? escaped_val : "");
+        ok = sb_printf(sb, "%s GLOB '*%s*'", escaped_col,
+                       escaped_val ? escaped_val : "");
       }
       free(escaped_val);
       break;
@@ -406,33 +430,33 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     case FILTER_OP_BETWEEN: {
       char *escaped_val1 = escape_sql_value(cf->value);
       char *escaped_val2 = escape_sql_value(cf->value2);
-      sb_printf(sb, "%s BETWEEN '%s' AND '%s'", escaped_col,
-                escaped_val1 ? escaped_val1 : "",
-                escaped_val2 ? escaped_val2 : "");
+      ok = sb_printf(sb, "%s BETWEEN '%s' AND '%s'", escaped_col,
+                     escaped_val1 ? escaped_val1 : "",
+                     escaped_val2 ? escaped_val2 : "");
       free(escaped_val1);
       free(escaped_val2);
       break;
     }
 
     case FILTER_OP_IS_EMPTY:
-      sb_printf(sb, "%s = ''", escaped_col);
+      ok = sb_printf(sb, "%s = ''", escaped_col);
       break;
 
     case FILTER_OP_IS_NOT_EMPTY:
-      sb_printf(sb, "%s <> ''", escaped_col);
+      ok = sb_printf(sb, "%s <> ''", escaped_col);
       break;
 
     case FILTER_OP_IS_NULL:
-      sb_printf(sb, "%s IS NULL", escaped_col);
+      ok = sb_printf(sb, "%s IS NULL", escaped_col);
       break;
 
     case FILTER_OP_IS_NOT_NULL:
-      sb_printf(sb, "%s IS NOT NULL", escaped_col);
+      ok = sb_printf(sb, "%s IS NOT NULL", escaped_col);
       break;
 
     case FILTER_OP_RAW:
       /* This case shouldn't occur - RAW is now a virtual column */
-      sb_printf(sb, "(%s)", cf->value);
+      ok = sb_printf(sb, "(%s)", cf->value);
       break;
 
     default:
@@ -440,6 +464,14 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     }
 
     free(escaped_col);
+  }
+
+  /* Check for allocation failure */
+  if (!ok) {
+    sb_free(sb);
+    if (err)
+      *err = str_dup("Out of memory");
+    return NULL;
   }
 
   /* If all filters were skipped, return NULL */

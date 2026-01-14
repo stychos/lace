@@ -8,6 +8,7 @@
 
 #include "vm_app.h"
 #include "../db/db.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include <stdlib.h>
 #include <string.h>
@@ -44,18 +45,12 @@ VmApp *vm_app_create(AppState *app, const VmAppCallbacks *callbacks) {
   if (!app)
     return NULL;
 
-  VmApp *vm = calloc(1, sizeof(VmApp));
-  if (!vm)
-    return NULL;
-
+  VmApp *vm = safe_calloc(1, sizeof(VmApp));
   vm->app = app;
 
   if (callbacks) {
     vm->callbacks = *callbacks;
   }
-
-  /* Create child view models */
-  vm->sidebar_vm = vm_sidebar_create(app, NULL);
 
   /* Layout defaults */
   vm->sidebar_visible = true;
@@ -70,9 +65,7 @@ void vm_app_destroy(VmApp *vm) {
     return;
 
   /* Destroy child view models */
-  vm_sidebar_destroy(vm->sidebar_vm);
-  vm_table_destroy(vm->table_vm);
-  vm_query_destroy(vm->query_vm);
+  table_vm_destroy(vm->table_vm);
 
   status_clear(&vm->status);
 
@@ -116,11 +109,6 @@ void vm_app_connect(VmApp *vm, const char *connstr) {
     vm_app_set_error(vm, err ? err : "Failed to load tables");
     free(err);
     /* Keep connection anyway */
-  }
-
-  /* Update sidebar */
-  if (vm->sidebar_vm) {
-    vm_sidebar_bind(vm->sidebar_vm, conn);
   }
 
   vm_app_set_status(vm, "Connected");
@@ -408,7 +396,7 @@ const char *vm_app_tab_name(const VmApp *vm, size_t index) {
  * ============================================================================
  */
 
-VmTable *vm_app_current_table_vm(VmApp *vm) {
+TableViewModel *vm_app_current_table_vm(VmApp *vm) {
   if (!vm)
     return NULL;
 
@@ -418,36 +406,12 @@ VmTable *vm_app_current_table_vm(VmApp *vm) {
 
   /* Create table VM if needed */
   if (!vm->table_vm) {
-    vm->table_vm = vm_table_create(vm->app, tab, NULL);
+    vm->table_vm = table_vm_create(vm->app, tab);
   } else {
-    vm_table_bind(vm->table_vm, tab);
+    table_vm_bind(vm->table_vm, tab);
   }
 
   return vm->table_vm;
-}
-
-VmQuery *vm_app_current_query_vm(VmApp *vm) {
-  if (!vm)
-    return NULL;
-
-  Tab *tab = app_current_tab(vm->app);
-  if (!tab || tab->type != TAB_TYPE_QUERY)
-    return NULL;
-
-  /* Create query VM if needed */
-  if (!vm->query_vm) {
-    vm->query_vm = vm_query_create(vm->app, tab, NULL);
-  } else {
-    vm_query_bind(vm->query_vm, tab);
-  }
-
-  return vm->query_vm;
-}
-
-VmSidebar *vm_app_sidebar_vm(VmApp *vm) {
-  if (!vm)
-    return NULL;
-  return vm->sidebar_vm;
 }
 
 /* ============================================================================
@@ -583,10 +547,9 @@ void vm_app_refresh(VmApp *vm) {
     return;
 
   if (tab->type == TAB_TYPE_TABLE && vm->table_vm) {
-    vm_table_refresh(vm->table_vm);
-  } else if (tab->type == TAB_TYPE_QUERY && vm->query_vm) {
-    vm_query_execute(vm->query_vm);
+    table_vm_refresh(vm->table_vm);
   }
+  /* VmQuery removed - query execution handled by QueryWidget */
 }
 
 /* ============================================================================
@@ -602,22 +565,13 @@ void vm_app_sync_to_current_tab(VmApp *vm) {
   if (!tab)
     return;
 
-  /* Update sidebar to current connection */
-  Connection *conn = app_get_tab_connection(vm->app, tab);
-  if (conn && vm->sidebar_vm) {
-    vm_sidebar_bind(vm->sidebar_vm, conn);
-  }
-
   /* Bind appropriate VM */
   if (tab->type == TAB_TYPE_TABLE) {
     if (vm->table_vm) {
-      vm_table_bind(vm->table_vm, tab);
-    }
-  } else if (tab->type == TAB_TYPE_QUERY) {
-    if (vm->query_vm) {
-      vm_query_bind(vm->query_vm, tab);
+      table_vm_bind(vm->table_vm, tab);
     }
   }
+  /* VmQuery removed - use QueryWidget instead */
 }
 
 void vm_app_sync_from_current_tab(VmApp *vm) {

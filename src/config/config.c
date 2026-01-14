@@ -8,8 +8,9 @@
 
 #include "config.h"
 #include "../core/history.h"
+#include "../core/ui_types.h"
 #include "../platform/platform.h"
-#include "../tui/ncurses/backend.h"
+#include "../util/json_helpers.h"
 #include "../util/str.h"
 #include <cJSON.h>
 #include <ctype.h>
@@ -61,6 +62,8 @@ static const char *def_toggle_sidebar[] = {"t", "F9"};
 static const char *def_show_schema[] = {"s", "F3"};
 static const char *def_refresh[] = {"r"};
 static const char *def_cycle_sort[] = {"o"};
+static const char *def_cell_copy[] = {"c", "CTRL+K"};
+static const char *def_cell_paste[] = {"v", "CTRL+U"};
 
 /* General */
 static const char *def_prev_tab[] = {"[", "F7"};
@@ -71,7 +74,7 @@ static const char *def_prev_workspace[] = {"{"};
 static const char *def_next_workspace[] = {"}"};
 static const char *def_toggle_header[] = {"m"};
 static const char *def_toggle_status[] = {"b"};
-static const char *def_connect_dialog[] = {"c", "F2"};
+static const char *def_connect_dialog[] = {"w", "F2"};
 static const char *def_help[] = {"?", "F1"};
 static const char *def_quit[] = {"q", "CTRL+X", "F10"};
 static const char *def_config[] = {"COMMA", "F11"};
@@ -89,7 +92,7 @@ static const char *def_query_switch_focus[] = {"CTRL+W", "ESCAPE"};
 /* Filters Panel */
 static const char *def_add_filter[] = {"+", "=", "INSERT"};
 static const char *def_remove_filter[] = {"-", "x", "DELETE"};
-static const char *def_clear_filters[] = {"c"};
+static const char *def_clear_filters[] = {"X"}; /* Shift+X to clear all */
 static const char *def_filters_switch_focus[] = {"CTRL+W", "ESCAPE"};
 
 /* Sidebar */
@@ -179,6 +182,10 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                         DEF_KEYS(def_refresh)},
     [HOTKEY_CYCLE_SORT] = {"cycle_sort", "Cycle sort", HOTKEY_CAT_TABLE,
                            DEF_KEYS(def_cycle_sort)},
+    [HOTKEY_CELL_COPY] = {"cell_copy", "Copy cell", HOTKEY_CAT_TABLE,
+                          DEF_KEYS(def_cell_copy)},
+    [HOTKEY_CELL_PASTE] = {"cell_paste", "Paste cell", HOTKEY_CAT_TABLE,
+                           DEF_KEYS(def_cell_paste)},
 
     /* General */
     [HOTKEY_PREV_TAB] = {"prev_tab", "Previous tab", HOTKEY_CAT_GENERAL,
@@ -324,15 +331,6 @@ static const char *category_names[HOTKEY_CAT_COUNT] = {
  * ============================================================================
  */
 
-static void set_error(char **err, const char *fmt, ...) {
-  if (!err)
-    return;
-  va_list args;
-  va_start(args, fmt);
-  *err = str_vprintf(fmt, args);
-  va_end(args);
-}
-
 char *config_get_path(void) {
   const char *config_dir = platform_get_config_dir();
   if (!config_dir)
@@ -364,12 +362,6 @@ static bool hotkey_binding_copy(HotkeyBinding *dst, const HotkeyBinding *src) {
 
   for (size_t i = 0; i < src->num_keys; i++) {
     dst->keys[i] = str_dup(src->keys[i]);
-    if (!dst->keys[i]) {
-      for (size_t j = 0; j < i; j++)
-        free(dst->keys[j]);
-      free(dst->keys);
-      return false;
-    }
   }
   dst->num_keys = src->num_keys;
   return true;
@@ -379,6 +371,43 @@ static bool hotkey_binding_copy(HotkeyBinding *dst, const HotkeyBinding *src) {
  * Key String Parsing
  * ============================================================================
  */
+
+/* Key name to code lookup table entry */
+typedef struct {
+  const char *name;
+  int code;
+} KeyNameEntry;
+
+/* Static lookup table for special key names */
+static const KeyNameEntry key_name_table[] = {
+    {"UP", UI_KEY_UP},
+    {"DOWN", UI_KEY_DOWN},
+    {"LEFT", UI_KEY_LEFT},
+    {"RIGHT", UI_KEY_RIGHT},
+    {"PGUP", UI_KEY_PAGEUP},
+    {"PGDN", UI_KEY_PAGEDOWN},
+    {"HOME", UI_KEY_HOME},
+    {"END", UI_KEY_END},
+    {"ENTER", UI_KEY_ENTER},
+    {"ESCAPE", UI_KEY_ESCAPE},
+    {"DELETE", UI_KEY_DELETE},
+    {"INSERT", UI_KEY_INSERT},
+    {"BACKSPACE", UI_KEY_BACKSPACE},
+    {"TAB", UI_KEY_TAB},
+    {"SPACE", ' '},
+    {"COMMA", ','},
+};
+#define KEY_NAME_TABLE_SIZE (sizeof(key_name_table) / sizeof(key_name_table[0]))
+
+/* Lookup key code by name - returns -1 if not found */
+static int lookup_key_code(const char *name) {
+  for (size_t i = 0; i < KEY_NAME_TABLE_SIZE; i++) {
+    if (strcmp(name, key_name_table[i].name) == 0) {
+      return key_name_table[i].code;
+    }
+  }
+  return -1;
+}
 
 /* Parse a key string like "k", "CTRL+A", "F5", "UP" into key code and mods */
 static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
@@ -394,60 +423,85 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
     str += 5;
   }
 
-  /* Check for special keys */
-  if (strcmp(str, "UP") == 0) {
-    *key_code = UI_KEY_UP;
-  } else if (strcmp(str, "DOWN") == 0) {
-    *key_code = UI_KEY_DOWN;
-  } else if (strcmp(str, "LEFT") == 0) {
-    *key_code = UI_KEY_LEFT;
-  } else if (strcmp(str, "RIGHT") == 0) {
-    *key_code = UI_KEY_RIGHT;
-  } else if (strcmp(str, "PGUP") == 0) {
-    *key_code = UI_KEY_PAGEUP;
-  } else if (strcmp(str, "PGDN") == 0) {
-    *key_code = UI_KEY_PAGEDOWN;
-  } else if (strcmp(str, "HOME") == 0) {
-    *key_code = UI_KEY_HOME;
-  } else if (strcmp(str, "END") == 0) {
-    *key_code = UI_KEY_END;
-  } else if (strcmp(str, "ENTER") == 0) {
-    *key_code = UI_KEY_ENTER;
-  } else if (strcmp(str, "ESCAPE") == 0) {
-    *key_code = UI_KEY_ESCAPE;
-  } else if (strcmp(str, "DELETE") == 0) {
-    *key_code = UI_KEY_DELETE;
-  } else if (strcmp(str, "INSERT") == 0) {
-    *key_code = UI_KEY_INSERT;
-  } else if (strcmp(str, "BACKSPACE") == 0) {
-    *key_code = UI_KEY_BACKSPACE;
-  } else if (strcmp(str, "TAB") == 0) {
-    *key_code = UI_KEY_TAB;
-  } else if (strcmp(str, "SPACE") == 0) {
-    *key_code = ' ';
-  } else if (strcmp(str, "COMMA") == 0) {
-    *key_code = ',';
-  } else if (str[0] == 'F' && str[1] >= '1' && str[1] <= '9') {
-    /* Function keys F1-F12 */
+  /* Try lookup table first */
+  int code = lookup_key_code(str);
+  if (code >= 0) {
+    *key_code = code;
+    return true;
+  }
+
+  /* Function keys F1-F12 */
+  if (str[0] == 'F' && str[1] >= '1' && str[1] <= '9') {
     int fnum = atoi(str + 1);
     if (fnum >= 1 && fnum <= 12) {
       *key_code = UI_KEY_F1 + (fnum - 1);
-    } else {
-      return false;
+      return true;
     }
-  } else if (strlen(str) == 1) {
-    /* Single character - convert to uppercase for CTRL combinations
-     * since render_translate_key returns uppercase for Ctrl+key */
+    return false;
+  }
+
+  /* Single character */
+  if (strlen(str) == 1) {
     char c = str[0];
+    /* Convert to uppercase for CTRL combinations */
     if ((*mods & UI_MOD_CTRL) && c >= 'a' && c <= 'z') {
       c = (char)(c - ('a' - 'A'));
     }
     *key_code = (unsigned char)c;
-  } else {
-    return false;
+    return true;
   }
 
-  return true;
+  return false;
+}
+
+/* Key code to display name lookup table entry */
+typedef struct {
+  int code;
+  const char *display;
+} KeyDisplayEntry;
+
+/* Static lookup table for key display names */
+static const KeyDisplayEntry key_display_table[] = {
+    {UI_KEY_UP, "\xe2\x86\x91"},         /* ↑ */
+    {UI_KEY_DOWN, "\xe2\x86\x93"},       /* ↓ */
+    {UI_KEY_LEFT, "\xe2\x86\x90"},       /* ← */
+    {UI_KEY_RIGHT, "\xe2\x86\x92"},      /* → */
+    {UI_KEY_PAGEUP, "PgUp"},
+    {UI_KEY_PAGEDOWN, "PgDn"},
+    {UI_KEY_HOME, "Home"},
+    {UI_KEY_END, "End"},
+    {UI_KEY_ENTER, "Enter"},
+    {UI_KEY_ESCAPE, "Esc"},
+    {UI_KEY_DELETE, "Del"},
+    {UI_KEY_INSERT, "Ins"},
+    {UI_KEY_BACKSPACE, "Bksp"},
+    {UI_KEY_TAB, "Tab"},
+    {UI_KEY_F1, "F1"},
+    {UI_KEY_F2, "F2"},
+    {UI_KEY_F3, "F3"},
+    {UI_KEY_F4, "F4"},
+    {UI_KEY_F5, "F5"},
+    {UI_KEY_F6, "F6"},
+    {UI_KEY_F7, "F7"},
+    {UI_KEY_F8, "F8"},
+    {UI_KEY_F9, "F9"},
+    {UI_KEY_F10, "F10"},
+    {UI_KEY_F11, "F11"},
+    {UI_KEY_F12, "F12"},
+    {' ', "Space"},
+    {',', ","},
+};
+#define KEY_DISPLAY_TABLE_SIZE                                                 \
+  (sizeof(key_display_table) / sizeof(key_display_table[0]))
+
+/* Lookup display name by key code - returns NULL if not found */
+static const char *lookup_key_display(int code) {
+  for (size_t i = 0; i < KEY_DISPLAY_TABLE_SIZE; i++) {
+    if (key_display_table[i].code == code) {
+      return key_display_table[i].display;
+    }
+  }
+  return NULL;
 }
 
 /* Convert key code and mods to display string */
@@ -456,102 +510,13 @@ static char *key_to_display(int key_code, UiKeyMod mods) {
   if (mods & UI_MOD_CTRL)
     snprintf(prefix, sizeof(prefix), "Ctrl+");
 
-  /* Special keys */
-  if (key_code >= UI_KEY_UP) {
-    const char *name = NULL;
-    switch (key_code) {
-    case UI_KEY_UP:
-      name = "\xe2\x86\x91";
-      break; /* ↑ */
-    case UI_KEY_DOWN:
-      name = "\xe2\x86\x93";
-      break; /* ↓ */
-    case UI_KEY_LEFT:
-      name = "\xe2\x86\x90";
-      break; /* ← */
-    case UI_KEY_RIGHT:
-      name = "\xe2\x86\x92";
-      break; /* → */
-    case UI_KEY_PAGEUP:
-      name = "PgUp";
-      break;
-    case UI_KEY_PAGEDOWN:
-      name = "PgDn";
-      break;
-    case UI_KEY_HOME:
-      name = "Home";
-      break;
-    case UI_KEY_END:
-      name = "End";
-      break;
-    case UI_KEY_ENTER:
-      name = "Enter";
-      break;
-    case UI_KEY_ESCAPE:
-      name = "Esc";
-      break;
-    case UI_KEY_DELETE:
-      name = "Del";
-      break;
-    case UI_KEY_INSERT:
-      name = "Ins";
-      break;
-    case UI_KEY_BACKSPACE:
-      name = "Bksp";
-      break;
-    case UI_KEY_TAB:
-      name = "Tab";
-      break;
-    case UI_KEY_F1:
-      name = "F1";
-      break;
-    case UI_KEY_F2:
-      name = "F2";
-      break;
-    case UI_KEY_F3:
-      name = "F3";
-      break;
-    case UI_KEY_F4:
-      name = "F4";
-      break;
-    case UI_KEY_F5:
-      name = "F5";
-      break;
-    case UI_KEY_F6:
-      name = "F6";
-      break;
-    case UI_KEY_F7:
-      name = "F7";
-      break;
-    case UI_KEY_F8:
-      name = "F8";
-      break;
-    case UI_KEY_F9:
-      name = "F9";
-      break;
-    case UI_KEY_F10:
-      name = "F10";
-      break;
-    case UI_KEY_F11:
-      name = "F11";
-      break;
-    case UI_KEY_F12:
-      name = "F12";
-      break;
-    default:
-      name = "?";
-      break;
-    }
+  /* Try lookup table first */
+  const char *name = lookup_key_display(key_code);
+  if (name) {
     return str_printf("%s%s", prefix, name);
   }
 
   /* Regular character */
-  if (key_code == ',') {
-    return str_printf("%s,", prefix);
-  }
-  if (key_code == ' ') {
-    return str_printf("%sSpace", prefix);
-  }
   return str_printf("%s%c", prefix, key_code);
 }
 
@@ -684,17 +649,17 @@ static bool parse_hotkeys(cJSON *json, Config *config) {
     HotkeyBinding *binding = &config->hotkeys[action];
     hotkey_binding_free(binding);
 
-    int count = cJSON_GetArraySize(item);
+    int count = json_array_size(item);
     if (count > 0) {
       binding->keys = calloc((size_t)count, sizeof(char *));
       if (binding->keys) {
-        cJSON *key_item;
-        cJSON_ArrayForEach(key_item, item) {
-          if (cJSON_IsString(key_item)) {
+        for (int i = 0; i < count; i++) {
+          if (binding->num_keys >= (size_t)count)
+            break; /* Safety check: don't exceed allocated capacity */
+          cJSON *key_item = json_get_array_item(item, i);
+          if (key_item && cJSON_IsString(key_item)) {
             binding->keys[binding->num_keys] = str_dup(key_item->valuestring);
-            if (binding->keys[binding->num_keys]) {
-              binding->num_keys++;
-            }
+            binding->num_keys++;
           }
         }
       }
@@ -724,7 +689,7 @@ Config *config_load(char **error) {
 
   FILE *f = fopen(path, "r");
   if (!f) {
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return config_get_defaults();
   }
@@ -735,7 +700,7 @@ Config *config_load(char **error) {
 
   if (size <= 0 || size > 1024 * 1024) { /* Max 1MB */
     fclose(f);
-    set_error(error, "Invalid config file size");
+    err_setf(error, "Invalid config file size");
     free(path);
     return config_get_defaults();
   }
@@ -743,7 +708,7 @@ Config *config_load(char **error) {
   char *content = malloc((size_t)size + 1);
   if (!content) {
     fclose(f);
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     free(path);
     return config_get_defaults();
   }
@@ -757,7 +722,7 @@ Config *config_load(char **error) {
   free(content);
 
   if (!json) {
-    set_error(error, "JSON parse error");
+    err_setf(error, "JSON parse error");
     return config_get_defaults();
   }
 
@@ -765,82 +730,53 @@ Config *config_load(char **error) {
   Config *config = config_get_defaults();
   if (!config) {
     cJSON_Delete(json);
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     return NULL;
   }
 
   /* Parse general settings */
-  cJSON *general = cJSON_GetObjectItem(json, "general");
-  if (cJSON_IsObject(general)) {
-    cJSON *item;
+  cJSON *general = json_get_object(json, "general");
+  if (general) {
+    /* Boolean settings - use defaults as fallback */
+    config->general.show_header =
+        json_get_bool(general, "show_header", config->general.show_header);
+    config->general.show_status_bar =
+        json_get_bool(general, "show_status_bar", config->general.show_status_bar);
+    config->general.restore_session =
+        json_get_bool(general, "restore_session", config->general.restore_session);
+    config->general.quit_confirmation =
+        json_get_bool(general, "quit_confirmation", config->general.quit_confirmation);
+    config->general.delete_confirmation =
+        json_get_bool(general, "delete_confirmation", config->general.delete_confirmation);
+    config->general.auto_open_first_table =
+        json_get_bool(general, "auto_open_first_table", config->general.auto_open_first_table);
+    config->general.close_conn_on_last_tab =
+        json_get_bool(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
 
-    item = cJSON_GetObjectItem(general, "show_header");
-    if (cJSON_IsBool(item))
-      config->general.show_header = cJSON_IsTrue(item);
+    /* Integer settings with range validation */
+    int val = json_get_int(general, "page_size", config->general.page_size);
+    if (val >= CONFIG_PAGE_SIZE_MIN && val <= CONFIG_PAGE_SIZE_MAX)
+      config->general.page_size = val;
 
-    item = cJSON_GetObjectItem(general, "show_status_bar");
-    if (cJSON_IsBool(item))
-      config->general.show_status_bar = cJSON_IsTrue(item);
+    val = json_get_int(general, "prefetch_pages", config->general.prefetch_pages);
+    if (val >= CONFIG_PREFETCH_PAGES_MIN && val <= CONFIG_PREFETCH_PAGES_MAX)
+      config->general.prefetch_pages = val;
 
-    item = cJSON_GetObjectItem(general, "page_size");
-    if (cJSON_IsNumber(item)) {
-      int val = item->valueint;
-      if (val >= CONFIG_PAGE_SIZE_MIN && val <= CONFIG_PAGE_SIZE_MAX)
-        config->general.page_size = val;
-    }
+    val = json_get_int(general, "max_result_rows", config->general.max_result_rows);
+    if (val >= CONFIG_MAX_RESULT_ROWS_MIN && val <= CONFIG_MAX_RESULT_ROWS_MAX)
+      config->general.max_result_rows = val;
 
-    item = cJSON_GetObjectItem(general, "prefetch_pages");
-    if (cJSON_IsNumber(item)) {
-      int val = item->valueint;
-      if (val >= CONFIG_PREFETCH_PAGES_MIN && val <= CONFIG_PREFETCH_PAGES_MAX)
-        config->general.prefetch_pages = val;
-    }
+    val = json_get_int(general, "history_mode", config->general.history_mode);
+    if (val >= HISTORY_MODE_OFF && val <= HISTORY_MODE_PERSISTENT)
+      config->general.history_mode = val;
 
-    item = cJSON_GetObjectItem(general, "restore_session");
-    if (cJSON_IsBool(item))
-      config->general.restore_session = cJSON_IsTrue(item);
-
-    item = cJSON_GetObjectItem(general, "quit_confirmation");
-    if (cJSON_IsBool(item))
-      config->general.quit_confirmation = cJSON_IsTrue(item);
-
-    item = cJSON_GetObjectItem(general, "delete_confirmation");
-    if (cJSON_IsBool(item))
-      config->general.delete_confirmation = cJSON_IsTrue(item);
-
-    item = cJSON_GetObjectItem(general, "max_result_rows");
-    if (cJSON_IsNumber(item)) {
-      int val = item->valueint;
-      if (val >= CONFIG_MAX_RESULT_ROWS_MIN &&
-          val <= CONFIG_MAX_RESULT_ROWS_MAX)
-        config->general.max_result_rows = val;
-    }
-
-    item = cJSON_GetObjectItem(general, "auto_open_first_table");
-    if (cJSON_IsBool(item))
-      config->general.auto_open_first_table = cJSON_IsTrue(item);
-
-    item = cJSON_GetObjectItem(general, "close_conn_on_last_tab");
-    if (cJSON_IsBool(item))
-      config->general.close_conn_on_last_tab = cJSON_IsTrue(item);
-
-    item = cJSON_GetObjectItem(general, "history_mode");
-    if (cJSON_IsNumber(item)) {
-      int val = item->valueint;
-      if (val >= HISTORY_MODE_OFF && val <= HISTORY_MODE_PERSISTENT)
-        config->general.history_mode = val;
-    }
-
-    item = cJSON_GetObjectItem(general, "history_max_size");
-    if (cJSON_IsNumber(item)) {
-      int val = item->valueint;
-      if (val >= HISTORY_SIZE_MIN && val <= HISTORY_SIZE_MAX)
-        config->general.history_max_size = val;
-    }
+    val = json_get_int(general, "history_max_size", config->general.history_max_size);
+    if (val >= HISTORY_SIZE_MIN && val <= HISTORY_SIZE_MAX)
+      config->general.history_max_size = val;
   }
 
   /* Parse hotkeys */
-  cJSON *hotkeys = cJSON_GetObjectItem(json, "hotkeys");
+  cJSON *hotkeys = json_get_object(json, "hotkeys");
   if (hotkeys) {
     parse_hotkeys(hotkeys, config);
   }
@@ -856,7 +792,7 @@ Config *config_load(char **error) {
 
 bool config_save(const Config *config, char **error) {
   if (!config) {
-    set_error(error, "Invalid config");
+    err_setf(error, "Invalid config");
     return false;
   }
 
@@ -872,47 +808,37 @@ bool config_save(const Config *config, char **error) {
 
   const char *config_dir = platform_get_config_dir();
   if (!config_dir) {
-    set_error(error, "Failed to get config directory");
+    err_setf(error, "Failed to get config directory");
     return false;
   }
 
   if (!platform_dir_exists(config_dir)) {
     if (!platform_mkdir(config_dir)) {
-      set_error(error, "Failed to create config directory");
+      err_setf(error, "Failed to create config directory");
       return false;
     }
   }
 
   cJSON *json = cJSON_CreateObject();
   if (!json) {
-    set_error(error, "Out of memory");
+    err_setf(error, "Out of memory");
     return false;
   }
 
   /* General settings */
   cJSON *general = cJSON_CreateObject();
-  cJSON_AddBoolToObject(general, "show_header", config->general.show_header);
-  cJSON_AddBoolToObject(general, "show_status_bar",
-                        config->general.show_status_bar);
-  cJSON_AddNumberToObject(general, "page_size", config->general.page_size);
-  cJSON_AddNumberToObject(general, "prefetch_pages",
-                          config->general.prefetch_pages);
-  cJSON_AddBoolToObject(general, "restore_session",
-                        config->general.restore_session);
-  cJSON_AddBoolToObject(general, "quit_confirmation",
-                        config->general.quit_confirmation);
-  cJSON_AddBoolToObject(general, "delete_confirmation",
-                        config->general.delete_confirmation);
-  cJSON_AddNumberToObject(general, "max_result_rows",
-                          config->general.max_result_rows);
-  cJSON_AddBoolToObject(general, "auto_open_first_table",
-                        config->general.auto_open_first_table);
-  cJSON_AddBoolToObject(general, "close_conn_on_last_tab",
-                        config->general.close_conn_on_last_tab);
-  cJSON_AddNumberToObject(general, "history_mode",
-                          config->general.history_mode);
-  cJSON_AddNumberToObject(general, "history_max_size",
-                          config->general.history_max_size);
+  JSON_ADD_BOOL(general, "show_header", config->general.show_header);
+  JSON_ADD_BOOL(general, "show_status_bar", config->general.show_status_bar);
+  JSON_ADD_INT(general, "page_size", config->general.page_size);
+  JSON_ADD_INT(general, "prefetch_pages", config->general.prefetch_pages);
+  JSON_ADD_BOOL(general, "restore_session", config->general.restore_session);
+  JSON_ADD_BOOL(general, "quit_confirmation", config->general.quit_confirmation);
+  JSON_ADD_BOOL(general, "delete_confirmation", config->general.delete_confirmation);
+  JSON_ADD_INT(general, "max_result_rows", config->general.max_result_rows);
+  JSON_ADD_BOOL(general, "auto_open_first_table", config->general.auto_open_first_table);
+  JSON_ADD_BOOL(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
+  JSON_ADD_INT(general, "history_mode", config->general.history_mode);
+  JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */
@@ -924,7 +850,7 @@ bool config_save(const Config *config, char **error) {
   char *path = config_get_path();
   if (!path) {
     cJSON_Delete(json);
-    set_error(error, "Failed to get config path");
+    err_setf(error, "Failed to get config path");
     return false;
   }
 
@@ -933,7 +859,7 @@ bool config_save(const Config *config, char **error) {
 
   if (!content) {
     free(path);
-    set_error(error, "Failed to serialize JSON");
+    err_setf(error, "Failed to serialize JSON");
     return false;
   }
 
@@ -943,7 +869,7 @@ bool config_save(const Config *config, char **error) {
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (fd < 0) {
     free(content);
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return false;
   }
@@ -951,7 +877,7 @@ bool config_save(const Config *config, char **error) {
   if (!f) {
     close(fd);
     free(content);
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return false;
   }
@@ -959,7 +885,7 @@ bool config_save(const Config *config, char **error) {
   f = fopen(path, "w");
   if (!f) {
     free(content);
-    set_error(error, "Failed to open %s: %s", path, strerror(errno));
+    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
     free(path);
     return false;
   }
@@ -972,7 +898,7 @@ bool config_save(const Config *config, char **error) {
   free(path);
 
   if (written != len) {
-    set_error(error, "Failed to write all data");
+    err_setf(error, "Failed to write all data");
     return false;
   }
 
@@ -995,10 +921,15 @@ void config_reset_hotkey(Config *config, HotkeyAction action) {
   if (meta->num_default_keys > 0) {
     binding->keys = calloc(meta->num_default_keys, sizeof(char *));
     if (binding->keys) {
+      size_t copied = 0;
       for (size_t j = 0; j < meta->num_default_keys; j++) {
         binding->keys[j] = str_dup(meta->default_keys[j]);
+        if (binding->keys[j]) {
+          copied++;
+        }
+        /* On str_dup failure, key stays NULL (calloc zeroed) */
       }
-      binding->num_keys = meta->num_default_keys;
+      binding->num_keys = copied;
     }
   }
 }
@@ -1018,7 +949,7 @@ void config_reset_all_hotkeys(Config *config) {
 
 bool config_validate(const Config *config, char **error) {
   if (!config) {
-    set_error(error, "Invalid config");
+    err_setf(error, "Invalid config");
     return false;
   }
 
@@ -1029,7 +960,7 @@ bool config_validate(const Config *config, char **error) {
       HotkeyAction conflict =
           hotkey_find_conflict(config, (HotkeyAction)i, binding->keys[j]);
       if (conflict != HOTKEY_COUNT) {
-        set_error(error, "Conflict: '%s' is bound to both '%s' and '%s'",
+        err_setf(error, "Conflict: '%s' is bound to both '%s' and '%s'",
                   binding->keys[j], action_meta[i].name,
                   action_meta[conflict].name);
         return false;
@@ -1192,11 +1123,13 @@ bool hotkey_add_key(Config *config, HotkeyAction action, const char *key) {
 
   /* Check if already exists */
   for (size_t i = 0; i < binding->num_keys; i++) {
-    if (strcmp(binding->keys[i], key) == 0)
+    if (binding->keys[i] && strcmp(binding->keys[i], key) == 0)
       return true; /* Already exists */
   }
 
-  /* Add new key */
+  /* Add new key - check for overflow before realloc */
+  if (binding->num_keys > SIZE_MAX / sizeof(char *) - 1)
+    return false;
   char **new_keys =
       realloc(binding->keys, (binding->num_keys + 1) * sizeof(char *));
   if (!new_keys)
@@ -1204,9 +1137,6 @@ bool hotkey_add_key(Config *config, HotkeyAction action, const char *key) {
 
   binding->keys = new_keys;
   binding->keys[binding->num_keys] = str_dup(key);
-  if (!binding->keys[binding->num_keys])
-    return false;
-
   binding->num_keys++;
   return true;
 }
@@ -1246,12 +1176,6 @@ char **hotkey_get_default_keys(HotkeyAction action, size_t *num_keys) {
 
   for (size_t i = 0; i < meta->num_default_keys; i++) {
     keys[i] = str_dup(meta->default_keys[i]);
-    if (!keys[i]) {
-      for (size_t j = 0; j < i; j++)
-        free(keys[j]);
-      free(keys);
-      return NULL;
-    }
   }
 
   return keys;

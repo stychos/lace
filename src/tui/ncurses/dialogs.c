@@ -12,7 +12,7 @@
 #include "../../async/async.h"
 #include "../../config/config.h"
 #include "../../core/history.h"
-#include "../../viewmodel/vm_table.h"
+#include "../../util/mem.h"
 #include "tui_internal.h"
 #include "views/config_view.h"
 #include "views/connect_view.h"
@@ -52,111 +52,251 @@ static void load_connection_history(TuiState *state, Connection *conn) {
   }
 }
 
-/* Helper to get VmTable, returns NULL if not valid */
-static VmTable *get_vm_table(TuiState *state) {
-  if (!state || !state->vm_table)
-    return NULL;
-  if (!vm_table_valid(state->vm_table))
-    return NULL;
-  return state->vm_table;
-}
-
 /* Show confirmation dialog - returns true if user confirms */
 bool tui_show_confirm_dialog(TuiState *state, const char *message) {
   if (!state)
     return false;
 
-  int term_rows, term_cols;
-  getmaxyx(stdscr, term_rows, term_cols);
-
   int msg_len = (int)strlen(message);
   int width = msg_len + 6;
   if (width < 30)
     width = 30;
-  if (width > term_cols - 4)
-    width = term_cols - 4;
 
-  int height = 7;
-  int start_y = (term_rows - height) / 2;
-  int start_x = (term_cols - width) / 2;
-
-  /* Clamp coordinates to prevent negative values */
-  if (start_y < 0)
-    start_y = 0;
-  if (start_x < 0)
-    start_x = 0;
-
-  WINDOW *dialog = newwin(height, width, start_y, start_x);
-  if (!dialog)
+  DialogContext ctx;
+  if (!dialog_ctx_init(&ctx, 7, width, COLOR_BORDER, "Confirm"))
     return false;
 
-  keypad(dialog, TRUE);
+  static const char *buttons[] = {"Yes", "No"};
+  bool result = false;
 
-  int selected = 0; /* 0 = Yes, 1 = No */
-
-  while (1) {
-    werase(dialog);
-    wattron(dialog, COLOR_PAIR(COLOR_BORDER));
-    box(dialog, 0, 0);
-    wattroff(dialog, COLOR_PAIR(COLOR_BORDER));
-
-    /* Title */
-    wattron(dialog, A_BOLD);
-    mvwprintw(dialog, 0, (width - 11) / 2, " Confirm ");
-    wattroff(dialog, A_BOLD);
+  while (ctx.running) {
+    dialog_ctx_draw_frame(&ctx);
 
     /* Message */
-    mvwprintw(dialog, 2, (width - msg_len) / 2, "%s", message);
+    mvwprintw(ctx.win, 2, (ctx.width - msg_len) / 2, "%s", message);
 
     /* Buttons */
-    int btn_y = height - 2;
-    int yes_x = width / 2 - 10;
-    int no_x = width / 2 + 4;
+    dialog_ctx_draw_buttons(&ctx, buttons, 2, ctx.selected);
+    wrefresh(ctx.win);
 
-    if (selected == 0) {
-      wattron(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, yes_x, "[ Yes ]");
-      wattroff(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, no_x, "[ No ]");
-    } else {
-      mvwprintw(dialog, btn_y, yes_x, "[ Yes ]");
-      wattron(dialog, A_REVERSE);
-      mvwprintw(dialog, btn_y, no_x, "[ No ]");
-      wattroff(dialog, A_REVERSE);
-    }
-
-    wrefresh(dialog);
-
-    int ch = wgetch(dialog);
+    int ch = dialog_ctx_getch(&ctx);
     switch (ch) {
     case KEY_LEFT:
     case KEY_RIGHT:
     case '\t':
     case 'h':
     case 'l':
-      selected = 1 - selected;
+      dialog_ctx_cycle_button(&ctx, 2);
       break;
 
     case 'y':
     case 'Y':
-      delwin(dialog);
-      touchwin(stdscr);
-      return true;
+      result = true;
+      ctx.running = false;
+      break;
 
     case 'n':
     case 'N':
     case 27: /* Escape */
-      delwin(dialog);
-      touchwin(stdscr);
-      return false;
+      ctx.running = false;
+      break;
 
     case '\n':
     case KEY_ENTER:
-      delwin(dialog);
-      touchwin(stdscr);
-      return (selected == 0);
+      result = (ctx.selected == 0);
+      ctx.running = false;
+      break;
     }
   }
+
+  dialog_ctx_destroy(&ctx);
+  return result;
+}
+
+/* Show password input dialog (masks input with asterisks)
+ * Returns: malloc'd password string, or NULL if cancelled.
+ * Caller must use str_secure_free() on result. */
+char *tui_show_password_dialog(TuiState *state, const char *title,
+                               const char *label, const char *error_msg) {
+  (void)state;
+
+  int screen_h, screen_w;
+  getmaxyx(stdscr, screen_h, screen_w);
+
+  /* Ensure minimum usable size */
+  if (screen_h < 12 || screen_w < 40)
+    return NULL;
+
+  /* Clear screen for clean dialog display */
+  clear();
+  refresh();
+
+  int dlg_height = 9;
+  int dlg_width = 55;
+  if (dlg_width > screen_w - 4)
+    dlg_width = screen_w - 4;
+
+  int dlg_y = (screen_h - dlg_height) / 2;
+  int dlg_x = (screen_w - dlg_width) / 2;
+  if (dlg_y < 0)
+    dlg_y = 0;
+  if (dlg_x < 0)
+    dlg_x = 0;
+
+  /* Create dialog window */
+  WINDOW *dlg = newwin(dlg_height, dlg_width, dlg_y, dlg_x);
+  if (!dlg)
+    return NULL;
+
+  keypad(dlg, TRUE);
+
+  char buf[128];
+  size_t len = 0;
+  size_t cursor = 0;
+  buf[0] = '\0';
+
+  /* Focus: 0 = input, 1 = OK button, 2 = Cancel button */
+  int focus = 0;
+
+  char *result = NULL;
+  bool running = true;
+
+  while (running) {
+    werase(dlg);
+    box(dlg, 0, 0);
+
+    /* Title */
+    int title_len = (int)strlen(title) + 2;
+    wattron(dlg, A_BOLD);
+    mvwprintw(dlg, 0, (dlg_width - title_len) / 2, " %s ", title);
+    wattroff(dlg, A_BOLD);
+
+    /* Label */
+    mvwprintw(dlg, 2, 2, "%s", label);
+
+    /* Password input field */
+    if (focus == 0) {
+      wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+    mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
+    /* Show asterisks instead of actual password */
+    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
+      mvwaddch(dlg, 3, 2 + (int)i, '*');
+    }
+    if (focus == 0) {
+      wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));
+    }
+
+    /* Error message */
+    if (error_msg && error_msg[0]) {
+      wattron(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
+      int max_err_len = dlg_width - 4;
+      mvwprintw(dlg, 4, 2, "%.*s", max_err_len, error_msg);
+      wattroff(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
+    }
+
+    /* Separator line */
+    wattron(dlg, A_DIM);
+    mvwaddch(dlg, 5, 0, ACS_LTEE);
+    mvwhline(dlg, 5, 1, ACS_HLINE, dlg_width - 2);
+    mvwaddch(dlg, 5, dlg_width - 1, ACS_RTEE);
+    wattroff(dlg, A_DIM);
+
+    /* Buttons */
+    int btn_x = dlg_width / 2 - 10;
+    if (focus == 1)
+      wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 7, btn_x, "[ OK ]");
+    if (focus == 1)
+      wattroff(dlg, A_REVERSE);
+    if (focus == 2)
+      wattron(dlg, A_REVERSE);
+    mvwprintw(dlg, 7, btn_x + 8, "[ Cancel ]");
+    if (focus == 2)
+      wattroff(dlg, A_REVERSE);
+
+    if (focus == 0) {
+      wmove(dlg, 3, 2 + (int)cursor);
+      curs_set(1);
+    } else {
+      curs_set(0);
+    }
+    wrefresh(dlg);
+
+    int ch = wgetch(dlg);
+    UiEvent event;
+    render_translate_key(ch, &event);
+
+    if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
+      running = false;
+    } else if (render_event_is_special(&event, UI_KEY_TAB) ||
+               render_event_is_special(&event, UI_KEY_DOWN)) {
+      focus = FOCUS_NEXT(focus, 3);
+    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+      focus = FOCUS_PREV(focus, 3);
+    } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
+      if (focus == 2) {
+        /* Cancel */
+        running = false;
+      } else {
+        /* OK - return even if empty (user might want empty password) */
+        result = str_dup(buf);
+        running = false;
+      }
+    } else if (focus == 0) {
+      /* Input field handling */
+      if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
+        if (cursor > 0 && cursor <= len) {
+          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
+          cursor--;
+          len--;
+        }
+      } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (cursor > 0)
+          cursor--;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (cursor < len)
+          cursor++;
+      } else if (render_event_is_special(&event, UI_KEY_HOME)) {
+        cursor = 0;
+      } else if (render_event_is_special(&event, UI_KEY_END)) {
+        cursor = len;
+      } else {
+        int key_char = render_event_get_char(&event);
+        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
+            len < sizeof(buf) - 1) {
+          memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
+          buf[cursor] = (char)key_char;
+          cursor++;
+          len++;
+        }
+      }
+    } else {
+      /* Button navigation with left/right */
+      if (render_event_is_special(&event, UI_KEY_LEFT)) {
+        if (focus == 2)
+          focus = 1;
+      } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
+        if (focus == 1)
+          focus = 2;
+      }
+    }
+  }
+
+  curs_set(0);
+  delwin(dlg);
+
+  /* Securely zero password buffer before returning to prevent stack leakage */
+  volatile char *vbuf = buf;
+  for (size_t i = 0; i < sizeof(buf); i++) {
+    vbuf[i] = 0;
+  }
+
+  /* Force screen refresh to clear dialog remnants */
+  touchwin(stdscr);
+  refresh();
+
+  return result;
 }
 
 /* Show go-to row dialog */
@@ -181,9 +321,10 @@ void tui_show_goto_dialog(TuiState *state) {
 
   /* Fall back to regular table data if not in query tab */
   if (!is_query) {
-    if (!state->data)
+    /* Use Tab as authoritative source */
+    if (!tab || !tab->data)
       return;
-    total_rows = state->total_rows;
+    total_rows = tab->total_rows;
   }
 
   if (total_rows == 0)
@@ -194,14 +335,8 @@ void tui_show_goto_dialog(TuiState *state) {
 
   int height = 7;
   int width = 50;
-  int starty = (term_rows - height) / 2;
-  int startx = (term_cols - width) / 2;
-
-  /* Clamp coordinates to prevent negative values */
-  if (starty < 0)
-    starty = 0;
-  if (startx < 0)
-    startx = 0;
+  int starty, startx;
+  dialog_center_position(&starty, &startx, height, width, term_rows, term_cols);
 
   WINDOW *win = newwin(height, width, starty, startx);
   if (!win)
@@ -217,13 +352,8 @@ void tui_show_goto_dialog(TuiState *state) {
   bool running = true;
   while (running) {
     werase(win);
-    wattron(win, COLOR_PAIR(COLOR_BORDER));
-    box(win, 0, 0);
-    wattroff(win, COLOR_PAIR(COLOR_BORDER));
-
-    wattron(win, A_BOLD);
-    mvwprintw(win, 0, (width - 14) / 2, " Go to Row ");
-    wattroff(win, A_BOLD);
+    DRAW_BOX(win, COLOR_BORDER);
+    WITH_ATTR(win, A_BOLD, mvwprintw(win, 0, (width - 14) / 2, " Go to Row "));
 
     mvwprintw(win, 2, 2, "Enter row number (1-%zu):", total_rows);
 
@@ -333,35 +463,36 @@ void tui_show_goto_dialog(TuiState *state) {
           } else {
             /* Handle regular table navigation */
             /* Check if target is in currently loaded range */
-            if (target_row >= state->loaded_offset &&
-                target_row < state->loaded_offset + state->loaded_count) {
+            if (target_row >= tab->loaded_offset &&
+                target_row < tab->loaded_offset + tab->loaded_count) {
               /* Already loaded, just move cursor */
-              state->cursor_row = target_row - state->loaded_offset;
+              tab->cursor_row = target_row - tab->loaded_offset;
 
               /* Adjust scroll */
-              if (state->cursor_row < state->scroll_row) {
-                state->scroll_row = state->cursor_row;
-              } else if (state->cursor_row >=
-                         state->scroll_row + (size_t)state->content_rows) {
-                state->scroll_row = state->cursor_row - state->content_rows + 1;
+              if (tab->cursor_row < tab->scroll_row) {
+                tab->scroll_row = tab->cursor_row;
+              } else if (tab->cursor_row >=
+                         tab->scroll_row + (size_t)state->content_rows) {
+                tab->scroll_row = tab->cursor_row - state->content_rows + 1;
               }
             } else {
               /* Need to load new data - use async with progress */
               size_t load_offset =
                   target_row > PAGE_SIZE / 2 ? target_row - PAGE_SIZE / 2 : 0;
 
-              /* Get table name */
-              const char *table = state->tables[state->current_table];
+              /* Get table name from Tab */
+              Tab *curr_tab = TUI_TAB(state);
+              DbConnection *conn = TUI_CONN(state);
+              const char *table = curr_tab ? curr_tab->table_name : NULL;
               char *where_clause = NULL;
 
               /* Build WHERE clause from filters if applicable */
-              Tab *curr_tab = TUI_TAB(state);
               if (curr_tab && curr_tab->filters.num_filters > 0 &&
-                  state->schema && state->conn) {
+                  curr_tab->schema && conn) {
                 char *err = NULL;
                 where_clause =
-                    filters_build_where(&curr_tab->filters, state->schema,
-                                        state->conn->driver->name, &err);
+                    filters_build_where(&curr_tab->filters, curr_tab->schema,
+                                        conn->driver->name, &err);
                 free(err);
               }
 
@@ -383,7 +514,7 @@ void tui_show_goto_dialog(TuiState *state) {
               }
 
               bool load_succeeded = false;
-              if (op.table_name && async_start(&op)) {
+              if (async_start(&op)) {
                 bool completed =
                     tui_show_processing_dialog(state, &op, "Loading data...");
 
@@ -418,17 +549,16 @@ void tui_show_goto_dialog(TuiState *state) {
                           count_op.state == ASYNC_STATE_COMPLETED &&
                           count_op.count > 0) {
                         /* Update total rows with exact count */
-                        state->total_rows = (size_t)count_op.count;
                         Tab *update_tab = TUI_TAB(state);
                         if (update_tab) {
-                          update_tab->total_rows = state->total_rows;
+                          update_tab->total_rows = (size_t)count_op.count;
                           update_tab->row_count_approximate = false;
                         }
 
                         /* Clamp target row to actual data */
-                        if (target_row >= state->total_rows) {
-                          target_row =
-                              state->total_rows > 0 ? state->total_rows - 1 : 0;
+                        size_t total = update_tab ? update_tab->total_rows : 0;
+                        if (target_row >= total) {
+                          target_row = total > 0 ? total - 1 : 0;
                         }
 
                         /* Recalculate load offset and reload */
@@ -445,14 +575,18 @@ void tui_show_goto_dialog(TuiState *state) {
                         /* Use tui_load_rows_at_with_dialog which handles edge
                          * cases */
                         if (tui_load_rows_at_with_dialog(state, load_offset)) {
-                          state->cursor_row = target_row - state->loaded_offset;
-                          if (state->cursor_row < state->scroll_row) {
-                            state->scroll_row = state->cursor_row;
-                          } else if (state->cursor_row >=
-                                     state->scroll_row +
-                                         (size_t)state->content_rows) {
-                            state->scroll_row =
-                                state->cursor_row - state->content_rows + 1;
+                          Tab *load_tab = TUI_TAB(state);
+                          if (load_tab) {
+                            load_tab->cursor_row =
+                                target_row - load_tab->loaded_offset;
+                            if (load_tab->cursor_row < load_tab->scroll_row) {
+                              load_tab->scroll_row = load_tab->cursor_row;
+                            } else if (load_tab->cursor_row >=
+                                       load_tab->scroll_row +
+                                           (size_t)state->content_rows) {
+                              load_tab->scroll_row =
+                                  load_tab->cursor_row - state->content_rows + 1;
+                            }
                           }
                         }
                         tui_refresh(state);
@@ -464,61 +598,62 @@ void tui_show_goto_dialog(TuiState *state) {
                     return;
                   }
 
-                  /* Free old data but keep schema */
-                  if (state->data) {
-                    db_result_free(state->data);
-                  }
-                  state->data = new_data;
-                  state->loaded_offset = load_offset;
-                  state->loaded_count = state->data->num_rows;
-
-                  /* Apply schema column names */
-                  if (state->schema && state->data) {
-                    size_t min_cols = state->schema->num_columns;
-                    if (state->data->num_columns < min_cols) {
-                      min_cols = state->data->num_columns;
-                    }
-                    for (size_t i = 0; i < min_cols; i++) {
-                      if (state->schema->columns[i].name) {
-                        free(state->data->columns[i].name);
-                        state->data->columns[i].name =
-                            str_dup(state->schema->columns[i].name);
-                        state->data->columns[i].type =
-                            state->schema->columns[i].type;
-                      }
-                    }
-                  }
-
-                  /* Update tab pointers */
+                  /* Update tab directly */
                   Tab *upd_tab = TUI_TAB(state);
                   if (upd_tab) {
-                    upd_tab->data = state->data;
-                    upd_tab->loaded_offset = state->loaded_offset;
-                    upd_tab->loaded_count = state->loaded_count;
-                  }
+                    /* Free old data but keep schema */
+                    if (upd_tab->data) {
+                      db_result_free(upd_tab->data);
+                    }
+                    upd_tab->data = new_data;
+                    upd_tab->loaded_offset = load_offset;
+                    upd_tab->loaded_count = new_data->num_rows;
 
-                  load_succeeded = true;
+                    /* Apply schema column names */
+                    if (upd_tab->schema && upd_tab->data) {
+                      size_t min_cols = upd_tab->schema->num_columns;
+                      if (upd_tab->data->num_columns < min_cols) {
+                        min_cols = upd_tab->data->num_columns;
+                      }
+                      for (size_t i = 0; i < min_cols; i++) {
+                        if (upd_tab->schema->columns[i].name) {
+                          free(upd_tab->data->columns[i].name);
+                          upd_tab->data->columns[i].name =
+                              str_dup(upd_tab->schema->columns[i].name);
+                          upd_tab->data->columns[i].type =
+                              upd_tab->schema->columns[i].type;
+                        }
+                      }
+                    }
+
+                    /* Tab data is updated directly - no sync needed */
+                    load_succeeded = true;
+                  }
                 }
               }
               async_free(&op);
 
               /* Only update cursor if load succeeded */
               if (load_succeeded) {
-                /* Clamp cursor to actual loaded data if target was beyond */
-                size_t actual_target = target_row - state->loaded_offset;
-                if (actual_target >= state->data->num_rows) {
-                  actual_target =
-                      state->data->num_rows > 0 ? state->data->num_rows - 1 : 0;
-                }
-                state->cursor_row = actual_target;
+                Tab *cur_tab = TUI_TAB(state);
+                if (cur_tab && cur_tab->data) {
+                  /* Clamp cursor to actual loaded data if target was beyond */
+                  size_t actual_target = target_row - cur_tab->loaded_offset;
+                  if (actual_target >= cur_tab->data->num_rows) {
+                    actual_target = cur_tab->data->num_rows > 0
+                                        ? cur_tab->data->num_rows - 1
+                                        : 0;
+                  }
+                  cur_tab->cursor_row = actual_target;
 
-                /* Adjust scroll */
-                if (state->cursor_row < state->scroll_row) {
-                  state->scroll_row = state->cursor_row;
-                } else if (state->cursor_row >=
-                           state->scroll_row + (size_t)state->content_rows) {
-                  state->scroll_row =
-                      state->cursor_row - state->content_rows + 1;
+                  /* Adjust scroll */
+                  if (cur_tab->cursor_row < cur_tab->scroll_row) {
+                    cur_tab->scroll_row = cur_tab->cursor_row;
+                  } else if (cur_tab->cursor_row >=
+                             cur_tab->scroll_row + (size_t)state->content_rows) {
+                    cur_tab->scroll_row =
+                        cur_tab->cursor_row - state->content_rows + 1;
+                  }
                 }
               }
               /* If cancelled/failed, keep current view unchanged */
@@ -565,9 +700,10 @@ void tui_show_goto_dialog(TuiState *state) {
 
 /* Show schema dialog */
 void tui_show_schema(TuiState *state) {
-  /* Get schema via VmTable if available, fallback to state->schema */
-  VmTable *vm = get_vm_table(state);
-  const TableSchema *schema = vm ? vm_table_schema(vm) : state->schema;
+  /* Get schema via VmTable if available, fallback to Tab */
+  VmTable *vm = tui_vm_table(state);
+  Tab *schema_tab = TUI_TAB(state);
+  const TableSchema *schema = vm ? vm_table_schema(vm) : (schema_tab ? schema_tab->schema : NULL);
 
   if (!state || !schema) {
     tui_set_error(state, "No schema available");
@@ -598,12 +734,9 @@ void tui_show_schema(TuiState *state) {
 
   while (running) {
     werase(schema_win);
-    wattron(schema_win, COLOR_PAIR(COLOR_BORDER));
-    box(schema_win, 0, 0);
-    wattroff(schema_win, COLOR_PAIR(COLOR_BORDER));
-    wattron(schema_win, A_BOLD);
-    mvwprintw(schema_win, 0, 2, " Schema: %s ", schema->name);
-    wattroff(schema_win, A_BOLD);
+    DRAW_BOX(schema_win, COLOR_BORDER);
+    WITH_ATTR(schema_win, A_BOLD,
+              mvwprintw(schema_win, 0, 2, " Schema: %s ", schema->name));
 
     int y = 2;
     int content_height = height - 4;
@@ -675,21 +808,23 @@ void tui_show_schema(TuiState *state) {
           size_t pos = 0;
           for (size_t j = 0; j < idx->num_columns && pos < sizeof(cols) - 1;
                j++) {
+            size_t remaining = sizeof(cols) - pos;
             int written;
             if (j > 0) {
-              written = snprintf(cols + pos, sizeof(cols) - pos, ", %s",
+              written = snprintf(cols + pos, remaining, ", %s",
                                  idx->columns[j] ? idx->columns[j] : "");
             } else {
-              written = snprintf(cols + pos, sizeof(cols) - pos, "%s",
+              written = snprintf(cols + pos, remaining, "%s",
                                  idx->columns[j] ? idx->columns[j] : "");
             }
             if (written > 0) {
+              /* Check if truncation occurred before updating pos */
+              if ((size_t)written >= remaining) {
+                pos = sizeof(cols) - 1;
+                break;
+              }
               pos += (size_t)written;
-              if (pos >= sizeof(cols))
-                pos = sizeof(cols) - 1; /* Cap to prevent overflow */
             }
-            if (pos >= sizeof(cols) - 1)
-              break;
           }
           mvwprintw(schema_win, y++, 4, "%s%-20s %s(%s)",
                     idx->unique ? "[U] " : "    ", idx->name ? idx->name : "",
@@ -726,12 +861,14 @@ void tui_show_schema(TuiState *state) {
                                  fk->columns[j] ? fk->columns[j] : "");
             }
             if (written > 0) {
-              pos += (size_t)written;
-              if (pos >= sizeof(src_cols))
+              /* Check for truncation BEFORE updating pos */
+              size_t remaining = sizeof(src_cols) - pos;
+              if ((size_t)written >= remaining) {
                 pos = sizeof(src_cols) - 1;
+                break;
+              }
+              pos += (size_t)written;
             }
-            if (pos >= sizeof(src_cols) - 1)
-              break;
           }
           char ref_cols[128] = "";
           pos = 0;
@@ -746,12 +883,14 @@ void tui_show_schema(TuiState *state) {
                                  fk->ref_columns[j] ? fk->ref_columns[j] : "");
             }
             if (written > 0) {
-              pos += (size_t)written;
-              if (pos >= sizeof(ref_cols))
+              /* Check for truncation BEFORE updating pos */
+              size_t remaining = sizeof(ref_cols) - pos;
+              if ((size_t)written >= remaining) {
                 pos = sizeof(ref_cols) - 1;
+                break;
+              }
+              pos += (size_t)written;
             }
-            if (pos >= sizeof(ref_cols) - 1)
-              break;
           }
           mvwprintw(schema_win, y++, 4, "(%s) -> %s(%s)", src_cols,
                     fk->ref_table ? fk->ref_table : "?", ref_cols);
@@ -811,7 +950,7 @@ void tui_show_connect_dialog(TuiState *state) {
   ConnectResult result = connect_view_show(state);
 
   if (result.mode == CONNECT_MODE_QUIT) {
-    free(result.connstr);
+    str_secure_free(result.connstr); /* Connection string may contain password */
     free(result.saved_conn_id);
     state->running = false;
     state->app->running = false;
@@ -819,7 +958,7 @@ void tui_show_connect_dialog(TuiState *state) {
   }
 
   if (result.mode == CONNECT_MODE_CANCELLED || !result.connstr) {
-    free(result.connstr);
+    str_secure_free(result.connstr); /* Connection string may contain password */
     free(result.saved_conn_id);
     tui_refresh(state);
     return;
@@ -831,7 +970,7 @@ void tui_show_connect_dialog(TuiState *state) {
     DbConnection *conn = tui_connect_with_progress(state, result.connstr);
     if (!conn) {
       /* Error already shown */
-      free(result.connstr);
+      str_secure_free(result.connstr); /* Connection string may contain password */
       free(result.saved_conn_id);
       tui_refresh(state);
       return;
@@ -842,7 +981,7 @@ void tui_show_connect_dialog(TuiState *state) {
     if (!app_conn) {
       db_disconnect(conn);
       tui_set_error(state, "Failed to add connection");
-      free(result.connstr);
+      str_secure_free(result.connstr); /* Connection string may contain password */
       free(result.saved_conn_id);
       tui_refresh(state);
       return;
@@ -883,21 +1022,13 @@ void tui_show_connect_dialog(TuiState *state) {
       ws = app_create_workspace(state->app);
       if (!ws) {
         tui_set_error(state, "Failed to create workspace (out of memory)");
-        free(result.connstr);
+        str_secure_free(result.connstr); /* Connection string may contain password */
         tui_refresh(state);
         return;
       }
     }
 
-    /* Clear TUI state for new workspace */
-    state->data = NULL;
-    state->schema = NULL;
-    state->col_widths = NULL;
-    state->num_col_widths = 0;
-    state->cursor_row = 0;
-    state->cursor_col = 0;
-    state->scroll_row = 0;
-    state->scroll_col = 0;
+    /* Tab data will be managed per-tab */
 
     /* Update TUI state to use new connection */
     state->conn = conn;
@@ -919,24 +1050,17 @@ void tui_show_connect_dialog(TuiState *state) {
         tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
                                    ws->current_tab);
 
-        /* Load table data */
-        state->current_table = table_idx;
+        /* Load table data (updates Tab directly) */
         tui_load_table_data(state, app_conn->tables[table_idx]);
-
-        /* Save to tab */
-        tab->data = state->data;
-        tab->schema = state->schema;
-        tab->col_widths = state->col_widths;
-        tab->num_col_widths = state->num_col_widths;
-        tab->total_rows = state->total_rows;
-        tab->loaded_offset = state->loaded_offset;
-        tab->loaded_count = state->loaded_count;
 
         /* Initialize UI state */
         UITabState *ui = TUI_TAB_UI(state);
         if (ui) {
           ui->sidebar_visible = true;
           ui->sidebar_focused = false;
+
+          /* Initialize widgets for the new table tab */
+          tui_init_table_tab_widgets(state, ui, tab);
         }
         state->sidebar_visible = true;
         state->sidebar_focused = false;
@@ -984,7 +1108,7 @@ void tui_show_connect_dialog(TuiState *state) {
       tui_set_error(state, "Connection failed: %s",
                     err ? err : "Unknown error");
       free(err);
-      free(result.connstr);
+      str_secure_free(result.connstr); /* Connection string may contain password */
       free(result.saved_conn_id);
       tui_refresh(state);
       return;
@@ -995,7 +1119,7 @@ void tui_show_connect_dialog(TuiState *state) {
     if (!app_conn) {
       db_disconnect(conn);
       tui_set_error(state, "Failed to add connection");
-      free(result.connstr);
+      str_secure_free(result.connstr); /* Connection string may contain password */
       free(result.saved_conn_id);
       tui_refresh(state);
       return;
@@ -1032,11 +1156,7 @@ void tui_show_connect_dialog(TuiState *state) {
       /* Save current tab state */
       if (ws->num_tabs > 0) {
         tab_save(state);
-        /* Clear state pointers - old tab now owns the data (don't free!) */
-        state->data = NULL;
-        state->schema = NULL;
-        state->col_widths = NULL;
-        state->num_col_widths = 0;
+        /* Tab owns its data - no cache clearing needed */
       }
 
       /* Update TUI state to use new connection */
@@ -1059,24 +1179,17 @@ void tui_show_connect_dialog(TuiState *state) {
           tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
                                      ws->current_tab);
 
-          /* Load table data */
-          state->current_table = table_idx;
+          /* Load table data (updates Tab directly) */
           tui_load_table_data(state, app_conn->tables[table_idx]);
-
-          /* Save to tab */
-          tab->data = state->data;
-          tab->schema = state->schema;
-          tab->col_widths = state->col_widths;
-          tab->num_col_widths = state->num_col_widths;
-          tab->total_rows = state->total_rows;
-          tab->loaded_offset = state->loaded_offset;
-          tab->loaded_count = state->loaded_count;
 
           /* Initialize UI state */
           UITabState *ui = TUI_TAB_UI(state);
           if (ui) {
             ui->sidebar_visible = true;
             ui->sidebar_focused = false;
+
+            /* Initialize widgets for the new table tab */
+            tui_init_table_tab_widgets(state, ui, tab);
           }
           state->sidebar_visible = true;
           state->sidebar_focused = false;
@@ -1130,12 +1243,14 @@ void tui_show_config(TuiState *state) {
 
 /* Show table selector dialog */
 void tui_show_table_selector(TuiState *state) {
-  if (!state || !state->tables || state->num_tables == 0) {
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  if (!state || !tables || num_tables == 0) {
     tui_set_error(state, "No tables available");
     return;
   }
 
-  int height = (int)state->num_tables + 4;
+  int height = (int)num_tables + 4;
   if (height > state->term_rows - 4) {
     height = state->term_rows - 4;
   }
@@ -1143,43 +1258,28 @@ void tui_show_table_selector(TuiState *state) {
   if (height < 5)
     height = 5;
   int width = 40;
-  int starty = (state->term_rows - height) / 2;
-  int startx = (state->term_cols - width) / 2;
-
-  /* Clamp coordinates to prevent negative values */
-  if (starty < 0)
-    starty = 0;
-  if (startx < 0)
-    startx = 0;
+  int starty, startx;
+  dialog_center_position(&starty, &startx, height, width, state->term_rows, state->term_cols);
 
   WINDOW *menu_win = newwin(height, width, starty, startx);
   if (!menu_win)
     return;
 
   keypad(menu_win, TRUE);
-  wattron(menu_win, COLOR_PAIR(COLOR_BORDER));
-  box(menu_win, 0, 0);
-  wattroff(menu_win, COLOR_PAIR(COLOR_BORDER));
-
-  wattron(menu_win, A_BOLD);
-  mvwprintw(menu_win, 0, 2, " Select Table ");
-  wattroff(menu_win, A_BOLD);
+  DRAW_BOX(menu_win, COLOR_BORDER);
+  WITH_ATTR(menu_win, A_BOLD, mvwprintw(menu_win, 0, 2, " Select Table "));
 
   /* Create menu items */
-  ITEM **items = calloc(state->num_tables + 1, sizeof(ITEM *));
-  if (!items) {
-    delwin(menu_win);
-    return;
-  }
+  ITEM **items = safe_calloc(num_tables + 1, sizeof(ITEM *));
 
-  for (size_t i = 0; i < state->num_tables; i++) {
-    items[i] = new_item(state->tables[i], "");
+  for (size_t i = 0; i < num_tables; i++) {
+    items[i] = new_item(tables[i], "");
   }
-  items[state->num_tables] = NULL;
+  items[num_tables] = NULL;
 
   MENU *menu = new_menu(items);
   if (!menu) {
-    for (size_t i = 0; i < state->num_tables; i++) {
+    for (size_t i = 0; i < num_tables; i++) {
       free_item(items[i]);
     }
     free(items);
@@ -1188,17 +1288,14 @@ void tui_show_table_selector(TuiState *state) {
   }
 
   /* Set menu options */
-  set_menu_win(menu, menu_win);
-  set_menu_sub(menu, derwin(menu_win, height - 4, width - 4, 2, 2));
-  set_menu_mark(menu, "> ");
-  set_menu_format(menu, height - 4, 1);
+  menu_setup(menu, menu_win, height, width, 2);
 
   /* Set current item */
-  if (state->current_table < state->num_tables) {
-    set_current_item(menu, items[state->current_table]);
+  Tab *sel_tab = TUI_TAB(state);
+  if (sel_tab && sel_tab->table_index < num_tables) {
+    set_current_item(menu, items[sel_tab->table_index]);
   }
 
-  post_menu(menu);
   wrefresh(menu_win);
 
   mvwprintw(menu_win, height - 1, 2, "Enter:Select  Esc:Cancel");
@@ -1231,14 +1328,13 @@ void tui_show_table_selector(TuiState *state) {
       ITEM *cur = current_item(menu);
       if (cur) {
         int idx = item_index(cur);
-        if (idx >= 0 && (size_t)idx < state->num_tables) {
-          state->current_table = idx;
+        if (idx >= 0 && (size_t)idx < num_tables) {
           /* Clear filters when switching tables */
-          Tab *sel_tab = TUI_TAB(state);
           if (sel_tab && sel_tab->type == TAB_TYPE_TABLE) {
+            sel_tab->table_index = (size_t)idx;
             filters_clear(&sel_tab->filters);
           }
-          tui_load_table_data(state, state->tables[idx]);
+          tui_load_table_data(state, tables[idx]);
         }
       }
       running = false;
@@ -1256,7 +1352,7 @@ void tui_show_table_selector(TuiState *state) {
   /* Cleanup */
   unpost_menu(menu);
   free_menu(menu);
-  for (size_t i = 0; i < state->num_tables; i++) {
+  for (size_t i = 0; i < num_tables; i++) {
     free_item(items[i]);
   }
   free(items);
@@ -1324,13 +1420,8 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
       if (width > term_cols - 4)
         width = term_cols - 4;
 
-      int start_y = (term_rows - height) / 2;
-      int start_x = (term_cols - width) / 2;
-
-      if (start_y < 0)
-        start_y = 0;
-      if (start_x < 0)
-        start_x = 0;
+      int start_y, start_x;
+      dialog_center_position(&start_y, &start_x, height, width, term_rows, term_cols);
 
       dialog = newwin(height, width, start_y, start_x);
       if (dialog) {
@@ -1342,14 +1433,9 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
     if (dialog) {
       /* Draw dialog */
       werase(dialog);
-      wattron(dialog, COLOR_PAIR(COLOR_BORDER));
-      box(dialog, 0, 0);
-      wattroff(dialog, COLOR_PAIR(COLOR_BORDER));
-
-      /* Title */
-      wattron(dialog, A_BOLD);
-      mvwprintw(dialog, 0, (width - 14) / 2, " Processing ");
-      wattroff(dialog, A_BOLD);
+      DRAW_BOX(dialog, COLOR_BORDER);
+      WITH_ATTR(dialog, A_BOLD,
+                mvwprintw(dialog, 0, (width - 14) / 2, " Processing "));
 
       /* Spinner and message */
       char spinner = SPINNER_CHARS[spinner_frame];
@@ -1404,11 +1490,6 @@ DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr) {
   async_init(&op);
   op.op_type = ASYNC_OP_CONNECT;
   op.connstr = str_dup(connstr);
-
-  if (!op.connstr) {
-    tui_set_error(state, "Memory allocation failed");
-    return NULL;
-  }
 
   if (!async_start(&op)) {
     tui_set_error(state, "Failed to start connection");
@@ -1507,11 +1588,6 @@ int64_t tui_count_rows_with_progress(TuiState *state, const char *table,
   op.table_name = str_dup(table);
   op.use_approximate = true; /* Try fast estimate first */
 
-  if (!op.table_name) {
-    tui_set_error(state, "Memory allocation failed");
-    return -1;
-  }
-
   if (!async_start(&op)) {
     tui_set_error(state, "Failed to start operation");
     free(op.table_name);
@@ -1549,11 +1625,6 @@ TableSchema *tui_get_schema_with_progress(TuiState *state, const char *table) {
   op.op_type = ASYNC_OP_GET_SCHEMA;
   op.conn = state->conn;
   op.table_name = str_dup(table);
-
-  if (!op.table_name) {
-    tui_set_error(state, "Memory allocation failed");
-    return NULL;
-  }
 
   if (!async_start(&op)) {
     tui_set_error(state, "Failed to start operation");
@@ -1596,11 +1667,6 @@ ResultSet *tui_query_page_with_progress(TuiState *state, const char *table,
   op.limit = limit;
   op.order_by = order_by ? str_dup(order_by) : NULL;
   op.desc = desc;
-
-  if (!op.table_name) {
-    tui_set_error(state, "Memory allocation failed");
-    return NULL;
-  }
 
   if (!async_start(&op)) {
     tui_set_error(state, "Failed to start operation");

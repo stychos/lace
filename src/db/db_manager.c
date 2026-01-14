@@ -6,6 +6,7 @@
  * https://github.com/stychos/lace
  */
 
+#include "../core/constants.h"
 #include "../util/str.h"
 #include "connstr.h"
 #include "db.h"
@@ -15,17 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define MAX_DRIVERS 16
-
-/* Helper to safely set error message (frees existing message first) */
-#define SET_ERROR(err, msg)                                                    \
-  do {                                                                         \
-    if (err) {                                                                 \
-      free(*err);                                                              \
-      *err = str_dup(msg);                                                     \
-    }                                                                          \
-  } while (0)
 
 /* Helper to invoke history callback if set */
 static inline void db_record_history(DbConnection *conn, const char *sql,
@@ -53,6 +43,11 @@ static char *escape_identifier(DbConnection *conn, const char *name) {
   return str_escape_identifier_dquote(name);
 }
 
+/* Public wrapper for escape_identifier */
+char *db_escape_identifier(DbConnection *conn, const char *name) {
+  return escape_identifier(conn, name);
+}
+
 /* Escape table name for SQL, handling schema-qualified names for PostgreSQL.
  * MySQL/MariaDB use backticks, PostgreSQL/SQLite use double quotes.
  * For PostgreSQL, schema.table becomes "schema"."table". */
@@ -67,11 +62,6 @@ static char *escape_table_name(DbConnection *conn, const char *table) {
     size_t schema_len = (size_t)(dot - table);
     char *schema = str_ndup(table, schema_len);
     char *tbl = str_dup(dot + 1);
-    if (!schema || !tbl) {
-      free(schema);
-      free(tbl);
-      return NULL;
-    }
 
     char *escaped_schema = str_escape_identifier_dquote(schema);
     char *escaped_table = str_escape_identifier_dquote(tbl);
@@ -92,6 +82,33 @@ static char *escape_table_name(DbConnection *conn, const char *table) {
 
   /* Simple case: use generic identifier escaping */
   return escape_identifier(conn, table);
+}
+
+/* Escape a value for SQL (escape single quotes by doubling) */
+static char *escape_sql_value(const char *value) {
+  if (!value)
+    return str_dup("NULL");
+
+  size_t len = strlen(value);
+  /* Worst case: every char is a quote, plus surrounding quotes + null */
+  if (len >= (SIZE_MAX - 3) / 2)
+    return NULL;
+
+  StringBuilder *sb = sb_new(len * 2 + 3);
+  if (!sb)
+    return NULL;
+
+  sb_append_char(sb, '\'');
+  for (const char *p = value; *p; p++) {
+    if (*p == '\'') {
+      sb_append(sb, "''"); /* Escape by doubling */
+    } else {
+      sb_append_char(sb, *p);
+    }
+  }
+  sb_append_char(sb, '\'');
+
+  return sb_to_string(sb);
 }
 
 /* Forward declarations for built-in drivers */
@@ -222,8 +239,10 @@ DbConnection *db_connect(const char *connstr, char **err) {
 
   DbDriver *driver = db_get_driver(cs->driver);
   if (!driver) {
-    if (err)
+    if (err) {
       *err = str_printf("Unknown driver: %s", cs->driver);
+      /* str_printf can return NULL on allocation failure - callers handle this */
+    }
     connstr_free(cs);
     return NULL;
   }
@@ -253,7 +272,7 @@ bool db_ping(DbConnection *conn) {
 
 char **db_list_databases(DbConnection *conn, size_t *count, char **err) {
   if (!conn || !conn->driver || !conn->driver->list_databases) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return NULL;
   }
   return conn->driver->list_databases(conn, count, err);
@@ -261,7 +280,7 @@ char **db_list_databases(DbConnection *conn, size_t *count, char **err) {
 
 char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
   if (!conn || !conn->driver || !conn->driver->list_tables) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return NULL;
   }
   return conn->driver->list_tables(conn, count, err);
@@ -270,7 +289,7 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
 TableSchema *db_get_table_schema(DbConnection *conn, const char *table,
                                  char **err) {
   if (!conn || !conn->driver || !conn->driver->get_table_schema) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return NULL;
   }
   return conn->driver->get_table_schema(conn, table, err);
@@ -278,7 +297,7 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table,
 
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
   if (!conn || !conn->driver || !conn->driver->query) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return NULL;
   }
   ResultSet *rs = conn->driver->query(conn, sql, err);
@@ -290,7 +309,7 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
 
 int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
   if (!conn || !conn->driver || !conn->driver->exec) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return -1;
   }
   int64_t affected = conn->driver->exec(conn, sql, err);
@@ -304,7 +323,7 @@ ResultSet *db_query_page(DbConnection *conn, const char *table, size_t offset,
                          size_t limit, const char *order_by, bool desc,
                          char **err) {
   if (!conn || !conn->driver) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return NULL;
   }
 
@@ -360,13 +379,13 @@ static int64_t extract_count_from_result(ResultSet *rs) {
 
 int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   if (!conn || !conn->driver || !table) {
-    SET_ERROR(err, "Invalid parameters");
+    err_set(err, "Invalid parameters");
     return -1;
   }
 
   char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return -1;
   }
 
@@ -374,7 +393,7 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
   free(escaped_table);
 
   if (!sql) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return -1;
   }
 
@@ -392,13 +411,13 @@ int64_t db_count_rows(DbConnection *conn, const char *table, char **err) {
 int64_t db_count_rows_where(DbConnection *conn, const char *table,
                             const char *where_clause, char **err) {
   if (!conn || !conn->driver || !table) {
-    SET_ERROR(err, "Invalid parameters");
+    err_set(err, "Invalid parameters");
     return -1;
   }
 
   char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return -1;
   }
 
@@ -412,7 +431,7 @@ int64_t db_count_rows_where(DbConnection *conn, const char *table,
   free(escaped_table);
 
   if (!sql) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return -1;
   }
 
@@ -431,7 +450,7 @@ int64_t db_count_rows_fast(DbConnection *conn, const char *table,
                            bool allow_approximate, bool *is_approximate,
                            char **err) {
   if (!conn || !conn->driver || !table) {
-    SET_ERROR(err, "Invalid parameters");
+    err_set(err, "Invalid parameters");
     if (is_approximate)
       *is_approximate = false;
     return -1;
@@ -459,21 +478,21 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
                                const char *where_clause, const char *order_by,
                                bool desc, char **err) {
   if (!conn || !conn->driver) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return NULL;
   }
 
   /* Build SQL query with proper identifier escaping (handles schema.table) */
   char *escaped_table = escape_table_name(conn, table);
   if (!escaped_table) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return NULL;
   }
 
   StringBuilder *sb = sb_new(256);
   if (!sb) {
     free(escaped_table);
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return NULL;
   }
 
@@ -484,10 +503,7 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
   }
 
   if (ok && order_by && *order_by) {
-    /* Check if this is a pre-built clause (contains ASC or DESC or comma) */
-    if (strstr(order_by, " ASC") || strstr(order_by, " DESC") ||
-        strstr(order_by, " asc") || strstr(order_by, " desc") ||
-        strchr(order_by, ',')) {
+    if (db_order_is_prebuilt(order_by)) {
       /* Pre-built clause - use directly */
       ok = sb_printf(sb, " ORDER BY %s", order_by);
     } else {
@@ -508,7 +524,7 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
   if (!ok) {
     sb_free(sb);
     free(escaped_table);
-    SET_ERROR(err, "Out of memory building query");
+    err_set(err, "Out of memory building query");
     return NULL;
   }
 
@@ -516,7 +532,7 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
   free(escaped_table);
 
   if (!sql) {
-    SET_ERROR(err, "Out of memory");
+    err_set(err, "Out of memory");
     return NULL;
   }
 
@@ -529,35 +545,193 @@ bool db_update_cell(DbConnection *conn, const char *table, const char **pk_cols,
                     const DbValue *pk_vals, size_t num_pk_cols, const char *col,
                     const DbValue *new_val, char **err) {
   if (!conn || !conn->driver || !conn->driver->update_cell) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return false;
   }
-  return conn->driver->update_cell(conn, table, pk_cols, pk_vals, num_pk_cols,
-                                   col, new_val, err);
+  bool success = conn->driver->update_cell(conn, table, pk_cols, pk_vals,
+                                           num_pk_cols, col, new_val, err);
+  if (success && conn->history_callback) {
+    /* Build SQL for history with proper escaping */
+    char *escaped_table = escape_table_name(conn, table);
+    char *escaped_col = escape_identifier(conn, col);
+    char *val_str = new_val ? db_value_to_string(new_val) : NULL;
+    /* Check if db_value_to_string failed (returned NULL for non-NULL input) */
+    if (new_val && !val_str) {
+      free(escaped_table);
+      free(escaped_col);
+      return success; /* Skip history on allocation failure */
+    }
+    char *escaped_val = escape_sql_value(val_str);
+    free(val_str);
+
+    char *where_str = NULL;
+    bool alloc_ok = escaped_table && escaped_col && escaped_val;
+    for (size_t i = 0; i < num_pk_cols && alloc_ok; i++) {
+      char *pk_val_str = db_value_to_string(&pk_vals[i]);
+      char *escaped_pk_col = escape_identifier(conn, pk_cols[i]);
+      char *escaped_pk_val = escape_sql_value(pk_val_str);
+      free(pk_val_str);
+
+      if (!escaped_pk_col || !escaped_pk_val) {
+        free(escaped_pk_col);
+        free(escaped_pk_val);
+        alloc_ok = false;
+        break;
+      }
+
+      char *new_where;
+      if (i == 0) {
+        new_where = str_printf("%s = %s", escaped_pk_col, escaped_pk_val);
+      } else {
+        new_where = str_printf("%s AND %s = %s", where_str, escaped_pk_col,
+                               escaped_pk_val);
+      }
+      free(escaped_pk_col);
+      free(escaped_pk_val);
+      free(where_str);
+      where_str = new_where;
+      if (!new_where)
+        alloc_ok = false;
+    }
+
+    if (alloc_ok && where_str) {
+      char *sql = str_printf("UPDATE %s SET %s = %s WHERE %s", escaped_table,
+                             escaped_col, escaped_val, where_str);
+      if (sql) {
+        db_record_history(conn, sql, DB_HISTORY_UPDATE);
+        free(sql);
+      }
+    }
+    free(escaped_table);
+    free(escaped_col);
+    free(escaped_val);
+    free(where_str);
+  }
+  return success;
 }
 
 bool db_insert_row(DbConnection *conn, const char *table, const ColumnDef *cols,
                    const DbValue *vals, size_t num_cols, char **err) {
   if (!conn || !conn->driver || !conn->driver->insert_row) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return false;
   }
-  return conn->driver->insert_row(conn, table, cols, vals, num_cols, err);
+  bool success = conn->driver->insert_row(conn, table, cols, vals, num_cols, err);
+  if (success && conn->history_callback) {
+    /* Build SQL for history with proper escaping */
+    char *escaped_table = escape_table_name(conn, table);
+    if (!escaped_table)
+      return success; /* Skip history if allocation fails */
+
+    char *col_list = NULL;
+    char *val_list = NULL;
+    bool alloc_ok = true;
+    for (size_t i = 0; i < num_cols && alloc_ok; i++) {
+      char *escaped_col = escape_identifier(conn, cols[i].name);
+      char *val_str = db_value_to_string(&vals[i]);
+      char *escaped_val = escape_sql_value(val_str);
+      free(val_str);
+
+      if (!escaped_col || !escaped_val) {
+        free(escaped_col);
+        free(escaped_val);
+        alloc_ok = false;
+        break;
+      }
+
+      char *new_cols, *new_vals;
+      if (i == 0) {
+        new_cols = str_printf("%s", escaped_col);
+        new_vals = str_printf("%s", escaped_val);
+      } else {
+        new_cols = str_printf("%s, %s", col_list, escaped_col);
+        new_vals = str_printf("%s, %s", val_list, escaped_val);
+      }
+      free(escaped_col);
+      free(escaped_val);
+      free(col_list);
+      free(val_list);
+      col_list = new_cols;
+      val_list = new_vals;
+      if (!new_cols || !new_vals)
+        alloc_ok = false;
+    }
+
+    if (alloc_ok && col_list && val_list) {
+      char *sql = str_printf("INSERT INTO %s (%s) VALUES (%s)", escaped_table,
+                             col_list, val_list);
+      if (sql) {
+        db_record_history(conn, sql, DB_HISTORY_INSERT);
+        free(sql);
+      }
+    }
+    free(escaped_table);
+    free(col_list);
+    free(val_list);
+  }
+  return success;
 }
 
 bool db_delete_row(DbConnection *conn, const char *table, const char **pk_cols,
                    const DbValue *pk_vals, size_t num_pk_cols, char **err) {
   if (!conn || !conn->driver || !conn->driver->delete_row) {
-    SET_ERROR(err, "Not supported");
+    err_set(err, "Not supported");
     return false;
   }
-  return conn->driver->delete_row(conn, table, pk_cols, pk_vals, num_pk_cols,
-                                  err);
+  bool success = conn->driver->delete_row(conn, table, pk_cols, pk_vals,
+                                          num_pk_cols, err);
+  if (success && conn->history_callback) {
+    /* Build SQL for history with proper escaping */
+    char *escaped_table = escape_table_name(conn, table);
+    if (!escaped_table)
+      return success; /* Skip history if allocation fails */
+
+    char *where_str = NULL;
+    bool alloc_ok = true;
+    for (size_t i = 0; i < num_pk_cols && alloc_ok; i++) {
+      char *escaped_pk_col = escape_identifier(conn, pk_cols[i]);
+      char *pk_val_str = db_value_to_string(&pk_vals[i]);
+      char *escaped_pk_val = escape_sql_value(pk_val_str);
+      free(pk_val_str);
+
+      if (!escaped_pk_col || !escaped_pk_val) {
+        free(escaped_pk_col);
+        free(escaped_pk_val);
+        alloc_ok = false;
+        break;
+      }
+
+      char *new_where;
+      if (i == 0) {
+        new_where = str_printf("%s = %s", escaped_pk_col, escaped_pk_val);
+      } else {
+        new_where = str_printf("%s AND %s = %s", where_str, escaped_pk_col,
+                               escaped_pk_val);
+      }
+      free(escaped_pk_col);
+      free(escaped_pk_val);
+      free(where_str);
+      where_str = new_where;
+      if (!new_where)
+        alloc_ok = false;
+    }
+
+    if (alloc_ok && where_str) {
+      char *sql = str_printf("DELETE FROM %s WHERE %s", escaped_table, where_str);
+      if (sql) {
+        db_record_history(conn, sql, DB_HISTORY_DELETE);
+        free(sql);
+      }
+    }
+    free(escaped_table);
+    free(where_str);
+  }
+  return success;
 }
 
 bool db_begin_transaction(DbConnection *conn, char **err) {
   if (!conn || !conn->driver) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return false;
   }
 
@@ -578,7 +752,7 @@ bool db_begin_transaction(DbConnection *conn, char **err) {
 
 bool db_commit(DbConnection *conn, char **err) {
   if (!conn || !conn->driver) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return false;
   }
 
@@ -599,7 +773,7 @@ bool db_commit(DbConnection *conn, char **err) {
 
 bool db_rollback(DbConnection *conn, char **err) {
   if (!conn || !conn->driver) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return false;
   }
 
@@ -623,21 +797,19 @@ bool db_in_transaction(DbConnection *conn) {
 
 /* Transaction context API - auto-rollback on scope exit or error */
 
-#define MAX_TRANSACTION_DEPTH 100
-
 DbTransaction db_transaction_begin(DbConnection *conn, char **err) {
   DbTransaction txn = {
       .conn = conn, .committed = false, .owns_transaction = false};
 
   if (!conn) {
-    SET_ERROR(err, "Not connected");
+    err_set(err, "Not connected");
     return txn;
   }
 
   /* If already in transaction, participate but don't own */
   if (conn->in_transaction) {
     if (conn->transaction_depth >= MAX_TRANSACTION_DEPTH) {
-      SET_ERROR(err, "Maximum transaction nesting depth exceeded");
+      err_set(err, "Maximum transaction nesting depth exceeded");
       return txn;
     }
     conn->transaction_depth++;

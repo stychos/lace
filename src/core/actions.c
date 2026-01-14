@@ -32,6 +32,22 @@
 #define UI_CALL_RET(ui, func, default_val, ...)                                \
   (((ui) && (ui)->func) ? (ui)->func((ui)->ctx, ##__VA_ARGS__) : (default_val))
 
+/* Require tab with data (declares 'tab' for use after check) */
+#define REQUIRE_TAB_DATA(app)                                                  \
+  Tab *tab = app_current_tab(app);                                             \
+  if (!tab || !tab->data)                                                      \
+    return CHANGED_NONE
+
+/* Validate table edit preconditions (declares 'tab' for use after check):
+ * - Tab exists with data and rows
+ * - Sidebar not focused */
+#define VALIDATE_TABLE_EDIT(app, ui)                                           \
+  Tab *tab = app_current_tab(app);                                             \
+  if (!tab || !tab->data || tab->data->num_rows == 0)                          \
+    return CHANGED_NONE;                                                       \
+  if (UI_CALL_RET(ui, is_sidebar_focused, false))                              \
+    return CHANGED_NONE
+
 /* ============================================================================
  * Navigation Actions (operate on Tab)
  * ============================================================================
@@ -39,9 +55,8 @@
 
 static ChangeFlags handle_cursor_move(AppState *app, const Action *action,
                                       const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data)
-    return CHANGED_NONE;
+  REQUIRE_TAB_DATA(app);
+  (void)tab;
 
   UI_CALL(ui, move_cursor, action->cursor_move.row_delta,
           action->cursor_move.col_delta);
@@ -49,18 +64,16 @@ static ChangeFlags handle_cursor_move(AppState *app, const Action *action,
 }
 
 static ChangeFlags handle_page_up(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data)
-    return CHANGED_NONE;
+  REQUIRE_TAB_DATA(app);
+  (void)tab;
 
   UI_CALL(ui, page_up);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
 static ChangeFlags handle_page_down(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data)
-    return CHANGED_NONE;
+  REQUIRE_TAB_DATA(app);
+  (void)tab;
 
   UI_CALL(ui, page_down);
   return CHANGED_CURSOR | CHANGED_SCROLL;
@@ -86,15 +99,15 @@ static ChangeFlags handle_column_first(AppState *app, const UICallbacks *ui) {
   Tab *tab = app_current_tab(app);
   if (!tab)
     return CHANGED_NONE;
+  (void)tab;
 
   UI_CALL(ui, column_first);
   return CHANGED_CURSOR | CHANGED_SCROLL;
 }
 
 static ChangeFlags handle_column_last(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data)
-    return CHANGED_NONE;
+  REQUIRE_TAB_DATA(app);
+  (void)tab;
 
   UI_CALL(ui, column_last);
   return CHANGED_CURSOR | CHANGED_SCROLL;
@@ -106,11 +119,8 @@ static ChangeFlags handle_column_last(AppState *app, const UICallbacks *ui) {
  */
 
 static ChangeFlags handle_edit_start(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab; /* unused after validation */
 
   UI_CALL(ui, start_edit);
   return CHANGED_EDIT;
@@ -118,11 +128,8 @@ static ChangeFlags handle_edit_start(AppState *app, const UICallbacks *ui) {
 
 static ChangeFlags handle_edit_start_modal(AppState *app,
                                            const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
 
   UI_CALL(ui, start_modal_edit);
   return CHANGED_EDIT | CHANGED_DATA;
@@ -135,33 +142,40 @@ static ChangeFlags handle_edit_cancel(AppState *app, const UICallbacks *ui) {
 }
 
 static ChangeFlags handle_cell_set_null(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
 
   UI_CALL(ui, set_cell_null);
   return CHANGED_DATA | CHANGED_STATUS;
 }
 
 static ChangeFlags handle_cell_set_empty(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
 
   UI_CALL(ui, set_cell_empty);
   return CHANGED_DATA | CHANGED_STATUS;
 }
 
+static ChangeFlags handle_cell_copy(AppState *app, const UICallbacks *ui) {
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
+
+  UI_CALL(ui, cell_copy);
+  return CHANGED_STATUS;
+}
+
+static ChangeFlags handle_cell_paste(AppState *app, const UICallbacks *ui) {
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
+
+  UI_CALL(ui, cell_paste);
+  return CHANGED_DATA | CHANGED_STATUS;
+}
+
 static ChangeFlags handle_row_delete(AppState *app, const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
 
   UI_CALL(ui, delete_row);
   return CHANGED_DATA | CHANGED_CURSOR | CHANGED_STATUS;
@@ -169,13 +183,11 @@ static ChangeFlags handle_row_delete(AppState *app, const UICallbacks *ui) {
 
 static ChangeFlags handle_row_toggle_select(AppState *app,
                                             const UICallbacks *ui) {
-  Tab *tab = app_current_tab(app);
-  if (!tab || !tab->data || tab->data->num_rows == 0)
-    return CHANGED_NONE;
-  if (UI_CALL_RET(ui, is_sidebar_focused, false))
-    return CHANGED_NONE;
+  VALIDATE_TABLE_EDIT(app, ui);
 
-  /* Calculate global row index */
+  /* Calculate global row index with overflow check */
+  if (tab->cursor_row > SIZE_MAX - tab->loaded_offset)
+    return CHANGED_NONE; /* Overflow protection */
   size_t global_row = tab->loaded_offset + tab->cursor_row;
   tab_toggle_selection(tab, global_row);
   return CHANGED_DATA; /* Need to redraw to show selection */
@@ -487,6 +499,10 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
     return handle_cell_set_null(app, ui);
   case ACTION_CELL_SET_EMPTY:
     return handle_cell_set_empty(app, ui);
+  case ACTION_CELL_COPY:
+    return handle_cell_copy(app, ui);
+  case ACTION_CELL_PASTE:
+    return handle_cell_paste(app, ui);
   case ACTION_ROW_DELETE:
     return handle_row_delete(app, ui);
   case ACTION_ROW_TOGGLE_SELECT:

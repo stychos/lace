@@ -7,6 +7,7 @@
  */
 
 #include "db_types.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,8 +85,12 @@ DbValue db_value_text(const char *str) {
   v.text.data = NULL;
   v.text.len = 0;
   if (str) {
-    v.text.len = strlen(str);
     v.text.data = str_dup(str);
+    if (v.text.data) {
+      v.text.len = strlen(str);
+    } else {
+      v.is_null = true; /* Mark as null on allocation failure */
+    }
   } else {
     v.is_null = true;
   }
@@ -98,8 +103,12 @@ DbValue db_value_text_len(const char *str, size_t len) {
   v.text.data = NULL;
   v.text.len = 0;
   if (str) {
-    v.text.len = len;
     v.text.data = str_ndup(str, len);
+    if (v.text.data) {
+      v.text.len = len;
+    } else {
+      v.is_null = true; /* Mark as null on allocation failure */
+    }
   } else {
     v.is_null = true;
   }
@@ -112,14 +121,9 @@ DbValue db_value_blob(const uint8_t *data, size_t len) {
   v.blob.data = NULL;
   v.blob.len = 0;
   if (data && len > 0) {
-    v.blob.data = malloc(len);
-    if (v.blob.data) {
-      memcpy(v.blob.data, data, len);
-      v.blob.len = len;
-    } else {
-      /* Malloc failed - return null value */
-      v.is_null = true;
-    }
+    v.blob.data = safe_malloc(len);
+    memcpy(v.blob.data, data, len);
+    v.blob.len = len;
   } else {
     v.is_null = true;
   }
@@ -128,6 +132,25 @@ DbValue db_value_blob(const uint8_t *data, size_t len) {
 
 DbValue db_value_bool(bool val) {
   DbValue v = {.type = DB_TYPE_BOOL, .bool_val = val, .is_null = false};
+  return v;
+}
+
+DbValue db_value_oversized_placeholder(const char *type_label, size_t size) {
+  DbValue v = {.type = DB_TYPE_TEXT, .is_null = false};
+  v.text.data = NULL;
+  v.text.len = 0;
+
+  char placeholder[64];
+  snprintf(placeholder, sizeof(placeholder), "[%s: %zu bytes]",
+           type_label ? type_label : "DATA", size);
+
+  v.text.data = str_dup(placeholder);
+  if (v.text.data) {
+    v.text.len = strlen(v.text.data);
+  } else {
+    v.type = DB_TYPE_NULL;
+    v.is_null = true;
+  }
   return v;
 }
 
@@ -157,25 +180,17 @@ DbValue db_value_copy(const DbValue *src) {
         v.is_null = true;
         break;
       }
-      v.text.data = malloc(src->text.len + 1);
-      if (v.text.data) {
-        memcpy(v.text.data, src->text.data, src->text.len);
-        v.text.data[src->text.len] = '\0';
-        v.text.len = src->text.len;
-      } else {
-        v.is_null = true;
-      }
+      v.text.data = safe_malloc(src->text.len + 1);
+      memcpy(v.text.data, src->text.data, src->text.len);
+      v.text.data[src->text.len] = '\0';
+      v.text.len = src->text.len;
     }
     break;
   case DB_TYPE_BLOB:
     if (src->blob.data && src->blob.len > 0) {
-      v.blob.data = malloc(src->blob.len);
-      if (v.blob.data) {
-        memcpy(v.blob.data, src->blob.data, src->blob.len);
-        v.blob.len = src->blob.len;
-      } else {
-        v.is_null = true;
-      }
+      v.blob.data = safe_malloc(src->blob.len);
+      memcpy(v.blob.data, src->blob.data, src->blob.len);
+      v.blob.len = src->blob.len;
     }
     break;
   case DB_TYPE_INT:
@@ -202,6 +217,9 @@ void db_value_free(DbValue *val) {
 
   switch (val->type) {
   case DB_TYPE_TEXT:
+  case DB_TYPE_DATE:
+  case DB_TYPE_TIMESTAMP:
+    /* DATE and TIMESTAMP store data in text.data (see db_value_copy) */
     free(val->text.data);
     val->text.data = NULL;
     val->text.len = 0;
@@ -221,11 +239,7 @@ void db_row_free(Row *row) {
   if (!row)
     return;
 
-  for (size_t i = 0; i < row->num_cells; i++) {
-    db_value_free(&row->cells[i]);
-  }
-  free(row->cells);
-  row->cells = NULL;
+  FREE_ARRAY(row->cells, row->num_cells, db_value_free);
   row->num_cells = 0;
 }
 
@@ -246,10 +260,7 @@ void db_index_free(IndexDef *idx) {
 
   free(idx->name);
   free(idx->type);
-  for (size_t i = 0; i < idx->num_columns; i++) {
-    free(idx->columns[i]);
-  }
-  free(idx->columns);
+  FREE_STRING_ARRAY(idx->columns, idx->num_columns);
   memset(idx, 0, sizeof(IndexDef));
 }
 
@@ -258,15 +269,9 @@ void db_fk_free(ForeignKeyDef *fk) {
     return;
 
   free(fk->name);
-  for (size_t i = 0; i < fk->num_columns; i++) {
-    free(fk->columns[i]);
-  }
-  free(fk->columns);
+  FREE_STRING_ARRAY(fk->columns, fk->num_columns);
   free(fk->ref_table);
-  for (size_t i = 0; i < fk->num_ref_columns; i++) {
-    free(fk->ref_columns[i]);
-  }
-  free(fk->ref_columns);
+  FREE_STRING_ARRAY(fk->ref_columns, fk->num_ref_columns);
   free(fk->on_delete);
   free(fk->on_update);
   memset(fk, 0, sizeof(ForeignKeyDef));
@@ -279,20 +284,9 @@ void db_schema_free(TableSchema *schema) {
   free(schema->name);
   free(schema->schema);
 
-  for (size_t i = 0; i < schema->num_columns; i++) {
-    db_column_free(&schema->columns[i]);
-  }
-  free(schema->columns);
-
-  for (size_t i = 0; i < schema->num_indexes; i++) {
-    db_index_free(&schema->indexes[i]);
-  }
-  free(schema->indexes);
-
-  for (size_t i = 0; i < schema->num_foreign_keys; i++) {
-    db_fk_free(&schema->foreign_keys[i]);
-  }
-  free(schema->foreign_keys);
+  FREE_ARRAY(schema->columns, schema->num_columns, db_column_free);
+  FREE_ARRAY(schema->indexes, schema->num_indexes, db_index_free);
+  FREE_ARRAY(schema->foreign_keys, schema->num_foreign_keys, db_fk_free);
 
   free(schema);
 }
@@ -301,18 +295,33 @@ void db_result_free(ResultSet *rs) {
   if (!rs)
     return;
 
-  for (size_t i = 0; i < rs->num_columns; i++) {
-    db_column_free(&rs->columns[i]);
-  }
-  free(rs->columns);
-
-  for (size_t i = 0; i < rs->num_rows; i++) {
-    db_row_free(&rs->rows[i]);
-  }
-  free(rs->rows);
+  FREE_ARRAY(rs->columns, rs->num_columns, db_column_free);
+  FREE_ARRAY(rs->rows, rs->num_rows, db_row_free);
 
   free(rs->error);
   free(rs);
+}
+
+ResultSet *db_result_alloc_empty(void) { return safe_calloc(1, sizeof(ResultSet)); }
+
+bool db_result_alloc_columns(ResultSet *rs, size_t num_cols, char **err) {
+  (void)err; /* safe_calloc aborts on failure */
+  if (!rs || num_cols == 0)
+    return true; /* Nothing to allocate */
+
+  rs->columns = safe_calloc(num_cols, sizeof(ColumnDef));
+  rs->num_columns = num_cols;
+  return true;
+}
+
+bool db_result_alloc_rows(ResultSet *rs, size_t num_rows, char **err) {
+  (void)err; /* safe_calloc aborts on failure */
+  if (!rs || num_rows == 0)
+    return true; /* Nothing to allocate */
+
+  rs->rows = safe_calloc(num_rows, sizeof(Row));
+  /* Note: num_rows is set by caller as rows are filled */
+  return true;
 }
 
 /* Value conversion */
@@ -353,12 +362,10 @@ char *db_value_to_string(const DbValue *val) {
       }
       if (is_text) {
         /* Return as string */
-        char *str = malloc(val->blob.len + 1);
-        if (str) {
-          memcpy(str, val->blob.data, val->blob.len);
-          str[val->blob.len] = '\0';
-          return str;
-        }
+        char *str = safe_malloc(val->blob.len + 1);
+        memcpy(str, val->blob.data, val->blob.len);
+        str[val->blob.len] = '\0';
+        return str;
       }
     }
 
@@ -373,9 +380,7 @@ char *db_value_to_string(const DbValue *val) {
      */
     size_t hex_len =
         2 + (display_len * 2) + 1 + (val->blob.len > 32 ? 3 : 0) + 1;
-    char *hex = malloc(hex_len);
-    if (!hex)
-      return NULL;
+    char *hex = safe_malloc(hex_len);
 
     size_t pos = 0;
     hex[pos++] = 'x';

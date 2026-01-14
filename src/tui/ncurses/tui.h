@@ -11,37 +11,36 @@
 
 #include "../../async/async.h"
 #include "../../core/app_state.h"
+#include "../../core/constants.h"
 #include "../../db/db.h"
 #include "../../viewmodel/vm_app.h"
-#include "../../viewmodel/vm_query.h"
-#include "../../viewmodel/vm_sidebar.h"
-#include "../../viewmodel/vm_table.h"
+#include "../../viewmodel/focus_manager.h"
+#include "../../viewmodel/viewmodel.h"
+#include "../../viewmodel/filters_viewmodel.h"
+#include "../../viewmodel/query_viewmodel.h"
+#include "../../viewmodel/sidebar_viewmodel.h"
+#include "../../viewmodel/table_viewmodel.h"
 #include "backend.h"
 #include <ncurses.h>
 #include <stdbool.h>
 
-/* Color pairs */
-#define COLOR_HEADER 1
-#define COLOR_SELECTED 2
-#define COLOR_STATUS 3
-#define COLOR_ERROR 4
-#define COLOR_BORDER 5
-#define COLOR_TITLE 6
-#define COLOR_NULL 7
-#define COLOR_NUMBER 8
-#define COLOR_EDIT 9
-#define COLOR_ERROR_TEXT 10
-#define COLOR_PK 11
+/* Color pairs for ncurses - mapped from UiColor enum values.
+ * Using UiColor values ensures consistency across backends.
+ * ncurses uses these as color pair indices with init_pair(). */
+#define COLOR_HEADER UI_COLOR_HEADER
+#define COLOR_SELECTED UI_COLOR_SELECTED
+#define COLOR_STATUS UI_COLOR_STATUS
+#define COLOR_ERROR UI_COLOR_ERROR
+#define COLOR_BORDER UI_COLOR_BORDER
+#define COLOR_TITLE UI_COLOR_TITLE
+#define COLOR_NULL UI_COLOR_NULL
+#define COLOR_NUMBER UI_COLOR_NUMBER
+#define COLOR_EDIT UI_COLOR_EDIT
+#define COLOR_ERROR_TEXT UI_COLOR_ERROR_TEXT
+#define COLOR_PK UI_COLOR_PK
 
-/* Sidebar width */
-#define SIDEBAR_WIDTH 20
-
-/* Tab bar height */
-#define TAB_BAR_HEIGHT 1
-
-/* Minimum terminal dimensions */
-#define MIN_TERM_ROWS 10
-#define MIN_TERM_COLS 40
+/* UI dimensions are in core/constants.h:
+ * SIDEBAR_WIDTH, TAB_BAR_HEIGHT, MIN_TERM_ROWS, MIN_TERM_COLS */
 
 /* ============================================================================
  * UITabState - Per-tab UI state (TUI-specific)
@@ -51,10 +50,33 @@
  * platform-independent while TUI maintains its own UI state.
  *
  * Indexed by [workspace_index][tab_index] in TuiState.tab_ui array.
+ *
+ * MIGRATION NOTE: This struct is transitioning to a widget-based architecture.
+ * New code should use the widget pointers. Legacy fields will be removed
+ * after all code is migrated to use widgets.
  * ============================================================================
  */
-typedef struct {
-  /* Filter panel UI state */
+typedef struct UITabState {
+  /* =========================================================================
+   * Widget-based state (NEW - use these for new code)
+   * Widgets own their cursor, scroll, selection, edit state.
+   * =========================================================================
+   */
+  TableWidget *table_widget;     /* Table data widget (NULL for query tabs) */
+  SidebarWidget *sidebar_widget; /* Sidebar widget (shared across tabs) */
+  FiltersWidget *filters_widget; /* Filters panel widget */
+  QueryWidget *query_widget;     /* Query editor widget (NULL for table tabs) */
+
+  /* Focus management via FocusManager */
+  FocusManager focus_mgr;        /* Centralized focus/event routing */
+
+  /* =========================================================================
+   * Legacy fields (DEPRECATED - will be removed after migration)
+   * Kept for backwards compatibility during gradual migration.
+   * =========================================================================
+   */
+
+  /* Filter panel UI state (LEGACY - migrate to filters_widget) */
   bool filters_visible;
   bool filters_focused;
   bool filters_editing;
@@ -63,7 +85,7 @@ typedef struct {
   size_t filters_cursor_col;
   size_t filters_scroll;
 
-  /* Sidebar state per-tab */
+  /* Sidebar state per-tab (LEGACY - migrate to sidebar_widget) */
   bool sidebar_visible;
   bool sidebar_focused;
   size_t sidebar_highlight;
@@ -72,7 +94,7 @@ typedef struct {
   char sidebar_filter[64];
   size_t sidebar_filter_len;
 
-  /* Query tab UI state */
+  /* Query tab UI state (LEGACY - migrate to query_widget) */
   bool query_focus_results;
   bool query_result_editing;
   char *query_result_edit_buf;
@@ -87,12 +109,11 @@ struct TuiState {
   /* =========================================================================
    * ViewModels - Platform-independent view state
    * These provide a clean interface between TUI and core state.
+   * VmSidebar and VmQuery removed - use widgets instead (Phase 9a/9b).
    * =========================================================================
    */
-  VmApp *vm_app;         /* App-level viewmodel (owns sidebar_vm) */
-  VmTable *vm_table;     /* Current table viewmodel */
-  VmQuery *vm_query;     /* Current query viewmodel */
-  VmSidebar *vm_sidebar; /* Sidebar viewmodel (owned by vm_app) */
+  VmApp *vm_app;     /* App-level viewmodel */
+  VmTable *vm_table; /* Current table viewmodel */
 
   /* Render backend context (for gradual migration from direct ncurses) */
   RenderContext *render_ctx;
@@ -177,39 +198,22 @@ struct TuiState {
   bool bg_loading_active;
 
   /* =========================================================================
-   * COMPATIBILITY LAYER - View cache synced from AppState/Workspace
-   * These will be removed in future refactoring phases.
-   * Access through state->app or TUI_WORKSPACE() for new code.
+   * Cached connection/tables for sidebar (performance optimization)
+   * These are synced in tui_sync_from_app() when tab changes.
    * =========================================================================
    */
 
-  /* Cached from app->conn */
+  /* Cached from current tab's connection */
   DbConnection *conn;
-
-  /* Cached from app->tables */
   char **tables;
   size_t num_tables;
 
-  /* Cached from app->workspaces */
+  /* Cached from app->workspaces (for initialization/cleanup) */
   Workspace *workspaces;
   size_t num_workspaces;
   size_t current_workspace;
 
-  /* Cached from current workspace */
-  size_t current_table;
-  ResultSet *data;
-  TableSchema *schema;
-  size_t cursor_row;
-  size_t cursor_col;
-  size_t scroll_row;
-  size_t scroll_col;
-  size_t total_rows;
-  size_t loaded_offset;
-  size_t loaded_count;
-  bool row_count_approximate;
-  size_t unfiltered_total_rows;
-  int *col_widths;
-  size_t num_col_widths;
+  /* Cached from app */
   size_t page_size;
 
   /* =========================================================================
@@ -308,23 +312,157 @@ bool tui_ensure_tab_ui_capacity(TuiState *state, size_t ws_idx, size_t tab_idx);
 /* Macro shortcut for current tab UI state */
 #define TUI_TAB_UI(state) tui_current_tab_ui(state)
 
-/* Tab field shortcuts (with null safety) */
+/* Get TableWidget for current tab (source of truth for cursor/scroll) */
+#define TUI_TABLE_WIDGET(state)                                                \
+  (TUI_TAB_UI(state) ? TUI_TAB_UI(state)->table_widget : NULL)
+
+/* Get SidebarWidget for current tab */
+#define TUI_SIDEBAR_WIDGET(state)                                              \
+  (TUI_TAB_UI(state) ? TUI_TAB_UI(state)->sidebar_widget : NULL)
+
+/* Get FiltersWidget for current tab */
+#define TUI_FILTERS_WIDGET(state)                                              \
+  (TUI_TAB_UI(state) ? TUI_TAB_UI(state)->filters_widget : NULL)
+
+/* Get QueryWidget for current tab */
+#define TUI_QUERY_WIDGET(state)                                                \
+  (TUI_TAB_UI(state) ? TUI_TAB_UI(state)->query_widget : NULL)
+
+/* ============================================================================
+ * Widget state accessors (read from widgets as source of truth)
+ * These provide null-safe access to widget state.
+ * ============================================================================
+ */
+
+/* TableWidget accessors */
 static inline size_t tui_cursor_row(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  return tab ? tab->cursor_row : 0;
+  TableWidget *w = TUI_TABLE_WIDGET(state);
+  return w ? w->base.state.cursor_row : 0;
 }
 static inline size_t tui_cursor_col(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  return tab ? tab->cursor_col : 0;
+  TableWidget *w = TUI_TABLE_WIDGET(state);
+  return w ? w->base.state.cursor_col : 0;
 }
+
+/* SidebarWidget accessors (read from widget, fallback to TuiState for legacy) */
+static inline bool tui_sidebar_visible(TuiState *state) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) return w->base.state.visible;
+  return state ? state->sidebar_visible : false;
+}
+static inline bool tui_sidebar_focused(TuiState *state) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) return w->base.state.focused;
+  return state ? state->sidebar_focused : false;
+}
+static inline size_t tui_sidebar_highlight(TuiState *state) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) return w->base.state.cursor_row;
+  return state ? state->sidebar_highlight : 0;
+}
+static inline size_t tui_sidebar_scroll(TuiState *state) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) return w->base.state.scroll_row;
+  return state ? state->sidebar_scroll : 0;
+}
+
+/* FiltersWidget accessors (read from widget, fallback to UITabState for legacy) */
 static inline bool tui_filters_visible(TuiState *state) {
+  FiltersWidget *w = TUI_FILTERS_WIDGET(state);
+  if (w) return w->base.state.visible;
   UITabState *ui = tui_current_tab_ui(state);
   return ui ? ui->filters_visible : false;
 }
 static inline bool tui_filters_focused(TuiState *state) {
+  FiltersWidget *w = TUI_FILTERS_WIDGET(state);
+  if (w) return w->base.state.focused;
   UITabState *ui = tui_current_tab_ui(state);
   return ui ? ui->filters_focused : false;
 }
+
+/* ============================================================================
+ * Widget state setters (write to widgets AND legacy fields for compatibility)
+ * These ensure both widget and legacy fields stay in sync during migration.
+ * ============================================================================
+ */
+
+/* SidebarWidget setters - update widget, TuiState, AND UITabState */
+static inline void tui_set_sidebar_visible(TuiState *state, bool visible) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) w->base.state.visible = visible;
+  if (state) state->sidebar_visible = visible;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->sidebar_visible = visible;
+}
+static inline void tui_set_sidebar_focused(TuiState *state, bool focused) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) w->base.state.focused = focused;
+  if (state) state->sidebar_focused = focused;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->sidebar_focused = focused;
+}
+static inline void tui_set_sidebar_highlight(TuiState *state, size_t highlight) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) w->base.state.cursor_row = highlight;
+  if (state) state->sidebar_highlight = highlight;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->sidebar_highlight = highlight;
+}
+static inline void tui_set_sidebar_scroll(TuiState *state, size_t scroll) {
+  SidebarWidget *w = TUI_SIDEBAR_WIDGET(state);
+  if (w) w->base.state.scroll_row = scroll;
+  if (state) state->sidebar_scroll = scroll;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->sidebar_scroll = scroll;
+}
+
+/* FiltersWidget setters */
+static inline void tui_set_filters_visible(TuiState *state, bool visible) {
+  FiltersWidget *w = TUI_FILTERS_WIDGET(state);
+  if (w) w->base.state.visible = visible;
+  if (state) state->filters_visible = visible;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->filters_visible = visible;
+}
+static inline void tui_set_filters_focused(TuiState *state, bool focused) {
+  FiltersWidget *w = TUI_FILTERS_WIDGET(state);
+  if (w) w->base.state.focused = focused;
+  if (state) state->filters_focused = focused;
+  UITabState *ui = tui_current_tab_ui(state);
+  if (ui) ui->filters_focused = focused;
+}
+
+/* ============================================================================
+ * Tab field accessor macros - USE THESE for cursor/scroll/data access
+ *
+ * These macros provide direct access to Tab fields, avoiding the need for
+ * duplicated fields in TuiState. They expand to lvalues, so they work for
+ * both read and write operations.
+ *
+ * IMPORTANT: These require TUI_TAB(state) to be non-NULL. Always check
+ * for a valid tab before using these, e.g.:
+ *   Tab *tab = TUI_TAB(state);
+ *   if (!tab) return;
+ *   tab->cursor_row = 0;  // Direct access is fine after null check
+ *
+ * Or use the null-safe read-only functions above for reads.
+ * ============================================================================
+ */
+
+/* Cursor position - direct access to Tab fields */
+#define TAB_CURSOR_ROW(tab) ((tab)->cursor_row)
+#define TAB_CURSOR_COL(tab) ((tab)->cursor_col)
+#define TAB_SCROLL_ROW(tab) ((tab)->scroll_row)
+#define TAB_SCROLL_COL(tab) ((tab)->scroll_col)
+
+/* Pagination state */
+#define TAB_TOTAL_ROWS(tab) ((tab)->total_rows)
+#define TAB_LOADED_OFFSET(tab) ((tab)->loaded_offset)
+#define TAB_LOADED_COUNT(tab) ((tab)->loaded_count)
+
+/* Column widths */
+#define TAB_COL_WIDTHS(tab) ((tab)->col_widths)
+#define TAB_NUM_COL_WIDTHS(tab) ((tab)->num_col_widths)
 
 /* ============================================================================
  * TUI lifecycle
@@ -348,6 +486,12 @@ void tui_run(TuiState *state);
 
 /* Refresh display */
 void tui_refresh(TuiState *state);
+
+/* Recreate windows after layout change (sidebar visibility, etc.) */
+void tui_recreate_windows(TuiState *state);
+
+/* Restore tab state after switch or session restore */
+void tab_restore(TuiState *state);
 
 /* ============================================================================
  * Drawing functions
@@ -396,6 +540,12 @@ void tui_show_connect_dialog(TuiState *state);
 void tui_show_history_dialog(TuiState *state);
 void tui_show_table_selector(TuiState *state);
 void tui_show_config(TuiState *state);
+
+/* Password input dialog (masks input with asterisks).
+ * Returns malloc'd password string, or NULL if cancelled.
+ * Caller must use str_secure_free() on result. */
+char *tui_show_password_dialog(TuiState *state, const char *title,
+                               const char *label, const char *error_msg);
 
 /* ============================================================================
  * Status messages

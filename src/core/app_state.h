@@ -14,16 +14,16 @@
 
 #include "../config/config.h"
 #include "../db/db.h"
+#include "constants.h"
 #include <stdbool.h>
 #include <stddef.h>
 
 /* Forward declaration for query history */
 typedef struct QueryHistory QueryHistory;
 
-/* Initial capacities for dynamic arrays */
-#define INITIAL_CONNECTION_CAPACITY 4
-#define INITIAL_WORKSPACE_CAPACITY 4
-#define INITIAL_TAB_CAPACITY 8
+/* Initial capacities and limits are in constants.h:
+ * INITIAL_CONNECTION_CAPACITY, INITIAL_WORKSPACE_CAPACITY, INITIAL_TAB_CAPACITY,
+ * MAX_SORT_COLUMNS */
 
 /* ============================================================================
  * Filter Types
@@ -83,7 +83,7 @@ typedef struct {
   SortDirection direction; /* Sort direction */
 } SortEntry;
 
-#define MAX_SORT_COLUMNS 8 /* Maximum columns for multi-column sort */
+/* MAX_SORT_COLUMNS is in constants.h */
 
 /* ============================================================================
  * Connection - Database connection (pool entry)
@@ -134,22 +134,27 @@ typedef struct {
   ResultSet *data;
   TableSchema *schema;
 
-  /* View state - cursor and scroll positions */
-  size_t cursor_row;
-  size_t cursor_col;
-  size_t scroll_row;
-  size_t scroll_col;
+  /* =========================================================================
+   * View state - DEPRECATED: Migrating to TableWidget
+   * These fields are kept for backwards compatibility during migration.
+   * New code should use TableWidget for cursor/scroll state.
+   * =========================================================================
+   */
+  size_t cursor_row;  /* DEPRECATED: Use TableWidget.base.state.cursor_row */
+  size_t cursor_col;  /* DEPRECATED: Use TableWidget.base.state.cursor_col */
+  size_t scroll_row;  /* DEPRECATED: Use TableWidget.base.state.scroll_row */
+  size_t scroll_col;  /* DEPRECATED: Use TableWidget.base.state.scroll_col */
 
-  /* Pagination state */
-  size_t total_rows;
-  size_t loaded_offset;
-  size_t loaded_count;
-  bool row_count_approximate;   /* True if total_rows is approximate */
+  /* Pagination state - DEPRECATED: Migrating to TableWidget */
+  size_t total_rows;  /* DEPRECATED: Use TableWidget.total_rows */
+  size_t loaded_offset;  /* DEPRECATED: Use TableWidget.loaded_offset */
+  size_t loaded_count;   /* DEPRECATED: Use TableWidget.loaded_count */
+  bool row_count_approximate;   /* DEPRECATED: Use TableWidget.row_count_approximate */
   size_t unfiltered_total_rows; /* Original row count before filtering */
 
-  /* Column widths (computed for display) */
-  int *col_widths;
-  size_t num_col_widths;
+  /* Column widths - DEPRECATED: Migrating to TableWidget */
+  int *col_widths;      /* DEPRECATED: Use TableWidget.col_widths */
+  size_t num_col_widths;  /* DEPRECATED: Use TableWidget.num_col_widths */
 
   /* Filters (per-table) */
   TableFilters filters;
@@ -158,23 +163,28 @@ typedef struct {
   SortEntry sort_entries[MAX_SORT_COLUMNS]; /* Sort columns in priority order */
   size_t num_sort_entries;                  /* Number of active sort columns */
 
-  /* Query mode fields */
-  char *query_text;
-  size_t query_len;
-  size_t query_capacity;
-  size_t query_cursor;
-  size_t query_scroll_line;
-  size_t query_scroll_col;
-  ResultSet *query_results;
-  int64_t query_affected;
-  bool query_exec_success; /* True if last exec (non-SELECT) succeeded */
-  char *query_error;
-  size_t query_result_row;
-  size_t query_result_col;
-  size_t query_result_scroll_row;
-  size_t query_result_scroll_col;
-  int *query_result_col_widths;
-  size_t query_result_num_cols;
+  /* =========================================================================
+   * Query mode fields - Migrating to QueryWidget
+   * Model data (query_text, query_results) stays in Tab.
+   * View state (cursor, scroll) moves to QueryWidget.
+   * =========================================================================
+   */
+  char *query_text;           /* Query text (model - stays) */
+  size_t query_len;           /* Text length (model - stays) */
+  size_t query_capacity;      /* Buffer capacity (model - stays) */
+  size_t query_cursor;        /* DEPRECATED: Use QueryWidget.cursor_offset */
+  size_t query_scroll_line;   /* DEPRECATED: Use QueryWidget.base.state.scroll_row */
+  size_t query_scroll_col;    /* DEPRECATED: Use QueryWidget.base.state.scroll_col */
+  ResultSet *query_results;   /* Query results (model - stays) */
+  int64_t query_affected;     /* Affected rows (model - stays) */
+  bool query_exec_success;    /* True if last exec (non-SELECT) succeeded */
+  char *query_error;          /* Error message (model - stays) */
+  size_t query_result_row;    /* DEPRECATED: Use QueryWidget results TableWidget */
+  size_t query_result_col;    /* DEPRECATED: Use QueryWidget results TableWidget */
+  size_t query_result_scroll_row;   /* DEPRECATED: Use QueryWidget results */
+  size_t query_result_scroll_col;   /* DEPRECATED: Use QueryWidget results */
+  int *query_result_col_widths;     /* DEPRECATED: Use QueryWidget results */
+  size_t query_result_num_cols;     /* DEPRECATED: Use QueryWidget results */
 
   /* Query results editing - source table tracking */
   char *query_source_table;

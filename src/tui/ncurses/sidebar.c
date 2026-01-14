@@ -2,55 +2,93 @@
  * Lace
  * Sidebar rendering and input handling
  *
- * During ViewModel migration, TuiState is the source of truth for sidebar
- * state (filter, scroll, highlight). VmSidebar is available for future native
- * GUI use but some state isn't fully synced yet.
+ * Uses SidebarViewModel as source of truth for sidebar state.
+ * Access via tui_ensure_sidebar_widget() to get the view model.
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
 #include "../../config/config.h"
-#include "../../viewmodel/vm_sidebar.h"
+#include "../../viewmodel/sidebar_viewmodel.h"
 #include "tui_internal.h"
 #include "views/config_view.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* Helper to get VmSidebar, returns NULL if not valid */
-static VmSidebar *get_vm_sidebar(TuiState *state) {
-  if (!state || !state->vm_sidebar)
-    return NULL;
-  if (!vm_sidebar_valid(state->vm_sidebar))
-    return NULL;
-  return state->vm_sidebar;
+/* ============================================================================
+ * Widget State Sync Helpers (temporary during migration)
+ * ============================================================================
+ */
+
+/* Sync TuiState sidebar fields from SidebarWidget */
+static void sync_state_from_widget(TuiState *state, SidebarWidget *sw) {
+  if (!state || !sw)
+    return;
+
+  state->sidebar_highlight = sw->base.state.cursor_row;
+  state->sidebar_scroll = sw->base.state.scroll_row;
+  state->sidebar_focused = sw->base.state.focused;
+
+  /* Copy filter */
+  if (sw->filter_len > 0 && sw->filter_len < sizeof(state->sidebar_filter)) {
+    memcpy(state->sidebar_filter, sw->filter, sw->filter_len + 1);
+    state->sidebar_filter_len = sw->filter_len;
+  } else {
+    state->sidebar_filter[0] = '\0';
+    state->sidebar_filter_len = 0;
+  }
+}
+
+/* Sync SidebarWidget from TuiState sidebar fields */
+static void sync_widget_from_state(SidebarWidget *sw, TuiState *state) {
+  if (!sw || !state)
+    return;
+
+  sw->base.state.cursor_row = state->sidebar_highlight;
+  sw->base.state.scroll_row = state->sidebar_scroll;
+  sw->base.state.focused = state->sidebar_focused;
+
+  /* Copy filter only if changed (to avoid resetting cursor) */
+  if (state->sidebar_filter_len > 0) {
+    /* Only update if filter text differs */
+    if (sw->filter_len != state->sidebar_filter_len ||
+        memcmp(sw->filter, state->sidebar_filter, state->sidebar_filter_len) !=
+            0) {
+      sidebar_widget_set_filter(sw, state->sidebar_filter);
+    }
+  } else if (sw->filter_len > 0) {
+    sidebar_widget_filter_clear(sw);
+  }
 }
 
 /*
  * Count filtered tables.
  *
- * During ViewModel migration, TuiState is the source of truth for sidebar
- * filter state. VmSidebar is available for future native GUI use but its
- * filter state isn't synced with TuiState, so we use TuiState directly.
+ * Uses SidebarWidget when available for filtered count, with fallback
+ * to TuiState for legacy compatibility.
  */
 size_t tui_count_filtered_tables(TuiState *state) {
   if (!state)
     return 0;
 
-  /* Try VmSidebar first (for future cross-platform consistency) */
-  VmSidebar *vm = get_vm_sidebar(state);
-  if (vm && state->sidebar_filter_len == 0) {
-    /* VmSidebar can be used when no filter is active (unfiltered count) */
-    return vm_sidebar_total_count(vm);
+  /* Try SidebarWidget first (new architecture) */
+  SidebarWidget *sw = tui_sidebar_widget(state);
+  if (sw) {
+    return sidebar_widget_count(sw);
   }
 
+  /* Fallback to TuiState-based calculation */
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+
   if (state->sidebar_filter_len == 0)
-    return state->num_tables;
+    return num_tables;
 
   size_t count = 0;
-  for (size_t i = 0; i < state->num_tables; i++) {
-    if (state->tables[i] &&
-        tui_str_istr(state->tables[i], state->sidebar_filter)) {
+  for (size_t i = 0; i < num_tables; i++) {
+    if (tables && tables[i] &&
+        tui_str_istr(tables[i], state->sidebar_filter)) {
       count++;
     }
   }
@@ -60,19 +98,29 @@ size_t tui_count_filtered_tables(TuiState *state) {
 /*
  * Get actual table index from filtered index.
  *
- * Uses TuiState directly during ViewModel migration.
+ * Uses SidebarWidget when available, with fallback to TuiState.
  */
 size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx) {
   if (!state)
     return 0;
 
+  /* Try SidebarWidget first (new architecture) */
+  SidebarWidget *sw = tui_sidebar_widget(state);
+  if (sw) {
+    return sidebar_widget_original_index(sw, filtered_idx);
+  }
+
+  /* Fallback to TuiState-based calculation */
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+
   if (state->sidebar_filter_len == 0)
     return filtered_idx;
 
   size_t count = 0;
-  for (size_t i = 0; i < state->num_tables; i++) {
-    if (state->tables[i] &&
-        tui_str_istr(state->tables[i], state->sidebar_filter)) {
+  for (size_t i = 0; i < num_tables; i++) {
+    if (tables && tables[i] &&
+        tui_str_istr(tables[i], state->sidebar_filter)) {
       if (count == filtered_idx)
         return i;
       count++;
@@ -83,13 +131,16 @@ size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx) {
 
 /* Get sidebar highlight for a table index */
 size_t tui_get_sidebar_highlight_for_table(TuiState *state, size_t table_idx) {
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+
   if (state->sidebar_filter_len == 0)
     return table_idx;
 
   size_t count = 0;
-  for (size_t i = 0; i < state->num_tables; i++) {
-    if (state->tables[i] &&
-        tui_str_istr(state->tables[i], state->sidebar_filter)) {
+  for (size_t i = 0; i < num_tables; i++) {
+    if (tables && tables[i] &&
+        tui_str_istr(tables[i], state->sidebar_filter)) {
       if (i == table_idx)
         return count;
       count++;
@@ -100,7 +151,10 @@ size_t tui_get_sidebar_highlight_for_table(TuiState *state, size_t table_idx) {
 
 /* Update sidebar name scroll animation */
 void tui_update_sidebar_scroll_animation(TuiState *state) {
-  if (!state || !state->sidebar_focused || !state->tables)
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+
+  if (!state || !state->sidebar_focused || !tables)
     return;
 
   /* Reset scroll when highlight changes */
@@ -115,10 +169,10 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
   /* Get highlighted table name */
   size_t actual_idx =
       tui_get_filtered_table_index(state, state->sidebar_highlight);
-  if (actual_idx >= state->num_tables)
+  if (actual_idx >= num_tables)
     return;
 
-  const char *name = state->tables[actual_idx];
+  const char *name = tables[actual_idx];
   if (!name)
     return;
 
@@ -170,6 +224,13 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
 
   int key_char = render_event_get_char(event);
 
+  /* Get/create sidebar widget - use it as source of truth */
+  SidebarWidget *sw = tui_ensure_sidebar_widget(state);
+  if (sw) {
+    /* Sync widget from TuiState in case it was modified elsewhere */
+    sync_widget_from_state(sw, state);
+  }
+
   /* Handle filter input mode */
   if (state->sidebar_filter_active) {
     if (render_event_is_special(event, UI_KEY_ESCAPE)) {
@@ -177,17 +238,73 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     } else if (render_event_is_special(event, UI_KEY_ENTER) ||
                render_event_is_special(event, UI_KEY_DOWN)) {
       state->sidebar_filter_active = false;
+      if (sw) {
+        sw->base.state.cursor_row = 0;
+        sw->base.state.scroll_row = 0;
+      }
       state->sidebar_highlight = 0;
       state->sidebar_scroll = 0;
     } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
-      if (state->sidebar_filter_len > 0) {
+      if (sw && sw->filter_len > 0) {
+        sidebar_widget_filter_backspace(sw);
+        sw->base.state.cursor_row = 0;
+        sw->base.state.scroll_row = 0;
+        sync_state_from_widget(state, sw);
+      } else if (state->sidebar_filter_len > 0) {
         state->sidebar_filter[--state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
         state->sidebar_scroll = 0;
       }
+    } else if (render_event_is_ctrl(event, 'K')) {
+      /* Ctrl+K - copy filter text to clipboard */
+      const char *filter = sw ? sw->filter : state->sidebar_filter;
+      size_t filter_len = sw ? sw->filter_len : state->sidebar_filter_len;
+      if (filter_len > 0) {
+        tui_clipboard_copy(state, filter);
+        tui_set_status(state, "Copied to clipboard");
+      }
+    } else if (render_event_is_ctrl(event, 'U')) {
+      /* Ctrl+U - paste from clipboard */
+      char *paste_text = tui_clipboard_read(state);
+      if (paste_text && paste_text[0]) {
+        /* Strip newlines for single-line filter field */
+        for (char *p = paste_text; *p; p++) {
+          if (*p == '\n' || *p == '\r')
+            *p = ' ';
+        }
+        if (sw) {
+          /* Append to widget filter */
+          for (const char *p = paste_text; *p; p++) {
+            sidebar_widget_filter_append(sw, *p);
+          }
+          sw->base.state.cursor_row = 0;
+          sw->base.state.scroll_row = 0;
+          sync_state_from_widget(state, sw);
+        } else {
+          size_t paste_len = strlen(paste_text);
+          size_t space_left =
+              sizeof(state->sidebar_filter) - 1 - state->sidebar_filter_len;
+          if (paste_len > space_left)
+            paste_len = space_left;
+          if (paste_len > 0) {
+            memcpy(state->sidebar_filter + state->sidebar_filter_len, paste_text,
+                   paste_len);
+            state->sidebar_filter_len += paste_len;
+            state->sidebar_filter[state->sidebar_filter_len] = '\0';
+            state->sidebar_highlight = 0;
+            state->sidebar_scroll = 0;
+          }
+        }
+      }
+      free(paste_text);
     } else if (render_event_is_char(event)) {
       /* Printable character - add to filter */
-      if (state->sidebar_filter_len < sizeof(state->sidebar_filter) - 1) {
+      if (sw) {
+        sidebar_widget_filter_append(sw, (char)key_char);
+        sw->base.state.cursor_row = 0;
+        sw->base.state.scroll_row = 0;
+        sync_state_from_widget(state, sw);
+      } else if (state->sidebar_filter_len < sizeof(state->sidebar_filter) - 1) {
         state->sidebar_filter[state->sidebar_filter_len++] = (char)key_char;
         state->sidebar_filter[state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
@@ -202,17 +319,29 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
   size_t filtered_count = tui_count_filtered_tables(state);
   const Config *cfg = state->app ? state->app->config : NULL;
 
-  /* Navigation */
+  /* Navigation - update widget and sync to TuiState */
   if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
-    if (state->sidebar_highlight > 0) {
-      state->sidebar_highlight--;
+    size_t highlight = sw ? sw->base.state.cursor_row : state->sidebar_highlight;
+    if (highlight > 0) {
+      if (sw) {
+        widget_move_cursor(&sw->base, -1, 0);
+        sync_state_from_widget(state, sw);
+      } else {
+        state->sidebar_highlight--;
+      }
     } else {
       /* At top of list, move to filter field */
       state->sidebar_filter_active = true;
     }
   } else if (hotkey_matches(cfg, event, HOTKEY_MOVE_DOWN)) {
-    if (filtered_count > 0 && state->sidebar_highlight < filtered_count - 1) {
-      state->sidebar_highlight++;
+    size_t highlight = sw ? sw->base.state.cursor_row : state->sidebar_highlight;
+    if (filtered_count > 0 && highlight < filtered_count - 1) {
+      if (sw) {
+        widget_move_cursor(&sw->base, 1, 0);
+        sync_state_from_widget(state, sw);
+      } else {
+        state->sidebar_highlight++;
+      }
     }
   } else if (hotkey_matches(cfg, event, HOTKEY_MOVE_RIGHT)) {
     /* Connection tab requires sidebar to stay focused */
@@ -221,10 +350,10 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       return true; /* Consume event but don't unfocus */
     }
     /* Save sidebar position and move focus back to filters or table view */
-    state->sidebar_last_position = state->sidebar_highlight;
-    state->sidebar_focused = false;
-    if (state->filters_visible && state->filters_was_focused) {
-      state->filters_focused = true;
+    state->sidebar_last_position = tui_sidebar_highlight(state);
+    tui_set_sidebar_focused(state, false);
+    if (tui_filters_visible(state) && state->filters_was_focused) {
+      tui_set_filters_focused(state, true);
     }
   }
   /* Select table */
@@ -262,41 +391,36 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
           }
         } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
           /* Connection tab active - convert to table tab */
+          char **tables = TUI_TABLES(state);
           free(tab->table_name);
-          tab->table_name = str_dup(state->tables[actual_idx]);
+          tab->table_name = tables ? str_dup(tables[actual_idx]) : NULL;
           tab->type = TAB_TYPE_TABLE;
           tab->table_index = actual_idx;
 
-          /* Clear state and load table */
-          state->data = NULL;
-          state->schema = NULL;
-          state->col_widths = NULL;
-          state->num_col_widths = 0;
-          state->current_table = actual_idx;
+          /* Load table - tui_load_table_data handles Tab data */
+          if (tables)
+            tui_load_table_data(state, tables[actual_idx]);
 
-          tui_load_table_data(state, state->tables[actual_idx]);
-
-          /* Save to tab */
-          tab->data = state->data;
-          tab->schema = state->schema;
-          tab->col_widths = state->col_widths;
-          tab->num_col_widths = state->num_col_widths;
-          tab->total_rows = state->total_rows;
-          tab->loaded_offset = state->loaded_offset;
-          tab->loaded_count = state->loaded_count;
-          tab->cursor_row = state->cursor_row;
-          tab->cursor_col = state->cursor_col;
-          tab->scroll_row = state->scroll_row;
-          tab->scroll_col = state->scroll_col;
-        } else if (tab && actual_idx != state->current_table) {
+          /* Initialize widgets for the converted tab */
+          UITabState *ui = TUI_TAB_UI(state);
+          if (ui) {
+            tui_init_table_tab_widgets(state, ui, tab);
+          }
+        } else if (tab && actual_idx != tab->table_index) {
           /* Replace current tab's table */
+          char **tables = TUI_TABLES(state);
           /* Copy new name first to avoid use-after-free if aliased */
-          char *new_name = str_dup(state->tables[actual_idx]);
+          char *new_name = tables ? str_dup(tables[actual_idx]) : NULL;
 
-          /* Free old data */
-          db_result_free(tab->data);
-          db_schema_free(tab->schema);
+          /* Free old data - NULL out pointers first to avoid dangling refs */
+          ResultSet *old_data = tab->data;
+          TableSchema *old_schema = tab->schema;
+          tab->data = NULL;
+          tab->schema = NULL;
+          db_result_free(old_data);
+          db_schema_free(old_schema);
           free(tab->col_widths);
+          tab->col_widths = NULL;
           free(tab->table_name);
 
           /* Update tab */
@@ -306,55 +430,72 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
           /* Clear filters when switching to a different table */
           filters_clear(&tab->filters);
 
-          /* Clear state and load new table */
-          state->data = NULL;
-          state->schema = NULL;
-          state->col_widths = NULL;
-          state->num_col_widths = 0;
-          state->current_table = actual_idx;
-
-          tui_load_table_data(state, state->tables[actual_idx]);
-
-          /* Save to tab */
-          tab->data = state->data;
-          tab->schema = state->schema;
-          tab->col_widths = state->col_widths;
-          tab->num_col_widths = state->num_col_widths;
-          tab->total_rows = state->total_rows;
-          tab->loaded_offset = state->loaded_offset;
-          tab->loaded_count = state->loaded_count;
-          tab->cursor_row = state->cursor_row;
-          tab->cursor_col = state->cursor_col;
-          tab->scroll_row = state->scroll_row;
-          tab->scroll_col = state->scroll_col;
+          /* Load new table - tui_load_table_data handles Tab data */
+          if (tables)
+            tui_load_table_data(state, tables[actual_idx]);
+          /* Note: tui_load_table_data rebinds FiltersWidget with new schema */
         }
       }
       /* Save position before leaving sidebar */
-      state->sidebar_last_position = state->sidebar_highlight;
-      state->sidebar_focused = false;
+      state->sidebar_last_position = tui_sidebar_highlight(state);
+      tui_set_sidebar_focused(state, false);
     }
   }
   /* Open in new tab */
   else if (hotkey_matches(cfg, event, HOTKEY_NEW_TAB)) {
-    if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
+    if (filtered_count > 0 && tui_sidebar_highlight(state) < filtered_count) {
       size_t actual_idx =
-          tui_get_filtered_table_index(state, state->sidebar_highlight);
+          tui_get_filtered_table_index(state, tui_sidebar_highlight(state));
       tab_create(state, actual_idx);
       /* Save position before leaving sidebar */
-      state->sidebar_last_position = state->sidebar_highlight;
-      state->sidebar_focused = false;
+      state->sidebar_last_position = tui_sidebar_highlight(state);
+      tui_set_sidebar_focused(state, false);
     }
   }
   /* Activate filter */
   else if (hotkey_matches(cfg, event, HOTKEY_SIDEBAR_FILTER)) {
     state->sidebar_filter_active = true;
   }
+  /* c - copy sidebar filter to clipboard */
+  else if (hotkey_matches(cfg, event, HOTKEY_CELL_COPY)) {
+    if (state->sidebar_filter_len > 0) {
+      tui_clipboard_copy(state, state->sidebar_filter);
+      tui_set_status(state, "Copied to clipboard");
+    }
+  }
+  /* v - paste into sidebar filter */
+  else if (hotkey_matches(cfg, event, HOTKEY_CELL_PASTE)) {
+    char *paste_text = tui_clipboard_read(state);
+    if (paste_text && paste_text[0]) {
+      /* Strip newlines for single-line filter */
+      for (char *p = paste_text; *p; p++) {
+        if (*p == '\n' || *p == '\r')
+          *p = ' ';
+      }
+      size_t paste_len = strlen(paste_text);
+      if (paste_len >= sizeof(state->sidebar_filter))
+        paste_len = sizeof(state->sidebar_filter) - 1;
+      memcpy(state->sidebar_filter, paste_text, paste_len);
+      state->sidebar_filter[paste_len] = '\0';
+      state->sidebar_filter_len = paste_len;
+      tui_set_sidebar_highlight(state, 0);
+      tui_set_sidebar_scroll(state, 0);
+      tui_set_status(state, "Pasted from clipboard");
+    }
+    free(paste_text);
+  }
   /* Escape - clear filter or unfocus */
   else if (render_event_is_special(event, UI_KEY_ESCAPE)) {
-    if (state->sidebar_filter_len > 0) {
+    size_t filter_len = sw ? sw->filter_len : state->sidebar_filter_len;
+    if (filter_len > 0) {
       /* Clear filter but keep highlight position */
-      state->sidebar_filter[0] = '\0';
-      state->sidebar_filter_len = 0;
+      if (sw) {
+        sidebar_widget_filter_clear(sw);
+        sync_state_from_widget(state, sw);
+      } else {
+        state->sidebar_filter[0] = '\0';
+        state->sidebar_filter_len = 0;
+      }
       /* Don't reset highlight - user may want to stay at current position */
     } else {
       /* Connection tab requires sidebar to stay focused */
@@ -363,8 +504,8 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
         return true; /* Consume event but don't unfocus */
       }
       /* Save position before leaving sidebar */
-      state->sidebar_last_position = state->sidebar_highlight;
-      state->sidebar_focused = false;
+      state->sidebar_last_position = tui_sidebar_highlight(state);
+      tui_set_sidebar_focused(state, false);
     }
   }
   /* Toggle sidebar (close) */
@@ -374,8 +515,8 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     if (toggle_tab && toggle_tab->type == TAB_TYPE_CONNECTION) {
       return true; /* Consume event but don't hide */
     }
-    state->sidebar_visible = false;
-    state->sidebar_focused = false;
+    tui_set_sidebar_visible(state, false);
+    tui_set_sidebar_focused(state, false);
     state->sidebar_filter[0] = '\0';
     state->sidebar_filter_len = 0;
     tui_recreate_windows(state);
@@ -414,17 +555,21 @@ void tui_draw_sidebar(TuiState *state) {
   if (!state || !state->sidebar_win || !state->sidebar_visible)
     return;
 
+  /* Get sidebar widget for reading state */
+  SidebarWidget *sw = tui_sidebar_widget(state);
+
+  /* Use widget state if available, otherwise fall back to TuiState */
+  const char *filter_text = sw ? sw->filter : state->sidebar_filter;
+  size_t filter_len = sw ? sw->filter_len : state->sidebar_filter_len;
+  size_t highlight = sw ? sw->base.state.cursor_row : state->sidebar_highlight;
+  size_t scroll = sw ? sw->base.state.scroll_row : state->sidebar_scroll;
+
   werase(state->sidebar_win);
 
-  /* Draw border */
-  wattron(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
-  box(state->sidebar_win, 0, 0);
-  wattroff(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
-
-  /* Title */
-  wattron(state->sidebar_win, A_BOLD);
-  mvwprintw(state->sidebar_win, 0, 2, " Tables ");
-  wattroff(state->sidebar_win, A_BOLD);
+  /* Draw border and title */
+  DRAW_BOX(state->sidebar_win, COLOR_BORDER);
+  WITH_ATTR(state->sidebar_win, A_BOLD,
+            mvwprintw(state->sidebar_win, 0, 2, " Tables "));
 
   int y = 1;
   int max_name_len = SIDEBAR_WIDTH - 4;
@@ -434,7 +579,7 @@ void tui_draw_sidebar(TuiState *state) {
     wattron(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
   mvwprintw(state->sidebar_win, y, 1, "/%-*.*s", max_name_len, max_name_len,
-            state->sidebar_filter_len > 0 ? state->sidebar_filter : "");
+            filter_len > 0 ? filter_text : "");
   if (state->sidebar_filter_active) {
     wattroff(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
@@ -449,12 +594,16 @@ void tui_draw_sidebar(TuiState *state) {
   wattroff(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
   y++;
 
-  if (!state->tables || state->num_tables == 0) {
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  Tab *current_tab = TUI_TAB(state);
+
+  if (!tables || num_tables == 0) {
     mvwprintw(state->sidebar_win, y, 2, "(no tables)");
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
       curs_set(1);
-      wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
+      wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
     }
     wrefresh(state->sidebar_win);
     return;
@@ -469,13 +618,14 @@ void tui_draw_sidebar(TuiState *state) {
    * separator(1), bottom border(1) */
   int list_height = win_height - 4;
 
-  /* Count filtered tables */
-  size_t filtered_count = 0;
-  for (size_t i = 0; i < state->num_tables; i++) {
-    if (state->tables[i] &&
-        (state->sidebar_filter_len == 0 ||
-         tui_str_istr(state->tables[i], state->sidebar_filter))) {
-      filtered_count++;
+  /* Count filtered tables - use widget if available */
+  size_t filtered_count = sw ? sidebar_widget_count(sw) : 0;
+  if (!sw) {
+    for (size_t i = 0; i < num_tables; i++) {
+      if (tables[i] &&
+          (filter_len == 0 || tui_str_istr(tables[i], filter_text))) {
+        filtered_count++;
+      }
     }
   }
 
@@ -484,41 +634,48 @@ void tui_draw_sidebar(TuiState *state) {
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
       curs_set(1);
-      wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
+      wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
     }
     wrefresh(state->sidebar_win);
     return;
   }
 
-  /* Adjust scroll if highlight is out of view */
-  if (state->sidebar_highlight < state->sidebar_scroll) {
-    state->sidebar_scroll = state->sidebar_highlight;
-  } else if (state->sidebar_highlight >=
-             state->sidebar_scroll + (size_t)list_height) {
-    state->sidebar_scroll = state->sidebar_highlight - list_height + 1;
+  /* Adjust scroll if highlight is out of view (update widget if present) */
+  size_t draw_scroll = scroll;
+  if (highlight < draw_scroll) {
+    draw_scroll = highlight;
+  } else if (highlight >= draw_scroll + (size_t)list_height) {
+    draw_scroll = highlight - (size_t)list_height + 1;
+  }
+  /* Sync adjusted scroll back to state/widget for next frame */
+  if (draw_scroll != scroll) {
+    if (sw) {
+      sw->base.state.scroll_row = draw_scroll;
+    }
+    state->sidebar_scroll = draw_scroll;
   }
 
   /* Draw filtered tables */
   size_t filtered_idx = 0;
-  for (size_t i = 0; i < state->num_tables && y < win_height - 1; i++) {
-    const char *name = state->tables[i];
+  size_t current_table_idx = current_tab ? current_tab->table_index : SIZE_MAX;
+  for (size_t i = 0; i < num_tables && y < win_height - 1; i++) {
+    const char *name = tables[i];
     if (!name)
       continue;
 
     /* Apply filter */
-    if (state->sidebar_filter_len > 0 &&
-        !tui_str_istr(name, state->sidebar_filter)) {
+    if (filter_len > 0 && !tui_str_istr(name, filter_text)) {
       continue;
     }
 
     /* Skip items before scroll offset */
-    if (filtered_idx < state->sidebar_scroll) {
+    if (filtered_idx < draw_scroll) {
       filtered_idx++;
       continue;
     }
 
-    bool is_highlighted = (filtered_idx == state->sidebar_highlight);
-    bool is_current = (i == state->current_table);
+    bool is_highlighted = (filtered_idx == highlight);
+    bool is_current = (i == current_table_idx);
 
     if (is_highlighted && state->sidebar_focused &&
         !state->sidebar_filter_active) {
@@ -532,12 +689,12 @@ void tui_draw_sidebar(TuiState *state) {
       if (is_highlighted && state->sidebar_focused &&
           !state->sidebar_filter_active) {
         /* Apply scroll animation for highlighted item */
-        size_t scroll = state->sidebar_name_scroll;
-        if (scroll > (size_t)(name_len - max_name_len)) {
-          scroll = name_len - max_name_len;
+        size_t name_scroll = state->sidebar_name_scroll;
+        if (name_scroll > (size_t)(name_len - max_name_len)) {
+          name_scroll = (size_t)(name_len - max_name_len);
         }
         snprintf(display_name, sizeof(display_name), "%.*s", max_name_len,
-                 name + scroll);
+                 name + name_scroll);
       } else {
         snprintf(display_name, sizeof(display_name), "%.*s..", max_name_len - 2,
                  name);
@@ -567,7 +724,7 @@ void tui_draw_sidebar(TuiState *state) {
   /* Position cursor in filter field if active, before refresh */
   if (state->sidebar_filter_active) {
     curs_set(1);
-    wmove(state->sidebar_win, filter_y, 2 + (int)state->sidebar_filter_len);
+    wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
   }
 
   wrefresh(state->sidebar_win);

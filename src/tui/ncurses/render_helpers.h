@@ -156,24 +156,48 @@ void render_region_background(RenderContext *ctx, RenderRegion *region,
                               UiColor color);
 
 /* ============================================================================
+ * Region Management
+ * ============================================================================
+ */
+
+/* Create or resize a region */
+bool render_set_region(RenderContext *ctx, UiRegionId id, int x, int y,
+                       int width, int height);
+
+/* Get region bounds */
+bool render_get_region(RenderContext *ctx, UiRegionId id, UiRegionBounds *bounds);
+
+/* Begin drawing to a region */
+void render_begin_region(RenderContext *ctx, UiRegionId id);
+
+/* End drawing to current region */
+void render_end_region(RenderContext *ctx);
+
+/* Clear a region */
+void render_clear_region(RenderContext *ctx, UiRegionId id);
+
+/* Refresh/update a specific region */
+void render_refresh_region(RenderContext *ctx, UiRegionId id);
+
+/* Get native window handle for a region (for gradual migration).
+ * For ncurses, returns WINDOW*. For other backends, returns backend-specific
+ * handle. Returns NULL if region not set up. */
+void *render_get_region_handle(RenderContext *ctx, UiRegionId id);
+
+/* Register an existing native window with a region (for gradual migration).
+ * This allows existing TUI code that creates WINDOW* to integrate with the
+ * backend abstraction. */
+void render_set_region_handle(RenderContext *ctx, UiRegionId id, void *handle);
+
+/* ============================================================================
  * Box Drawing Characters
  * ============================================================================
  */
 
-/* Box drawing character types */
-#define RENDER_HLINE '-'
-#define RENDER_VLINE '|'
-#define RENDER_ULCORNER '+'
-#define RENDER_URCORNER '+'
-#define RENDER_LLCORNER '+'
-#define RENDER_LRCORNER '+'
-#define RENDER_LTEE '+'
-#define RENDER_RTEE '+'
-#define RENDER_TTEE '+'
-#define RENDER_BTEE '+'
-#define RENDER_PLUS '+'
+/* Get line drawing character from backend (platform-independent) */
+int render_line_char(RenderContext *ctx, UiLineChar ch);
 
-/* Get ACS character for current backend (falls back to ASCII) */
+/* Convenience functions for common line characters */
 int render_acs_hline(RenderContext *ctx);
 int render_acs_vline(RenderContext *ctx);
 int render_acs_ulcorner(RenderContext *ctx);

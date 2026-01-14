@@ -101,6 +101,29 @@ typedef struct {
 } Session;
 
 /* ============================================================================
+ * UI Callbacks (for decoupling from specific UI implementation)
+ * ============================================================================
+ */
+
+/* Password prompt callback type.
+ * Returns: malloc'd password string, or NULL if cancelled.
+ * Caller must use str_secure_free() on result.
+ * Parameters:
+ *   user_data - opaque pointer passed to session_set_password_callback
+ *   title - dialog title (e.g., "Password for mydb")
+ *   label - prompt label (e.g., "Enter password:")
+ *   error_msg - error to display (e.g., "Access denied"), or NULL
+ */
+typedef char *(*SessionPasswordCallback)(void *user_data, const char *title,
+                                         const char *label,
+                                         const char *error_msg);
+
+/* Set the password prompt callback. Must be called before session_restore
+ * if password prompts are needed. */
+void session_set_password_callback(SessionPasswordCallback callback,
+                                   void *user_data);
+
+/* ============================================================================
  * Session API
  * ============================================================================
  */

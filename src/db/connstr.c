@@ -7,6 +7,7 @@
  */
 
 #include "connstr.h"
+#include "../util/mem.h"
 #include "../util/str.h"
 #include <ctype.h>
 #include <errno.h>
@@ -20,16 +21,6 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
-
-static void set_error(char **err, const char *fmt, ...) {
-  if (!err)
-    return;
-
-  va_list args;
-  va_start(args, fmt);
-  *err = str_vprintf(fmt, args);
-  va_end(args);
-}
 
 static char *decode_component(const char *s, size_t len) {
   char *temp = str_ndup(s, len);
@@ -45,44 +36,35 @@ static char *decode_component(const char *s, size_t len) {
 
 ConnString *connstr_parse(const char *str, char **err) {
   if (!str || *str == '\0') {
-    set_error(err, "Connection string is empty");
+    err_setf(err, "Connection string is empty");
     return NULL;
   }
 
   /* Prevent processing extremely long connection strings */
   size_t len = strlen(str);
   if (len > MAX_CONNSTR_LEN) {
-    set_error(err, "Connection string too long (max %d characters)",
+    err_setf(err, "Connection string too long (max %d characters)",
               MAX_CONNSTR_LEN);
     return NULL;
   }
 
-  ConnString *cs = calloc(1, sizeof(ConnString));
-  if (!cs) {
-    set_error(err, "Out of memory");
-    return NULL;
-  }
+  ConnString *cs = safe_calloc(1, sizeof(ConnString));
 
   cs->raw = str_dup(str);
-  if (!cs->raw) {
-    free(cs);
-    set_error(err, "Out of memory");
-    return NULL;
-  }
 
   const char *p = str;
 
   /* Parse driver (scheme) */
   const char *scheme_end = strstr(p, "://");
   if (!scheme_end) {
-    set_error(err, "Missing '://' in connection string");
+    err_setf(err, "Missing '://' in connection string");
     connstr_free(cs);
     return NULL;
   }
 
   cs->driver = str_ndup(p, scheme_end - p);
   if (!cs->driver) {
-    set_error(err, "Out of memory");
+    err_setf(err, "Out of memory");
     connstr_free(cs);
     return NULL;
   }
@@ -95,7 +77,7 @@ ConnString *connstr_parse(const char *str, char **err) {
     /* For sqlite, everything after :// is the path */
     /* Handle sqlite:///absolute/path and sqlite://./relative/path */
     if (*p == '\0') {
-      set_error(err, "SQLite connection string missing database path");
+      err_setf(err, "SQLite connection string missing database path");
       connstr_free(cs);
       return NULL;
     }
@@ -111,7 +93,7 @@ ConnString *connstr_parse(const char *str, char **err) {
     }
 
     if (!cs->database) {
-      set_error(err, "Out of memory");
+      err_setf(err, "Out of memory");
       connstr_free(cs);
       return NULL;
     }
@@ -129,14 +111,14 @@ ConnString *connstr_parse(const char *str, char **err) {
         cs->user = decode_component(p, colon - p);
         cs->password = decode_component(colon + 1, at - colon - 1);
         if (!cs->user || !cs->password) {
-          set_error(err, "Out of memory");
+          err_setf(err, "Out of memory");
           connstr_free(cs);
           return NULL;
         }
       } else {
         cs->user = decode_component(p, at - p);
         if (!cs->user) {
-          set_error(err, "Out of memory");
+          err_setf(err, "Out of memory");
           connstr_free(cs);
           return NULL;
         }
@@ -163,7 +145,7 @@ ConnString *connstr_parse(const char *str, char **err) {
         if (bracket_end && bracket_end < host_end) {
           cs->host = str_ndup(bracket + 1, bracket_end - bracket - 1);
           if (!cs->host) {
-            set_error(err, "Out of memory");
+            err_setf(err, "Out of memory");
             connstr_free(cs);
             return NULL;
           }
@@ -187,7 +169,7 @@ ConnString *connstr_parse(const char *str, char **err) {
           cs->host = str_ndup(p, host_end - p);
         }
         if (!cs->host) {
-          set_error(err, "Out of memory");
+          err_setf(err, "Out of memory");
           connstr_free(cs);
           return NULL;
         }
@@ -225,7 +207,7 @@ ConnString *connstr_parse(const char *str, char **err) {
         p = p + strlen(p);
       }
       if (!cs->database) {
-        set_error(err, "Out of memory");
+        err_setf(err, "Out of memory");
         connstr_free(cs);
         return NULL;
       }
@@ -243,13 +225,8 @@ ConnString *connstr_parse(const char *str, char **err) {
         count++;
     }
 
-    cs->option_keys = calloc(count, sizeof(char *));
-    cs->option_values = calloc(count, sizeof(char *));
-    if (!cs->option_keys || !cs->option_values) {
-      set_error(err, "Out of memory");
-      connstr_free(cs);
-      return NULL;
-    }
+    cs->option_keys = safe_calloc(count, sizeof(char *));
+    cs->option_values = safe_calloc(count, sizeof(char *));
 
     size_t i = 0;
     while (*p && i < count) {
@@ -268,7 +245,7 @@ ConnString *connstr_parse(const char *str, char **err) {
       /* Check for allocation failure */
       if (!cs->option_keys[i] || !cs->option_values[i]) {
         cs->num_options = i + 1; /* Include partial for cleanup */
-        set_error(err, "Out of memory");
+        err_setf(err, "Out of memory");
         connstr_free(cs);
         return NULL;
       }
@@ -294,12 +271,8 @@ void connstr_free(ConnString *cs) {
   free(cs->schema);
   str_secure_free(cs->raw); /* Raw string may contain password */
 
-  for (size_t i = 0; i < cs->num_options; i++) {
-    free(cs->option_keys[i]);
-    free(cs->option_values[i]);
-  }
-  free(cs->option_keys);
-  free(cs->option_values);
+  FREE_STRING_ARRAY(cs->option_keys, cs->num_options);
+  FREE_STRING_ARRAY(cs->option_values, cs->num_options);
 
   free(cs);
 }
@@ -373,7 +346,7 @@ char *connstr_build(const char *driver, const char *user, const char *password,
         return NULL;
       }
       sb_append(sb, encoded_pass);
-      free(encoded_pass);
+      str_secure_free(encoded_pass); /* Encoded password is sensitive */
     }
     sb_append_char(sb, '@');
   }
@@ -432,12 +405,12 @@ char *connstr_build(const char *driver, const char *user, const char *password,
 
 bool connstr_validate(const ConnString *cs, char **err) {
   if (!cs) {
-    set_error(err, "Connection string is NULL");
+    err_setf(err, "Connection string is NULL");
     return false;
   }
 
   if (!cs->driver || *cs->driver == '\0') {
-    set_error(err, "Driver not specified");
+    err_setf(err, "Driver not specified");
     return false;
   }
 
@@ -448,14 +421,14 @@ bool connstr_validate(const ConnString *cs, char **err) {
       str_eq(cs->driver, "mysql") || str_eq(cs->driver, "mariadb");
 
   if (!known_driver) {
-    set_error(err, "Unknown driver: %s", cs->driver);
+    err_setf(err, "Unknown driver: %s", cs->driver);
     return false;
   }
 
   /* SQLite validation */
   if (str_eq(cs->driver, "sqlite")) {
     if (!cs->database || *cs->database == '\0') {
-      set_error(err, "SQLite requires a database path");
+      err_setf(err, "SQLite requires a database path");
       return false;
     }
     return true;
@@ -463,12 +436,12 @@ bool connstr_validate(const ConnString *cs, char **err) {
 
   /* Network database validation */
   if (!cs->host || *cs->host == '\0') {
-    set_error(err, "Host is required for %s", cs->driver);
+    err_setf(err, "Host is required for %s", cs->driver);
     return false;
   }
 
   if (!cs->database || *cs->database == '\0') {
-    set_error(err, "Database name is required for %s", cs->driver);
+    err_setf(err, "Database name is required for %s", cs->driver);
     return false;
   }
 
@@ -499,26 +472,26 @@ bool connstr_is_sqlite_file(const char *path) {
 
 char *connstr_from_path(const char *path, char **err) {
   if (!path || *path == '\0') {
-    set_error(err, "Empty file path");
+    err_setf(err, "Empty file path");
     return NULL;
   }
 
   /* Check if file exists */
   struct stat st;
   if (stat(path, &st) != 0) {
-    set_error(err, "File not found: %s", path);
+    err_setf(err, "File not found: %s", path);
     return NULL;
   }
 
   /* Check it's a regular file */
   if (!S_ISREG(st.st_mode)) {
-    set_error(err, "Not a file: %s", path);
+    err_setf(err, "Not a file: %s", path);
     return NULL;
   }
 
   /* Validate it's a SQLite database */
   if (!connstr_is_sqlite_file(path)) {
-    set_error(err, "Not a SQLite database: %s", path);
+    err_setf(err, "Not a SQLite database: %s", path);
     return NULL;
   }
 

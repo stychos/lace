@@ -82,6 +82,8 @@ typedef enum {
   /* Cell Operations */
   ACTION_CELL_SET_NULL,     /* Set current cell to NULL */
   ACTION_CELL_SET_EMPTY,    /* Set current cell to empty string */
+  ACTION_CELL_COPY,         /* Copy current cell to clipboard */
+  ACTION_CELL_PASTE,        /* Paste clipboard to current cell */
   ACTION_ROW_DELETE,        /* Delete current row */
   ACTION_ROW_TOGGLE_SELECT, /* Toggle selection of current row */
   ACTION_ROWS_CLEAR_SELECT, /* Clear all row selections */
@@ -250,6 +252,8 @@ typedef struct UICallbacks {
   void (*cancel_edit)(void *ctx);
   void (*set_cell_null)(void *ctx);
   void (*set_cell_empty)(void *ctx);
+  void (*cell_copy)(void *ctx);
+  void (*cell_paste)(void *ctx);
   void (*delete_row)(void *ctx);
 
   /* Layout - window/widget management */
@@ -429,6 +433,14 @@ static inline Action action_cell_set_null(void) {
 
 static inline Action action_cell_set_empty(void) {
   return (Action){.type = ACTION_CELL_SET_EMPTY};
+}
+
+static inline Action action_cell_copy(void) {
+  return (Action){.type = ACTION_CELL_COPY};
+}
+
+static inline Action action_cell_paste(void) {
+  return (Action){.type = ACTION_CELL_PASTE};
 }
 
 static inline Action action_row_delete(void) {
