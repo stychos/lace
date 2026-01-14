@@ -1,108 +1,64 @@
 # Lace - Database Viewer and Manager
-# Built with clang
+# Top-level Makefile
 
-CC = clang
-CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -Isrc -g
-LDFLAGS = -lncursesw -lpanel -lmenu -lsqlite3 -lmariadb -lpq -lpthread -lcjson
-
-# Build directory
-BUILD_DIR = build
-
-# Detect OS
-UNAME_S := $(shell uname -s)
-
-ifeq ($(UNAME_S),Darwin)
-    # macOS - detect Homebrew prefix (ARM vs Intel)
-    HOMEBREW_PREFIX := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
-
-    # Add Homebrew include paths
-    CFLAGS += -I$(HOMEBREW_PREFIX)/include
-    CFLAGS += -I$(HOMEBREW_PREFIX)/include/cjson
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/mariadb/include/mysql
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/libpq/include
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/sqlite/include
-    CFLAGS += -I$(HOMEBREW_PREFIX)/opt/ncurses/include
-
-    # Add Homebrew library paths
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/lib
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/mariadb/lib
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/libpq/lib
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/sqlite/lib
-    LDFLAGS += -L$(HOMEBREW_PREFIX)/opt/ncurses/lib
-else ifeq ($(UNAME_S),Linux)
-    # Linux - cJSON headers may be in /usr/include/cjson
-    CFLAGS += -I/usr/include/cjson
-endif
-
-# Source directories (common)
-SRC_DIRS_COMMON = src/app src/core src/config src/db src/db/sqlite src/db/postgres src/db/mysql \
-                  src/tui/ncurses src/tui/ncurses/views src/util src/async src/viewmodel
-
-# Platform-specific source directories
-ifeq ($(UNAME_S),Windows_NT)
-    SRC_DIRS_PLATFORM = src/platform/win32
-else
-    SRC_DIRS_PLATFORM = src/platform/posix
-endif
-
-SRC_DIRS = $(SRC_DIRS_COMMON) $(SRC_DIRS_PLATFORM)
-
-# Find all C source files
-SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
-
-# Object files in build directory
-OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
-DEPS = $(OBJS:.o=.d)
-
-TARGET = $(BUILD_DIR)/lace
+.PHONY: all laced liblace ncurses clean distclean install help
 
 # Default target
-all: $(TARGET)
+all: laced liblace ncurses
 
-# Link the final executable
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+# Build the daemon
+laced:
+	$(MAKE) -C laced
 
-# Compile C files with dependency generation
-$(BUILD_DIR)/%.o: src/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+# Build the client library
+liblace:
+	$(MAKE) -C liblace
 
-# Include dependency files (only if they exist)
--include $(wildcard $(DEPS))
+# Build the ncurses frontend (depends on liblace)
+ncurses: liblace
+	$(MAKE) -C tui/ncurses
 
-# Clean build artifacts
+# Clean all build artifacts
 clean:
-	rm -rf $(BUILD_DIR)
+	$(MAKE) -C laced clean
+	$(MAKE) -C liblace clean
+	$(MAKE) -C tui/ncurses clean
 
-# Run the application
-run: $(TARGET)
-	./$(TARGET)
+# Full clean
+distclean: clean
+	rm -rf build
 
-# Debug build
-debug: CFLAGS += -DDEBUG -O0
-debug: clean all
+# Install (requires PREFIX or DESTDIR)
+PREFIX ?= /usr/local
+DESTDIR ?=
 
-# Release build
-release: CFLAGS += -O2 -DNDEBUG
-release: clean all
+install: all
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -d $(DESTDIR)$(PREFIX)/include/lace
+	install -m 755 laced/build/laced $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 tui/ncurses/build/lace $(DESTDIR)$(PREFIX)/bin/
+	install -m 644 liblace/build/liblace.a $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 liblace/include/*.h $(DESTDIR)$(PREFIX)/include/lace/
 
-# Format code (if clang-format available)
-format:
-	find src -name "*.c" -o -name "*.h" | xargs clang-format -i
+# Run the ncurses frontend
+run: all
+	./tui/ncurses/build/lace
 
-# Static analysis with clang analyzer
-analyze:
-	@mkdir -p $(BUILD_DIR)/analyze
-	@for src in $(SRCS); do \
-		echo "Analyzing $$src..."; \
-		$(CC) --analyze $(CFLAGS) -o $(BUILD_DIR)/analyze/$$(basename $$src .c).plist $$src 2>&1; \
-	done
-	@echo "Analysis complete. Results in $(BUILD_DIR)/analyze/"
-
-# Print variables for debugging
-print-%:
-	@echo $* = $($*)
-
-.PHONY: all clean run debug release format analyze
+# Help
+help:
+	@echo "Lace - Database Viewer and Manager"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all       Build everything (default)"
+	@echo "  laced     Build the daemon"
+	@echo "  liblace   Build the client library"
+	@echo "  ncurses   Build the ncurses frontend"
+	@echo "  clean     Remove build artifacts"
+	@echo "  distclean Remove all artifacts"
+	@echo "  install   Install to PREFIX (default: /usr/local)"
+	@echo "  run       Build and run the ncurses frontend"
+	@echo ""
+	@echo "Variables:"
+	@echo "  PREFIX    Installation prefix (default: /usr/local)"
+	@echo "  DESTDIR   Staging directory for packaging"
