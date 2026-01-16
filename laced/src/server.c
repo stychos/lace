@@ -7,19 +7,24 @@
  */
 
 #include "server.h"
+#include "async.h"
 #include "handler.h"
 #include "json.h"
 #include "session.h"
 #include <cjson/cJSON.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <unistd.h>
 
 /* Server structure */
 struct LacedServer {
-  LacedSession *session; /* Connection pool */
+  LacedSession *session;   /* Connection pool */
+  AsyncQueue *async_queue; /* Async query queue */
+  int async_notify_fd;     /* Pipe fd for async notifications */
   bool initialized;
 };
 
@@ -40,6 +45,14 @@ LacedServer *laced_server_create(void) {
     return NULL;
   }
 
+  /* Create async queue for background queries */
+  server->async_queue = async_queue_create(&server->async_notify_fd);
+  if (!server->async_queue) {
+    laced_session_destroy(server->session);
+    free(server);
+    return NULL;
+  }
+
   server->initialized = true;
   return server;
 }
@@ -49,11 +62,20 @@ void laced_server_destroy(LacedServer *server) {
     return;
   }
 
+  if (server->async_queue) {
+    async_queue_destroy(server->async_queue);
+  }
+
   if (server->session) {
     laced_session_destroy(server->session);
   }
 
   free(server);
+}
+
+/* Get async queue (for handler use) */
+AsyncQueue *laced_server_get_async_queue(LacedServer *server) {
+  return server ? server->async_queue : NULL;
 }
 
 /* ==========================================================================
@@ -218,10 +240,11 @@ static bool process_request(LacedServer *server, FILE *output,
 
   /* Handle the request */
   LacedHandlerResult result = laced_handler_dispatch(
-      server->session, method->valuestring, params);
+      server->session, server->async_queue, method->valuestring, params, id);
 
   bool ok = true;
-  if (!is_notification) {
+  if (!is_notification && !result.deferred) {
+    /* Only send response if not deferred (async handlers send response later) */
     if (result.error_code != 0) {
       ok = send_error(output, id, result.error_code,
                       result.error_message ? result.error_message : "Internal error");
@@ -245,49 +268,163 @@ static bool process_request(LacedServer *server, FILE *output,
  * Server Execution
  * ========================================================================== */
 
+/* Process completed async queries and send responses */
+static void process_async_completions(LacedServer *server, FILE *output) {
+  async_queue_drain_notify(server->async_queue);
+
+  AsyncQuery *query;
+  while ((query = async_queue_pop(server->async_queue)) != NULL) {
+    cJSON *request_id = async_query_get_request_id(query);
+    AsyncQueryStatus status = async_query_status(query);
+
+    if (status == ASYNC_QUERY_COMPLETED) {
+      cJSON *result = async_query_take_result(query);
+      send_result(output, request_id, result);
+    } else {
+      /* Error or cancelled */
+      char *error_msg = async_query_take_error(query);
+      int error_code = async_query_get_error_code(query);
+      send_error(output, request_id, error_code,
+                 error_msg ? error_msg : "Query failed");
+      free(error_msg);
+    }
+
+    async_query_free(query);
+  }
+}
+
+/* Non-blocking line read - returns NULL if no complete line available */
+static char *try_read_line(int fd, char **partial_buf, size_t *partial_len,
+                           size_t *partial_cap) {
+  /* Read available data */
+  char temp[4096];
+  ssize_t n = read(fd, temp, sizeof(temp));
+
+  if (n <= 0) {
+    if (n == 0) {
+      /* EOF - return any partial data as final line */
+      if (*partial_len > 0) {
+        char *line = *partial_buf;
+        line[*partial_len] = '\0';
+        *partial_buf = NULL;
+        *partial_len = 0;
+        *partial_cap = 0;
+        return line;
+      }
+    }
+    return NULL;
+  }
+
+  /* Ensure buffer capacity */
+  size_t needed = *partial_len + (size_t)n + 1;
+  if (needed > *partial_cap) {
+    size_t new_cap = *partial_cap ? *partial_cap * 2 : 4096;
+    while (new_cap < needed) new_cap *= 2;
+    char *new_buf = realloc(*partial_buf, new_cap);
+    if (!new_buf) {
+      return NULL;
+    }
+    *partial_buf = new_buf;
+    *partial_cap = new_cap;
+  }
+
+  /* Append new data */
+  memcpy(*partial_buf + *partial_len, temp, (size_t)n);
+  *partial_len += (size_t)n;
+
+  /* Look for newline */
+  for (size_t i = 0; i < *partial_len; i++) {
+    if ((*partial_buf)[i] == '\n') {
+      /* Extract complete line */
+      size_t line_len = i;
+      char *line = malloc(line_len + 1);
+      if (!line) {
+        return NULL;
+      }
+      memcpy(line, *partial_buf, line_len);
+      line[line_len] = '\0';
+
+      /* Shift remaining data */
+      size_t remaining = *partial_len - i - 1;
+      if (remaining > 0) {
+        memmove(*partial_buf, *partial_buf + i + 1, remaining);
+      }
+      *partial_len = remaining;
+
+      return line;
+    }
+  }
+
+  return NULL; /* No complete line yet */
+}
+
 int laced_server_run_stdio(LacedServer *server,
                            volatile sig_atomic_t *shutdown_flag) {
   if (!server || !server->initialized) {
     return 1;
   }
 
-  /* Set stdin/stdout to line-buffered */
-  setvbuf(stdin, NULL, _IOLBF, 0);
+  /* Set stdin to non-blocking */
+  int stdin_fd = fileno(stdin);
+  int flags = fcntl(stdin_fd, F_GETFL, 0);
+  fcntl(stdin_fd, F_SETFL, flags | O_NONBLOCK);
+
+  /* Set stdout to line-buffered */
   setvbuf(stdout, NULL, _IOLBF, 0);
 
-  while (!*shutdown_flag) {
-    /* Check for EOF */
-    if (feof(stdin)) {
-      break;
-    }
+  /* Partial line buffer */
+  char *partial_buf = NULL;
+  size_t partial_len = 0;
+  size_t partial_cap = 0;
 
-    /* Read a request line */
-    char *line = read_line(stdin);
-    if (!line) {
-      if (feof(stdin)) {
-        break; /* Clean EOF */
-      }
+  int max_fd = stdin_fd > server->async_notify_fd ? stdin_fd : server->async_notify_fd;
+
+  while (!*shutdown_flag) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(stdin_fd, &read_fds);
+    FD_SET(server->async_notify_fd, &read_fds);
+
+    /* Short timeout so we can check shutdown flag */
+    struct timeval timeout = {.tv_sec = 0, .tv_usec = 100000}; /* 100ms */
+
+    int ready = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+
+    if (ready < 0) {
       if (errno == EINTR) {
-        continue; /* Interrupted by signal, check shutdown flag */
+        continue; /* Interrupted by signal */
       }
       break; /* Error */
     }
 
-    /* Skip empty lines */
-    if (line[0] == '\0') {
-      free(line);
-      continue;
+    /* Check for async completions */
+    if (ready > 0 && FD_ISSET(server->async_notify_fd, &read_fds)) {
+      process_async_completions(server, stdout);
     }
 
-    /* Process the request */
-    if (!process_request(server, stdout, line)) {
-      free(line);
-      /* Write error, but don't exit - let client disconnect */
-      continue;
-    }
+    /* Check for stdin input */
+    if (ready > 0 && FD_ISSET(stdin_fd, &read_fds)) {
+      char *line;
+      while ((line = try_read_line(stdin_fd, &partial_buf, &partial_len,
+                                   &partial_cap)) != NULL) {
+        /* Skip empty lines */
+        if (line[0] != '\0') {
+          process_request(server, stdout, line);
+        }
+        free(line);
+      }
 
-    free(line);
+      /* Check for EOF */
+      if (feof(stdin)) {
+        break;
+      }
+    }
   }
+
+  free(partial_buf);
+
+  /* Restore stdin to blocking */
+  fcntl(stdin_fd, F_SETFL, flags);
 
   return 0;
 }

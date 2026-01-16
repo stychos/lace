@@ -17,7 +17,7 @@ INCLUDES = -I$(SRC_DIR)
 BUILD_DIR = build
 
 # Libraries
-LIBS = -lcjson -lsqlite3 -lpq -lmariadb
+LIBS = -lcjson -lsqlite3 -lpq -lmariadb -lpthread
 
 # Output
 TARGET = $(BUILD_DIR)/laced
@@ -28,7 +28,8 @@ DAEMON_SRCS = \
 	$(SRC_DIR)/server.c \
 	$(SRC_DIR)/session.c \
 	$(SRC_DIR)/handler.c \
-	$(SRC_DIR)/json.c
+	$(SRC_DIR)/json.c \
+	$(SRC_DIR)/async.c
 
 # Database source files
 DB_SRCS = \
@@ -88,6 +89,10 @@ $(BUILD_DIR)/handler.o: $(SRC_DIR)/handler.c
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/json.o: $(SRC_DIR)/json.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/async.o: $(SRC_DIR)/async.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 

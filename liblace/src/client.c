@@ -649,6 +649,26 @@ int lace_exec(lace_client_t *client, int conn_id, const char *sql,
   return LACE_OK;
 }
 
+int lace_cancel_query(lace_client_t *client, int conn_id) {
+  if (!client || !client->connected) {
+    return LACE_ERR_INVALID_PARAMS;
+  }
+
+  cJSON *params = cJSON_CreateObject();
+  if (!params) {
+    return LACE_ERR_OUT_OF_MEMORY;
+  }
+
+  cJSON_AddNumberToObject(params, "conn_id", conn_id);
+
+  cJSON *resp = NULL;
+  int err = lace_rpc_call(client, "cancel", params, &resp);
+  cJSON_Delete(params);
+  cJSON_Delete(resp);
+
+  return err;
+}
+
 /* ==========================================================================
  * Data Mutations
  * ========================================================================== */

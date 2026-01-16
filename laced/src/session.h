@@ -113,4 +113,38 @@ bool laced_session_list_connections(LacedSession *session, LacedConnInfo **info,
  */
 void laced_conn_info_array_free(LacedConnInfo *info, size_t count);
 
+/* ==========================================================================
+ * Query Cancellation
+ * ========================================================================== */
+
+/*
+ * Prepare cancellation handle before executing a query.
+ * Call this before starting a query to enable cancellation.
+ *
+ * @param session  Session handle
+ * @param conn_id  Connection ID
+ * @return         true if cancel handle was prepared
+ */
+bool laced_session_prepare_cancel(LacedSession *session, int conn_id);
+
+/*
+ * Cancel the current query on a connection.
+ * This should be called from a different thread than the one executing the query.
+ *
+ * @param session  Session handle
+ * @param conn_id  Connection ID
+ * @param err      Output: error message on failure (caller must free)
+ * @return         true if cancellation was sent
+ */
+bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err);
+
+/*
+ * Clean up cancellation state after a query completes.
+ * Call this after each query (success or failure).
+ *
+ * @param session  Session handle
+ * @param conn_id  Connection ID
+ */
+void laced_session_finish_query(LacedSession *session, int conn_id);
+
 #endif /* LACED_SESSION_H */

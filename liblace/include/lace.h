@@ -209,6 +209,23 @@ int lace_count(lace_client_t *client, int conn_id, const char *table,
  */
 int lace_exec(lace_client_t *client, int conn_id, const char *sql, LaceResult **result);
 
+/*
+ * Cancel a running query on a connection.
+ *
+ * This sends a cancellation request to the daemon. For network databases,
+ * this uses database-specific cancellation mechanisms (e.g., PQcancel for
+ * PostgreSQL, KILL QUERY for MySQL). For SQLite, it uses sqlite3_interrupt.
+ *
+ * Note: The query must be currently executing for cancellation to work.
+ * This function returns immediately; the query may take some time to actually
+ * stop. Query cancellation is best-effort and may not work in all situations.
+ *
+ * @param client   Client handle
+ * @param conn_id  Connection ID with the running query
+ * @return         LACE_OK on success, error code on failure
+ */
+int lace_cancel_query(lace_client_t *client, int conn_id);
+
 /* ==========================================================================
  * Data Mutations
  * ========================================================================== */

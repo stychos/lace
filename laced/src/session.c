@@ -19,6 +19,8 @@ typedef struct {
   int id;
   DbConnection *conn;
   bool in_use;
+  void *cancel_handle;  /* Active cancel handle during query execution */
+  bool query_active;    /* True while a query is running */
 } ConnectionSlot;
 
 /* Session structure */
@@ -252,4 +254,79 @@ void laced_conn_info_array_free(LacedConnInfo *info, size_t count) {
     free(info[i].user);
   }
   free(info);
+}
+
+/* ==========================================================================
+ * Query Cancellation
+ * ========================================================================== */
+
+bool laced_session_prepare_cancel(LacedSession *session, int conn_id) {
+  if (!session) {
+    return false;
+  }
+
+  int slot = find_slot_by_id(session, conn_id);
+  if (slot < 0) {
+    return false;
+  }
+
+  ConnectionSlot *cs = &session->connections[slot];
+  if (!cs->conn || !cs->conn->driver || !cs->conn->driver->prepare_cancel) {
+    return false;
+  }
+
+  /* Free any existing cancel handle */
+  if (cs->cancel_handle && cs->conn->driver->free_cancel_handle) {
+    cs->conn->driver->free_cancel_handle(cs->cancel_handle);
+  }
+
+  cs->cancel_handle = cs->conn->driver->prepare_cancel(cs->conn);
+  cs->query_active = true;
+  return cs->cancel_handle != NULL;
+}
+
+bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err) {
+  if (!session) {
+    err_set(err, "Invalid session");
+    return false;
+  }
+
+  int slot = find_slot_by_id(session, conn_id);
+  if (slot < 0) {
+    err_set(err, "Invalid connection ID");
+    return false;
+  }
+
+  ConnectionSlot *cs = &session->connections[slot];
+  if (!cs->query_active) {
+    /* No query running - not an error, just nothing to cancel */
+    return true;
+  }
+
+  if (!cs->cancel_handle || !cs->conn || !cs->conn->driver ||
+      !cs->conn->driver->cancel_query) {
+    err_set(err, "Cancellation not supported for this connection");
+    return false;
+  }
+
+  return cs->conn->driver->cancel_query(cs->conn, cs->cancel_handle, err);
+}
+
+void laced_session_finish_query(LacedSession *session, int conn_id) {
+  if (!session) {
+    return;
+  }
+
+  int slot = find_slot_by_id(session, conn_id);
+  if (slot < 0) {
+    return;
+  }
+
+  ConnectionSlot *cs = &session->connections[slot];
+  if (cs->cancel_handle && cs->conn && cs->conn->driver &&
+      cs->conn->driver->free_cancel_handle) {
+    cs->conn->driver->free_cancel_handle(cs->cancel_handle);
+  }
+  cs->cancel_handle = NULL;
+  cs->query_active = false;
 }
