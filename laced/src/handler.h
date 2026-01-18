@@ -14,13 +14,15 @@
 
 /* Forward declarations */
 typedef struct AsyncQueue AsyncQueue;
+typedef struct AsyncQuery AsyncQuery;
 
 /* Handler result structure */
 typedef struct {
-  cJSON *result;        /* Result JSON (NULL on error) */
-  int error_code;       /* Error code (0 on success) */
-  char *error_message;  /* Error message (NULL on success, caller must free) */
-  bool deferred;        /* If true, response will be sent later (async query) */
+  cJSON *result;          /* Result JSON (NULL on error) */
+  int error_code;         /* Error code (0 on success) */
+  char *error_message;    /* Error message (NULL on success, caller must free) */
+  bool deferred;          /* If true, response will be sent later (async query) */
+  AsyncQuery *deferred_query; /* For deferred responses, pointer to async query */
 } LacedHandlerResult;
 
 /*

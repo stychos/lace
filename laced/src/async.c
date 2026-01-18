@@ -9,19 +9,35 @@
 #include "async.h"
 #include "db/db.h"
 #include "json.h"
-#include "util/str.h"
-#include <errno.h>
+#include <util/mem.h>
+#include <util/str.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
+
+/* Get current time in milliseconds since epoch */
+static uint64_t get_time_ms(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+}
 
 /* ==========================================================================
  * Async Query Structure
  * ========================================================================== */
 
+/* Forward declaration for socket client */
+struct LacedClient;
+
 struct AsyncQuery {
   AsyncQueryType type;
   AsyncQueryStatus status;
+
+  /* Unique identifier */
+  int64_t query_id;
+  uint64_t started_at_ms;
 
   /* Input parameters */
   LacedSession *session;
@@ -46,6 +62,9 @@ struct AsyncQuery {
   /* Queue linkage */
   AsyncQuery *next;
   AsyncQueue *queue;
+
+  /* Client tracking (for socket mode) */
+  struct LacedClient *client;
 };
 
 /* ==========================================================================
@@ -62,6 +81,9 @@ struct AsyncQueue {
 
   /* Active queries (for cancellation lookup) */
   AsyncQuery *active_head;
+
+  /* Query ID counter */
+  int64_t next_query_id;
 };
 
 /* ==========================================================================
@@ -69,7 +91,7 @@ struct AsyncQueue {
  * ========================================================================== */
 
 AsyncQueue *async_queue_create(int *notify_fd) {
-  AsyncQueue *queue = calloc(1, sizeof(AsyncQueue));
+  AsyncQueue *queue = safe_calloc(1, sizeof(AsyncQueue));
   if (!queue) {
     return NULL;
   }
@@ -85,9 +107,21 @@ AsyncQueue *async_queue_create(int *notify_fd) {
     return NULL;
   }
 
+  /* Set notify pipe to non-blocking to prevent deadlock in drain_notify */
+  int flags = fcntl(queue->notify_pipe[0], F_GETFL, 0);
+  if (flags != -1) {
+    fcntl(queue->notify_pipe[0], F_SETFL, flags | O_NONBLOCK);
+  }
+  flags = fcntl(queue->notify_pipe[1], F_GETFL, 0);
+  if (flags != -1) {
+    fcntl(queue->notify_pipe[1], F_SETFL, flags | O_NONBLOCK);
+  }
+
   if (notify_fd) {
     *notify_fd = queue->notify_pipe[0];
   }
+
+  queue->next_query_id = 1;
 
   return queue;
 }
@@ -323,7 +357,7 @@ static void *query_worker(void *arg) {
 
 static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
                                       int conn_id, cJSON *request_id) {
-  AsyncQuery *query = calloc(1, sizeof(AsyncQuery));
+  AsyncQuery *query = safe_calloc(1, sizeof(AsyncQuery));
   if (!query) {
     return NULL;
   }
@@ -332,6 +366,12 @@ static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
   query->session = session;
   query->conn_id = conn_id;
   query->status = ASYNC_QUERY_PENDING;
+
+  /* Assign unique query ID and timestamp */
+  pthread_mutex_lock(&queue->mutex);
+  query->query_id = queue->next_query_id++;
+  pthread_mutex_unlock(&queue->mutex);
+  query->started_at_ms = get_time_ms();
 
   if (request_id) {
     query->request_id = cJSON_Duplicate(request_id, true);
@@ -506,4 +546,129 @@ bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session, int conn_
   }
 
   return found;
+}
+
+bool async_cancel_by_query_id(AsyncQueue *queue, LacedSession *session, int64_t query_id) {
+  if (!queue || !session || query_id <= 0) {
+    return false;
+  }
+
+  bool found = false;
+  int conn_id = 0;
+
+  pthread_mutex_lock(&queue->mutex);
+
+  /* Find query by ID in active list */
+  AsyncQuery *q = queue->active_head;
+  while (q) {
+    if (q->query_id == query_id && q->status == ASYNC_QUERY_RUNNING) {
+      q->cancel_requested = true;
+      conn_id = q->conn_id;
+      found = true;
+      break;
+    }
+    q = q->next;
+  }
+
+  pthread_mutex_unlock(&queue->mutex);
+
+  /* Call session cancel */
+  if (found && conn_id > 0) {
+    char *err = NULL;
+    laced_session_cancel_query(session, conn_id, &err);
+    free(err);
+  }
+
+  return found;
+}
+
+/* ==========================================================================
+ * Query Tracking
+ * ========================================================================== */
+
+int64_t async_query_get_id(const AsyncQuery *query) {
+  return query ? query->query_id : 0;
+}
+
+bool async_get_active_queries(AsyncQueue *queue, int conn_id,
+                              AsyncQueryInfo **out_info, size_t *out_count) {
+  if (!queue || !out_info || !out_count) {
+    return false;
+  }
+
+  *out_info = NULL;
+  *out_count = 0;
+
+  pthread_mutex_lock(&queue->mutex);
+
+  /* Count matching queries */
+  size_t count = 0;
+  for (AsyncQuery *q = queue->active_head; q; q = q->next) {
+    if (conn_id == 0 || q->conn_id == conn_id) {
+      count++;
+    }
+  }
+
+  if (count == 0) {
+    pthread_mutex_unlock(&queue->mutex);
+    return true;
+  }
+
+  /* Allocate result array */
+  AsyncQueryInfo *info = safe_calloc(count, sizeof(AsyncQueryInfo));
+  if (!info) {
+    pthread_mutex_unlock(&queue->mutex);
+    return false;
+  }
+
+  /* Fill in query info */
+  size_t i = 0;
+  for (AsyncQuery *q = queue->active_head; q && i < count; q = q->next) {
+    if (conn_id == 0 || q->conn_id == conn_id) {
+      info[i].query_id = q->query_id;
+      info[i].conn_id = q->conn_id;
+      info[i].type = q->type;
+      info[i].status = q->status;
+      info[i].started_at_ms = q->started_at_ms;
+
+      /* Copy description (table name or SQL) */
+      if (q->sql) {
+        info[i].description = str_dup(q->sql);
+      } else if (q->table) {
+        info[i].description = str_dup(q->table);
+      }
+
+      i++;
+    }
+  }
+
+  pthread_mutex_unlock(&queue->mutex);
+
+  *out_info = info;
+  *out_count = i;
+  return true;
+}
+
+void async_query_info_free(AsyncQueryInfo *info, size_t count) {
+  if (!info) {
+    return;
+  }
+  for (size_t i = 0; i < count; i++) {
+    free(info[i].description);
+  }
+  free(info);
+}
+
+/* ==========================================================================
+ * Client Tracking
+ * ========================================================================== */
+
+void async_query_set_client(AsyncQuery *query, struct LacedClient *client) {
+  if (query) {
+    query->client = client;
+  }
+}
+
+struct LacedClient *async_query_get_client(const AsyncQuery *query) {
+  return query ? query->client : NULL;
 }

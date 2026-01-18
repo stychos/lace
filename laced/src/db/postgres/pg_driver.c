@@ -6,9 +6,9 @@
  * https://github.com/stychos/lace
  */
 
-#include "../../util/mem.h"
-#include "../../util/str.h"
-#include "../connstr.h"
+#include "util/mem.h"
+#include "util/str.h"
+#include "util/connstr.h"
 #include "../db.h"
 #include "../db_common.h"
 #include <ctype.h>

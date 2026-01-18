@@ -6,9 +6,9 @@
  * https://github.com/stychos/lace
  */
 
-#include "../../util/mem.h"
-#include "../../util/str.h"
-#include "../connstr.h"
+#include "util/mem.h"
+#include "util/str.h"
+#include "util/connstr.h"
 #include "../db.h"
 #include "../db_common.h"
 #include <ctype.h>
@@ -217,8 +217,17 @@ DbDriver mariadb_driver = {
     .library_cleanup = mysql_driver_library_cleanup,
 };
 
-/* Map MySQL field type to DbValueType */
-static DbValueType mysql_type_to_db_type(enum enum_field_types type) {
+/* Binary charset ID in MySQL/MariaDB */
+#define MYSQL_BINARY_CHARSET 63
+
+/* Map MySQL field type to DbValueType.
+ * For BLOB-like types, we need the charset to distinguish BLOB from TEXT.
+ * In MySQL/MariaDB, TEXT types (TINYTEXT, TEXT, MEDIUMTEXT, LONGTEXT) share
+ * the same type codes as BLOB types - the difference is the charset:
+ * - charset 63 (binary) = actual BLOB (binary data)
+ * - any other charset = TEXT (character data) */
+static DbValueType mysql_type_to_db_type(enum enum_field_types type,
+                                         unsigned int charsetnr) {
   switch (type) {
   case MYSQL_TYPE_TINY:
   case MYSQL_TYPE_SHORT:
@@ -238,7 +247,8 @@ static DbValueType mysql_type_to_db_type(enum enum_field_types type) {
   case MYSQL_TYPE_TINY_BLOB:
   case MYSQL_TYPE_MEDIUM_BLOB:
   case MYSQL_TYPE_LONG_BLOB:
-    return DB_TYPE_BLOB;
+    /* Check charset: binary = BLOB, otherwise it's TEXT */
+    return (charsetnr == MYSQL_BINARY_CHARSET) ? DB_TYPE_BLOB : DB_TYPE_TEXT;
 
   case MYSQL_TYPE_DATE:
   case MYSQL_TYPE_TIME:
@@ -275,7 +285,7 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
   }
 
   val.is_null = false;
-  DbValueType type = mysql_type_to_db_type(field->type);
+  DbValueType type = mysql_type_to_db_type(field->type, field->charsetnr);
 
   switch (type) {
   case DB_TYPE_INT: {
@@ -1063,7 +1073,8 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
 
   for (unsigned int i = 0; i < num_fields; i++) {
     rs->columns[i].name = str_dup(fields[i].name);
-    rs->columns[i].type = mysql_type_to_db_type(fields[i].type);
+    rs->columns[i].type =
+        mysql_type_to_db_type(fields[i].type, fields[i].charsetnr);
     rs->columns[i].nullable = !(fields[i].flags & NOT_NULL_FLAG);
     rs->columns[i].primary_key = (fields[i].flags & PRI_KEY_FLAG) != 0;
   }

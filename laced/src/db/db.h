@@ -9,7 +9,7 @@
 #ifndef LACE_DB_H
 #define LACE_DB_H
 
-#include "../util/str.h"
+#include "util/str.h"
 #include "db_types.h"
 #include <string.h>
 

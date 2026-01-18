@@ -99,4 +99,14 @@ bool laced_json_get_size(cJSON *params, const char *name, size_t *out);
  */
 bool laced_json_get_bool(cJSON *params, const char *name, bool *out);
 
+/*
+ * Get a 64-bit integer parameter from JSON object.
+ *
+ * @param params   JSON object
+ * @param name     Parameter name
+ * @param out      Output: int64_t value
+ * @return         true if found and is number, false otherwise
+ */
+bool laced_json_get_int64(cJSON *params, const char *name, int64_t *out);
+
 #endif /* LACED_JSON_H */

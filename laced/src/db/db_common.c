@@ -7,7 +7,7 @@
  */
 
 #include "db_common.h"
-#include "../util/mem.h"
+#include "util/mem.h"
 #include "db.h"
 #include <errno.h>
 #include <stdlib.h>

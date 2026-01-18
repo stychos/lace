@@ -12,7 +12,7 @@
 #ifndef LACE_DB_COMMON_H
 #define LACE_DB_COMMON_H
 
-#include "../util/str.h"
+#include "util/str.h"
 #include "db_types.h"
 #include <stdbool.h>
 #include <stddef.h>

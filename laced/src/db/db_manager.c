@@ -7,8 +7,8 @@
  */
 
 #include "../constants.h"
-#include "../util/str.h"
-#include "connstr.h"
+#include "util/str.h"
+#include "util/connstr.h"
 #include "db.h"
 #include <errno.h>
 #include <stdarg.h>

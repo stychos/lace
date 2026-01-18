@@ -46,6 +46,32 @@ extern "C" {
 typedef struct lace_client lace_client_t;
 
 /* ==========================================================================
+ * Connection Configuration
+ * ========================================================================== */
+
+/* Connection mode for client-daemon communication */
+typedef enum {
+  LACE_CONN_SPAWN,    /* Spawn dedicated daemon (default, current behavior) */
+  LACE_CONN_UNIX,     /* Connect to existing Unix socket */
+  LACE_CONN_TCP       /* Connect to existing TCP socket */
+} LaceConnMode;
+
+/* Client configuration for extended creation */
+typedef struct {
+  LaceConnMode mode;          /* Connection mode */
+  const char *socket_path;    /* Unix socket path (NULL = auto-detect) */
+  const char *host;           /* TCP host (NULL = localhost) */
+  int port;                   /* TCP port (0 = default 7433) */
+  const char *daemon_path;    /* Path to laced for spawn mode */
+  bool spawn_if_missing;      /* Spawn daemon if socket not found */
+  int connect_timeout_ms;     /* Connection timeout (0 = default 5000) */
+} LaceClientConfig;
+
+/* Default values for config */
+#define LACE_DEFAULT_PORT 7433
+#define LACE_DEFAULT_CONNECT_TIMEOUT_MS 5000
+
+/* ==========================================================================
  * Client Lifecycle
  * ========================================================================== */
 
@@ -56,6 +82,32 @@ typedef struct lace_client lace_client_t;
  * @return             Client handle, or NULL on failure (check errno)
  */
 lace_client_t *lace_client_create(const char *daemon_path);
+
+/*
+ * Create a new client with extended configuration.
+ * Allows connecting to existing daemon via socket instead of spawning.
+ *
+ * @param config  Client configuration (NULL for defaults, same as lace_client_create(NULL))
+ * @return        Client handle, or NULL on failure (check lace_client_error)
+ */
+lace_client_t *lace_client_create_with_config(const LaceClientConfig *config);
+
+/*
+ * Connect to an existing daemon via Unix socket.
+ *
+ * @param socket_path  Path to Unix socket (NULL = auto-detect)
+ * @return             Client handle, or NULL on failure
+ */
+lace_client_t *lace_client_connect(const char *socket_path);
+
+/*
+ * Connect to an existing daemon via TCP.
+ *
+ * @param host  Hostname or IP (NULL = localhost)
+ * @param port  Port number (0 = default 7433)
+ * @return      Client handle, or NULL on failure
+ */
+lace_client_t *lace_client_connect_tcp(const char *host, int port);
 
 /*
  * Destroy client and terminate the daemon process.
@@ -327,6 +379,26 @@ void lace_set_timeout(lace_client_t *client, int timeout_ms);
  * @return        Timeout in milliseconds
  */
 int lace_get_timeout(const lace_client_t *client);
+
+/* ==========================================================================
+ * Daemon Discovery
+ * ========================================================================== */
+
+/*
+ * Get the default Unix socket path for the daemon.
+ * Checks: $XDG_RUNTIME_DIR/laced.sock, /tmp/laced-{uid}.sock
+ *
+ * @return  Allocated string with socket path (caller must free), or NULL
+ */
+char *lace_get_default_socket_path(void);
+
+/*
+ * Check if a daemon is running at the given socket path.
+ *
+ * @param socket_path  Path to check (NULL = auto-detect)
+ * @return             true if daemon is responding, false otherwise
+ */
+bool lace_daemon_is_running(const char *socket_path);
 
 #ifdef __cplusplus
 }

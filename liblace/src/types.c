@@ -7,35 +7,11 @@
  */
 
 #include "../include/types.h"
+#include "../include/util/mem.h"
+#include "../include/util/str.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* ==========================================================================
- * Internal Helpers
- * ========================================================================== */
-
-/* Safe string duplication */
-static char *lace_strdup(const char *s) {
-  if (!s) return NULL;
-  size_t len = strlen(s);
-  char *copy = malloc(len + 1);
-  if (copy) {
-    memcpy(copy, s, len + 1);
-  }
-  return copy;
-}
-
-/* Safe string duplication with length */
-static char *lace_strndup(const char *s, size_t n) {
-  if (!s) return NULL;
-  char *copy = malloc(n + 1);
-  if (copy) {
-    memcpy(copy, s, n);
-    copy[n] = '\0';
-  }
-  return copy;
-}
 
 /* ==========================================================================
  * Type Name Functions
@@ -140,13 +116,9 @@ LaceValue lace_value_text(const char *str) {
   LaceValue v = {0};
   v.type = LACE_TYPE_TEXT;
   if (str) {
-    v.text.data = lace_strdup(str);
-    if (v.text.data) {
-      v.text.len = strlen(str);
-      v.is_null = false;
-    } else {
-      v.is_null = true;
-    }
+    v.text.data = str_dup(str);
+    v.text.len = strlen(str);
+    v.is_null = false;
   } else {
     v.is_null = true;
   }
@@ -157,13 +129,9 @@ LaceValue lace_value_text_len(const char *str, size_t len) {
   LaceValue v = {0};
   v.type = LACE_TYPE_TEXT;
   if (str) {
-    v.text.data = lace_strndup(str, len);
-    if (v.text.data) {
-      v.text.len = len;
-      v.is_null = false;
-    } else {
-      v.is_null = true;
-    }
+    v.text.data = str_ndup(str, len);
+    v.text.len = len;
+    v.is_null = false;
   } else {
     v.is_null = true;
   }
@@ -174,14 +142,10 @@ LaceValue lace_value_blob(const uint8_t *data, size_t len) {
   LaceValue v = {0};
   v.type = LACE_TYPE_BLOB;
   if (data && len > 0) {
-    v.blob.data = malloc(len);
-    if (v.blob.data) {
-      memcpy(v.blob.data, data, len);
-      v.blob.len = len;
-      v.is_null = false;
-    } else {
-      v.is_null = true;
-    }
+    v.blob.data = safe_malloc(len);
+    memcpy(v.blob.data, data, len);
+    v.blob.len = len;
+    v.is_null = false;
   } else {
     v.is_null = true;
   }
@@ -216,26 +180,18 @@ LaceValue lace_value_copy(const LaceValue *src) {
   case LACE_TYPE_DATE:
   case LACE_TYPE_TIMESTAMP:
     if (src->text.data) {
-      v.text.data = malloc(src->text.len + 1);
-      if (v.text.data) {
-        memcpy(v.text.data, src->text.data, src->text.len);
-        v.text.data[src->text.len] = '\0';
-        v.text.len = src->text.len;
-      } else {
-        v.is_null = true;
-      }
+      v.text.data = safe_malloc(src->text.len + 1);
+      memcpy(v.text.data, src->text.data, src->text.len);
+      v.text.data[src->text.len] = '\0';
+      v.text.len = src->text.len;
     }
     break;
 
   case LACE_TYPE_BLOB:
     if (src->blob.data && src->blob.len > 0) {
-      v.blob.data = malloc(src->blob.len);
-      if (v.blob.data) {
-        memcpy(v.blob.data, src->blob.data, src->blob.len);
-        v.blob.len = src->blob.len;
-      } else {
-        v.is_null = true;
-      }
+      v.blob.data = safe_malloc(src->blob.len);
+      memcpy(v.blob.data, src->blob.data, src->blob.len);
+      v.blob.len = src->blob.len;
     }
     break;
 
@@ -264,36 +220,35 @@ LaceValue lace_value_copy(const LaceValue *src) {
 
 char *lace_value_to_string(const LaceValue *val) {
   if (!val || val->is_null) {
-    return lace_strdup("NULL");
+    return str_dup("NULL");
   }
 
   char buf[64];
 
   switch (val->type) {
   case LACE_TYPE_NULL:
-    return lace_strdup("NULL");
+    return str_dup("NULL");
 
   case LACE_TYPE_INT:
     snprintf(buf, sizeof(buf), "%lld", (long long)val->int_val);
-    return lace_strdup(buf);
+    return str_dup(buf);
 
   case LACE_TYPE_FLOAT:
     snprintf(buf, sizeof(buf), "%g", val->float_val);
-    return lace_strdup(buf);
+    return str_dup(buf);
 
   case LACE_TYPE_TEXT:
-    return val->text.data ? lace_strdup(val->text.data) : lace_strdup("");
+    return val->text.data ? str_dup(val->text.data) : str_dup("");
 
   case LACE_TYPE_BLOB:
     if (!val->blob.data || val->blob.len == 0) {
-      return lace_strdup("x''");
+      return str_dup("x''");
     }
     /* Return hex representation for first 32 bytes */
     {
       size_t display_len = val->blob.len > 32 ? 32 : val->blob.len;
       size_t hex_len = 3 + display_len * 2 + (val->blob.len > 32 ? 3 : 0) + 1;
-      char *hex = malloc(hex_len);
-      if (!hex) return lace_strdup("x'...'");
+      char *hex = safe_malloc(hex_len);
 
       size_t pos = 0;
       hex[pos++] = 'x';
@@ -303,7 +258,7 @@ char *lace_value_to_string(const LaceValue *val) {
         pos += 2;
       }
       if (val->blob.len > 32) {
-        strcpy(hex + pos, "...");
+        memcpy(hex + pos, "...", 3);
         pos += 3;
       }
       hex[pos++] = '\'';
@@ -312,14 +267,14 @@ char *lace_value_to_string(const LaceValue *val) {
     }
 
   case LACE_TYPE_BOOL:
-    return lace_strdup(val->bool_val ? "true" : "false");
+    return str_dup(val->bool_val ? "true" : "false");
 
   case LACE_TYPE_DATE:
   case LACE_TYPE_TIMESTAMP:
-    return val->text.data ? lace_strdup(val->text.data) : lace_strdup("");
+    return val->text.data ? str_dup(val->text.data) : str_dup("");
 
   default:
-    return lace_strdup("???");
+    return str_dup("???");
   }
 }
 

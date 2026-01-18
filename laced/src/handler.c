@@ -9,7 +9,8 @@
 #include "handler.h"
 #include "async.h"
 #include "json.h"
-#include "util/str.h"
+#include <util/mem.h>
+#include <util/str.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,16 +19,16 @@
  * ========================================================================== */
 
 #define HANDLER_OK(json_result) \
-  (LacedHandlerResult) { .result = (json_result), .error_code = 0, .error_message = NULL, .deferred = false }
+  (LacedHandlerResult) { .result = (json_result), .error_code = 0, .error_message = NULL, .deferred = false, .deferred_query = NULL }
 
 #define HANDLER_ERROR(code, msg) \
-  (LacedHandlerResult) { .result = NULL, .error_code = (code), .error_message = str_dup(msg), .deferred = false }
+  (LacedHandlerResult) { .result = NULL, .error_code = (code), .error_message = str_dup(msg), .deferred = false, .deferred_query = NULL }
 
 #define HANDLER_ERROR_DYN(code, msg) \
-  (LacedHandlerResult) { .result = NULL, .error_code = (code), .error_message = (msg), .deferred = false }
+  (LacedHandlerResult) { .result = NULL, .error_code = (code), .error_message = (msg), .deferred = false, .deferred_query = NULL }
 
-#define HANDLER_DEFERRED() \
-  (LacedHandlerResult) { .result = NULL, .error_code = 0, .error_message = NULL, .deferred = true }
+#define HANDLER_DEFERRED(q) \
+  (LacedHandlerResult) { .result = NULL, .error_code = 0, .error_message = NULL, .deferred = true, .deferred_query = (q) }
 
 /* JSON-RPC error codes */
 #define JSONRPC_INVALID_PARAMS -32602
@@ -224,11 +225,11 @@ static LacedHandlerResult handle_schema(LacedSession *session,
  * Query Handlers
  * ========================================================================== */
 
-/* query: Execute paginated table query (async) */
-static LacedHandlerResult handle_query(LacedSession *session,
-                                       AsyncQueue *async_queue,
-                                       cJSON *params,
-                                       cJSON *request_id) {
+/* data: Execute paginated table query (async) */
+static LacedHandlerResult handle_data(LacedSession *session,
+                                      AsyncQueue *async_queue,
+                                      cJSON *params,
+                                      cJSON *request_id) {
   int conn_id = 0;
   const char *table = NULL;
   size_t offset = 0;
@@ -265,7 +266,7 @@ static LacedHandlerResult handle_query(LacedSession *session,
     if (!query) {
       return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start async query");
     }
-    return HANDLER_DEFERRED();
+    return HANDLER_DEFERRED(query);
   }
 
   /* Fallback: synchronous execution if no async queue */
@@ -322,7 +323,7 @@ static LacedHandlerResult handle_count(LacedSession *session,
     if (!query) {
       return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start async count");
     }
-    return HANDLER_DEFERRED();
+    return HANDLER_DEFERRED(query);
   }
 
   /* Fallback: synchronous execution if no async queue */
@@ -344,11 +345,11 @@ static LacedHandlerResult handle_count(LacedSession *session,
   return HANDLER_OK(result);
 }
 
-/* exec: Execute raw SQL (async) */
-static LacedHandlerResult handle_exec(LacedSession *session,
-                                      AsyncQueue *async_queue,
-                                      cJSON *params,
-                                      cJSON *request_id) {
+/* query: Execute raw SQL (async) */
+static LacedHandlerResult handle_query(LacedSession *session,
+                                       AsyncQueue *async_queue,
+                                       cJSON *params,
+                                       cJSON *request_id) {
   int conn_id = 0;
   const char *sql = NULL;
 
@@ -371,7 +372,7 @@ static LacedHandlerResult handle_exec(LacedSession *session,
     if (!query) {
       return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start async exec");
     }
-    return HANDLER_DEFERRED();
+    return HANDLER_DEFERRED(query);
   }
 
   /* Fallback: synchronous execution if no async queue */
@@ -434,7 +435,7 @@ static LacedHandlerResult handle_exec(LacedSession *session,
  * Mutation Handlers
  * ========================================================================== */
 
-/* update: Update a cell value */
+/* update: Update one or more cell values in a row */
 static LacedHandlerResult handle_update(LacedSession *session,
                                         AsyncQueue *async_queue,
                                         cJSON *params,
@@ -443,7 +444,6 @@ static LacedHandlerResult handle_update(LacedSession *session,
   (void)request_id;
   int conn_id = 0;
   const char *table = NULL;
-  const char *column = NULL;
 
   if (!laced_json_get_int(params, "conn_id", &conn_id)) {
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
@@ -451,42 +451,29 @@ static LacedHandlerResult handle_update(LacedSession *session,
   if (!laced_json_get_string(params, "table", &table)) {
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'table' parameter");
   }
-  if (!laced_json_get_string(params, "column", &column)) {
-    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'column' parameter");
-  }
 
   DbConnection *conn = laced_session_get_connection(session, conn_id);
   if (!conn) {
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Invalid connection ID");
   }
 
-  /* Get value */
-  cJSON *value_json = cJSON_GetObjectItem(params, "value");
-  DbValue value;
-  if (!laced_json_to_value(value_json, &value)) {
-    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Invalid 'value' parameter");
-  }
-
   /* Get primary key */
   cJSON *pk_json = cJSON_GetObjectItem(params, "pk");
   if (!pk_json || !cJSON_IsArray(pk_json)) {
-    db_value_free(&value);
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'pk' array parameter");
   }
 
   int pk_size = cJSON_GetArraySize(pk_json);
   if (pk_size == 0) {
-    db_value_free(&value);
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Empty 'pk' array");
   }
 
   /* Parse PK columns and values */
-  const char **pk_cols = calloc((size_t)pk_size, sizeof(char *));
-  DbValue *pk_vals = calloc((size_t)pk_size, sizeof(DbValue));
+  const char **pk_cols = safe_calloc((size_t)pk_size, sizeof(char *));
+  DbValue *pk_vals = safe_calloc((size_t)pk_size, sizeof(DbValue));
   if (!pk_cols || !pk_vals) {
     free(pk_cols);
     free(pk_vals);
-    db_value_free(&value);
     return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Memory allocation failed");
   }
 
@@ -516,14 +503,72 @@ static LacedHandlerResult handle_update(LacedSession *session,
     }
     free(pk_cols);
     free(pk_vals);
-    db_value_free(&value);
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Invalid 'pk' format");
   }
 
-  /* Perform update */
+  /* Check for multi-cell update (updates array) or single-cell (column/value) */
+  cJSON *updates_json = cJSON_GetObjectItem(params, "updates");
+  const char *single_column = NULL;
+  laced_json_get_string(params, "column", &single_column);
+
+  bool success = true;
   char *err = NULL;
-  bool success = db_update_cell(conn, table, pk_cols, pk_vals, (size_t)pk_size,
-                                column, &value, &err);
+
+  if (updates_json && cJSON_IsArray(updates_json)) {
+    /* Multi-cell update: iterate through updates array */
+    int num_updates = cJSON_GetArraySize(updates_json);
+    for (int i = 0; i < num_updates && success; i++) {
+      cJSON *update_item = cJSON_GetArrayItem(updates_json, i);
+      if (!update_item || !cJSON_IsObject(update_item)) {
+        success = false;
+        err = str_dup("Invalid update item format");
+        break;
+      }
+
+      cJSON *col_json = cJSON_GetObjectItem(update_item, "column");
+      cJSON *val_json = cJSON_GetObjectItem(update_item, "value");
+      if (!col_json || !cJSON_IsString(col_json)) {
+        success = false;
+        err = str_dup("Missing 'column' in update item");
+        break;
+      }
+
+      DbValue value;
+      if (!laced_json_to_value(val_json, &value)) {
+        success = false;
+        err = str_dup("Invalid 'value' in update item");
+        break;
+      }
+
+      success = db_update_cell(conn, table, pk_cols, pk_vals, (size_t)pk_size,
+                               col_json->valuestring, &value, &err);
+      db_value_free(&value);
+    }
+  } else if (single_column) {
+    /* Single-cell update (backwards compatible) */
+    cJSON *value_json = cJSON_GetObjectItem(params, "value");
+    DbValue value;
+    if (!laced_json_to_value(value_json, &value)) {
+      for (int i = 0; i < pk_size; i++) {
+        db_value_free(&pk_vals[i]);
+      }
+      free(pk_cols);
+      free(pk_vals);
+      return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Invalid 'value' parameter");
+    }
+
+    success = db_update_cell(conn, table, pk_cols, pk_vals, (size_t)pk_size,
+                             single_column, &value, &err);
+    db_value_free(&value);
+  } else {
+    for (int i = 0; i < pk_size; i++) {
+      db_value_free(&pk_vals[i]);
+    }
+    free(pk_cols);
+    free(pk_vals);
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS,
+                         "Missing 'column' or 'updates' parameter");
+  }
 
   /* Cleanup */
   for (int i = 0; i < pk_size; i++) {
@@ -531,7 +576,6 @@ static LacedHandlerResult handle_update(LacedSession *session,
   }
   free(pk_cols);
   free(pk_vals);
-  db_value_free(&value);
 
   if (!success) {
     return HANDLER_ERROR_DYN(JSONRPC_INTERNAL_ERROR,
@@ -576,8 +620,8 @@ static LacedHandlerResult handle_delete(LacedSession *session,
   }
 
   /* Parse PK columns and values */
-  const char **pk_cols = calloc((size_t)pk_size, sizeof(char *));
-  DbValue *pk_vals = calloc((size_t)pk_size, sizeof(DbValue));
+  const char **pk_cols = safe_calloc((size_t)pk_size, sizeof(char *));
+  DbValue *pk_vals = safe_calloc((size_t)pk_size, sizeof(DbValue));
   if (!pk_cols || !pk_vals) {
     free(pk_cols);
     free(pk_vals);
@@ -700,28 +744,106 @@ static LacedHandlerResult handle_shutdown(LacedSession *session,
   return HANDLER_OK(cJSON_CreateObject());
 }
 
-/* cancel: Cancel a running query on a connection */
+/* queries: List active queries for a connection */
+static LacedHandlerResult handle_queries(LacedSession *session,
+                                         AsyncQueue *async_queue,
+                                         cJSON *params,
+                                         cJSON *request_id) {
+  (void)session;
+  (void)request_id;
+  int conn_id = 0;
+
+  /* conn_id is optional - 0 means all connections */
+  laced_json_get_int(params, "conn_id", &conn_id);
+
+  if (!async_queue) {
+    /* No async queue - return empty array */
+    return HANDLER_OK(cJSON_CreateArray());
+  }
+
+  AsyncQueryInfo *info = NULL;
+  size_t count = 0;
+  if (!async_get_active_queries(async_queue, conn_id, &info, &count)) {
+    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to get active queries");
+  }
+
+  cJSON *result = cJSON_CreateArray();
+  if (result) {
+    for (size_t i = 0; i < count; i++) {
+      cJSON *query = cJSON_CreateObject();
+      if (query) {
+        cJSON_AddNumberToObject(query, "query_id", (double)info[i].query_id);
+        cJSON_AddNumberToObject(query, "conn_id", info[i].conn_id);
+        const char *type_str;
+        switch (info[i].type) {
+        case ASYNC_QUERY_TYPE_QUERY: type_str = "data"; break;
+        case ASYNC_QUERY_TYPE_EXEC: type_str = "query"; break;
+        case ASYNC_QUERY_TYPE_COUNT: type_str = "count"; break;
+        default: type_str = "unknown"; break;
+        }
+        cJSON_AddStringToObject(query, "type", type_str);
+        const char *status_str;
+        switch (info[i].status) {
+        case ASYNC_QUERY_PENDING: status_str = "pending"; break;
+        case ASYNC_QUERY_RUNNING: status_str = "running"; break;
+        case ASYNC_QUERY_COMPLETED: status_str = "completed"; break;
+        case ASYNC_QUERY_CANCELLED: status_str = "cancelled"; break;
+        case ASYNC_QUERY_ERROR: status_str = "error"; break;
+        default: status_str = "unknown"; break;
+        }
+        cJSON_AddStringToObject(query, "status", status_str);
+        if (info[i].description) {
+          cJSON_AddStringToObject(query, "description", info[i].description);
+        }
+        cJSON_AddNumberToObject(query, "started_at_ms", (double)info[i].started_at_ms);
+        cJSON_AddItemToArray(result, query);
+      }
+    }
+  }
+
+  async_query_info_free(info, count);
+  return HANDLER_OK(result);
+}
+
+/* cancel: Cancel a running query by connection or query ID */
 static LacedHandlerResult handle_cancel(LacedSession *session,
                                         AsyncQueue *async_queue,
                                         cJSON *params,
                                         cJSON *request_id) {
   (void)request_id;
   int conn_id = 0;
-  if (!laced_json_get_int(params, "conn_id", &conn_id)) {
-    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
+  int64_t query_id = 0;
+  bool has_conn_id = laced_json_get_int(params, "conn_id", &conn_id);
+  bool has_query_id = laced_json_get_int64(params, "query_id", &query_id);
+
+  if (!has_conn_id && !has_query_id) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS,
+                         "Missing 'conn_id' or 'query_id' parameter");
   }
 
-  /* Try async cancellation first (for queries running in background threads) */
-  if (async_queue) {
-    async_cancel_by_conn_id(async_queue, session, conn_id);
+  bool cancelled = false;
+
+  if (has_query_id && async_queue) {
+    /* Cancel by specific query ID */
+    cancelled = async_cancel_by_query_id(async_queue, session, query_id);
+  } else if (has_conn_id) {
+    /* Cancel by connection ID (all queries on that connection) */
+    if (async_queue) {
+      (void)async_cancel_by_conn_id(async_queue, session, conn_id);
+    }
+    /* Also call session cancel directly (for synchronous operations) */
+    char *err = NULL;
+    laced_session_cancel_query(session, conn_id, &err);
+    free(err);
+    /* Always report cancelled for conn_id mode since we attempt all methods */
+    cancelled = true;
   }
 
-  /* Also call session cancel directly (for synchronous operations) */
-  char *err = NULL;
-  laced_session_cancel_query(session, conn_id, &err);
-  free(err);
-
-  return HANDLER_OK(cJSON_CreateObject());
+  cJSON *result = cJSON_CreateObject();
+  if (result) {
+    cJSON_AddBoolToObject(result, "cancelled", cancelled);
+  }
+  return HANDLER_OK(result);
 }
 
 /* ==========================================================================
@@ -749,9 +871,9 @@ static struct {
     {"schema", handle_schema},
 
     /* Data queries */
-    {"query", handle_query},
+    {"data", handle_data},
     {"count", handle_count},
-    {"exec", handle_exec},
+    {"query", handle_query},
 
     /* Data mutations */
     {"update", handle_update},
@@ -762,6 +884,7 @@ static struct {
     {"ping", handle_ping},
     {"version", handle_version},
     {"shutdown", handle_shutdown},
+    {"queries", handle_queries},
     {"cancel", handle_cancel},
 
     {NULL, NULL}  /* Sentinel */

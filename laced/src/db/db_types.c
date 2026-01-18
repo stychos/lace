@@ -7,8 +7,8 @@
  */
 
 #include "db_types.h"
-#include "../util/mem.h"
-#include "../util/str.h"
+#include "util/mem.h"
+#include "util/str.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -3,15 +3,17 @@
 
 CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -g
-CFLAGS += -I. -I../../liblace/include -I/usr/include/cjson
+CFLAGS += -Isrc -I../../liblace/include -I/usr/include/cjson
 LDFLAGS = -L../../liblace/build
 LIBS = -llace -lncursesw -lmenuw -lcjson
 
-# Build directory
+# Build and source directories
 BUILD_DIR = build
+SRC_DIR = src
 
-# Source directories
-SRC_DIRS = . app async config core platform/posix util viewmodel views
+# Source directories relative to SRC_DIR
+SRC_SUBDIRS = . app async config core platform/posix viewmodel views
+SRC_DIRS = $(addprefix $(SRC_DIR)/,$(SRC_SUBDIRS))
 
 # Find all source files
 SRCS := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))

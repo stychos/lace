@@ -11,8 +11,8 @@ ARFLAGS = rcs
 # Build directory
 BUILD_DIR = build
 
-# Source files
-SRCS = $(wildcard src/*.c)
+# Source files (including subdirectories)
+SRCS = $(wildcard src/*.c) $(wildcard src/util/*.c) $(wildcard src/config/*.c)
 OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 DEPS = $(OBJS:.o=.d)
 
@@ -45,9 +45,9 @@ $(TARGET_SHARED): $(OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(SHARED_FLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
-# Compile source files
+# Compile source files (handles subdirectories)
 $(BUILD_DIR)/%.o: src/%.c
-	@mkdir -p $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 # Include dependency files

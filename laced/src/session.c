@@ -7,7 +7,8 @@
  */
 
 #include "session.h"
-#include "util/str.h"
+#include <util/mem.h>
+#include <util/str.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,7 +36,7 @@ struct LacedSession {
  * ========================================================================== */
 
 LacedSession *laced_session_create(void) {
-  LacedSession *session = calloc(1, sizeof(LacedSession));
+  LacedSession *session = safe_calloc(1, sizeof(LacedSession));
   if (!session) {
     return NULL;
   }
@@ -204,7 +205,7 @@ bool laced_session_list_connections(LacedSession *session, LacedConnInfo **info,
     return true;
   }
 
-  LacedConnInfo *result = calloc(num_conns, sizeof(LacedConnInfo));
+  LacedConnInfo *result = safe_calloc(num_conns, sizeof(LacedConnInfo));
   if (!result) {
     return false;
   }

@@ -7,6 +7,8 @@
  */
 
 #include "../include/lace.h"
+#include "../include/util/mem.h"
+#include "../include/util/str.h"
 #include "rpc.h"
 #include <errno.h>
 #include <signal.h>
@@ -21,14 +23,21 @@
 
 /* Client structure */
 struct lace_client {
-  pid_t daemon_pid;       /* Daemon process ID */
+  pid_t daemon_pid;       /* Daemon process ID (0 if connected to socket) */
   FILE *to_daemon;        /* Write to daemon stdin */
   FILE *from_daemon;      /* Read from daemon stdout */
+  int socket_fd;          /* Socket fd (-1 if using pipes) */
+  LaceConnMode conn_mode; /* Connection mode */
   int timeout_ms;         /* Request timeout */
   char *last_error;       /* Last error message */
   int64_t next_id;        /* Next request ID */
   bool connected;         /* Whether daemon is running */
 };
+
+/* Socket utilities (implemented in socket.c) */
+extern int lace_connect_unix(const char *path, int timeout_ms);
+extern int lace_connect_tcp(const char *host, int port, int timeout_ms);
+extern int lace_find_daemon_socket(void);
 
 /* ==========================================================================
  * Internal Helpers
@@ -37,7 +46,25 @@ struct lace_client {
 /* Set error message */
 static void set_error(lace_client_t *client, const char *msg) {
   free(client->last_error);
-  client->last_error = msg ? strdup(msg) : NULL;
+  client->last_error = msg ? str_dup(msg) : NULL;
+}
+
+/* Get directory of the current executable */
+static char *get_exe_dir(void) {
+  char exe_path[4096];
+  ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+  if (len <= 0) {
+    return NULL;
+  }
+  exe_path[len] = '\0';
+
+  /* Find last slash to get directory */
+  char *last_slash = strrchr(exe_path, '/');
+  if (last_slash) {
+    *last_slash = '\0';
+    return str_dup(exe_path);
+  }
+  return NULL;
 }
 
 /* Find daemon executable */
@@ -45,12 +72,37 @@ static char *find_daemon(const char *daemon_path) {
   if (daemon_path) {
     /* Check if the provided path exists and is executable */
     if (access(daemon_path, X_OK) == 0) {
-      return strdup(daemon_path);
+      return str_dup(daemon_path);
     }
     return NULL;
   }
 
-  /* Search in common locations */
+  /* First, try paths relative to the executable */
+  char *exe_dir = get_exe_dir();
+  if (exe_dir) {
+    /* Search paths relative to executable directory */
+    const char *exe_relative_paths[] = {
+        "../../../laced/build/laced",  /* tui/ncurses/build/ -> laced/build/ */
+        "../../laced/build/laced",     /* tui/build/ -> laced/build/ */
+        "../laced/build/laced",        /* Same level as laced/ */
+        "./laced",                     /* Same directory as executable */
+        NULL
+    };
+
+    for (int i = 0; exe_relative_paths[i]; i++) {
+      char full_path[4096];
+      snprintf(full_path, sizeof(full_path), "%s/%s", exe_dir, exe_relative_paths[i]);
+      if (access(full_path, X_OK) == 0) {
+        free(exe_dir);
+        /* Resolve to absolute path */
+        char *real = realpath(full_path, NULL);
+        return real ? real : str_dup(full_path);
+      }
+    }
+    free(exe_dir);
+  }
+
+  /* Search in common locations relative to CWD */
   const char *search_paths[] = {
       "./laced/build/laced",      /* Development build */
       "./build/laced",            /* Local build */
@@ -63,14 +115,14 @@ static char *find_daemon(const char *daemon_path) {
 
   for (int i = 0; search_paths[i]; i++) {
     if (access(search_paths[i], X_OK) == 0) {
-      return strdup(search_paths[i]);
+      return str_dup(search_paths[i]);
     }
   }
 
   /* Try PATH */
   const char *path_env = getenv("PATH");
   if (path_env) {
-    char *path_copy = strdup(path_env);
+    char *path_copy = str_dup(path_env);
     if (path_copy) {
       char *saveptr;
       char *dir = strtok_r(path_copy, ":", &saveptr);
@@ -79,7 +131,7 @@ static char *find_daemon(const char *daemon_path) {
         snprintf(full_path, sizeof(full_path), "%s/laced", dir);
         if (access(full_path, X_OK) == 0) {
           free(path_copy);
-          return strdup(full_path);
+          return str_dup(full_path);
         }
         dir = strtok_r(NULL, ":", &saveptr);
       }
@@ -191,13 +243,12 @@ static bool spawn_daemon(lace_client_t *client, const char *daemon_path) {
  * ========================================================================== */
 
 lace_client_t *lace_client_create(const char *daemon_path) {
-  lace_client_t *client = calloc(1, sizeof(lace_client_t));
-  if (!client) {
-    return NULL;
-  }
+  lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
 
   client->timeout_ms = DEFAULT_TIMEOUT_MS;
   client->next_id = 1;
+  client->socket_fd = -1;
+  client->conn_mode = LACE_CONN_SPAWN;
 
   if (!spawn_daemon(client, daemon_path)) {
     /* Error already set in spawn_daemon */
@@ -208,37 +259,161 @@ lace_client_t *lace_client_create(const char *daemon_path) {
   return client;
 }
 
+/* Create client from existing socket fd */
+static lace_client_t *create_from_socket(int fd, LaceConnMode mode) {
+  if (fd < 0) {
+    return NULL;
+  }
+
+  lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
+
+  client->timeout_ms = DEFAULT_TIMEOUT_MS;
+  client->next_id = 1;
+  client->socket_fd = fd;
+  client->conn_mode = mode;
+  client->daemon_pid = 0;
+
+  /* Create FILE streams for the socket */
+  int fd_read = dup(fd);
+  if (fd_read < 0) {
+    close(fd);
+    free(client);
+    return NULL;
+  }
+
+  client->to_daemon = fdopen(fd, "w");
+  client->from_daemon = fdopen(fd_read, "r");
+
+  if (!client->to_daemon || !client->from_daemon) {
+    if (client->to_daemon) fclose(client->to_daemon);
+    if (client->from_daemon) fclose(client->from_daemon);
+    else close(fd_read);
+    if (!client->to_daemon) close(fd);
+    free(client);
+    return NULL;
+  }
+
+  /* Disable buffering for immediate communication */
+  setvbuf(client->to_daemon, NULL, _IONBF, 0);
+  setvbuf(client->from_daemon, NULL, _IONBF, 0);
+
+  client->connected = true;
+  return client;
+}
+
+lace_client_t *lace_client_create_with_config(const LaceClientConfig *config) {
+  if (!config) {
+    return lace_client_create(NULL);
+  }
+
+  switch (config->mode) {
+  case LACE_CONN_SPAWN:
+    return lace_client_create(config->daemon_path);
+
+  case LACE_CONN_UNIX: {
+    int fd = lace_connect_unix(config->socket_path, config->connect_timeout_ms);
+    if (fd < 0 && config->spawn_if_missing) {
+      /* TODO: Spawn daemon with --unix and retry connection */
+      return NULL;
+    }
+    if (fd < 0) {
+      lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
+      set_error(client, "Failed to connect to Unix socket");
+      return client;
+    }
+    return create_from_socket(fd, LACE_CONN_UNIX);
+  }
+
+  case LACE_CONN_TCP: {
+    int fd = lace_connect_tcp(config->host, config->port, config->connect_timeout_ms);
+    if (fd < 0) {
+      lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
+      set_error(client, "Failed to connect to TCP socket");
+      return client;
+    }
+    return create_from_socket(fd, LACE_CONN_TCP);
+  }
+  }
+
+  return NULL;
+}
+
+lace_client_t *lace_client_connect(const char *socket_path) {
+  char *path = NULL;
+  bool allocated = false;
+
+  if (socket_path) {
+    path = (char *)socket_path;
+  } else {
+    path = lace_get_default_socket_path();
+    if (!path) {
+      return NULL;
+    }
+    allocated = true;
+  }
+
+  int fd = lace_connect_unix(path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+  if (allocated) {
+    free(path);
+  }
+
+  if (fd < 0) {
+    return NULL;
+  }
+
+  return create_from_socket(fd, LACE_CONN_UNIX);
+}
+
+lace_client_t *lace_client_connect_tcp(const char *host, int port) {
+  int fd = lace_connect_tcp(host, port, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+  if (fd < 0) {
+    return NULL;
+  }
+
+  return create_from_socket(fd, LACE_CONN_TCP);
+}
+
 void lace_client_destroy(lace_client_t *client) {
   if (!client) {
     return;
   }
 
-  if (client->connected && client->daemon_pid > 0) {
-    /* Try graceful shutdown first */
-    if (client->to_daemon) {
-      lace_shutdown(client);
-    }
+  if (client->connected) {
+    if (client->conn_mode == LACE_CONN_SPAWN && client->daemon_pid > 0) {
+      /* Spawned daemon: try graceful shutdown first */
+      if (client->to_daemon) {
+        lace_shutdown(client);
+      }
 
-    /* Close streams */
-    if (client->to_daemon) {
-      fclose(client->to_daemon);
-    }
-    if (client->from_daemon) {
-      fclose(client->from_daemon);
-    }
+      /* Close streams */
+      if (client->to_daemon) {
+        fclose(client->to_daemon);
+      }
+      if (client->from_daemon) {
+        fclose(client->from_daemon);
+      }
 
-    /* Wait for daemon to exit, with timeout */
-    int status;
-    int wait_result = waitpid(client->daemon_pid, &status, WNOHANG);
-    if (wait_result == 0) {
-      /* Daemon still running, send SIGTERM */
-      kill(client->daemon_pid, SIGTERM);
-      usleep(100000); /* 100ms */
-      wait_result = waitpid(client->daemon_pid, &status, WNOHANG);
+      /* Wait for daemon to exit, with timeout */
+      int status;
+      int wait_result = waitpid(client->daemon_pid, &status, WNOHANG);
       if (wait_result == 0) {
-        /* Still running, force kill */
-        kill(client->daemon_pid, SIGKILL);
-        waitpid(client->daemon_pid, &status, 0);
+        /* Daemon still running, send SIGTERM */
+        kill(client->daemon_pid, SIGTERM);
+        usleep(100000); /* 100ms */
+        wait_result = waitpid(client->daemon_pid, &status, WNOHANG);
+        if (wait_result == 0) {
+          /* Still running, force kill */
+          kill(client->daemon_pid, SIGKILL);
+          waitpid(client->daemon_pid, &status, 0);
+        }
+      }
+    } else {
+      /* Socket connection: just close the streams (don't shutdown daemon) */
+      if (client->to_daemon) {
+        fclose(client->to_daemon);
+      }
+      if (client->from_daemon) {
+        fclose(client->from_daemon);
       }
     }
   }
@@ -362,11 +537,7 @@ int lace_list_connections(lace_client_t *client, LaceConnInfo **info,
     return LACE_OK;
   }
 
-  LaceConnInfo *arr = calloc((size_t)num, sizeof(LaceConnInfo));
-  if (!arr) {
-    cJSON_Delete(result);
-    return LACE_ERR_OUT_OF_MEMORY;
-  }
+  LaceConnInfo *arr = safe_calloc((size_t)num, sizeof(LaceConnInfo));
 
   for (int i = 0; i < num; i++) {
     cJSON *item = cJSON_GetArrayItem(result, i);
@@ -392,10 +563,10 @@ int lace_list_connections(lace_client_t *client, LaceConnInfo **info,
         arr[i].driver = LACE_DRIVER_MARIADB;
       }
     }
-    if (database && cJSON_IsString(database)) arr[i].database = strdup(database->valuestring);
-    if (host && cJSON_IsString(host)) arr[i].host = strdup(host->valuestring);
+    if (database && cJSON_IsString(database)) arr[i].database = str_dup(database->valuestring);
+    if (host && cJSON_IsString(host)) arr[i].host = str_dup(host->valuestring);
     if (port && cJSON_IsNumber(port)) arr[i].port = port->valueint;
-    if (user && cJSON_IsString(user)) arr[i].user = strdup(user->valuestring);
+    if (user && cJSON_IsString(user)) arr[i].user = str_dup(user->valuestring);
   }
 
   *info = arr;
@@ -453,16 +624,12 @@ int lace_list_tables(lace_client_t *client, int conn_id, char ***tables,
     return LACE_OK;
   }
 
-  char **arr = calloc((size_t)num, sizeof(char *));
-  if (!arr) {
-    cJSON_Delete(result);
-    return LACE_ERR_OUT_OF_MEMORY;
-  }
+  char **arr = safe_calloc((size_t)num, sizeof(char *));
 
   for (int i = 0; i < num; i++) {
     cJSON *item = cJSON_GetArrayItem(result, i);
     if (item && cJSON_IsString(item)) {
-      arr[i] = strdup(item->valuestring);
+      arr[i] = str_dup(item->valuestring);
     }
   }
 
@@ -543,7 +710,7 @@ int lace_query(lace_client_t *client, int conn_id, const char *table,
   (void)num_sorts;
 
   cJSON *resp = NULL;
-  int err = lace_rpc_call(client, "query", params, &resp);
+  int err = lace_rpc_call(client, "data", params, &resp);
   cJSON_Delete(params);
 
   if (err != LACE_OK) {
@@ -620,7 +787,7 @@ int lace_exec(lace_client_t *client, int conn_id, const char *sql,
   cJSON_AddStringToObject(params, "sql", sql);
 
   cJSON *resp = NULL;
-  int err = lace_rpc_call(client, "exec", params, &resp);
+  int err = lace_rpc_call(client, "query", params, &resp);
   cJSON_Delete(params);
 
   if (err != LACE_OK) {
@@ -635,12 +802,10 @@ int lace_exec(lace_client_t *client, int conn_id, const char *sql,
       *result = lace_rpc_parse_result(data);
     } else {
       /* Non-select: create minimal result with affected count */
-      *result = calloc(1, sizeof(LaceResult));
-      if (*result) {
-        cJSON *affected = cJSON_GetObjectItem(resp, "affected");
-        if (affected && cJSON_IsNumber(affected)) {
-          (*result)->total_rows = (size_t)affected->valuedouble;
-        }
+      *result = safe_calloc(1, sizeof(LaceResult));
+      cJSON *affected = cJSON_GetObjectItem(resp, "affected");
+      if (affected && cJSON_IsNumber(affected)) {
+        (*result)->total_rows = (size_t)affected->valuedouble;
       }
     }
   }
@@ -812,9 +977,9 @@ int lace_version(lace_client_t *client, char **version) {
 
   cJSON *ver = cJSON_GetObjectItem(result, "daemon_version");
   if (ver && cJSON_IsString(ver)) {
-    *version = strdup(ver->valuestring);
+    *version = str_dup(ver->valuestring);
   } else {
-    *version = strdup("unknown");
+    *version = str_dup("unknown");
   }
 
   cJSON_Delete(result);

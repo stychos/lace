@@ -1,12 +1,14 @@
 build/mysql_driver.o: src/db/mysql/mysql_driver.c \
-  src/db/mysql/../../util/mem.h src/db/mysql/../../util/str.h \
-  src/db/mysql/../connstr.h src/db/mysql/../db.h \
+  ../liblace/include/util/mem.h ../liblace/include/util/str.h \
+  ../liblace/include/util/connstr.h src/db/mysql/../db.h \
   src/db/mysql/../db_types.h src/db/mysql/../../constants.h \
+  src/db/mysql/../../../../liblace/include/constants.h \
   src/db/mysql/../db_common.h
-src/db/mysql/../../util/mem.h:
-src/db/mysql/../../util/str.h:
-src/db/mysql/../connstr.h:
+../liblace/include/util/mem.h:
+../liblace/include/util/str.h:
+../liblace/include/util/connstr.h:
 src/db/mysql/../db.h:
 src/db/mysql/../db_types.h:
 src/db/mysql/../../constants.h:
+src/db/mysql/../../../../liblace/include/constants.h:
 src/db/mysql/../db_common.h:

@@ -3,7 +3,7 @@
 
 CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -g
-LDFLAGS =
+LDFLAGS = -L../liblace/build
 
 # Source directories
 SRC_DIR = src
@@ -11,13 +11,13 @@ DB_SRC_DIR = $(SRC_DIR)/db
 UTIL_SRC_DIR = $(SRC_DIR)/util
 
 # Include paths
-INCLUDES = -I$(SRC_DIR)
+INCLUDES = -I$(SRC_DIR) -I../liblace/include
 
 # Build directory
 BUILD_DIR = build
 
-# Libraries
-LIBS = -lcjson -lsqlite3 -lpq -lmariadb -lpthread
+# Libraries (liblace now provides str, mem, connstr utilities)
+LIBS = -llace -lcjson -lsqlite3 -lpq -lmariadb -lpthread
 
 # Output
 TARGET = $(BUILD_DIR)/laced
@@ -29,25 +29,24 @@ DAEMON_SRCS = \
 	$(SRC_DIR)/session.c \
 	$(SRC_DIR)/handler.c \
 	$(SRC_DIR)/json.c \
-	$(SRC_DIR)/async.c
+	$(SRC_DIR)/async.c \
+	$(SRC_DIR)/socket.c
 
 # Database source files
+# Note: connstr.c is now in liblace
 DB_SRCS = \
 	$(DB_SRC_DIR)/db_manager.c \
 	$(DB_SRC_DIR)/db_types.c \
 	$(DB_SRC_DIR)/db_common.c \
-	$(DB_SRC_DIR)/connstr.c \
 	$(DB_SRC_DIR)/sqlite/sqlite_driver.c \
 	$(DB_SRC_DIR)/postgres/pg_driver.c \
 	$(DB_SRC_DIR)/mysql/mysql_driver.c
 
-# Utility source files
-UTIL_SRCS = \
-	$(UTIL_SRC_DIR)/str.c \
-	$(UTIL_SRC_DIR)/mem.c
+# Utility source files - now in liblace, not compiled here
+# UTIL_SRCS = (removed - str.c, mem.c now in liblace)
 
 # All source files
-SRCS = $(DAEMON_SRCS) $(DB_SRCS) $(UTIL_SRCS)
+SRCS = $(DAEMON_SRCS) $(DB_SRCS)
 
 # Object files
 OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(notdir $(SRCS)))
@@ -64,12 +63,16 @@ ifeq ($(UNAME_S),Darwin)
 endif
 
 # Default target
-all: $(TARGET)
+all: ../liblace/build/liblace.a $(TARGET)
+
+# Build liblace first
+../liblace/build/liblace.a:
+	$(MAKE) -C ../liblace
 
 # Link
-$(TARGET): $(OBJS)
+$(TARGET): $(OBJS) ../liblace/build/liblace.a
 	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
 
 # Compile daemon sources
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.c
@@ -96,6 +99,10 @@ $(BUILD_DIR)/async.o: $(SRC_DIR)/async.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
+$(BUILD_DIR)/socket.o: $(SRC_DIR)/socket.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
 # Compile database sources
 $(BUILD_DIR)/db_manager.o: $(DB_SRC_DIR)/db_manager.c
 	@mkdir -p $(BUILD_DIR)
@@ -109,9 +116,7 @@ $(BUILD_DIR)/db_common.o: $(DB_SRC_DIR)/db_common.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/connstr.o: $(DB_SRC_DIR)/connstr.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+# connstr.c is now in liblace - removed from here
 
 $(BUILD_DIR)/sqlite_driver.o: $(DB_SRC_DIR)/sqlite/sqlite_driver.c
 	@mkdir -p $(BUILD_DIR)
@@ -125,14 +130,7 @@ $(BUILD_DIR)/mysql_driver.o: $(DB_SRC_DIR)/mysql/mysql_driver.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
-# Compile utility sources
-$(BUILD_DIR)/str.o: $(UTIL_SRC_DIR)/str.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
-
-$(BUILD_DIR)/mem.o: $(UTIL_SRC_DIR)/mem.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+# Utility sources (str.c, mem.c) are now in liblace - removed from here
 
 # Include dependency files
 -include $(DEPS)

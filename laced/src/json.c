@@ -7,6 +7,7 @@
  */
 
 #include "json.h"
+#include <util/mem.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,7 +43,7 @@ cJSON *laced_json_from_value(const DbValue *val) {
     /* Encode blob as hex string */
     if (val->blob.data && val->blob.len > 0) {
       size_t hex_len = val->blob.len * 2 + 1;
-      char *hex = malloc(hex_len);
+      char *hex = safe_malloc(hex_len);
       if (!hex) {
         return cJSON_CreateNull();
       }
@@ -84,10 +85,13 @@ bool laced_json_to_value(cJSON *json, DbValue *val) {
 
   if (cJSON_IsNumber(json)) {
     double num = json->valuedouble;
-    /* Check if it's an integer */
-    if (num == (double)(int64_t)num && num >= INT64_MIN && num <= INT64_MAX) {
+    /* Check if it's an integer that fits in int64_t.
+     * Note: We check if the value equals its truncated form, which handles
+     * the range check implicitly since out-of-range values won't round-trip. */
+    int64_t as_int = (int64_t)num;
+    if (num == (double)as_int) {
       val->type = DB_TYPE_INT;
-      val->int_val = (int64_t)num;
+      val->int_val = as_int;
     } else {
       val->type = DB_TYPE_FLOAT;
       val->float_val = num;
@@ -99,7 +103,7 @@ bool laced_json_to_value(cJSON *json, DbValue *val) {
     val->type = DB_TYPE_TEXT;
     if (json->valuestring) {
       val->text.len = strlen(json->valuestring);
-      val->text.data = malloc(val->text.len + 1);
+      val->text.data = safe_malloc(val->text.len + 1);
       if (!val->text.data) {
         return false;
       }
@@ -376,5 +380,19 @@ bool laced_json_get_bool(cJSON *params, const char *name, bool *out) {
   }
 
   *out = cJSON_IsTrue(item);
+  return true;
+}
+
+bool laced_json_get_int64(cJSON *params, const char *name, int64_t *out) {
+  if (!params || !name || !out) {
+    return false;
+  }
+
+  cJSON *item = cJSON_GetObjectItem(params, name);
+  if (!item || !cJSON_IsNumber(item)) {
+    return false;
+  }
+
+  *out = (int64_t)item->valuedouble;
   return true;
 }

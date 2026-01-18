@@ -7,15 +7,19 @@
  */
 
 #include "rpc.h"
+#include "../include/util/mem.h"
+#include "../include/util/str.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Access to client internals */
+/* Access to client internals - must match definition in client.c */
 struct lace_client {
   pid_t daemon_pid;
   FILE *to_daemon;
   FILE *from_daemon;
+  int socket_fd;
+  LaceConnMode conn_mode;
   int timeout_ms;
   char *last_error;
   int64_t next_id;
@@ -29,7 +33,7 @@ struct lace_client {
 /* Set error message in client */
 static void rpc_set_error(lace_client_t *client, const char *msg) {
   free(client->last_error);
-  client->last_error = msg ? strdup(msg) : NULL;
+  client->last_error = msg ? str_dup(msg) : NULL;
 }
 
 /* Read a line from daemon (newline-delimited) */
@@ -218,10 +222,7 @@ bool lace_rpc_parse_value(cJSON *json, LaceValue *val) {
     val->type = LACE_TYPE_TEXT;
     if (json->valuestring) {
       val->text.len = strlen(json->valuestring);
-      val->text.data = malloc(val->text.len + 1);
-      if (!val->text.data) {
-        return false;
-      }
+      val->text.data = safe_malloc(val->text.len + 1);
       memcpy(val->text.data, json->valuestring, val->text.len + 1);
     }
     return true;
@@ -235,10 +236,7 @@ LaceResult *lace_rpc_parse_result(cJSON *json) {
     return NULL;
   }
 
-  LaceResult *result = calloc(1, sizeof(LaceResult));
-  if (!result) {
-    return NULL;
-  }
+  LaceResult *result = safe_calloc(1, sizeof(LaceResult));
 
   /* Parse columns */
   cJSON *columns = cJSON_GetObjectItem(json, "columns");
@@ -246,25 +244,20 @@ LaceResult *lace_rpc_parse_result(cJSON *json) {
   if (columns && cJSON_IsArray(columns)) {
     int num_cols = cJSON_GetArraySize(columns);
     if (num_cols > 0) {
-      result->columns = calloc((size_t)num_cols, sizeof(LaceColumn));
-      if (!result->columns) {
-        free(result);
-        return NULL;
-      }
+      result->columns = safe_calloc((size_t)num_cols, sizeof(LaceColumn));
       result->num_columns = (size_t)num_cols;
 
       for (int i = 0; i < num_cols; i++) {
         cJSON *col = cJSON_GetArrayItem(columns, i);
         if (col && cJSON_IsString(col)) {
-          result->columns[i].name = strdup(col->valuestring);
+          result->columns[i].name = str_dup(col->valuestring);
         }
 
         /* Get type from types array */
         if (types && cJSON_IsArray(types)) {
           cJSON *type = cJSON_GetArrayItem(types, i);
           if (type && cJSON_IsString(type)) {
-            result->columns[i].type_name = strdup(type->valuestring);
-            /* TODO: Parse type to LaceValueType */
+            result->columns[i].type_name = str_dup(type->valuestring);
           }
         }
       }
@@ -276,11 +269,7 @@ LaceResult *lace_rpc_parse_result(cJSON *json) {
   if (rows && cJSON_IsArray(rows)) {
     int num_rows = cJSON_GetArraySize(rows);
     if (num_rows > 0) {
-      result->rows = calloc((size_t)num_rows, sizeof(LaceRow));
-      if (!result->rows) {
-        lace_result_free(result);
-        return NULL;
-      }
+      result->rows = safe_calloc((size_t)num_rows, sizeof(LaceRow));
       result->num_rows = (size_t)num_rows;
 
       for (int i = 0; i < num_rows; i++) {
@@ -288,11 +277,7 @@ LaceResult *lace_rpc_parse_result(cJSON *json) {
         if (row && cJSON_IsArray(row)) {
           int num_cells = cJSON_GetArraySize(row);
           if (num_cells > 0) {
-            result->rows[i].cells = calloc((size_t)num_cells, sizeof(LaceValue));
-            if (!result->rows[i].cells) {
-              lace_result_free(result);
-              return NULL;
-            }
+            result->rows[i].cells = safe_calloc((size_t)num_cells, sizeof(LaceValue));
             result->rows[i].num_cells = (size_t)num_cells;
 
             for (int j = 0; j < num_cells; j++) {
@@ -319,21 +304,18 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
     return NULL;
   }
 
-  LaceSchema *schema = calloc(1, sizeof(LaceSchema));
-  if (!schema) {
-    return NULL;
-  }
+  LaceSchema *schema = safe_calloc(1, sizeof(LaceSchema));
 
   /* Parse name */
   cJSON *name = cJSON_GetObjectItem(json, "name");
   if (name && cJSON_IsString(name)) {
-    schema->name = strdup(name->valuestring);
+    schema->name = str_dup(name->valuestring);
   }
 
   /* Parse schema name */
   cJSON *sch = cJSON_GetObjectItem(json, "schema");
   if (sch && cJSON_IsString(sch)) {
-    schema->schema = strdup(sch->valuestring);
+    schema->schema = str_dup(sch->valuestring);
   }
 
   /* Parse columns */
@@ -341,11 +323,7 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
   if (columns && cJSON_IsArray(columns)) {
     int num_cols = cJSON_GetArraySize(columns);
     if (num_cols > 0) {
-      schema->columns = calloc((size_t)num_cols, sizeof(LaceColumn));
-      if (!schema->columns) {
-        lace_schema_free(schema);
-        return NULL;
-      }
+      schema->columns = safe_calloc((size_t)num_cols, sizeof(LaceColumn));
       schema->num_columns = (size_t)num_cols;
 
       for (int i = 0; i < num_cols; i++) {
@@ -362,19 +340,19 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
         cJSON *max_len = cJSON_GetObjectItem(col, "max_length");
 
         if (col_name && cJSON_IsString(col_name)) {
-          schema->columns[i].name = strdup(col_name->valuestring);
+          schema->columns[i].name = str_dup(col_name->valuestring);
         }
         if (col_type && cJSON_IsString(col_type)) {
-          schema->columns[i].type_name = strdup(col_type->valuestring);
+          schema->columns[i].type_name = str_dup(col_type->valuestring);
         }
         schema->columns[i].nullable = nullable && cJSON_IsTrue(nullable);
         schema->columns[i].primary_key = pk && cJSON_IsTrue(pk);
         schema->columns[i].auto_increment = auto_inc && cJSON_IsTrue(auto_inc);
         if (def_val && cJSON_IsString(def_val)) {
-          schema->columns[i].default_val = strdup(def_val->valuestring);
+          schema->columns[i].default_val = str_dup(def_val->valuestring);
         }
         if (fk && cJSON_IsString(fk)) {
-          schema->columns[i].foreign_key = strdup(fk->valuestring);
+          schema->columns[i].foreign_key = str_dup(fk->valuestring);
         }
         if (max_len && cJSON_IsNumber(max_len)) {
           schema->columns[i].max_length = max_len->valueint;
@@ -388,11 +366,7 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
   if (indexes && cJSON_IsArray(indexes)) {
     int num_idx = cJSON_GetArraySize(indexes);
     if (num_idx > 0) {
-      schema->indexes = calloc((size_t)num_idx, sizeof(LaceIndex));
-      if (!schema->indexes) {
-        lace_schema_free(schema);
-        return NULL;
-      }
+      schema->indexes = safe_calloc((size_t)num_idx, sizeof(LaceIndex));
       schema->num_indexes = (size_t)num_idx;
 
       for (int i = 0; i < num_idx; i++) {
@@ -406,25 +380,23 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
         cJSON *idx_cols = cJSON_GetObjectItem(idx, "columns");
 
         if (idx_name && cJSON_IsString(idx_name)) {
-          schema->indexes[i].name = strdup(idx_name->valuestring);
+          schema->indexes[i].name = str_dup(idx_name->valuestring);
         }
         schema->indexes[i].unique = idx_unique && cJSON_IsTrue(idx_unique);
         schema->indexes[i].primary = idx_primary && cJSON_IsTrue(idx_primary);
         if (idx_type && cJSON_IsString(idx_type)) {
-          schema->indexes[i].type = strdup(idx_type->valuestring);
+          schema->indexes[i].type = str_dup(idx_type->valuestring);
         }
 
         if (idx_cols && cJSON_IsArray(idx_cols)) {
           int num_idx_cols = cJSON_GetArraySize(idx_cols);
           if (num_idx_cols > 0) {
-            schema->indexes[i].columns = calloc((size_t)num_idx_cols, sizeof(char *));
-            if (schema->indexes[i].columns) {
-              schema->indexes[i].num_columns = (size_t)num_idx_cols;
-              for (int j = 0; j < num_idx_cols; j++) {
-                cJSON *col = cJSON_GetArrayItem(idx_cols, j);
-                if (col && cJSON_IsString(col)) {
-                  schema->indexes[i].columns[j] = strdup(col->valuestring);
-                }
+            schema->indexes[i].columns = safe_calloc((size_t)num_idx_cols, sizeof(char *));
+            schema->indexes[i].num_columns = (size_t)num_idx_cols;
+            for (int j = 0; j < num_idx_cols; j++) {
+              cJSON *col = cJSON_GetArrayItem(idx_cols, j);
+              if (col && cJSON_IsString(col)) {
+                schema->indexes[i].columns[j] = str_dup(col->valuestring);
               }
             }
           }
@@ -438,11 +410,7 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
   if (fks && cJSON_IsArray(fks)) {
     int num_fk = cJSON_GetArraySize(fks);
     if (num_fk > 0) {
-      schema->foreign_keys = calloc((size_t)num_fk, sizeof(LaceForeignKey));
-      if (!schema->foreign_keys) {
-        lace_schema_free(schema);
-        return NULL;
-      }
+      schema->foreign_keys = safe_calloc((size_t)num_fk, sizeof(LaceForeignKey));
       schema->num_foreign_keys = (size_t)num_fk;
 
       for (int i = 0; i < num_fk; i++) {
@@ -457,29 +425,27 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
         cJSON *fk_on_update = cJSON_GetObjectItem(fk, "on_update");
 
         if (fk_name && cJSON_IsString(fk_name)) {
-          schema->foreign_keys[i].name = strdup(fk_name->valuestring);
+          schema->foreign_keys[i].name = str_dup(fk_name->valuestring);
         }
         if (fk_ref_table && cJSON_IsString(fk_ref_table)) {
-          schema->foreign_keys[i].ref_table = strdup(fk_ref_table->valuestring);
+          schema->foreign_keys[i].ref_table = str_dup(fk_ref_table->valuestring);
         }
         if (fk_on_delete && cJSON_IsString(fk_on_delete)) {
-          schema->foreign_keys[i].on_delete = strdup(fk_on_delete->valuestring);
+          schema->foreign_keys[i].on_delete = str_dup(fk_on_delete->valuestring);
         }
         if (fk_on_update && cJSON_IsString(fk_on_update)) {
-          schema->foreign_keys[i].on_update = strdup(fk_on_update->valuestring);
+          schema->foreign_keys[i].on_update = str_dup(fk_on_update->valuestring);
         }
 
         if (fk_cols && cJSON_IsArray(fk_cols)) {
           int num_fk_cols = cJSON_GetArraySize(fk_cols);
           if (num_fk_cols > 0) {
-            schema->foreign_keys[i].columns = calloc((size_t)num_fk_cols, sizeof(char *));
-            if (schema->foreign_keys[i].columns) {
-              schema->foreign_keys[i].num_columns = (size_t)num_fk_cols;
-              for (int j = 0; j < num_fk_cols; j++) {
-                cJSON *col = cJSON_GetArrayItem(fk_cols, j);
-                if (col && cJSON_IsString(col)) {
-                  schema->foreign_keys[i].columns[j] = strdup(col->valuestring);
-                }
+            schema->foreign_keys[i].columns = safe_calloc((size_t)num_fk_cols, sizeof(char *));
+            schema->foreign_keys[i].num_columns = (size_t)num_fk_cols;
+            for (int j = 0; j < num_fk_cols; j++) {
+              cJSON *col = cJSON_GetArrayItem(fk_cols, j);
+              if (col && cJSON_IsString(col)) {
+                schema->foreign_keys[i].columns[j] = str_dup(col->valuestring);
               }
             }
           }
@@ -488,14 +454,12 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json) {
         if (fk_ref_cols && cJSON_IsArray(fk_ref_cols)) {
           int num_ref_cols = cJSON_GetArraySize(fk_ref_cols);
           if (num_ref_cols > 0) {
-            schema->foreign_keys[i].ref_columns = calloc((size_t)num_ref_cols, sizeof(char *));
-            if (schema->foreign_keys[i].ref_columns) {
-              schema->foreign_keys[i].num_ref_columns = (size_t)num_ref_cols;
-              for (int j = 0; j < num_ref_cols; j++) {
-                cJSON *col = cJSON_GetArrayItem(fk_ref_cols, j);
-                if (col && cJSON_IsString(col)) {
-                  schema->foreign_keys[i].ref_columns[j] = strdup(col->valuestring);
-                }
+            schema->foreign_keys[i].ref_columns = safe_calloc((size_t)num_ref_cols, sizeof(char *));
+            schema->foreign_keys[i].num_ref_columns = (size_t)num_ref_cols;
+            for (int j = 0; j < num_ref_cols; j++) {
+              cJSON *col = cJSON_GetArrayItem(fk_ref_cols, j);
+              if (col && cJSON_IsString(col)) {
+                schema->foreign_keys[i].ref_columns[j] = str_dup(col->valuestring);
               }
             }
           }
@@ -544,10 +508,7 @@ cJSON *lace_rpc_value_to_json(const LaceValue *val) {
     /* Encode blob as hex string */
     if (val->blob.data && val->blob.len > 0) {
       size_t hex_len = val->blob.len * 2 + 1;
-      char *hex = malloc(hex_len);
-      if (!hex) {
-        return cJSON_CreateNull();
-      }
+      char *hex = safe_malloc(hex_len);
       for (size_t i = 0; i < val->blob.len; i++) {
         snprintf(hex + i * 2, 3, "%02x", val->blob.data[i]);
       }
