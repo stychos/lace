@@ -14,6 +14,10 @@ build/src/views/editor_view.o: src/views/editor_view.c \
   src/views/../viewmodel/table_viewmodel.h \
   src/views/../viewmodel/../core/app_state.h \
   src/views/../viewmodel/../db_compat.h src/views/../core/ui_types.h \
+  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   src/views/../config/config.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
   ../../liblace/include/../../liblace/include/util/str.h \
@@ -39,6 +43,10 @@ src/views/../viewmodel/table_viewmodel.h:
 src/views/../viewmodel/../core/app_state.h:
 src/views/../viewmodel/../db_compat.h:
 src/views/../core/ui_types.h:
+/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
 src/views/../config/config.h:
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:

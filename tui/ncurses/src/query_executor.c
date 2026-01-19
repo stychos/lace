@@ -401,10 +401,10 @@ void query_calculate_result_widths(Tab *tab) {
     }
   }
 
-  /* Clamp to max width */
+  /* Clamp to max width: content-based sizing up to 15 chars */
   for (size_t c = 0; c < num_cols; c++) {
-    if (tab->query_result_col_widths[c] > MAX_COL_WIDTH) {
-      tab->query_result_col_widths[c] = MAX_COL_WIDTH;
+    if (tab->query_result_col_widths[c] > DEFAULT_COL_WIDTH) {
+      tab->query_result_col_widths[c] = DEFAULT_COL_WIDTH;
     }
   }
 }

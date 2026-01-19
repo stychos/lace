@@ -13,10 +13,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <util/mem.h>
 #include <util/str.h>
 
+#include "crash.h"
+#include "log.h"
 #include "server.h"
 
 /* Global state */
@@ -38,6 +41,12 @@ typedef struct {
   size_t max_clients;    /* Max concurrent clients (0 for default 64) */
   bool daemonize;        /* Fork to background */
   char *pidfile;         /* PID file path */
+  /* Logging options */
+  char *log_path;        /* Log file path (NULL for default) */
+  LogLevel log_level;    /* Minimum log level */
+  size_t log_max_size;   /* Max log file size (0 for default 10MB) */
+  int log_rotate;        /* Number of rotated files to keep */
+  bool quiet;            /* Suppress stderr output */
 } DaemonConfig;
 
 /* Signal handler for graceful shutdown */
@@ -64,8 +73,16 @@ static void print_usage(const char *prog) {
           "  --daemonize, -d      Fork to background (socket modes only)\n"
           "  --pidfile PATH       Write PID to file\n"
           "  --max-clients N      Maximum concurrent clients (default: 64)\n"
+          "  -q, --quiet          Suppress log output to stderr\n"
           "  -h, --help           Show this help message\n"
           "  -v, --version        Show version information\n"
+          "\n"
+          "Logging options:\n"
+          "  --log PATH           Log file path (default: platform-specific)\n"
+          "  --log-level LEVEL    Minimum log level: debug, info, warn, error, fatal\n"
+          "                       Default: info (debug builds: debug)\n"
+          "  --log-max-size SIZE  Max log file size in MB before rotation (default: 10)\n"
+          "  --log-rotate N       Number of rotated log files to keep (default: 5)\n"
           "\n"
           "Examples:\n"
           "  %s                      # Unix socket with default path (default)\n"
@@ -73,14 +90,40 @@ static void print_usage(const char *prog) {
           "  %s --tcp 7433           # TCP on localhost:7433\n"
           "  %s --tcp 0.0.0.0:7433   # TCP on all interfaces\n"
           "  %s -d                   # Background daemon with Unix socket\n"
-          "  %s --stdio              # Use with liblace spawn mode\n",
-          prog, prog, prog, prog, prog, prog, prog);
+          "  %s --stdio              # Use with liblace spawn mode\n"
+          "  %s --log /var/log/laced.log --log-level debug\n",
+          prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 /* Print version information */
 static void print_version(void) {
   fprintf(stderr, "laced version 0.1.0\n");
   fprintf(stderr, "Protocol version: 1.0\n");
+}
+
+/* Parse log level string */
+static bool parse_log_level(const char *str, LogLevel *level) {
+  if (strcasecmp(str, "debug") == 0) {
+    *level = LOG_LEVEL_DEBUG;
+    return true;
+  }
+  if (strcasecmp(str, "info") == 0) {
+    *level = LOG_LEVEL_INFO;
+    return true;
+  }
+  if (strcasecmp(str, "warn") == 0 || strcasecmp(str, "warning") == 0) {
+    *level = LOG_LEVEL_WARN;
+    return true;
+  }
+  if (strcasecmp(str, "error") == 0) {
+    *level = LOG_LEVEL_ERROR;
+    return true;
+  }
+  if (strcasecmp(str, "fatal") == 0) {
+    *level = LOG_LEVEL_FATAL;
+    return true;
+  }
+  return false;
 }
 
 /* Parse TCP address in format [HOST:]PORT */
@@ -119,6 +162,16 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
   config->max_clients = 0;
   config->daemonize = false;
   config->pidfile = NULL;
+  /* Log defaults */
+  config->log_path = NULL;
+#ifdef DEBUG
+  config->log_level = LOG_LEVEL_DEBUG;
+#else
+  config->log_level = LOG_LEVEL_INFO;
+#endif
+  config->log_max_size = 0; /* Use default */
+  config->log_rotate = 0;   /* Use default */
+  config->quiet = false;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -161,6 +214,10 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       config->daemonize = true;
       continue;
     }
+    if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
+      config->quiet = true;
+      continue;
+    }
     if (strcmp(argv[i], "--pidfile") == 0) {
       if (i + 1 >= argc) {
         fprintf(stderr, "--pidfile requires an argument\n");
@@ -179,6 +236,54 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       config->max_clients = (size_t)atoi(argv[i]);
       if (config->max_clients == 0 || config->max_clients > 10000) {
         fprintf(stderr, "Invalid --max-clients value: %s (must be 1-10000)\n", argv[i]);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--log") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--log requires an argument\n");
+        return -1;
+      }
+      i++;
+      config->log_path = str_dup(argv[i]);
+      continue;
+    }
+    if (strcmp(argv[i], "--log-level") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--log-level requires an argument\n");
+        return -1;
+      }
+      i++;
+      if (!parse_log_level(argv[i], &config->log_level)) {
+        fprintf(stderr, "Invalid log level: %s (must be debug, info, warn, error, or fatal)\n", argv[i]);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--log-max-size") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--log-max-size requires an argument\n");
+        return -1;
+      }
+      i++;
+      int size_mb = atoi(argv[i]);
+      if (size_mb <= 0 || size_mb > 1000) {
+        fprintf(stderr, "Invalid log max size: %s (must be 1-1000 MB)\n", argv[i]);
+        return -1;
+      }
+      config->log_max_size = (size_t)size_mb * 1024 * 1024;
+      continue;
+    }
+    if (strcmp(argv[i], "--log-rotate") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--log-rotate requires an argument\n");
+        return -1;
+      }
+      i++;
+      config->log_rotate = atoi(argv[i]);
+      if (config->log_rotate < 0 || config->log_rotate > 100) {
+        fprintf(stderr, "Invalid log rotate count: %s (must be 0-100)\n", argv[i]);
         return -1;
       }
       continue;
@@ -203,6 +308,7 @@ static void free_config(DaemonConfig *config) {
   free(config->socket_path);
   free(config->bind_addr);
   free(config->pidfile);
+  free(config->log_path);
 }
 
 /* Write PID file */
@@ -251,6 +357,20 @@ static bool do_daemonize(void) {
   return true;
 }
 
+/* Get transport mode name for logging */
+static const char *transport_mode_name(TransportMode mode) {
+  switch (mode) {
+  case MODE_STDIO:
+    return "stdio";
+  case MODE_UNIX:
+    return "unix";
+  case MODE_TCP:
+    return "tcp";
+  default:
+    return "unknown";
+  }
+}
+
 int main(int argc, char **argv) {
   DaemonConfig config = {0};
 
@@ -260,13 +380,42 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  /* Initialize logging BEFORE daemonization */
+  LogConfig log_config = {
+      .min_level = config.log_level,
+      .max_file_size =
+          config.log_max_size > 0 ? config.log_max_size : LOG_DEFAULT_MAX_SIZE,
+      .max_rotated_files =
+          config.log_rotate > 0 ? config.log_rotate : LOG_DEFAULT_ROTATE_COUNT,
+      .use_stderr = (config.mode == MODE_STDIO && !config.quiet),
+      .log_path = config.log_path,
+  };
+
+  if (!log_init(&log_config)) {
+    fprintf(stderr, "Failed to initialize logging\n");
+    free_config(&config);
+    return 1;
+  }
+
+  /* Install crash handlers */
+  if (!crash_handler_install(NULL)) {
+    LOG_WARN("Failed to install crash handlers");
+  }
+
+  LOG_INFO("laced starting (pid=%d, transport=%s)", (int)getpid(),
+           transport_mode_name(config.mode));
+
   /* Daemonize if requested */
   if (config.daemonize) {
+    LOG_DEBUG("Daemonizing...");
     if (!do_daemonize()) {
-      fprintf(stderr, "Failed to daemonize\n");
+      LOG_ERROR("Failed to daemonize");
+      crash_handler_uninstall();
+      log_shutdown();
       free_config(&config);
       return 1;
     }
+    LOG_INFO("Daemonized successfully (new pid=%d)", (int)getpid());
   }
 
   /* Set up signal handlers */
@@ -286,20 +435,27 @@ int main(int argc, char **argv) {
   /* Write PID file */
   if (config.pidfile) {
     if (!write_pidfile(config.pidfile)) {
-      fprintf(stderr, "Failed to write PID file: %s\n", config.pidfile);
+      LOG_ERROR("Failed to write PID file: %s", config.pidfile);
+      crash_handler_uninstall();
+      log_shutdown();
       free_config(&config);
       return 1;
     }
+    LOG_DEBUG("PID file written: %s", config.pidfile);
   }
 
   /* Initialize server */
   LacedServer *server = laced_server_create();
   if (!server) {
-    fprintf(stderr, "Failed to create server\n");
+    LOG_ERROR("Failed to create server");
     remove_pidfile(config.pidfile);
+    crash_handler_uninstall();
+    log_shutdown();
     free_config(&config);
     return 1;
   }
+
+  LOG_INFO("Server initialized, entering main loop");
 
   /* Run server loop based on transport mode */
   int result = 0;
@@ -319,9 +475,13 @@ int main(int argc, char **argv) {
     break;
   }
 
+  LOG_INFO("Server shutting down (result=%d)", result);
+
   /* Cleanup */
   laced_server_destroy(server);
   remove_pidfile(config.pidfile);
+  crash_handler_uninstall();
+  log_shutdown();
   free_config(&config);
 
   return result;

@@ -922,26 +922,9 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
       }
     }
 
-    /* Check if this is a PK column */
-    bool is_pk = false;
-    DbValueType col_type = DB_TYPE_NULL;
-    if (vm->schema && col < vm->schema->num_columns) {
-      is_pk = vm->schema->columns[col].primary_key;
-      col_type = vm->schema->columns[col].type;
-    }
-
-    if (is_pk) {
-      /* PK columns: ensure minimum width for numeric (10) or text (15) */
-      int pk_min_width = (col_type == DB_TYPE_INT || col_type == DB_TYPE_FLOAT)
-                             ? 10
-                             : DEFAULT_COL_WIDTH;
-      if (width < pk_min_width)
-        width = pk_min_width;
-    }
-
-    /* Clamp to max width */
-    if (width > MAX_COL_WIDTH)
-      width = MAX_COL_WIDTH;
+    /* Clamp to max width: content-based sizing up to 15 chars */
+    if (width > DEFAULT_COL_WIDTH)
+      width = DEFAULT_COL_WIDTH;
 
     vm->col_widths[col] = width;
   }

@@ -67,23 +67,6 @@ void async_queue_drain_notify(AsyncQueue *queue);
  * ========================================================================== */
 
 /*
- * Start an async table query.
- *
- * @param queue    Queue for completion notification
- * @param session  Session handle
- * @param conn_id  Connection ID
- * @param table    Table name
- * @param offset   Pagination offset
- * @param limit    Pagination limit
- * @param request_id  JSON-RPC request ID (will be duplicated)
- * @return         Query handle, or NULL on error
- */
-AsyncQuery *async_query_start(AsyncQueue *queue, LacedSession *session,
-                              int conn_id, const char *table,
-                              size_t offset, size_t limit,
-                              cJSON *request_id);
-
-/*
  * Start an async SQL execution.
  *
  * @param queue    Queue for completion notification
@@ -96,20 +79,6 @@ AsyncQuery *async_query_start(AsyncQueue *queue, LacedSession *session,
 AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
                              int conn_id, const char *sql,
                              cJSON *request_id);
-
-/*
- * Start an async row count.
- *
- * @param queue    Queue for completion notification
- * @param session  Session handle
- * @param conn_id  Connection ID
- * @param table    Table name
- * @param request_id  JSON-RPC request ID (will be duplicated)
- * @return         Query handle, or NULL on error
- */
-AsyncQuery *async_count_start(AsyncQueue *queue, LacedSession *session,
-                              int conn_id, const char *table,
-                              cJSON *request_id);
 
 /*
  * Get query status.

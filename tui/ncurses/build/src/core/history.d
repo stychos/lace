@@ -3,15 +3,15 @@ build/src/core/history.o: src/core/history.c src/core/history.h \
   src/core/../platform/platform.h src/core/../platform/thread.h \
   ../../liblace/include/util/json_helpers.h \
   ../../liblace/include/util/str.h \
+  /opt/homebrew/opt/cjson/include/cjson/cJSON.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
-  ../../liblace/include/../../liblace/include/util/str.h \
-  /usr/include/cjson/cJSON.h
+  ../../liblace/include/../../liblace/include/util/str.h
 src/core/history.h:
 src/../../../liblace/include/config/history.h:
 src/core/../platform/platform.h:
 src/core/../platform/thread.h:
 ../../liblace/include/util/json_helpers.h:
 ../../liblace/include/util/str.h:
+/opt/homebrew/opt/cjson/include/cjson/cJSON.h:
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:
-/usr/include/cjson/cJSON.h:

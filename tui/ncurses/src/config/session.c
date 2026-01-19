@@ -15,7 +15,7 @@
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include "connections.h"
-#include <cJSON.h>
+#include <cjson/cJSON.h>
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
@@ -63,10 +63,7 @@ static size_t json_to_size_t(cJSON *num) {
 
 /* Column width constants (from tui_internal.h) */
 #define SESSION_MIN_COL_WIDTH 4
-#define SESSION_MAX_COL_WIDTH 40
-
-/* Default column width for text PK columns */
-#define SESSION_DEFAULT_COL_WIDTH 15
+#define SESSION_MAX_COL_WIDTH 42
 
 /* Calculate column widths for a Tab based on its data */
 static void calculate_tab_column_widths(Tab *tab) {
@@ -106,28 +103,8 @@ static void calculate_tab_column_widths(Tab *tab) {
     }
   }
 
-  /* Apply max width, but ensure PK columns show full content for short values */
+  /* Apply max width: content-based sizing up to SESSION_MAX_COL_WIDTH (15) */
   for (size_t i = 0; i < tab->num_col_widths; i++) {
-    bool is_pk = false;
-    DbValueType col_type = DB_TYPE_NULL;
-
-    /* Check if this column is a primary key */
-    if (tab->schema && i < tab->schema->num_columns) {
-      is_pk = tab->schema->columns[i].primary_key;
-      col_type = tab->schema->columns[i].type;
-    }
-
-    if (is_pk) {
-      /* PK columns: ensure minimum width for numeric (10) or text (15) */
-      int pk_min_width = (col_type == DB_TYPE_INT || col_type == DB_TYPE_FLOAT)
-                             ? 10
-                             : SESSION_DEFAULT_COL_WIDTH;
-      if (tab->col_widths[i] < pk_min_width) {
-        tab->col_widths[i] = pk_min_width;
-      }
-    }
-
-    /* Apply max width */
     if (tab->col_widths[i] > SESSION_MAX_COL_WIDTH) {
       tab->col_widths[i] = SESSION_MAX_COL_WIDTH;
     }
@@ -210,6 +187,12 @@ static char *build_tab_order_clause(Tab *tab, TableSchema *schema,
     sb_printf(sb, "%s %s", escaped,
               entry->direction == SORT_ASC ? "ASC" : "DESC");
     free(escaped);
+  }
+
+  /* Return NULL if no valid entries were added */
+  if (!first_added) {
+    sb_free(sb);
+    return NULL;
   }
 
   char *result = sb_to_string(sb);

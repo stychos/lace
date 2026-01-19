@@ -265,7 +265,12 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           wattron(win, A_REVERSE | A_BOLD);
           mvwaddch(win, y, cursor_x, cursor_char);
           wattroff(win, A_REVERSE | A_BOLD);
-          wmove(win, y, cursor_x);
+
+          /* Store cursor screen position for later use */
+          if (state) {
+            state->edit_cursor_y = y;
+            state->edit_cursor_x = cursor_x;
+          }
         }
       } else if (is_selected) {
         /* Check if this column is a primary key */
@@ -1082,14 +1087,9 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
           }
         }
 
-        /* Adjust scroll to keep cursor visible using actual main window height
-         */
-        int main_rows, main_cols;
-        getmaxyx(state->main_win, main_rows, main_cols);
-        (void)main_cols;
-        int visible_rows = main_rows - 3; /* Minus header rows in main window */
-        if (visible_rows < 1)
-          visible_rows = 1;
+        /* Adjust scroll to keep cursor visible using layout info */
+        LayoutInfo layout = tui_get_layout_info(state);
+        int visible_rows = layout.visible_rows;
         if (cursor_row < scroll_row) {
           scroll_row = cursor_row;
         } else if (cursor_row >= scroll_row + (size_t)visible_rows) {

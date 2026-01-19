@@ -139,6 +139,13 @@ static inline LayoutInfo tui_get_layout_info(TuiState *state) {
   layout.filters_height =
       state->filters_visible ? tui_get_filters_panel_height(state) : 0;
 
+  /* Header rows: border + column names + separator = 3
+   * Add 1 more row when sorting is active (sort indicator row) */
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->num_sort_entries > 0) {
+    layout.header_rows = 4;
+  }
+
   /* Visible rows = window height - header rows - filters panel */
   layout.visible_rows =
       layout.win_rows - layout.header_rows - layout.filters_height;

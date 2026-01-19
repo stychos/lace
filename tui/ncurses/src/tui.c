@@ -1091,8 +1091,13 @@ void tui_refresh(TuiState *state) {
 
   tui_draw_status(state);
 
-  /* Ensure cursor is only visible when filter is active */
-  if (state->sidebar_filter_active && state->sidebar_focused) {
+  /* Ensure cursor is visible when editing or filtering */
+  if (state->editing && state->main_win) {
+    /* Inline editing - position cursor at stored location */
+    wmove(state->main_win, state->edit_cursor_y, state->edit_cursor_x);
+    wrefresh(state->main_win);
+    curs_set(1);
+  } else if (state->sidebar_filter_active && state->sidebar_focused) {
     curs_set(1);
     if (state->sidebar_win) {
       wmove(state->sidebar_win, 1, 2 + (int)state->sidebar_filter_len);
@@ -1621,8 +1626,9 @@ void tui_run(TuiState *state) {
       /* Only do full refresh when data was actually merged */
       if (bg_result == BG_POLL_MERGED) {
         tui_refresh(state);
-      } else {
+      } else if (!state->editing) {
         /* Just update sidebar animation, don't redraw everything */
+        /* Skip when editing to avoid moving cursor away from edit cell */
         tui_draw_sidebar(state);
       }
       continue;

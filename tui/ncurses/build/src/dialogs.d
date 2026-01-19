@@ -14,6 +14,10 @@ build/src/./dialogs.o: src/./dialogs.c src/./async/async.h \
   src/./core/app_state.h src/./core/../config/config.h \
   src/./core/../db_compat.h src/./viewmodel/table_viewmodel.h \
   src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h \
+  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   src/./views/config_view.h src/./views/../tui.h \
   src/./views/connect_view.h
 src/./async/async.h:
@@ -41,6 +45,10 @@ src/./core/../db_compat.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
+/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
 src/./views/config_view.h:
 src/./views/../tui.h:
 src/./views/connect_view.h:

@@ -377,7 +377,7 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
   }
 
   /* Enable automatic reconnection */
-  bool reconnect = true;
+  my_bool reconnect = 1;
   if (mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect) != 0) {
     mysql_close(mysql);
     connstr_free(cs);

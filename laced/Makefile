@@ -12,6 +12,10 @@ UTIL_SRC_DIR = $(SRC_DIR)/util
 
 # Include paths
 INCLUDES = -I$(SRC_DIR) -I../liblace/include
+INCLUDES += $(shell pkg-config --cflags libcjson 2>/dev/null || echo "-I/opt/homebrew/opt/cjson/include")
+
+# cJSON library path (needed for linking)
+LDFLAGS += $(shell pkg-config --libs-only-L libcjson 2>/dev/null || echo "-L/opt/homebrew/opt/cjson/lib")
 
 # Build directory
 BUILD_DIR = build
@@ -30,7 +34,9 @@ DAEMON_SRCS = \
 	$(SRC_DIR)/handler.c \
 	$(SRC_DIR)/json.c \
 	$(SRC_DIR)/async.c \
-	$(SRC_DIR)/socket.c
+	$(SRC_DIR)/socket.c \
+	$(SRC_DIR)/log.c \
+	$(SRC_DIR)/crash.c
 
 # Database source files
 # Note: connstr.c is now in liblace
@@ -58,7 +64,7 @@ ifeq ($(UNAME_S),Darwin)
     # macOS - use Homebrew paths
     CFLAGS += $(shell pkg-config --cflags libpq 2>/dev/null || echo "-I/opt/homebrew/opt/libpq/include")
     LDFLAGS += $(shell pkg-config --libs libpq 2>/dev/null || echo "-L/opt/homebrew/opt/libpq/lib")
-    CFLAGS += $(shell pkg-config --cflags mariadb 2>/dev/null || echo "-I/opt/homebrew/opt/mariadb/include/mysql")
+    CFLAGS += $(shell pkg-config --cflags mariadb 2>/dev/null || echo "-I/opt/homebrew/opt/mariadb/include")
     LDFLAGS += $(shell pkg-config --libs mariadb 2>/dev/null || echo "-L/opt/homebrew/opt/mariadb/lib")
 endif
 
@@ -100,6 +106,14 @@ $(BUILD_DIR)/async.o: $(SRC_DIR)/async.c
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/socket.o: $(SRC_DIR)/socket.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/log.o: $(SRC_DIR)/log.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/crash.o: $(SRC_DIR)/crash.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 

@@ -75,8 +75,8 @@
  * ========================================================================== */
 
 #define MIN_COL_WIDTH 4
-#define MAX_COL_WIDTH 40
-#define DEFAULT_COL_WIDTH 15
+#define MAX_COL_WIDTH 60
+#define DEFAULT_COL_WIDTH 42
 
 /* ==========================================================================
  * UI Dimensions

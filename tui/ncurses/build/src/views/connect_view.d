@@ -14,6 +14,10 @@ build/src/views/connect_view.o: src/views/connect_view.c \
   src/views/../viewmodel/table_viewmodel.h \
   src/views/../viewmodel/../core/app_state.h \
   src/views/../viewmodel/../db_compat.h src/views/../core/ui_types.h \
+  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   src/views/../config/config.h src/views/../config/connections.h \
   src/../../../liblace/include/config/saved_connection.h \
   ../../liblace/include/util/connstr.h \
@@ -41,6 +45,10 @@ src/views/../viewmodel/table_viewmodel.h:
 src/views/../viewmodel/../core/app_state.h:
 src/views/../viewmodel/../db_compat.h:
 src/views/../core/ui_types.h:
+/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
 src/views/../config/config.h:
 src/views/../config/connections.h:
 src/../../../liblace/include/config/saved_connection.h:

@@ -12,6 +12,8 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <time.h>
 
 /* Forward declarations */
 typedef struct LacedServer LacedServer;
@@ -35,6 +37,10 @@ typedef struct LacedClient {
   size_t partial_len;         /* Current length in buffer */
   size_t partial_cap;         /* Buffer capacity */
   struct LacedClient *next;   /* Next client in linked list */
+  /* Activity tracking */
+  time_t connected_at;        /* Connection timestamp */
+  time_t last_activity;       /* Last request timestamp */
+  uint64_t requests_count;    /* Total requests handled */
 } LacedClient;
 
 /* ==========================================================================

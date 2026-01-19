@@ -114,16 +114,27 @@ bool laced_session_list_connections(LacedSession *session, LacedConnInfo **info,
 void laced_conn_info_array_free(LacedConnInfo *info, size_t count);
 
 /* ==========================================================================
- * Query Cancellation
+ * Query State Management
  * ========================================================================== */
+
+/*
+ * Check if a connection has a query in progress.
+ * Thread-safe.
+ *
+ * @param session  Session handle
+ * @param conn_id  Connection ID
+ * @return         true if a query is currently running
+ */
+bool laced_session_is_conn_busy(LacedSession *session, int conn_id);
 
 /*
  * Prepare cancellation handle before executing a query.
  * Call this before starting a query to enable cancellation.
+ * Returns false if another query is already active on this connection.
  *
  * @param session  Session handle
  * @param conn_id  Connection ID
- * @return         true if cancel handle was prepared
+ * @return         true if query can proceed, false if connection is busy
  */
 bool laced_session_prepare_cancel(LacedSession *session, int conn_id);
 

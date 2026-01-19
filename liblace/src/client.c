@@ -7,10 +7,12 @@
  */
 
 #include "../include/lace.h"
+#include "../include/util/connstr.h"
 #include "../include/util/mem.h"
 #include "../include/util/str.h"
 #include "rpc.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +22,15 @@
 
 /* Default timeout in milliseconds */
 #define DEFAULT_TIMEOUT_MS 30000
+
+/* Maximum tracked connections */
+#define MAX_CONNECTIONS 64
+
+/* Connection tracking entry */
+typedef struct {
+  int conn_id;
+  LaceDriver driver;
+} ConnEntry;
 
 /* Client structure */
 struct lace_client {
@@ -32,12 +43,18 @@ struct lace_client {
   char *last_error;       /* Last error message */
   int64_t next_id;        /* Next request ID */
   bool connected;         /* Whether daemon is running */
+
+  /* Connection tracking */
+  ConnEntry connections[MAX_CONNECTIONS];
+  size_t num_connections;
 };
 
 /* Socket utilities (implemented in socket.c) */
 extern int lace_connect_unix(const char *path, int timeout_ms);
 extern int lace_connect_tcp(const char *host, int port, int timeout_ms);
 extern int lace_find_daemon_socket(void);
+extern char *lace_get_default_socket_path(void);
+extern bool lace_daemon_is_running(const char *socket_path);
 
 /* ==========================================================================
  * Internal Helpers
@@ -47,6 +64,145 @@ extern int lace_find_daemon_socket(void);
 static void set_error(lace_client_t *client, const char *msg) {
   free(client->last_error);
   client->last_error = msg ? str_dup(msg) : NULL;
+}
+
+/* Parse driver type from connection string */
+static LaceDriver parse_driver(const char *connstr) {
+  ConnString *cs = connstr_parse(connstr, NULL);
+  if (!cs) {
+    return LACE_DRIVER_SQLITE; /* Default */
+  }
+
+  LaceDriver driver = LACE_DRIVER_SQLITE;
+  if (str_eq(cs->driver, "postgres") || str_eq(cs->driver, "postgresql")) {
+    driver = LACE_DRIVER_POSTGRES;
+  } else if (str_eq(cs->driver, "mysql")) {
+    driver = LACE_DRIVER_MYSQL;
+  } else if (str_eq(cs->driver, "mariadb")) {
+    driver = LACE_DRIVER_MARIADB;
+  }
+
+  connstr_free(cs);
+  return driver;
+}
+
+/* Track a new connection */
+static void track_connection(lace_client_t *client, int conn_id, LaceDriver driver) {
+  if (client->num_connections >= MAX_CONNECTIONS) {
+    return; /* Silently ignore if full */
+  }
+  client->connections[client->num_connections].conn_id = conn_id;
+  client->connections[client->num_connections].driver = driver;
+  client->num_connections++;
+}
+
+/* Remove a tracked connection */
+static void untrack_connection(lace_client_t *client, int conn_id) {
+  for (size_t i = 0; i < client->num_connections; i++) {
+    if (client->connections[i].conn_id == conn_id) {
+      /* Shift remaining entries */
+      for (size_t j = i; j < client->num_connections - 1; j++) {
+        client->connections[j] = client->connections[j + 1];
+      }
+      client->num_connections--;
+      return;
+    }
+  }
+}
+
+/* Get driver type for a connection */
+static LaceDriver get_connection_driver(lace_client_t *client, int conn_id) {
+  for (size_t i = 0; i < client->num_connections; i++) {
+    if (client->connections[i].conn_id == conn_id) {
+      return client->connections[i].driver;
+    }
+  }
+  return LACE_DRIVER_SQLITE; /* Default */
+}
+
+/* Get identifier quote character for driver */
+static char get_quote_char(LaceDriver driver) {
+  return (driver == LACE_DRIVER_MYSQL || driver == LACE_DRIVER_MARIADB)
+      ? '`' : '"';
+}
+
+/* Escape identifier (caller must free) */
+static char *escape_identifier(const char *name, LaceDriver driver) {
+  if (!name) return NULL;
+  char q = get_quote_char(driver);
+
+  /* Count occurrences of quote char that need escaping */
+  size_t len = strlen(name);
+  size_t extra = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (name[i] == q) extra++;
+  }
+
+  /* Allocate: quotes + original + doubled quotes + null */
+  char *escaped = malloc(len + extra + 3);
+  if (!escaped) return NULL;
+
+  char *p = escaped;
+  *p++ = q;
+  for (size_t i = 0; i < len; i++) {
+    if (name[i] == q) *p++ = q; /* Double the quote */
+    *p++ = name[i];
+  }
+  *p++ = q;
+  *p = '\0';
+
+  return escaped;
+}
+
+/* Escape string value for SQL (caller must free) */
+static char *escape_string_value(const char *value) {
+  if (!value) return str_dup("NULL");
+
+  size_t len = strlen(value);
+  size_t extra = 0;
+  for (size_t i = 0; i < len; i++) {
+    if (value[i] == '\'') extra++;
+  }
+
+  char *escaped = malloc(len + extra + 3);
+  if (!escaped) return NULL;
+
+  char *p = escaped;
+  *p++ = '\'';
+  for (size_t i = 0; i < len; i++) {
+    if (value[i] == '\'') *p++ = '\'';
+    *p++ = value[i];
+  }
+  *p++ = '\'';
+  *p = '\0';
+
+  return escaped;
+}
+
+/* Convert LaceValue to SQL literal (caller must free) */
+static char *value_to_sql(const LaceValue *val) {
+  if (!val || val->is_null) return str_dup("NULL");
+
+  char buf[64];
+  switch (val->type) {
+  case LACE_TYPE_NULL:
+    return str_dup("NULL");
+  case LACE_TYPE_INT:
+    snprintf(buf, sizeof(buf), "%lld", (long long)val->int_val);
+    return str_dup(buf);
+  case LACE_TYPE_FLOAT:
+    snprintf(buf, sizeof(buf), "%g", val->float_val);
+    return str_dup(buf);
+  case LACE_TYPE_TEXT:
+    return escape_string_value(val->text.data);
+  case LACE_TYPE_BOOL:
+    return str_dup(val->bool_val ? "TRUE" : "FALSE");
+  case LACE_TYPE_BLOB:
+    /* For now, return NULL for blobs - proper handling would need hex encoding */
+    return str_dup("NULL");
+  default:
+    return str_dup("NULL");
+  }
 }
 
 /* Get directory of the current executable */
@@ -142,39 +298,27 @@ static char *find_daemon(const char *daemon_path) {
   return NULL;
 }
 
-/* Spawn daemon process */
-static bool spawn_daemon(lace_client_t *client, const char *daemon_path) {
+/* Spawn daemon process in Unix socket mode */
+static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
+                              char **socket_path_out) {
   char *daemon_exe = find_daemon(daemon_path);
   if (!daemon_exe) {
     set_error(client, "Daemon executable not found");
     return false;
   }
 
-  /* Create pipes for communication */
-  int to_daemon_pipe[2];   /* Client writes, daemon reads */
-  int from_daemon_pipe[2]; /* Daemon writes, client reads */
-
-  if (pipe(to_daemon_pipe) < 0) {
+  /* Get the socket path the daemon will use */
+  char *socket_path = lace_get_default_socket_path();
+  if (!socket_path) {
     free(daemon_exe);
-    set_error(client, "Failed to create pipe");
-    return false;
-  }
-
-  if (pipe(from_daemon_pipe) < 0) {
-    close(to_daemon_pipe[0]);
-    close(to_daemon_pipe[1]);
-    free(daemon_exe);
-    set_error(client, "Failed to create pipe");
+    set_error(client, "Failed to determine socket path");
     return false;
   }
 
   pid_t pid = fork();
   if (pid < 0) {
-    close(to_daemon_pipe[0]);
-    close(to_daemon_pipe[1]);
-    close(from_daemon_pipe[0]);
-    close(from_daemon_pipe[1]);
     free(daemon_exe);
+    free(socket_path);
     set_error(client, "Fork failed");
     return false;
   }
@@ -182,25 +326,22 @@ static bool spawn_daemon(lace_client_t *client, const char *daemon_path) {
   if (pid == 0) {
     /* Child process - become the daemon */
 
-    /* Set up stdin from pipe */
-    close(to_daemon_pipe[1]); /* Close write end */
-    dup2(to_daemon_pipe[0], STDIN_FILENO);
-    close(to_daemon_pipe[0]);
+    /* Create new session to detach from terminal */
+    setsid();
 
-    /* Set up stdout to pipe */
-    close(from_daemon_pipe[0]); /* Close read end */
-    dup2(from_daemon_pipe[1], STDOUT_FILENO);
-    close(from_daemon_pipe[1]);
+    /* Redirect stdin/stdout/stderr to /dev/null */
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      dup2(devnull, STDOUT_FILENO);
+      dup2(devnull, STDERR_FILENO);
+      if (devnull > STDERR_FILENO) {
+        close(devnull);
+      }
+    }
 
-    /* Redirect stderr to /dev/null or keep for debugging */
-    /* int devnull = open("/dev/null", O_WRONLY);
-       if (devnull >= 0) {
-         dup2(devnull, STDERR_FILENO);
-         close(devnull);
-       } */
-
-    /* Execute daemon */
-    execl(daemon_exe, daemon_exe, "--stdio", NULL);
+    /* Execute daemon in default Unix socket mode */
+    execl(daemon_exe, daemon_exe, "--unix", socket_path, (char *)NULL);
 
     /* If exec fails, exit */
     _exit(127);
@@ -209,32 +350,41 @@ static bool spawn_daemon(lace_client_t *client, const char *daemon_path) {
   /* Parent process */
   free(daemon_exe);
 
-  /* Close unused pipe ends */
-  close(to_daemon_pipe[0]);   /* Close read end */
-  close(from_daemon_pipe[1]); /* Close write end */
+  /* Wait for the daemon to create the socket (up to 5 seconds) */
+  int max_wait_ms = 5000;
+  int wait_interval_ms = 50;
+  int waited_ms = 0;
 
-  /* Create FILE streams */
-  client->to_daemon = fdopen(to_daemon_pipe[1], "w");
-  client->from_daemon = fdopen(from_daemon_pipe[0], "r");
+  while (waited_ms < max_wait_ms) {
+    if (lace_daemon_is_running(socket_path)) {
+      break;
+    }
 
-  if (!client->to_daemon || !client->from_daemon) {
-    if (client->to_daemon) fclose(client->to_daemon);
-    if (client->from_daemon) fclose(client->from_daemon);
-    close(to_daemon_pipe[1]);
-    close(from_daemon_pipe[0]);
+    /* Check if child process died */
+    int status;
+    pid_t result = waitpid(pid, &status, WNOHANG);
+    if (result > 0) {
+      /* Child exited */
+      free(socket_path);
+      set_error(client, "Daemon process exited unexpectedly");
+      return false;
+    }
+
+    usleep((useconds_t)(wait_interval_ms * 1000));
+    waited_ms += wait_interval_ms;
+  }
+
+  if (waited_ms >= max_wait_ms) {
+    /* Timeout - kill the daemon */
     kill(pid, SIGTERM);
     waitpid(pid, NULL, 0);
-    set_error(client, "Failed to create file streams");
+    free(socket_path);
+    set_error(client, "Timeout waiting for daemon to start");
     return false;
   }
 
-  /* Disable buffering for immediate communication */
-  setvbuf(client->to_daemon, NULL, _IONBF, 0);
-  setvbuf(client->from_daemon, NULL, _IONBF, 0);
-
+  *socket_path_out = socket_path;
   client->daemon_pid = pid;
-  client->connected = true;
-
   return true;
 }
 
@@ -250,11 +400,92 @@ lace_client_t *lace_client_create(const char *daemon_path) {
   client->socket_fd = -1;
   client->conn_mode = LACE_CONN_SPAWN;
 
-  if (!spawn_daemon(client, daemon_path)) {
-    /* Error already set in spawn_daemon */
-    /* Don't free client - caller needs to check error */
+  /* Try to connect to existing daemon first */
+  char *socket_path = lace_get_default_socket_path();
+  if (socket_path && lace_daemon_is_running(socket_path)) {
+    int fd = lace_connect_unix(socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+    free(socket_path);
+    if (fd >= 0) {
+      /* Connected to existing daemon */
+      client->socket_fd = fd;
+      int fd_read = dup(fd);
+      if (fd_read >= 0) {
+        client->to_daemon = fdopen(fd, "w");
+        client->from_daemon = fdopen(fd_read, "r");
+        if (client->to_daemon && client->from_daemon) {
+          setvbuf(client->to_daemon, NULL, _IONBF, 0);
+          setvbuf(client->from_daemon, NULL, _IONBF, 0);
+          client->connected = true;
+          client->conn_mode = LACE_CONN_UNIX;
+          return client;
+        }
+        if (client->to_daemon) fclose(client->to_daemon);
+        if (client->from_daemon) fclose(client->from_daemon);
+        else close(fd_read);
+        if (!client->to_daemon) close(fd);
+      } else {
+        close(fd);
+      }
+    }
+  } else {
+    free(socket_path);
+  }
+
+  /* No running daemon - spawn one */
+  char *spawned_socket_path = NULL;
+  if (!spawn_daemon_unix(client, daemon_path, &spawned_socket_path)) {
+    /* Error already set */
     return client;
   }
+
+  /* Connect to the spawned daemon */
+  int fd = lace_connect_unix(spawned_socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+  free(spawned_socket_path);
+  if (fd < 0) {
+    /* Kill the daemon we just spawned */
+    if (client->daemon_pid > 0) {
+      kill(client->daemon_pid, SIGTERM);
+      waitpid(client->daemon_pid, NULL, 0);
+      client->daemon_pid = 0;
+    }
+    set_error(client, "Failed to connect to spawned daemon");
+    return client;
+  }
+
+  client->socket_fd = fd;
+  int fd_read = dup(fd);
+  if (fd_read < 0) {
+    close(fd);
+    if (client->daemon_pid > 0) {
+      kill(client->daemon_pid, SIGTERM);
+      waitpid(client->daemon_pid, NULL, 0);
+      client->daemon_pid = 0;
+    }
+    set_error(client, "Failed to duplicate socket fd");
+    return client;
+  }
+
+  client->to_daemon = fdopen(fd, "w");
+  client->from_daemon = fdopen(fd_read, "r");
+
+  if (!client->to_daemon || !client->from_daemon) {
+    if (client->to_daemon) fclose(client->to_daemon);
+    if (client->from_daemon) fclose(client->from_daemon);
+    else close(fd_read);
+    if (!client->to_daemon) close(fd);
+    if (client->daemon_pid > 0) {
+      kill(client->daemon_pid, SIGTERM);
+      waitpid(client->daemon_pid, NULL, 0);
+      client->daemon_pid = 0;
+    }
+    set_error(client, "Failed to create file streams");
+    return client;
+  }
+
+  setvbuf(client->to_daemon, NULL, _IONBF, 0);
+  setvbuf(client->from_daemon, NULL, _IONBF, 0);
+  client->connected = true;
+  client->conn_mode = LACE_CONN_UNIX;
 
   return client;
 }
@@ -311,11 +542,62 @@ lace_client_t *lace_client_create_with_config(const LaceClientConfig *config) {
     return lace_client_create(config->daemon_path);
 
   case LACE_CONN_UNIX: {
-    int fd = lace_connect_unix(config->socket_path, config->connect_timeout_ms);
-    if (fd < 0 && config->spawn_if_missing) {
-      /* TODO: Spawn daemon with --unix and retry connection */
-      return NULL;
+    const char *path = config->socket_path;
+    char *default_path = NULL;
+    if (!path) {
+      default_path = lace_get_default_socket_path();
+      path = default_path;
     }
+    int fd = lace_connect_unix(path, config->connect_timeout_ms);
+    if (fd < 0 && config->spawn_if_missing) {
+      /* Spawn daemon and retry */
+      lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
+      client->timeout_ms = DEFAULT_TIMEOUT_MS;
+      client->next_id = 1;
+      client->socket_fd = -1;
+
+      char *spawned_path = NULL;
+      if (!spawn_daemon_unix(client, config->daemon_path, &spawned_path)) {
+        free(default_path);
+        return client;
+      }
+      fd = lace_connect_unix(spawned_path, config->connect_timeout_ms);
+      free(spawned_path);
+      if (fd < 0) {
+        if (client->daemon_pid > 0) {
+          kill(client->daemon_pid, SIGTERM);
+          waitpid(client->daemon_pid, NULL, 0);
+          client->daemon_pid = 0;
+        }
+        set_error(client, "Failed to connect to spawned daemon");
+        free(default_path);
+        return client;
+      }
+
+      /* Connect successful after spawn */
+      free(default_path);
+      client->socket_fd = fd;
+      int fd_read = dup(fd);
+      client->to_daemon = fdopen(fd, "w");
+      client->from_daemon = fdopen(fd_read, "r");
+      if (client->to_daemon && client->from_daemon) {
+        setvbuf(client->to_daemon, NULL, _IONBF, 0);
+        setvbuf(client->from_daemon, NULL, _IONBF, 0);
+        client->connected = true;
+        client->conn_mode = LACE_CONN_UNIX;
+        return client;
+      }
+      /* Cleanup on failure */
+      if (client->to_daemon) fclose(client->to_daemon);
+      if (client->from_daemon) fclose(client->from_daemon);
+      if (client->daemon_pid > 0) {
+        kill(client->daemon_pid, SIGTERM);
+        waitpid(client->daemon_pid, NULL, 0);
+      }
+      set_error(client, "Failed to create file streams");
+      return client;
+    }
+    free(default_path);
     if (fd < 0) {
       lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
       set_error(client, "Failed to connect to Unix socket");
@@ -480,6 +762,11 @@ int lace_connect(lace_client_t *client, const char *connstr,
 
   *conn_id = id_json->valueint;
   cJSON_Delete(result);
+
+  /* Track driver type for this connection */
+  LaceDriver driver = parse_driver(connstr);
+  track_connection(client, *conn_id, driver);
+
   return LACE_OK;
 }
 
@@ -499,6 +786,9 @@ int lace_disconnect(lace_client_t *client, int conn_id) {
   int err = lace_rpc_call(client, "disconnect", params, &result);
   cJSON_Delete(params);
   cJSON_Delete(result);
+
+  /* Untrack connection */
+  untrack_connection(client, conn_id);
 
   return err;
 }
@@ -596,46 +886,56 @@ int lace_list_tables(lace_client_t *client, int conn_id, char ***tables,
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
-    return LACE_ERR_OUT_OF_MEMORY;
+  LaceDriver driver = get_connection_driver(client, conn_id);
+
+  /* Build driver-specific SQL */
+  const char *sql;
+  switch (driver) {
+  case LACE_DRIVER_SQLITE:
+    sql = "SELECT name FROM sqlite_master WHERE type='table' "
+          "AND name NOT LIKE 'sqlite_%' ORDER BY name";
+    break;
+  case LACE_DRIVER_POSTGRES:
+    sql = "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+          "ORDER BY tablename";
+    break;
+  case LACE_DRIVER_MYSQL:
+  case LACE_DRIVER_MARIADB:
+    sql = "SHOW TABLES";
+    break;
+  default:
+    return LACE_ERR_INTERNAL_ERROR;
   }
 
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-
-  cJSON *result = NULL;
-  int err = lace_rpc_call(client, "tables", params, &result);
-  cJSON_Delete(params);
-
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
   if (err != LACE_OK) {
     return err;
   }
 
-  if (!cJSON_IsArray(result)) {
-    cJSON_Delete(result);
-    return LACE_ERR_INTERNAL_ERROR;
-  }
-
-  int num = cJSON_GetArraySize(result);
-  if (num == 0) {
+  if (!result || result->num_rows == 0) {
     *tables = NULL;
     *count = 0;
-    cJSON_Delete(result);
+    lace_result_free(result);
     return LACE_OK;
   }
 
-  char **arr = safe_calloc((size_t)num, sizeof(char *));
+  char **arr = safe_calloc(result->num_rows, sizeof(char *));
+  if (!arr) {
+    lace_result_free(result);
+    return LACE_ERR_OUT_OF_MEMORY;
+  }
 
-  for (int i = 0; i < num; i++) {
-    cJSON *item = cJSON_GetArrayItem(result, i);
-    if (item && cJSON_IsString(item)) {
-      arr[i] = str_dup(item->valuestring);
+  for (size_t i = 0; i < result->num_rows; i++) {
+    LaceRow *row = &result->rows[i];
+    if (row->cells && row->num_cells > 0 && row->cells[0].type == LACE_TYPE_TEXT) {
+      arr[i] = str_dup(row->cells[0].text.data);
     }
   }
 
   *tables = arr;
-  *count = (size_t)num;
-  cJSON_Delete(result);
+  *count = result->num_rows;
+  lace_result_free(result);
   return LACE_OK;
 }
 
@@ -654,30 +954,115 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
-    return LACE_ERR_OUT_OF_MEMORY;
+  LaceDriver driver = get_connection_driver(client, conn_id);
+
+  /* Build driver-specific schema query */
+  char sql[1024];
+  switch (driver) {
+  case LACE_DRIVER_SQLITE: {
+    char *esc_table = escape_string_value(table);
+    if (!esc_table) return LACE_ERR_OUT_OF_MEMORY;
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(%s)", esc_table);
+    free(esc_table);
+    break;
+  }
+  case LACE_DRIVER_POSTGRES: {
+    char *esc_table = escape_string_value(table);
+    if (!esc_table) return LACE_ERR_OUT_OF_MEMORY;
+    snprintf(sql, sizeof(sql),
+             "SELECT column_name, data_type, is_nullable, column_default "
+             "FROM information_schema.columns "
+             "WHERE table_name = %s AND table_schema = 'public' "
+             "ORDER BY ordinal_position", esc_table);
+    free(esc_table);
+    break;
+  }
+  case LACE_DRIVER_MYSQL:
+  case LACE_DRIVER_MARIADB: {
+    char *esc_table = escape_identifier(table, driver);
+    if (!esc_table) return LACE_ERR_OUT_OF_MEMORY;
+    snprintf(sql, sizeof(sql), "DESCRIBE %s", esc_table);
+    free(esc_table);
+    break;
+  }
+  default:
+    return LACE_ERR_INTERNAL_ERROR;
   }
 
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-  cJSON_AddStringToObject(params, "table", table);
-
-  cJSON *result = NULL;
-  int err = lace_rpc_call(client, "schema", params, &result);
-  cJSON_Delete(params);
-
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
   if (err != LACE_OK) {
     return err;
   }
 
-  /* Parse schema from JSON */
-  *schema = lace_rpc_parse_schema(result);
-  cJSON_Delete(result);
+  if (!result || result->num_rows == 0) {
+    lace_result_free(result);
+    return LACE_ERR_TABLE_NOT_FOUND;
+  }
 
-  if (!*schema) {
+  /* Allocate schema */
+  LaceSchema *sch = safe_calloc(1, sizeof(LaceSchema));
+  if (!sch) {
+    lace_result_free(result);
     return LACE_ERR_OUT_OF_MEMORY;
   }
 
+  sch->name = str_dup(table);
+  sch->num_columns = result->num_rows;
+  sch->columns = safe_calloc(result->num_rows, sizeof(LaceColumn));
+  if (!sch->columns) {
+    free(sch->name);
+    free(sch);
+    lace_result_free(result);
+    return LACE_ERR_OUT_OF_MEMORY;
+  }
+
+  /* Parse columns based on driver */
+  for (size_t i = 0; i < result->num_rows; i++) {
+    LaceRow *row = &result->rows[i];
+    LaceColumn *col = &sch->columns[i];
+
+    switch (driver) {
+    case LACE_DRIVER_SQLITE:
+      /* PRAGMA table_info: cid, name, type, notnull, dflt_value, pk */
+      if (result->num_columns >= 6 && row->num_cells >= 6) {
+        col->name = row->cells[1].type == LACE_TYPE_TEXT ? str_dup(row->cells[1].text.data) : NULL;
+        col->type_name = row->cells[2].type == LACE_TYPE_TEXT ? str_dup(row->cells[2].text.data) : NULL;
+        col->nullable = row->cells[3].type == LACE_TYPE_INT ? !row->cells[3].int_val : true;
+        col->primary_key = row->cells[5].type == LACE_TYPE_INT ? row->cells[5].int_val > 0 : false;
+      }
+      break;
+
+    case LACE_DRIVER_POSTGRES:
+      /* column_name, data_type, is_nullable, column_default */
+      if (result->num_columns >= 3 && row->num_cells >= 3) {
+        col->name = row->cells[0].type == LACE_TYPE_TEXT ? str_dup(row->cells[0].text.data) : NULL;
+        col->type_name = row->cells[1].type == LACE_TYPE_TEXT ? str_dup(row->cells[1].text.data) : NULL;
+        col->nullable = row->cells[2].type == LACE_TYPE_TEXT && row->cells[2].text.data &&
+                        strcmp(row->cells[2].text.data, "YES") == 0;
+      }
+      break;
+
+    case LACE_DRIVER_MYSQL:
+    case LACE_DRIVER_MARIADB:
+      /* DESCRIBE: Field, Type, Null, Key, Default, Extra */
+      if (result->num_columns >= 4 && row->num_cells >= 4) {
+        col->name = row->cells[0].type == LACE_TYPE_TEXT ? str_dup(row->cells[0].text.data) : NULL;
+        col->type_name = row->cells[1].type == LACE_TYPE_TEXT ? str_dup(row->cells[1].text.data) : NULL;
+        col->nullable = row->cells[2].type == LACE_TYPE_TEXT && row->cells[2].text.data &&
+                        strcmp(row->cells[2].text.data, "YES") == 0;
+        col->primary_key = row->cells[3].type == LACE_TYPE_TEXT && row->cells[3].text.data &&
+                           strcmp(row->cells[3].text.data, "PRI") == 0;
+      }
+      break;
+
+    default:
+      break;
+    }
+  }
+
+  lace_result_free(result);
+  *schema = sch;
   return LACE_OK;
 }
 
@@ -693,39 +1078,25 @@ int lace_query(lace_client_t *client, int conn_id, const char *table,
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
-    return LACE_ERR_OUT_OF_MEMORY;
-  }
-
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-  cJSON_AddStringToObject(params, "table", table);
-  cJSON_AddNumberToObject(params, "offset", (double)offset);
-  cJSON_AddNumberToObject(params, "limit", (double)(limit > 0 ? limit : 500));
-
-  /* TODO: Add filters and sorts to params */
+  /* Note: filters and sorts require schema to build SQL - not supported here.
+   * Use lace_exec() with pre-built SQL for filtered/sorted queries. */
   (void)filters;
   (void)num_filters;
   (void)sorts;
   (void)num_sorts;
 
-  cJSON *resp = NULL;
-  int err = lace_rpc_call(client, "data", params, &resp);
-  cJSON_Delete(params);
-
-  if (err != LACE_OK) {
-    return err;
-  }
-
-  /* Parse result from JSON */
-  *result = lace_rpc_parse_result(resp);
-  cJSON_Delete(resp);
-
-  if (!*result) {
+  LaceDriver driver = get_connection_driver(client, conn_id);
+  char *escaped_table = escape_identifier(table, driver);
+  if (!escaped_table) {
     return LACE_ERR_OUT_OF_MEMORY;
   }
 
-  return LACE_OK;
+  char sql[1024];
+  snprintf(sql, sizeof(sql), "SELECT * FROM %s LIMIT %zu OFFSET %zu",
+           escaped_table, limit > 0 ? limit : 500, offset);
+  free(escaped_table);
+
+  return lace_exec(client, conn_id, sql, result);
 }
 
 int lace_count(lace_client_t *client, int conn_id, const char *table,
@@ -735,40 +1106,55 @@ int lace_count(lace_client_t *client, int conn_id, const char *table,
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
-    return LACE_ERR_OUT_OF_MEMORY;
-  }
-
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-  cJSON_AddStringToObject(params, "table", table);
-
-  /* TODO: Add filters to params */
+  /* Note: filters require schema to build SQL - not supported here.
+   * Use lace_exec() with COUNT(*) WHERE ... for filtered counts. */
   (void)filters;
   (void)num_filters;
 
-  cJSON *result = NULL;
-  int err = lace_rpc_call(client, "count", params, &result);
-  cJSON_Delete(params);
+  LaceDriver driver = get_connection_driver(client, conn_id);
+  char *escaped_table = escape_identifier(table, driver);
+  if (!escaped_table) {
+    return LACE_ERR_OUT_OF_MEMORY;
+  }
 
+  char sql[512];
+  snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM %s", escaped_table);
+  free(escaped_table);
+
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
   if (err != LACE_OK) {
     return err;
   }
 
-  cJSON *cnt = cJSON_GetObjectItem(result, "count");
-  cJSON *approx = cJSON_GetObjectItem(result, "approximate");
-
-  if (!cnt || !cJSON_IsNumber(cnt)) {
-    cJSON_Delete(result);
+  if (!result || result->num_rows == 0) {
+    lace_result_free(result);
     return LACE_ERR_INTERNAL_ERROR;
   }
 
-  *count = (size_t)cnt->valuedouble;
-  if (approximate) {
-    *approximate = approx && cJSON_IsTrue(approx);
+  LaceRow *row = &result->rows[0];
+  if (!row->cells || row->num_cells == 0) {
+    lace_result_free(result);
+    return LACE_ERR_INTERNAL_ERROR;
   }
 
-  cJSON_Delete(result);
+  /* Extract count from first column of first row */
+  LaceValue *cell = &row->cells[0];
+  if (cell->type == LACE_TYPE_INT) {
+    *count = (size_t)cell->int_val;
+  } else if (cell->type == LACE_TYPE_FLOAT) {
+    *count = (size_t)cell->float_val;
+  } else if (cell->type == LACE_TYPE_TEXT && cell->text.data) {
+    *count = (size_t)strtoll(cell->text.data, NULL, 10);
+  } else {
+    *count = 0;
+  }
+
+  if (approximate) {
+    *approximate = false; /* Raw COUNT(*) is exact */
+  }
+
+  lace_result_free(result);
   return LACE_OK;
 }
 
@@ -841,102 +1227,205 @@ int lace_cancel_query(lace_client_t *client, int conn_id) {
 int lace_update(lace_client_t *client, int conn_id, const char *table,
                 const LacePkValue *pk, size_t num_pk,
                 const char *column, const LaceValue *value) {
-  if (!client || !client->connected || !table || !pk || !column || !value) {
+  if (!client || !client->connected || !table || !pk || num_pk == 0 || !column || !value) {
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
+  LaceDriver driver = get_connection_driver(client, conn_id);
+
+  /* Build UPDATE table SET column = value WHERE pk1 = v1 AND pk2 = v2 ... */
+  char sql[4096];
+  char *p = sql;
+  size_t remaining = sizeof(sql);
+
+  /* UPDATE table SET column = value */
+  char *esc_table = escape_identifier(table, driver);
+  char *esc_col = escape_identifier(column, driver);
+  char *val_sql = value_to_sql(value);
+  if (!esc_table || !esc_col || !val_sql) {
+    free(esc_table);
+    free(esc_col);
+    free(val_sql);
     return LACE_ERR_OUT_OF_MEMORY;
   }
 
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-  cJSON_AddStringToObject(params, "table", table);
-  cJSON_AddStringToObject(params, "column", column);
+  int n = snprintf(p, remaining, "UPDATE %s SET %s = %s WHERE ", esc_table, esc_col, val_sql);
+  free(esc_table);
+  free(esc_col);
+  free(val_sql);
 
-  /* Add value */
-  cJSON *val_json = lace_rpc_value_to_json(value);
-  if (val_json) {
-    cJSON_AddItemToObject(params, "value", val_json);
+  if (n < 0 || (size_t)n >= remaining) {
+    return LACE_ERR_INTERNAL_ERROR;
   }
+  p += n;
+  remaining -= (size_t)n;
 
-  /* Add primary key array */
-  cJSON *pk_array = cJSON_CreateArray();
-  if (pk_array) {
-    for (size_t i = 0; i < num_pk; i++) {
-      cJSON *pk_item = cJSON_CreateObject();
-      if (pk_item) {
-        cJSON_AddStringToObject(pk_item, "column", pk[i].column);
-        cJSON *pk_val = lace_rpc_value_to_json(&pk[i].value);
-        if (pk_val) {
-          cJSON_AddItemToObject(pk_item, "value", pk_val);
-        }
-        cJSON_AddItemToArray(pk_array, pk_item);
-      }
+  /* WHERE clause from primary keys */
+  for (size_t i = 0; i < num_pk; i++) {
+    char *esc_pk_col = escape_identifier(pk[i].column, driver);
+    char *pk_val_sql = value_to_sql(&pk[i].value);
+    if (!esc_pk_col || !pk_val_sql) {
+      free(esc_pk_col);
+      free(pk_val_sql);
+      return LACE_ERR_OUT_OF_MEMORY;
     }
-    cJSON_AddItemToObject(params, "pk", pk_array);
+
+    n = snprintf(p, remaining, "%s%s = %s",
+                 i > 0 ? " AND " : "", esc_pk_col, pk_val_sql);
+    free(esc_pk_col);
+    free(pk_val_sql);
+
+    if (n < 0 || (size_t)n >= remaining) {
+      return LACE_ERR_INTERNAL_ERROR;
+    }
+    p += n;
+    remaining -= (size_t)n;
   }
 
-  cJSON *result = NULL;
-  int err = lace_rpc_call(client, "update", params, &result);
-  cJSON_Delete(params);
-  cJSON_Delete(result);
-
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
+  lace_result_free(result);
   return err;
 }
 
 int lace_delete(lace_client_t *client, int conn_id, const char *table,
                 const LacePkValue *pk, size_t num_pk) {
-  if (!client || !client->connected || !table || !pk) {
+  if (!client || !client->connected || !table || !pk || num_pk == 0) {
     return LACE_ERR_INVALID_PARAMS;
   }
 
-  cJSON *params = cJSON_CreateObject();
-  if (!params) {
+  LaceDriver driver = get_connection_driver(client, conn_id);
+
+  /* Build DELETE FROM table WHERE pk1 = v1 AND pk2 = v2 ... */
+  char sql[4096];
+  char *p = sql;
+  size_t remaining = sizeof(sql);
+
+  char *esc_table = escape_identifier(table, driver);
+  if (!esc_table) {
     return LACE_ERR_OUT_OF_MEMORY;
   }
 
-  cJSON_AddNumberToObject(params, "conn_id", conn_id);
-  cJSON_AddStringToObject(params, "table", table);
+  int n = snprintf(p, remaining, "DELETE FROM %s WHERE ", esc_table);
+  free(esc_table);
 
-  /* Add primary key array */
-  cJSON *pk_array = cJSON_CreateArray();
-  if (pk_array) {
-    for (size_t i = 0; i < num_pk; i++) {
-      cJSON *pk_item = cJSON_CreateObject();
-      if (pk_item) {
-        cJSON_AddStringToObject(pk_item, "column", pk[i].column);
-        cJSON *pk_val = lace_rpc_value_to_json(&pk[i].value);
-        if (pk_val) {
-          cJSON_AddItemToObject(pk_item, "value", pk_val);
-        }
-        cJSON_AddItemToArray(pk_array, pk_item);
-      }
+  if (n < 0 || (size_t)n >= remaining) {
+    return LACE_ERR_INTERNAL_ERROR;
+  }
+  p += n;
+  remaining -= (size_t)n;
+
+  /* WHERE clause from primary keys */
+  for (size_t i = 0; i < num_pk; i++) {
+    char *esc_pk_col = escape_identifier(pk[i].column, driver);
+    char *pk_val_sql = value_to_sql(&pk[i].value);
+    if (!esc_pk_col || !pk_val_sql) {
+      free(esc_pk_col);
+      free(pk_val_sql);
+      return LACE_ERR_OUT_OF_MEMORY;
     }
-    cJSON_AddItemToObject(params, "pk", pk_array);
+
+    n = snprintf(p, remaining, "%s%s = %s",
+                 i > 0 ? " AND " : "", esc_pk_col, pk_val_sql);
+    free(esc_pk_col);
+    free(pk_val_sql);
+
+    if (n < 0 || (size_t)n >= remaining) {
+      return LACE_ERR_INTERNAL_ERROR;
+    }
+    p += n;
+    remaining -= (size_t)n;
   }
 
-  cJSON *result = NULL;
-  int err = lace_rpc_call(client, "delete", params, &result);
-  cJSON_Delete(params);
-  cJSON_Delete(result);
-
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
+  lace_result_free(result);
   return err;
 }
 
 int lace_insert(lace_client_t *client, int conn_id, const char *table,
                 const char **columns, const LaceValue *values, size_t num_columns,
                 LacePkValue **out_pk, size_t *out_num_pk) {
-  /* TODO: Implement insert */
-  (void)client;
-  (void)conn_id;
-  (void)table;
-  (void)columns;
-  (void)values;
-  (void)num_columns;
-  (void)out_pk;
-  (void)out_num_pk;
-  return LACE_ERR_INTERNAL_ERROR;
+  if (!client || !client->connected || !table || !columns || !values || num_columns == 0) {
+    return LACE_ERR_INVALID_PARAMS;
+  }
+
+  LaceDriver driver = get_connection_driver(client, conn_id);
+
+  /* Build INSERT INTO table (col1, col2, ...) VALUES (v1, v2, ...) */
+  char sql[8192];
+  char *p = sql;
+  size_t remaining = sizeof(sql);
+
+  char *esc_table = escape_identifier(table, driver);
+  if (!esc_table) {
+    return LACE_ERR_OUT_OF_MEMORY;
+  }
+
+  int n = snprintf(p, remaining, "INSERT INTO %s (", esc_table);
+  free(esc_table);
+
+  if (n < 0 || (size_t)n >= remaining) {
+    return LACE_ERR_INTERNAL_ERROR;
+  }
+  p += n;
+  remaining -= (size_t)n;
+
+  /* Column list */
+  for (size_t i = 0; i < num_columns; i++) {
+    char *esc_col = escape_identifier(columns[i], driver);
+    if (!esc_col) {
+      return LACE_ERR_OUT_OF_MEMORY;
+    }
+
+    n = snprintf(p, remaining, "%s%s", i > 0 ? ", " : "", esc_col);
+    free(esc_col);
+
+    if (n < 0 || (size_t)n >= remaining) {
+      return LACE_ERR_INTERNAL_ERROR;
+    }
+    p += n;
+    remaining -= (size_t)n;
+  }
+
+  n = snprintf(p, remaining, ") VALUES (");
+  if (n < 0 || (size_t)n >= remaining) {
+    return LACE_ERR_INTERNAL_ERROR;
+  }
+  p += n;
+  remaining -= (size_t)n;
+
+  /* Value list */
+  for (size_t i = 0; i < num_columns; i++) {
+    char *val_sql = value_to_sql(&values[i]);
+    if (!val_sql) {
+      return LACE_ERR_OUT_OF_MEMORY;
+    }
+
+    n = snprintf(p, remaining, "%s%s", i > 0 ? ", " : "", val_sql);
+    free(val_sql);
+
+    if (n < 0 || (size_t)n >= remaining) {
+      return LACE_ERR_INTERNAL_ERROR;
+    }
+    p += n;
+    remaining -= (size_t)n;
+  }
+
+  n = snprintf(p, remaining, ")");
+  if (n < 0 || (size_t)n >= remaining) {
+    return LACE_ERR_INTERNAL_ERROR;
+  }
+
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
+
+  /* Currently we don't return auto-generated PK - would need RETURNING clause */
+  if (out_pk) *out_pk = NULL;
+  if (out_num_pk) *out_num_pk = 0;
+
+  lace_result_free(result);
+  return err;
 }
 
 void lace_pk_free(LacePkValue *pk, size_t num_pk) {

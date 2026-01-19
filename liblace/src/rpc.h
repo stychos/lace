@@ -69,20 +69,4 @@ bool lace_rpc_parse_value(cJSON *json, LaceValue *val);
  */
 cJSON *lace_rpc_value_to_json(const LaceValue *val);
 
-/*
- * Convert a LaceFilter to JSON.
- *
- * @param filter  Filter to convert
- * @return        JSON object (caller must cJSON_Delete), or NULL on error
- */
-cJSON *lace_rpc_filter_to_json(const LaceFilter *filter);
-
-/*
- * Convert a LaceSort to JSON.
- *
- * @param sort  Sort to convert
- * @return      JSON object (caller must cJSON_Delete), or NULL on error
- */
-cJSON *lace_rpc_sort_to_json(const LaceSort *sort);
-
 #endif /* LIBLACE_RPC_H */

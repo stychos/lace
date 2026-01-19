@@ -10,6 +10,7 @@
 #include "async.h"
 #include "handler.h"
 #include "json.h"
+#include "log.h"
 #include "session.h"
 #include <util/mem.h>
 #include <util/str.h>
@@ -28,6 +29,9 @@
 
 /* Default max clients */
 #define DEFAULT_MAX_CLIENTS 64
+
+/* Idle client timeout in seconds (5 minutes) */
+#define CLIENT_IDLE_TIMEOUT 300
 
 /* Server structure */
 struct LacedServer {
@@ -447,9 +451,14 @@ int laced_server_run_stdio(LacedServer *server,
 
 /* Add a client to the server's client list */
 static void add_client(LacedServer *server, LacedClient *client) {
+  time_t now = time(NULL);
+  client->connected_at = now;
+  client->last_activity = now;
+  client->requests_count = 0;
   client->next = server->clients;
   server->clients = client;
   server->num_clients++;
+  LOG_INFO("Client connected (fd=%d, total=%zu)", client->fd, server->num_clients);
 }
 
 /* Remove a client from the server's client list */
@@ -461,6 +470,10 @@ static void remove_client(LacedServer *server, LacedClient *client) {
   if (*pp) {
     *pp = client->next;
     server->num_clients--;
+    time_t connected_secs = time(NULL) - client->connected_at;
+    LOG_INFO("Client disconnected (fd=%d, connected=%lds, requests=%llu, remaining=%zu)",
+             client->fd, (long)connected_secs,
+             (unsigned long long)client->requests_count, server->num_clients);
   }
   laced_client_free(client);
 }
@@ -537,8 +550,13 @@ static bool send_result_to_client(LacedClient *client, cJSON *id, cJSON *result)
 /* Process a JSON-RPC request from a socket client */
 static bool process_client_request(LacedServer *server, LacedClient *client,
                                    const char *json_str) {
+  /* Update client activity */
+  client->last_activity = time(NULL);
+  client->requests_count++;
+
   cJSON *req = cJSON_Parse(json_str);
   if (!req) {
+    LOG_WARN("Client fd=%d: parse error", client->fd);
     return send_error_to_client(client, NULL, -32700, "Parse error");
   }
 
@@ -547,6 +565,9 @@ static bool process_client_request(LacedServer *server, LacedClient *client,
   cJSON *method = cJSON_GetObjectItem(req, "method");
   cJSON *id = cJSON_GetObjectItem(req, "id");
   cJSON *params = cJSON_GetObjectItem(req, "params");
+
+  LOG_DEBUG("Client fd=%d: method=%s", client->fd,
+            method && cJSON_IsString(method) ? method->valuestring : "(invalid)");
 
   if (!jsonrpc || !cJSON_IsString(jsonrpc) ||
       strcmp(jsonrpc->valuestring, "2.0") != 0) {
@@ -689,9 +710,11 @@ static int run_socket_event_loop(LacedServer *server,
     }
 
     /* Handle client requests */
+    time_t now = time(NULL);
     LacedClient *client = server->clients;
     while (client) {
       LacedClient *next = client->next; /* Save next in case we remove */
+      bool should_remove = false;
 
       if (FD_ISSET(client->fd, &read_fds)) {
         char *line;
@@ -712,8 +735,19 @@ static int run_socket_event_loop(LacedServer *server,
 
         /* Check if client disconnected */
         if (client_disconnected || !laced_client_is_connected(client)) {
-          remove_client(server, client);
+          should_remove = true;
         }
+      }
+
+      /* Check for idle timeout */
+      if (!should_remove && (now - client->last_activity) > CLIENT_IDLE_TIMEOUT) {
+        LOG_INFO("Client fd=%d idle timeout (%lds)", client->fd,
+                 (long)(now - client->last_activity));
+        should_remove = true;
+      }
+
+      if (should_remove) {
+        remove_client(server, client);
       }
 
       client = next;
@@ -743,7 +777,7 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
 
   /* Remove stale socket if present */
   if (!laced_remove_stale_socket(path)) {
-    fprintf(stderr, "Another daemon is already running at %s\n", path);
+    LOG_ERROR("Another daemon is already running at %s", path);
     free(path);
     return 1;
   }
@@ -751,8 +785,7 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
   /* Create and bind socket */
   int listen_fd = laced_create_unix_socket(path);
   if (listen_fd < 0) {
-    fprintf(stderr, "Failed to create Unix socket at %s: %s\n", path,
-            strerror(errno));
+    LOG_ERROR("Failed to create Unix socket at %s: %s", path, strerror(errno));
     free(path);
     return 1;
   }
@@ -762,6 +795,9 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
   server->listen_fd = listen_fd;
   server->socket_path = path;
   server->max_clients = max_clients > 0 ? max_clients : DEFAULT_MAX_CLIENTS;
+
+  LOG_INFO("Listening on Unix socket: %s (max_clients=%zu)", path,
+           server->max_clients);
 
   /* Run event loop */
   int result = run_socket_event_loop(server, shutdown_flag);
@@ -777,12 +813,15 @@ int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
     return 1;
   }
 
+  /* Use default port if not specified */
+  int actual_port = port > 0 ? port : 7433;
+  const char *actual_addr = bind_addr ? bind_addr : "localhost";
+
   /* Create and bind socket */
-  int listen_fd = laced_create_tcp_socket(bind_addr, port);
+  int listen_fd = laced_create_tcp_socket(bind_addr, actual_port);
   if (listen_fd < 0) {
-    fprintf(stderr, "Failed to create TCP socket on %s:%d: %s\n",
-            bind_addr ? bind_addr : "localhost", port > 0 ? port : 7433,
-            strerror(errno));
+    LOG_ERROR("Failed to create TCP socket on %s:%d: %s", actual_addr,
+              actual_port, strerror(errno));
     return 1;
   }
 
@@ -790,6 +829,9 @@ int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
   server->transport = LACED_TRANSPORT_TCP;
   server->listen_fd = listen_fd;
   server->max_clients = max_clients > 0 ? max_clients : DEFAULT_MAX_CLIENTS;
+
+  LOG_INFO("Listening on TCP socket: %s:%d (max_clients=%zu)", actual_addr,
+           actual_port, server->max_clients);
 
   /* Run event loop */
   int result = run_socket_event_loop(server, shutdown_flag);

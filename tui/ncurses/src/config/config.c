@@ -13,7 +13,7 @@
 #include "util/json_helpers.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
-#include <cJSON.h>
+#include <cjson/cJSON.h>
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>

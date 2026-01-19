@@ -41,7 +41,7 @@ void tui_calculate_column_widths(TuiState *state) {
     tab->col_widths[i] = len < MIN_COL_WIDTH ? MIN_COL_WIDTH : len;
   }
 
-  /* Check data widths */
+  /* Check data widths - sample first 100 rows */
   for (size_t row = 0; row < data->num_rows && row < 100; row++) {
     Row *r = &data->rows[row];
     if (!r->cells)
@@ -58,38 +58,10 @@ void tui_calculate_column_widths(TuiState *state) {
     }
   }
 
-  /* Apply max width, but ensure PK columns show full content for short values */
+  /* Apply max width: content-based sizing up to DEFAULT_COL_WIDTH (15) */
   for (size_t i = 0; i < tab->num_col_widths; i++) {
-    bool is_pk = false;
-    DbValueType col_type = DB_TYPE_NULL;
-
-    /* Check if this column is a primary key */
-    if (tab->schema && i < tab->schema->num_columns) {
-      is_pk = tab->schema->columns[i].primary_key;
-      col_type = tab->schema->columns[i].type;
-    }
-
-    if (is_pk) {
-      /* For PK columns:
-       * - Numeric types: minimum width of 10 to show typical IDs (up to 9999999999)
-       * - Text types: show full content up to 15 chars
-       * - Apply normal MAX_COL_WIDTH only if data is longer than these thresholds */
-      int pk_min_width = (col_type == DB_TYPE_INT || col_type == DB_TYPE_FLOAT)
-                             ? 10
-                             : DEFAULT_COL_WIDTH; /* 15 for text */
-
-      if (tab->col_widths[i] < pk_min_width) {
-        tab->col_widths[i] = pk_min_width;
-      }
-      /* Only clamp to MAX if significantly larger than PK threshold */
-      if (tab->col_widths[i] > MAX_COL_WIDTH) {
-        tab->col_widths[i] = MAX_COL_WIDTH;
-      }
-    } else {
-      /* Non-PK columns: apply normal max width */
-      if (tab->col_widths[i] > MAX_COL_WIDTH) {
-        tab->col_widths[i] = MAX_COL_WIDTH;
-      }
+    if (tab->col_widths[i] > DEFAULT_COL_WIDTH) {
+      tab->col_widths[i] = DEFAULT_COL_WIDTH;
     }
   }
 
@@ -171,6 +143,12 @@ static char *build_order_clause(TuiState *state) {
     sb_printf(sb, "%s %s", escaped,
               entry->direction == SORT_ASC ? "ASC" : "DESC");
     free(escaped);
+  }
+
+  /* Return NULL if no valid entries were added */
+  if (!first_added) {
+    sb_free(sb);
+    return NULL;
   }
 
   char *result = sb_to_string(sb);

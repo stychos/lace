@@ -87,6 +87,8 @@ struct TuiState {
   bool editing;
   char *edit_buffer;
   size_t edit_pos;
+  int edit_cursor_y;  /* Screen Y position of edit cursor */
+  int edit_cursor_x;  /* Screen X position of edit cursor */
 
   /* Visibility toggles */
   bool header_visible;

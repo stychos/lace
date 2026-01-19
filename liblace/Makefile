@@ -8,6 +8,16 @@ LIBS = -lcjson
 AR = ar
 ARFLAGS = rcs
 
+# Detect OS for platform-specific paths
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS - use Homebrew paths
+    CFLAGS += $(shell pkg-config --cflags libcjson 2>/dev/null || echo "-I/opt/homebrew/opt/cjson/include")
+    LDFLAGS += $(shell pkg-config --libs-only-L libcjson 2>/dev/null || echo "-L/opt/homebrew/opt/cjson/lib")
+else
+    CFLAGS += -I/usr/include/cjson
+endif
+
 # Build directory
 BUILD_DIR = build
 

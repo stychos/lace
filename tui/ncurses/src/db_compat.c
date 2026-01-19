@@ -222,15 +222,16 @@ ResultSet *db_query_page(DbConnection *conn, const char *table,
     return NULL;
   }
 
-  /* Build SQL query: SELECT * FROM table [ORDER BY ...] LIMIT ... OFFSET ... */
+  (void)order_desc; /* order_clause already includes direction */
+
+  /* Build SQL query */
   char sql[2048];
   const char *q = conn->driver_type == LACE_DRIVER_MYSQL ||
                   conn->driver_type == LACE_DRIVER_MARIADB ? "`" : "\"";
 
   if (order_clause && order_clause[0]) {
-    snprintf(sql, sizeof(sql), "SELECT * FROM %s%s%s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-             q, table, q, order_clause, order_desc ? "DESC" : "ASC",
-             limit, offset);
+    snprintf(sql, sizeof(sql), "SELECT * FROM %s%s%s ORDER BY %s LIMIT %zu OFFSET %zu",
+             q, table, q, order_clause, limit, offset);
   } else {
     snprintf(sql, sizeof(sql), "SELECT * FROM %s%s%s LIMIT %zu OFFSET %zu",
              q, table, q, limit, offset);
@@ -250,6 +251,8 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
     return NULL;
   }
 
+  (void)order_desc; /* order_clause already includes direction */
+
   /* Build SQL query with WHERE clause */
   char sql[4096];
   const char *q = conn->driver_type == LACE_DRIVER_MYSQL ||
@@ -257,18 +260,16 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
 
   if (where_clause && where_clause[0] && order_clause && order_clause[0]) {
     snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s WHERE %s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-             q, table, q, where_clause, order_clause,
-             order_desc ? "DESC" : "ASC", limit, offset);
+             "SELECT * FROM %s%s%s WHERE %s ORDER BY %s LIMIT %zu OFFSET %zu",
+             q, table, q, where_clause, order_clause, limit, offset);
   } else if (where_clause && where_clause[0]) {
     snprintf(sql, sizeof(sql),
              "SELECT * FROM %s%s%s WHERE %s LIMIT %zu OFFSET %zu",
              q, table, q, where_clause, limit, offset);
   } else if (order_clause && order_clause[0]) {
     snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s ORDER BY %s %s LIMIT %zu OFFSET %zu",
-             q, table, q, order_clause, order_desc ? "DESC" : "ASC",
-             limit, offset);
+             "SELECT * FROM %s%s%s ORDER BY %s LIMIT %zu OFFSET %zu",
+             q, table, q, order_clause, limit, offset);
   } else {
     snprintf(sql, sizeof(sql),
              "SELECT * FROM %s%s%s LIMIT %zu OFFSET %zu",

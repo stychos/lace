@@ -155,32 +155,28 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset) {
   tab->query_loaded_offset = offset;
   tab->query_loaded_count = data->num_rows;
 
-  /* Recalculate column widths */
+  /* Recalculate column widths based on content */
   free(tab->query_result_col_widths);
   tab->query_result_col_widths = NULL;
   if (data->num_columns > 0) {
     tab->query_result_col_widths = safe_calloc(data->num_columns, sizeof(int));
     for (size_t c = 0; c < data->num_columns; c++) {
       int w = data->columns[c].name ? (int)strlen(data->columns[c].name) : 0;
-      if (w < 8)
-        w = 8;
+      if (w < MIN_COL_WIDTH)
+        w = MIN_COL_WIDTH;
       for (size_t r = 0; r < data->num_rows && r < 100; r++) {
         if (r < data->num_rows && c < data->rows[r].num_cells) {
-          DbValue *v = &data->rows[r].cells[c];
-          int vw = 0;
-          if (v->type == DB_TYPE_TEXT && v->text.data) {
-            vw = (int)strlen(v->text.data);
-          } else if (v->type == DB_TYPE_INT) {
-            vw = 12;
-          } else if (v->type == DB_TYPE_FLOAT) {
-            vw = 15;
+          char *str = db_value_to_string(&data->rows[r].cells[c]);
+          if (str) {
+            int vw = (int)strlen(str);
+            if (vw > w)
+              w = vw;
+            free(str);
           }
-          if (vw > w)
-            w = vw;
         }
       }
-      if (w > 50)
-        w = 50;
+      if (w > DEFAULT_COL_WIDTH)
+        w = DEFAULT_COL_WIDTH;
       tab->query_result_col_widths[c] = w;
     }
   }

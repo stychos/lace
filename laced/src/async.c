@@ -9,9 +9,11 @@
 #include "async.h"
 #include "db/db.h"
 #include "json.h"
+#include "log.h"
 #include <util/mem.h>
 #include <util/str.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -42,10 +44,7 @@ struct AsyncQuery {
   /* Input parameters */
   LacedSession *session;
   int conn_id;
-  char *table;
   char *sql;
-  size_t offset;
-  size_t limit;
 
   /* Request tracking */
   cJSON *request_id;
@@ -57,7 +56,7 @@ struct AsyncQuery {
 
   /* Threading */
   pthread_t thread;
-  volatile bool cancel_requested;
+  _Atomic bool cancel_requested;
 
   /* Queue linkage */
   AsyncQuery *next;
@@ -213,15 +212,29 @@ void async_queue_drain_notify(AsyncQueue *queue) {
 
 static void *query_worker(void *arg) {
   AsyncQuery *query = (AsyncQuery *)arg;
+  uint64_t start_time = get_time_ms();
 
-  /* Prepare cancellation */
-  laced_session_prepare_cancel(query->session, query->conn_id);
+  LOG_DEBUG("Query %lld starting (conn_id=%d, type=%d)",
+            (long long)query->query_id, query->conn_id, query->type);
+
+  /* Prepare cancellation - this also checks if connection is busy */
+  if (!laced_session_prepare_cancel(query->session, query->conn_id)) {
+    query->error = str_dup("Connection busy: another query is in progress");
+    query->error_code = -32001;
+    query->status = ASYNC_QUERY_ERROR;
+    LOG_WARN("Query %lld rejected: connection %d is busy",
+             (long long)query->query_id, query->conn_id);
+    async_queue_push(query->queue, query);
+    return NULL;
+  }
 
   DbConnection *conn = laced_session_get_connection(query->session, query->conn_id);
   if (!conn) {
     query->error = str_dup("Invalid connection ID");
     query->error_code = -32602;
     query->status = ASYNC_QUERY_ERROR;
+    LOG_ERROR("Query %lld failed: invalid connection ID %d",
+              (long long)query->query_id, query->conn_id);
     laced_session_finish_query(query->session, query->conn_id);
     async_queue_push(query->queue, query);
     return NULL;
@@ -229,10 +242,18 @@ static void *query_worker(void *arg) {
 
   char *err = NULL;
 
-  switch (query->type) {
-  case ASYNC_QUERY_TYPE_QUERY: {
-    ResultSet *rs = db_query_page(conn, query->table, query->offset,
-                                   query->limit, NULL, false, &err);
+  /* Execute SQL - check if it's a SELECT statement */
+  const char *p = query->sql;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+  bool is_select = (strncasecmp(p, "SELECT", 6) == 0 ||
+                    strncasecmp(p, "PRAGMA", 6) == 0 ||
+                    strncasecmp(p, "SHOW", 4) == 0 ||
+                    strncasecmp(p, "DESCRIBE", 8) == 0 ||
+                    strncasecmp(p, "EXPLAIN", 7) == 0);
+
+  if (is_select) {
+    ResultSet *rs = db_query(conn, query->sql, &err);
     laced_session_finish_query(query->session, query->conn_id);
 
     if (query->cancel_requested) {
@@ -246,84 +267,19 @@ static void *query_worker(void *arg) {
       query->error = err ? err : str_dup("Query failed");
       query->error_code = -32603;
     } else {
-      /* Get total count */
-      int64_t total = db_count_rows(conn, query->table, NULL);
-      if (total >= 0) {
-        rs->total_rows = (size_t)total;
+      cJSON *result = cJSON_CreateObject();
+      cJSON_AddStringToObject(result, "type", "select");
+      cJSON *data = laced_json_from_result(rs);
+      if (data) {
+        cJSON_AddItemToObject(result, "data", data);
       }
-
-      query->result = laced_json_from_result(rs);
+      query->result = result;
       query->status = ASYNC_QUERY_COMPLETED;
       db_result_free(rs);
       free(err);
     }
-    break;
-  }
-
-  case ASYNC_QUERY_TYPE_EXEC: {
-    /* Check if it's a SELECT statement */
-    const char *p = query->sql;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-
-    bool is_select = (strncasecmp(p, "SELECT", 6) == 0 ||
-                      strncasecmp(p, "PRAGMA", 6) == 0 ||
-                      strncasecmp(p, "SHOW", 4) == 0 ||
-                      strncasecmp(p, "DESCRIBE", 8) == 0 ||
-                      strncasecmp(p, "EXPLAIN", 7) == 0);
-
-    if (is_select) {
-      ResultSet *rs = db_query(conn, query->sql, &err);
-      laced_session_finish_query(query->session, query->conn_id);
-
-      if (query->cancel_requested) {
-        query->status = ASYNC_QUERY_CANCELLED;
-        query->error = str_dup("Query cancelled");
-        query->error_code = -32000;
-        if (rs) db_result_free(rs);
-        free(err);
-      } else if (!rs) {
-        query->status = ASYNC_QUERY_ERROR;
-        query->error = err ? err : str_dup("Query failed");
-        query->error_code = -32603;
-      } else {
-        cJSON *result = cJSON_CreateObject();
-        cJSON_AddStringToObject(result, "type", "select");
-        cJSON *data = laced_json_from_result(rs);
-        if (data) {
-          cJSON_AddItemToObject(result, "data", data);
-        }
-        query->result = result;
-        query->status = ASYNC_QUERY_COMPLETED;
-        db_result_free(rs);
-        free(err);
-      }
-    } else {
-      int64_t affected = db_exec(conn, query->sql, &err);
-      laced_session_finish_query(query->session, query->conn_id);
-
-      if (query->cancel_requested) {
-        query->status = ASYNC_QUERY_CANCELLED;
-        query->error = str_dup("Query cancelled");
-        query->error_code = -32000;
-        free(err);
-      } else if (affected < 0) {
-        query->status = ASYNC_QUERY_ERROR;
-        query->error = err ? err : str_dup("Execution failed");
-        query->error_code = -32603;
-      } else {
-        cJSON *result = cJSON_CreateObject();
-        cJSON_AddStringToObject(result, "type", "exec");
-        cJSON_AddNumberToObject(result, "affected", (double)affected);
-        query->result = result;
-        query->status = ASYNC_QUERY_COMPLETED;
-        free(err);
-      }
-    }
-    break;
-  }
-
-  case ASYNC_QUERY_TYPE_COUNT: {
-    int64_t count = db_count_rows(conn, query->table, &err);
+  } else {
+    int64_t affected = db_exec(conn, query->sql, &err);
     laced_session_finish_query(query->session, query->conn_id);
 
     if (query->cancel_requested) {
@@ -331,20 +287,31 @@ static void *query_worker(void *arg) {
       query->error = str_dup("Query cancelled");
       query->error_code = -32000;
       free(err);
-    } else if (count < 0) {
+    } else if (affected < 0) {
       query->status = ASYNC_QUERY_ERROR;
-      query->error = err ? err : str_dup("Count failed");
+      query->error = err ? err : str_dup("Execution failed");
       query->error_code = -32603;
     } else {
       cJSON *result = cJSON_CreateObject();
-      cJSON_AddNumberToObject(result, "count", (double)count);
-      cJSON_AddBoolToObject(result, "approximate", false);
+      cJSON_AddStringToObject(result, "type", "exec");
+      cJSON_AddNumberToObject(result, "affected", (double)affected);
       query->result = result;
       query->status = ASYNC_QUERY_COMPLETED;
       free(err);
     }
-    break;
   }
+
+  /* Log completion */
+  uint64_t elapsed_ms = get_time_ms() - start_time;
+  if (query->status == ASYNC_QUERY_COMPLETED) {
+    LOG_DEBUG("Query %lld completed in %llu ms", (long long)query->query_id,
+              (unsigned long long)elapsed_ms);
+  } else if (query->status == ASYNC_QUERY_CANCELLED) {
+    LOG_INFO("Query %lld cancelled after %llu ms", (long long)query->query_id,
+             (unsigned long long)elapsed_ms);
+  } else {
+    LOG_WARN("Query %lld failed after %llu ms: %s", (long long)query->query_id,
+             (unsigned long long)elapsed_ms, query->error ? query->error : "unknown error");
   }
 
   async_queue_push(query->queue, query);
@@ -411,28 +378,6 @@ static bool async_query_launch(AsyncQuery *query) {
   return true;
 }
 
-AsyncQuery *async_query_start(AsyncQueue *queue, LacedSession *session,
-                              int conn_id, const char *table,
-                              size_t offset, size_t limit,
-                              cJSON *request_id) {
-  AsyncQuery *query = async_query_create(queue, session, conn_id, request_id);
-  if (!query) {
-    return NULL;
-  }
-
-  query->type = ASYNC_QUERY_TYPE_QUERY;
-  query->table = str_dup(table);
-  query->offset = offset;
-  query->limit = limit;
-
-  if (!async_query_launch(query)) {
-    /* Error already set, push to queue for response */
-    async_queue_push(queue, query);
-  }
-
-  return query;
-}
-
 AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
                              int conn_id, const char *sql,
                              cJSON *request_id) {
@@ -443,24 +388,6 @@ AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
 
   query->type = ASYNC_QUERY_TYPE_EXEC;
   query->sql = str_dup(sql);
-
-  if (!async_query_launch(query)) {
-    async_queue_push(queue, query);
-  }
-
-  return query;
-}
-
-AsyncQuery *async_count_start(AsyncQueue *queue, LacedSession *session,
-                              int conn_id, const char *table,
-                              cJSON *request_id) {
-  AsyncQuery *query = async_query_create(queue, session, conn_id, request_id);
-  if (!query) {
-    return NULL;
-  }
-
-  query->type = ASYNC_QUERY_TYPE_COUNT;
-  query->table = str_dup(table);
 
   if (!async_query_launch(query)) {
     async_queue_push(queue, query);
@@ -504,7 +431,6 @@ void async_query_free(AsyncQuery *query) {
     return;
   }
 
-  free(query->table);
   free(query->sql);
   free(query->error);
   if (query->result) {
@@ -631,11 +557,9 @@ bool async_get_active_queries(AsyncQueue *queue, int conn_id,
       info[i].status = q->status;
       info[i].started_at_ms = q->started_at_ms;
 
-      /* Copy description (table name or SQL) */
+      /* Copy description (SQL) */
       if (q->sql) {
         info[i].description = str_dup(q->sql);
-      } else if (q->table) {
-        info[i].description = str_dup(q->table);
       }
 
       i++;

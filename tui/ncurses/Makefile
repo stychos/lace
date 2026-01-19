@@ -3,9 +3,21 @@
 
 CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -g
-CFLAGS += -Isrc -I../../liblace/include -I/usr/include/cjson
+CFLAGS += -Isrc -I../../liblace/include
 LDFLAGS = -L../../liblace/build
 LIBS = -llace -lncursesw -lmenuw -lcjson
+
+# Detect OS for platform-specific paths
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS - use Homebrew paths
+    CFLAGS += $(shell pkg-config --cflags libcjson 2>/dev/null || echo "-I/opt/homebrew/opt/cjson/include")
+    LDFLAGS += $(shell pkg-config --libs-only-L libcjson 2>/dev/null || echo "-L/opt/homebrew/opt/cjson/lib")
+    CFLAGS += $(shell pkg-config --cflags ncursesw 2>/dev/null || echo "-I/opt/homebrew/opt/ncurses/include")
+    LDFLAGS += $(shell pkg-config --libs-only-L ncursesw 2>/dev/null || echo "-L/opt/homebrew/opt/ncurses/lib")
+else
+    CFLAGS += -I/usr/include/cjson
+endif
 
 # Build and source directories
 BUILD_DIR = build
