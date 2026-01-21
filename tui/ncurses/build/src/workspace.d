@@ -12,11 +12,7 @@ build/src/./workspace.o: src/./workspace.c src/./core/workspace.h \
   src/./render_helpers.h src/./core/ui_types.h src/./tui.h \
   src/./async/async.h src/./async/../db_compat.h \
   src/./async/../platform/thread.h src/./viewmodel/table_viewmodel.h \
-  src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h
+  src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h
 src/./core/workspace.h:
 src/./core/app_state.h:
 src/./core/../config/config.h:
@@ -41,7 +37,3 @@ src/./async/../platform/thread.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:

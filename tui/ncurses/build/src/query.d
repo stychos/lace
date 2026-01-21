@@ -13,11 +13,7 @@ build/src/./query.o: src/./query.c \
   src/./core/../db_compat.h src/./core/history.h \
   src/../../../liblace/include/config/history.h \
   src/./viewmodel/table_viewmodel.h src/./viewmodel/../core/app_state.h \
-  src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h
+  src/./viewmodel/../db_compat.h
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:
 src/./query_internal.h:
@@ -43,7 +39,3 @@ src/../../../liblace/include/config/history.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:

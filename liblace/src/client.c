@@ -34,7 +34,7 @@ typedef struct {
 
 /* Client structure */
 struct lace_client {
-  pid_t daemon_pid;       /* Daemon process ID (0 if connected to socket) */
+  pid_t daemon_pid;       /* Daemon process ID (0 if connected to existing) */
   FILE *to_daemon;        /* Write to daemon stdin */
   FILE *from_daemon;      /* Read from daemon stdout */
   int socket_fd;          /* Socket fd (-1 if using pipes) */
@@ -43,6 +43,8 @@ struct lace_client {
   char *last_error;       /* Last error message */
   int64_t next_id;        /* Next request ID */
   bool connected;         /* Whether daemon is running */
+  bool owns_daemon;       /* True if we spawned this daemon */
+  char *socket_path;      /* Socket path for cleanup (if we spawned) */
 
   /* Connection tracking */
   ConnEntry connections[MAX_CONNECTIONS];
@@ -238,6 +240,7 @@ static char *find_daemon(const char *daemon_path) {
   if (exe_dir) {
     /* Search paths relative to executable directory */
     const char *exe_relative_paths[] = {
+        "../../../../laced/build/laced",  /* gui/gtk/build/ -> laced/build/ */
         "../../../laced/build/laced",  /* tui/ncurses/build/ -> laced/build/ */
         "../../laced/build/laced",     /* tui/build/ -> laced/build/ */
         "../laced/build/laced",        /* Same level as laced/ */
@@ -298,22 +301,150 @@ static char *find_daemon(const char *daemon_path) {
   return NULL;
 }
 
-/* Spawn daemon process in Unix socket mode */
-static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
-                              char **socket_path_out) {
+/* Spawn daemon process in stdio mode (pipes).
+ * The daemon automatically exits when stdin closes (client terminates). */
+static bool spawn_daemon_stdio(lace_client_t *client, const char *daemon_path) {
   char *daemon_exe = find_daemon(daemon_path);
   if (!daemon_exe) {
     set_error(client, "Daemon executable not found");
     return false;
   }
 
-  /* Get the socket path the daemon will use */
+  /* Create pipes for communication */
+  int to_daemon[2];   /* Parent writes, daemon reads (daemon's stdin) */
+  int from_daemon[2]; /* Daemon writes, parent reads (daemon's stdout) */
+
+  if (pipe(to_daemon) < 0) {
+    free(daemon_exe);
+    set_error(client, "Failed to create pipe");
+    return false;
+  }
+
+  if (pipe(from_daemon) < 0) {
+    close(to_daemon[0]);
+    close(to_daemon[1]);
+    free(daemon_exe);
+    set_error(client, "Failed to create pipe");
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(to_daemon[0]);
+    close(to_daemon[1]);
+    close(from_daemon[0]);
+    close(from_daemon[1]);
+    free(daemon_exe);
+    set_error(client, "Fork failed");
+    return false;
+  }
+
+  if (pid == 0) {
+    /* Child process - become the daemon */
+
+    /* Set up stdin from pipe */
+    close(to_daemon[1]); /* Close write end */
+    dup2(to_daemon[0], STDIN_FILENO);
+    close(to_daemon[0]);
+
+    /* Set up stdout to pipe */
+    close(from_daemon[0]); /* Close read end */
+    dup2(from_daemon[1], STDOUT_FILENO);
+    close(from_daemon[1]);
+
+    /* Redirect stderr to /dev/null (or keep for debugging) */
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
+
+    /* Execute daemon in stdio mode */
+    execl(daemon_exe, daemon_exe, "--stdio", (char *)NULL);
+
+    /* If exec fails, exit */
+    _exit(127);
+  }
+
+  /* Parent process */
+  free(daemon_exe);
+
+  /* Close unused pipe ends */
+  close(to_daemon[0]);   /* Close read end of to_daemon */
+  close(from_daemon[1]); /* Close write end of from_daemon */
+
+  /* Set up FILE streams */
+  client->to_daemon = fdopen(to_daemon[1], "w");
+  client->from_daemon = fdopen(from_daemon[0], "r");
+
+  if (!client->to_daemon || !client->from_daemon) {
+    if (client->to_daemon) {
+      fclose(client->to_daemon);
+    } else {
+      close(to_daemon[1]);
+    }
+    if (client->from_daemon) {
+      fclose(client->from_daemon);
+    } else {
+      close(from_daemon[0]);
+    }
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    set_error(client, "Failed to create FILE streams");
+    return false;
+  }
+
+  /* Disable buffering for immediate writes */
+  setvbuf(client->to_daemon, NULL, _IONBF, 0);
+  setvbuf(client->from_daemon, NULL, _IONBF, 0);
+
+  client->daemon_pid = pid;
+  client->socket_fd = -1; /* Not using socket */
+  client->connected = true;
+  client->owns_daemon = true;
+  client->conn_mode = LACE_CONN_SPAWN;
+
+  /* Verify daemon is responsive */
+  cJSON *result = NULL;
+  int err = lace_rpc_call(client, "ping", NULL, &result);
+  cJSON_Delete(result);
+
+  if (err != LACE_OK) {
+    fclose(client->to_daemon);
+    fclose(client->from_daemon);
+    client->to_daemon = NULL;
+    client->from_daemon = NULL;
+    client->connected = false;
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    client->daemon_pid = 0;
+    set_error(client, "Daemon not responding");
+    return false;
+  }
+
+  return true;
+}
+
+/* Spawn daemon process in Unix socket mode.
+ * We spawn the daemon, then connect to it via Unix socket.
+ * This is preferred over stdio mode for better multi-client support. */
+static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path) {
+  char *daemon_exe = find_daemon(daemon_path);
+  if (!daemon_exe) {
+    set_error(client, "Daemon executable not found");
+    return false;
+  }
+
+  /* Get socket path for daemon */
   char *socket_path = lace_get_default_socket_path();
   if (!socket_path) {
     free(daemon_exe);
     set_error(client, "Failed to determine socket path");
     return false;
   }
+
+  /* Remove stale socket file if it exists */
+  unlink(socket_path);
 
   pid_t pid = fork();
   if (pid < 0) {
@@ -326,7 +457,7 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
   if (pid == 0) {
     /* Child process - become the daemon */
 
-    /* Create new session to detach from terminal */
+    /* Detach from controlling terminal */
     setsid();
 
     /* Redirect stdin/stdout/stderr to /dev/null */
@@ -340,7 +471,7 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
       }
     }
 
-    /* Execute daemon in default Unix socket mode */
+    /* Execute daemon in Unix socket mode */
     execl(daemon_exe, daemon_exe, "--unix", socket_path, (char *)NULL);
 
     /* If exec fails, exit */
@@ -350,41 +481,267 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
   /* Parent process */
   free(daemon_exe);
 
-  /* Wait for the daemon to create the socket (up to 5 seconds) */
-  int max_wait_ms = 5000;
-  int wait_interval_ms = 50;
-  int waited_ms = 0;
-
-  while (waited_ms < max_wait_ms) {
+  /* Wait for daemon to create socket (with timeout) */
+  int wait_attempts = 50; /* 50 * 20ms = 1 second max */
+  while (wait_attempts > 0) {
     if (lace_daemon_is_running(socket_path)) {
       break;
     }
+    usleep(20000); /* 20ms */
+    wait_attempts--;
 
-    /* Check if child process died */
+    /* Check if daemon died */
     int status;
-    pid_t result = waitpid(pid, &status, WNOHANG);
-    if (result > 0) {
-      /* Child exited */
+    if (waitpid(pid, &status, WNOHANG) != 0) {
       free(socket_path);
-      set_error(client, "Daemon process exited unexpectedly");
+      set_error(client, "Daemon failed to start");
       return false;
     }
-
-    usleep((useconds_t)(wait_interval_ms * 1000));
-    waited_ms += wait_interval_ms;
   }
 
-  if (waited_ms >= max_wait_ms) {
-    /* Timeout - kill the daemon */
+  if (wait_attempts == 0) {
+    /* Timeout - daemon didn't start */
     kill(pid, SIGTERM);
     waitpid(pid, NULL, 0);
     free(socket_path);
-    set_error(client, "Timeout waiting for daemon to start");
+    set_error(client, "Daemon startup timeout");
     return false;
   }
 
-  *socket_path_out = socket_path;
+  /* Connect to daemon via Unix socket */
+  int fd = lace_connect_unix(socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+  if (fd < 0) {
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    free(socket_path);
+    set_error(client, "Failed to connect to spawned daemon");
+    return false;
+  }
+
+  /* Set up FILE streams */
+  int fd_read = dup(fd);
+  if (fd_read < 0) {
+    close(fd);
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    free(socket_path);
+    set_error(client, "Failed to duplicate socket fd");
+    return false;
+  }
+
+  client->to_daemon = fdopen(fd, "w");
+  client->from_daemon = fdopen(fd_read, "r");
+
+  if (!client->to_daemon || !client->from_daemon) {
+    if (client->to_daemon) {
+      fclose(client->to_daemon);
+    } else {
+      close(fd);
+    }
+    if (client->from_daemon) {
+      fclose(client->from_daemon);
+    } else {
+      close(fd_read);
+    }
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    free(socket_path);
+    set_error(client, "Failed to create FILE streams");
+    return false;
+  }
+
+  /* Disable buffering for immediate writes */
+  setvbuf(client->to_daemon, NULL, _IONBF, 0);
+  setvbuf(client->from_daemon, NULL, _IONBF, 0);
+
   client->daemon_pid = pid;
+  client->socket_fd = fd;
+  client->socket_path = socket_path;
+  client->connected = true;
+  client->owns_daemon = true;
+  client->conn_mode = LACE_CONN_UNIX;
+
+  /* Verify daemon is responsive */
+  cJSON *result = NULL;
+  int err = lace_rpc_call(client, "ping", NULL, &result);
+  cJSON_Delete(result);
+
+  if (err != LACE_OK) {
+    fclose(client->to_daemon);
+    fclose(client->from_daemon);
+    client->to_daemon = NULL;
+    client->from_daemon = NULL;
+    client->connected = false;
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    client->daemon_pid = 0;
+    free(socket_path);
+    client->socket_path = NULL;
+    client->owns_daemon = false;
+    set_error(client, "Daemon not responding");
+    return false;
+  }
+
+  return true;
+}
+
+/* Spawn daemon process in TCP socket mode.
+ * We spawn the daemon, then connect to it via TCP.
+ * This allows network connections from other machines. */
+static bool spawn_daemon_tcp(lace_client_t *client, const char *daemon_path,
+                             const char *host, int port) {
+  char *daemon_exe = find_daemon(daemon_path);
+  if (!daemon_exe) {
+    set_error(client, "Daemon executable not found");
+    return false;
+  }
+
+  if (port <= 0) {
+    port = LACE_DEFAULT_PORT;
+  }
+
+  /* Build port string for exec */
+  char port_str[16];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+
+  /* Build host:port string if host specified */
+  char addr_str[128];
+  if (host && host[0]) {
+    snprintf(addr_str, sizeof(addr_str), "%s:%d", host, port);
+  } else {
+    snprintf(addr_str, sizeof(addr_str), "%d", port);
+  }
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    free(daemon_exe);
+    set_error(client, "Fork failed");
+    return false;
+  }
+
+  if (pid == 0) {
+    /* Child process - become the daemon */
+
+    /* Detach from controlling terminal */
+    setsid();
+
+    /* Redirect stdin/stdout/stderr to /dev/null */
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      dup2(devnull, STDOUT_FILENO);
+      dup2(devnull, STDERR_FILENO);
+      if (devnull > STDERR_FILENO) {
+        close(devnull);
+      }
+    }
+
+    /* Execute daemon in TCP socket mode */
+    execl(daemon_exe, daemon_exe, "--tcp", addr_str, (char *)NULL);
+
+    /* If exec fails, exit */
+    _exit(127);
+  }
+
+  /* Parent process */
+  free(daemon_exe);
+
+  /* Wait for daemon to start listening (with timeout) */
+  int wait_attempts = 50; /* 50 * 20ms = 1 second max */
+  const char *connect_host = (host && host[0]) ? host : "127.0.0.1";
+  while (wait_attempts > 0) {
+    int fd = lace_connect_tcp(connect_host, port, 100);
+    if (fd >= 0) {
+      close(fd);
+      break;
+    }
+    usleep(20000); /* 20ms */
+    wait_attempts--;
+
+    /* Check if daemon died */
+    int status;
+    if (waitpid(pid, &status, WNOHANG) != 0) {
+      set_error(client, "Daemon failed to start");
+      return false;
+    }
+  }
+
+  if (wait_attempts == 0) {
+    /* Timeout - daemon didn't start */
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    set_error(client, "Daemon startup timeout");
+    return false;
+  }
+
+  /* Connect to daemon via TCP */
+  int fd = lace_connect_tcp(connect_host, port, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+  if (fd < 0) {
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    set_error(client, "Failed to connect to spawned daemon");
+    return false;
+  }
+
+  /* Set up FILE streams */
+  int fd_read = dup(fd);
+  if (fd_read < 0) {
+    close(fd);
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    set_error(client, "Failed to duplicate socket fd");
+    return false;
+  }
+
+  client->to_daemon = fdopen(fd, "w");
+  client->from_daemon = fdopen(fd_read, "r");
+
+  if (!client->to_daemon || !client->from_daemon) {
+    if (client->to_daemon) {
+      fclose(client->to_daemon);
+    } else {
+      close(fd);
+    }
+    if (client->from_daemon) {
+      fclose(client->from_daemon);
+    } else {
+      close(fd_read);
+    }
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    set_error(client, "Failed to create FILE streams");
+    return false;
+  }
+
+  /* Disable buffering for immediate writes */
+  setvbuf(client->to_daemon, NULL, _IONBF, 0);
+  setvbuf(client->from_daemon, NULL, _IONBF, 0);
+
+  client->daemon_pid = pid;
+  client->socket_fd = fd;
+  client->connected = true;
+  client->owns_daemon = true;
+  client->conn_mode = LACE_CONN_TCP;
+
+  /* Verify daemon is responsive */
+  cJSON *result = NULL;
+  int err = lace_rpc_call(client, "ping", NULL, &result);
+  cJSON_Delete(result);
+
+  if (err != LACE_OK) {
+    fclose(client->to_daemon);
+    fclose(client->from_daemon);
+    client->to_daemon = NULL;
+    client->from_daemon = NULL;
+    client->connected = false;
+    kill(pid, SIGTERM);
+    waitpid(pid, NULL, 0);
+    client->daemon_pid = 0;
+    client->owns_daemon = false;
+    set_error(client, "Daemon not responding");
+    return false;
+  }
+
   return true;
 }
 
@@ -392,7 +749,7 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path,
  * Client Lifecycle
  * ========================================================================== */
 
-lace_client_t *lace_client_create(const char *daemon_path) {
+lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode) {
   lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
 
   client->timeout_ms = DEFAULT_TIMEOUT_MS;
@@ -401,12 +758,43 @@ lace_client_t *lace_client_create(const char *daemon_path) {
   client->conn_mode = LACE_CONN_SPAWN;
 
   /* Try to connect to existing daemon first */
-  char *socket_path = lace_get_default_socket_path();
-  if (socket_path && lace_daemon_is_running(socket_path)) {
-    int fd = lace_connect_unix(socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
-    free(socket_path);
+  if (spawn_mode == LACE_SPAWN_UNIX || spawn_mode == LACE_SPAWN_NONE) {
+    /* Try Unix socket */
+    char *socket_path = lace_get_default_socket_path();
+    if (socket_path && lace_daemon_is_running(socket_path)) {
+      int fd = lace_connect_unix(socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
+      free(socket_path);
+      if (fd >= 0) {
+        /* Connected to existing daemon */
+        client->socket_fd = fd;
+        int fd_read = dup(fd);
+        if (fd_read >= 0) {
+          client->to_daemon = fdopen(fd, "w");
+          client->from_daemon = fdopen(fd_read, "r");
+          if (client->to_daemon && client->from_daemon) {
+            setvbuf(client->to_daemon, NULL, _IONBF, 0);
+            setvbuf(client->from_daemon, NULL, _IONBF, 0);
+            client->connected = true;
+            client->conn_mode = LACE_CONN_UNIX;
+            return client;
+          }
+          if (client->to_daemon) fclose(client->to_daemon);
+          if (client->from_daemon) fclose(client->from_daemon);
+          else close(fd_read);
+          if (!client->to_daemon) close(fd);
+        } else {
+          close(fd);
+        }
+      }
+    } else {
+      free(socket_path);
+    }
+  }
+
+  if (spawn_mode == LACE_SPAWN_TCP || spawn_mode == LACE_SPAWN_NONE) {
+    /* Try TCP socket on default port */
+    int fd = lace_connect_tcp(NULL, LACE_DEFAULT_PORT, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
     if (fd >= 0) {
-      /* Connected to existing daemon */
       client->socket_fd = fd;
       int fd_read = dup(fd);
       if (fd_read >= 0) {
@@ -416,7 +804,7 @@ lace_client_t *lace_client_create(const char *daemon_path) {
           setvbuf(client->to_daemon, NULL, _IONBF, 0);
           setvbuf(client->from_daemon, NULL, _IONBF, 0);
           client->connected = true;
-          client->conn_mode = LACE_CONN_UNIX;
+          client->conn_mode = LACE_CONN_TCP;
           return client;
         }
         if (client->to_daemon) fclose(client->to_daemon);
@@ -427,67 +815,33 @@ lace_client_t *lace_client_create(const char *daemon_path) {
         close(fd);
       }
     }
-  } else {
-    free(socket_path);
   }
 
-  /* No running daemon - spawn one */
-  char *spawned_socket_path = NULL;
-  if (!spawn_daemon_unix(client, daemon_path, &spawned_socket_path)) {
-    /* Error already set */
+  /* NONE mode: don't spawn, just fail if no daemon found */
+  if (spawn_mode == LACE_SPAWN_NONE) {
+    set_error(client, "No daemon found (spawn disabled)");
     return client;
   }
 
-  /* Connect to the spawned daemon */
-  int fd = lace_connect_unix(spawned_socket_path, LACE_DEFAULT_CONNECT_TIMEOUT_MS);
-  free(spawned_socket_path);
-  if (fd < 0) {
-    /* Kill the daemon we just spawned */
-    if (client->daemon_pid > 0) {
-      kill(client->daemon_pid, SIGTERM);
-      waitpid(client->daemon_pid, NULL, 0);
-      client->daemon_pid = 0;
-    }
-    set_error(client, "Failed to connect to spawned daemon");
-    return client;
+  /* No running daemon - spawn one with the preferred mode */
+  switch (spawn_mode) {
+  case LACE_SPAWN_STDIO:
+    spawn_daemon_stdio(client, daemon_path);
+    break;
+  case LACE_SPAWN_TCP:
+    spawn_daemon_tcp(client, daemon_path, NULL, LACE_DEFAULT_PORT);
+    break;
+  case LACE_SPAWN_UNIX:
+  default:
+    spawn_daemon_unix(client, daemon_path);
+    break;
   }
-
-  client->socket_fd = fd;
-  int fd_read = dup(fd);
-  if (fd_read < 0) {
-    close(fd);
-    if (client->daemon_pid > 0) {
-      kill(client->daemon_pid, SIGTERM);
-      waitpid(client->daemon_pid, NULL, 0);
-      client->daemon_pid = 0;
-    }
-    set_error(client, "Failed to duplicate socket fd");
-    return client;
-  }
-
-  client->to_daemon = fdopen(fd, "w");
-  client->from_daemon = fdopen(fd_read, "r");
-
-  if (!client->to_daemon || !client->from_daemon) {
-    if (client->to_daemon) fclose(client->to_daemon);
-    if (client->from_daemon) fclose(client->from_daemon);
-    else close(fd_read);
-    if (!client->to_daemon) close(fd);
-    if (client->daemon_pid > 0) {
-      kill(client->daemon_pid, SIGTERM);
-      waitpid(client->daemon_pid, NULL, 0);
-      client->daemon_pid = 0;
-    }
-    set_error(client, "Failed to create file streams");
-    return client;
-  }
-
-  setvbuf(client->to_daemon, NULL, _IONBF, 0);
-  setvbuf(client->from_daemon, NULL, _IONBF, 0);
-  client->connected = true;
-  client->conn_mode = LACE_CONN_UNIX;
-
+  /* Error or success already set in spawn function */
   return client;
+}
+
+lace_client_t *lace_client_create(const char *daemon_path) {
+  return lace_client_create_ex(daemon_path, LACE_SPAWN_UNIX);
 }
 
 /* Create client from existing socket fd */
@@ -549,55 +903,17 @@ lace_client_t *lace_client_create_with_config(const LaceClientConfig *config) {
       path = default_path;
     }
     int fd = lace_connect_unix(path, config->connect_timeout_ms);
+    free(default_path);
     if (fd < 0 && config->spawn_if_missing) {
-      /* Spawn daemon and retry */
+      /* No daemon running, spawn one in Unix socket mode.
+       * We'll send shutdown RPC when this client is destroyed. */
       lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
       client->timeout_ms = DEFAULT_TIMEOUT_MS;
       client->next_id = 1;
       client->socket_fd = -1;
-
-      char *spawned_path = NULL;
-      if (!spawn_daemon_unix(client, config->daemon_path, &spawned_path)) {
-        free(default_path);
-        return client;
-      }
-      fd = lace_connect_unix(spawned_path, config->connect_timeout_ms);
-      free(spawned_path);
-      if (fd < 0) {
-        if (client->daemon_pid > 0) {
-          kill(client->daemon_pid, SIGTERM);
-          waitpid(client->daemon_pid, NULL, 0);
-          client->daemon_pid = 0;
-        }
-        set_error(client, "Failed to connect to spawned daemon");
-        free(default_path);
-        return client;
-      }
-
-      /* Connect successful after spawn */
-      free(default_path);
-      client->socket_fd = fd;
-      int fd_read = dup(fd);
-      client->to_daemon = fdopen(fd, "w");
-      client->from_daemon = fdopen(fd_read, "r");
-      if (client->to_daemon && client->from_daemon) {
-        setvbuf(client->to_daemon, NULL, _IONBF, 0);
-        setvbuf(client->from_daemon, NULL, _IONBF, 0);
-        client->connected = true;
-        client->conn_mode = LACE_CONN_UNIX;
-        return client;
-      }
-      /* Cleanup on failure */
-      if (client->to_daemon) fclose(client->to_daemon);
-      if (client->from_daemon) fclose(client->from_daemon);
-      if (client->daemon_pid > 0) {
-        kill(client->daemon_pid, SIGTERM);
-        waitpid(client->daemon_pid, NULL, 0);
-      }
-      set_error(client, "Failed to create file streams");
+      spawn_daemon_unix(client, config->daemon_path);
       return client;
     }
-    free(default_path);
     if (fd < 0) {
       lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
       set_error(client, "Failed to connect to Unix socket");
@@ -661,8 +977,8 @@ void lace_client_destroy(lace_client_t *client) {
   }
 
   if (client->connected) {
-    if (client->conn_mode == LACE_CONN_SPAWN && client->daemon_pid > 0) {
-      /* Spawned daemon: try graceful shutdown first */
+    if (client->owns_daemon && client->daemon_pid > 0) {
+      /* We spawned this daemon: send shutdown RPC first */
       if (client->to_daemon) {
         lace_shutdown(client);
       }
@@ -689,8 +1005,13 @@ void lace_client_destroy(lace_client_t *client) {
           waitpid(client->daemon_pid, &status, 0);
         }
       }
+
+      /* Clean up socket file if we spawned with Unix socket */
+      if (client->socket_path) {
+        unlink(client->socket_path);
+      }
     } else {
-      /* Socket connection: just close the streams (don't shutdown daemon) */
+      /* Connected to existing daemon: just close streams (don't shutdown) */
       if (client->to_daemon) {
         fclose(client->to_daemon);
       }
@@ -700,6 +1021,7 @@ void lace_client_destroy(lace_client_t *client) {
     }
   }
 
+  free(client->socket_path);
   free(client->last_error);
   free(client);
 }

@@ -15,13 +15,8 @@ build/src/config/session.o: src/config/session.c src/config/session.h \
   src/config/../viewmodel/table_viewmodel.h \
   src/config/../viewmodel/../core/app_state.h \
   src/config/../viewmodel/../db_compat.h src/config/../core/ui_types.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   ../../liblace/include/util/json_helpers.h \
   ../../liblace/include/util/str.h \
-  /opt/homebrew/opt/cjson/include/cjson/cJSON.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
   ../../liblace/include/../../liblace/include/util/str.h \
   src/config/connections.h \
@@ -50,13 +45,8 @@ src/config/../viewmodel/table_viewmodel.h:
 src/config/../viewmodel/../core/app_state.h:
 src/config/../viewmodel/../db_compat.h:
 src/config/../core/ui_types.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
 ../../liblace/include/util/json_helpers.h:
 ../../liblace/include/util/str.h:
-/opt/homebrew/opt/cjson/include/cjson/cJSON.h:
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:
 src/config/connections.h:

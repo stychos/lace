@@ -39,6 +39,7 @@ typedef enum {
   FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
   FIELD_CLOSE_CONN_LAST_TAB,
+  FIELD_DAEMON_SPAWN_MODE,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
   FIELD_COUNT
@@ -232,6 +233,22 @@ static const char *history_mode_name(int mode) {
   }
 }
 
+/* Get daemon spawn mode name */
+static const char *spawn_mode_name(int mode) {
+  switch (mode) {
+  case SPAWN_MODE_UNIX:
+    return "Unix socket";
+  case SPAWN_MODE_STDIO:
+    return "Stdio pipes";
+  case SPAWN_MODE_TCP:
+    return "TCP socket";
+  case SPAWN_MODE_NONE:
+    return "Connect only";
+  default:
+    return "Unknown";
+  }
+}
+
 /* ============================================================================
  * General Tab Drawing
  * ============================================================================
@@ -334,6 +351,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_checkbox(win, y++, start_x + 2, "Close connection when last tab closes",
                 ds->config->general.close_conn_on_last_tab,
                 ds->selected_field == FIELD_CLOSE_CONN_LAST_TAB, focused);
+
+  draw_option(win, y++, start_x + 2, "Daemon spawn mode",
+              spawn_mode_name(ds->config->general.daemon_spawn_mode),
+              ds->selected_field == FIELD_DAEMON_SPAWN_MODE, focused);
 
   y++;
 
@@ -952,6 +973,11 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_CLOSE_CONN_LAST_TAB:
       ds->config->general.close_conn_on_last_tab =
           !ds->config->general.close_conn_on_last_tab;
+      break;
+    case FIELD_DAEMON_SPAWN_MODE:
+      /* Cycle through spawn modes: Unix -> Stdio -> TCP -> None -> Unix */
+      ds->config->general.daemon_spawn_mode =
+          (ds->config->general.daemon_spawn_mode + 1) % 4;
       break;
     default:
       break;

@@ -14,11 +14,7 @@ build/src/./pagination.o: src/./pagination.c src/./async/async.h \
   src/./core/../db_compat.h src/./core/history.h \
   src/../../../liblace/include/config/history.h \
   src/./viewmodel/table_viewmodel.h src/./viewmodel/../core/app_state.h \
-  src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h
+  src/./viewmodel/../db_compat.h
 src/./async/async.h:
 src/./async/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
@@ -44,7 +40,3 @@ src/../../../liblace/include/config/history.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
-/opt/homebrew/opt/ncurses/include/ncursesw/curses.h:

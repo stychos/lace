@@ -56,6 +56,14 @@ typedef enum {
   LACE_CONN_TCP       /* Connect to existing TCP socket */
 } LaceConnMode;
 
+/* Preferred spawn mode when starting a new daemon */
+typedef enum {
+  LACE_SPAWN_UNIX,   /* Unix socket mode (default, multi-client) */
+  LACE_SPAWN_STDIO,  /* Stdio pipes (single client, auto-exit on EOF) */
+  LACE_SPAWN_TCP,    /* TCP socket mode (network, multi-client) */
+  LACE_SPAWN_NONE    /* Don't spawn, connect to existing daemon only */
+} LaceSpawnMode;
+
 /* Client configuration for extended creation */
 typedef struct {
   LaceConnMode mode;          /* Connection mode */
@@ -65,6 +73,7 @@ typedef struct {
   const char *daemon_path;    /* Path to laced for spawn mode */
   bool spawn_if_missing;      /* Spawn daemon if socket not found */
   int connect_timeout_ms;     /* Connection timeout (0 = default 5000) */
+  LaceSpawnMode spawn_mode;   /* Preferred mode when spawning daemon */
 } LaceClientConfig;
 
 /* Default values for config */
@@ -77,11 +86,21 @@ typedef struct {
 
 /*
  * Create a new client and spawn the laced daemon.
+ * Uses Unix socket mode by default.
  *
  * @param daemon_path  Path to laced executable, or NULL to search PATH
  * @return             Client handle, or NULL on failure (check errno)
  */
 lace_client_t *lace_client_create(const char *daemon_path);
+
+/*
+ * Create a new client with specified spawn mode.
+ *
+ * @param daemon_path  Path to laced executable, or NULL to search PATH
+ * @param spawn_mode   LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
+ * @return             Client handle, or NULL on failure (check errno)
+ */
+lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode);
 
 /*
  * Create a new client with extended configuration.

@@ -5,7 +5,6 @@ build/src/config/connections.o: src/config/connections.c \
   src/config/../platform/thread.h \
   ../../liblace/include/util/json_helpers.h \
   ../../liblace/include/util/str.h \
-  /opt/homebrew/opt/cjson/include/cjson/cJSON.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
   ../../liblace/include/../../liblace/include/util/str.h
 src/config/connections.h:
@@ -15,6 +14,5 @@ src/config/../platform/platform.h:
 src/config/../platform/thread.h:
 ../../liblace/include/util/json_helpers.h:
 ../../liblace/include/util/str.h:
-/opt/homebrew/opt/cjson/include/cjson/cJSON.h:
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:

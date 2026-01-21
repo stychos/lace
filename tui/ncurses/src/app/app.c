@@ -7,6 +7,7 @@
  */
 
 #include "app.h"
+#include "../config/config.h"
 #include "../config/session.h"
 #include "../core/app_state.h"
 #include "util/connstr.h"
@@ -19,24 +20,26 @@
 #include <string.h>
 
 /*
- * Create a lace client, auto-discovering existing daemon.
- * First tries to connect to an existing Unix socket daemon,
+ * Create a lace client with the specified spawn mode.
+ * First tries to connect to an existing Unix socket daemon (for Unix mode),
  * then falls back to spawning a new daemon if none found.
  */
-static lace_client_t *create_client_auto(void) {
-  /* First, try to connect to an existing daemon via Unix socket */
-  lace_client_t *client = lace_client_connect(NULL);
-  if (client && lace_client_connected(client)) {
-    return client;
+static lace_client_t *create_client_with_mode(LaceSpawnMode spawn_mode) {
+  if (spawn_mode == LACE_SPAWN_UNIX) {
+    /* First, try to connect to an existing daemon via Unix socket */
+    lace_client_t *client = lace_client_connect(NULL);
+    if (client && lace_client_connected(client)) {
+      return client;
+    }
+
+    /* Clean up failed connection attempt */
+    if (client) {
+      lace_client_destroy(client);
+    }
   }
 
-  /* Clean up failed connection attempt */
-  if (client) {
-    lace_client_destroy(client);
-  }
-
-  /* Fall back to spawning a new daemon */
-  return lace_client_create(NULL);
+  /* Spawn a new daemon with the preferred mode */
+  return lace_client_create_ex(NULL, spawn_mode);
 }
 
 static struct option long_options[] = {{"help", no_argument, NULL, 'h'},
@@ -161,18 +164,94 @@ void app_print_usage(const char *prog) {
   printf("Press ? or F1 in TUI for keyboard shortcuts.\n");
 }
 
+/* Convert TUI spawn mode to liblace spawn mode */
+static LaceSpawnMode convert_spawn_mode(int tui_mode) {
+  switch (tui_mode) {
+  case SPAWN_MODE_STDIO:
+    return LACE_SPAWN_STDIO;
+  case SPAWN_MODE_TCP:
+    return LACE_SPAWN_TCP;
+  case SPAWN_MODE_NONE:
+    return LACE_SPAWN_NONE;
+  case SPAWN_MODE_UNIX:
+  default:
+    return LACE_SPAWN_UNIX;
+  }
+}
+
+/*
+ * Prompt user to spawn daemon when autospawn is disabled and no daemon found.
+ * Returns true if user wants to spawn, false if user refuses.
+ */
+static bool prompt_spawn_daemon(void) {
+  printf("No running daemon found and autospawn is disabled.\n");
+  printf("Would you like to spawn a daemon now? [Y/n] ");
+  fflush(stdout);
+
+  int c = getchar();
+  /* Consume rest of line */
+  if (c != '\n' && c != EOF) {
+    int ch;
+    while ((ch = getchar()) != '\n' && ch != EOF)
+      ;
+  }
+
+  /* Accept Y, y, or empty (just Enter) as yes */
+  return (c == 'Y' || c == 'y' || c == '\n');
+}
+
+/*
+ * Handle the case where spawn mode is NONE and no daemon is connected.
+ * Asks user if they want to spawn a daemon, and if so, spawns one.
+ * Returns new client if daemon was spawned, NULL if user refused.
+ */
+static lace_client_t *handle_no_daemon_prompt(lace_client_t *client) {
+  if (prompt_spawn_daemon()) {
+    /* User wants to spawn - destroy old client and create new one with Unix
+     * mode */
+    lace_client_destroy(client);
+    return lace_client_create_ex(NULL, LACE_SPAWN_UNIX);
+  }
+  /* User refused - return NULL to signal quit */
+  lace_client_destroy(client);
+  return NULL;
+}
+
 static int run_query_mode(AppConfig *config) {
-  /* Create liblace client (auto-discovers existing daemon) */
-  lace_client_t *client = create_client_auto();
+  /* Load application config to get spawn mode preference */
+  Config *app_config = config_load(NULL);
+  LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX; /* Default */
+  if (app_config) {
+    spawn_mode = convert_spawn_mode(app_config->general.daemon_spawn_mode);
+  }
+
+  /* Create liblace client with configured spawn mode */
+  lace_client_t *client = create_client_with_mode(spawn_mode);
+  config_free(app_config);
+
   if (!client) {
     fprintf(stderr, "Failed to allocate client\n");
     return 1;
   }
   if (!lace_client_connected(client)) {
-    fprintf(stderr, "Failed to connect to lace daemon: %s\n",
-            lace_client_error(client));
-    lace_client_destroy(client);
-    return 1;
+    /* If autospawn disabled (NONE mode), ask user if they want to spawn */
+    if (spawn_mode == LACE_SPAWN_NONE) {
+      client = handle_no_daemon_prompt(client);
+      if (!client) {
+        return 1; /* User refused to spawn */
+      }
+      if (!lace_client_connected(client)) {
+        fprintf(stderr, "Failed to spawn daemon: %s\n",
+                lace_client_error(client));
+        lace_client_destroy(client);
+        return 1;
+      }
+    } else {
+      fprintf(stderr, "Failed to connect to lace daemon: %s\n",
+              lace_client_error(client));
+      lace_client_destroy(client);
+      return 1;
+    }
   }
 
   char *err = NULL;
@@ -250,17 +329,42 @@ static char *tui_password_callback(void *user_data, const char *title,
 }
 
 static int run_tui_mode(AppConfig *config) {
-  /* Create liblace client (auto-discovers existing daemon) */
-  lace_client_t *client = create_client_auto();
+  /* Load application config first to get spawn mode preference */
+  Config *early_config = config_load(NULL);
+  LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX; /* Default */
+  if (early_config) {
+    spawn_mode = convert_spawn_mode(early_config->general.daemon_spawn_mode);
+  }
+
+  /* Create liblace client with configured spawn mode */
+  lace_client_t *client = create_client_with_mode(spawn_mode);
   if (!client) {
+    config_free(early_config);
     fprintf(stderr, "Failed to allocate client\n");
     return 1;
   }
   if (!lace_client_connected(client)) {
-    fprintf(stderr, "Failed to connect to lace daemon: %s\n",
-            lace_client_error(client));
-    lace_client_destroy(client);
-    return 1;
+    /* If autospawn disabled (NONE mode), ask user if they want to spawn */
+    if (spawn_mode == LACE_SPAWN_NONE) {
+      client = handle_no_daemon_prompt(client);
+      if (!client) {
+        config_free(early_config);
+        return 1; /* User refused to spawn */
+      }
+      if (!lace_client_connected(client)) {
+        fprintf(stderr, "Failed to spawn daemon: %s\n",
+                lace_client_error(client));
+        lace_client_destroy(client);
+        config_free(early_config);
+        return 1;
+      }
+    } else {
+      fprintf(stderr, "Failed to connect to lace daemon: %s\n",
+              lace_client_error(client));
+      lace_client_destroy(client);
+      config_free(early_config);
+      return 1;
+    }
   }
 
   AppState app;
@@ -269,6 +373,12 @@ static int run_tui_mode(AppConfig *config) {
 
   app_state_init(&app);
   app.client = client;
+
+  /* Use the already-loaded config instead of loading again */
+  if (early_config) {
+    config_free(app.config);
+    app.config = early_config;
+  }
 
   if (!tui_init(&state, &app)) {
     fprintf(stderr, "Failed to initialize TUI\n");

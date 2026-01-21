@@ -309,16 +309,43 @@ static void process_async_completions(LacedServer *server, FILE *output) {
   }
 }
 
-/* Non-blocking line read - returns NULL if no complete line available */
+/* Non-blocking line read - returns NULL if no complete line available.
+ * Sets *eof_flag to true if EOF is detected. */
 static char *try_read_line(int fd, char **partial_buf, size_t *partial_len,
-                           size_t *partial_cap) {
-  /* Read available data */
+                           size_t *partial_cap, bool *eof_flag) {
+  /* First check if we already have a complete line in the buffer */
+  for (size_t i = 0; i < *partial_len; i++) {
+    if ((*partial_buf)[i] == '\n') {
+      /* Extract complete line */
+      size_t line_len = i;
+      char *line = safe_malloc(line_len + 1);
+      if (!line) {
+        return NULL;
+      }
+      memcpy(line, *partial_buf, line_len);
+      line[line_len] = '\0';
+
+      /* Shift remaining data */
+      size_t remaining = *partial_len - i - 1;
+      if (remaining > 0) {
+        memmove(*partial_buf, *partial_buf + i + 1, remaining);
+      }
+      *partial_len = remaining;
+
+      return line;
+    }
+  }
+
+  /* No complete line in buffer, try to read more */
   char temp[4096];
   ssize_t n = read(fd, temp, sizeof(temp));
 
   if (n <= 0) {
     if (n == 0) {
-      /* EOF - return any partial data as final line */
+      /* EOF detected - stdin pipe closed */
+      *eof_flag = true;
+      LOG_DEBUG("EOF detected on stdin");
+      /* Return any partial data as final line */
       if (*partial_len > 0) {
         char *line = *partial_buf;
         line[*partial_len] = '\0';
@@ -328,6 +355,7 @@ static char *try_read_line(int fd, char **partial_buf, size_t *partial_len,
         return line;
       }
     }
+    /* n < 0: EAGAIN or error - no data available */
     return NULL;
   }
 
@@ -392,10 +420,11 @@ int laced_server_run_stdio(LacedServer *server,
   char *partial_buf = NULL;
   size_t partial_len = 0;
   size_t partial_cap = 0;
+  bool stdin_eof = false;
 
   int max_fd = stdin_fd > server->async_notify_fd ? stdin_fd : server->async_notify_fd;
 
-  while (!*shutdown_flag) {
+  while (!*shutdown_flag && !stdin_eof) {
     fd_set read_fds;
     FD_ZERO(&read_fds);
     FD_SET(stdin_fd, &read_fds);
@@ -422,17 +451,12 @@ int laced_server_run_stdio(LacedServer *server,
     if (ready > 0 && FD_ISSET(stdin_fd, &read_fds)) {
       char *line;
       while ((line = try_read_line(stdin_fd, &partial_buf, &partial_len,
-                                   &partial_cap)) != NULL) {
+                                   &partial_cap, &stdin_eof)) != NULL) {
         /* Skip empty lines */
         if (line[0] != '\0') {
           process_request(server, stdout, line);
         }
         free(line);
-      }
-
-      /* Check for EOF */
-      if (feof(stdin)) {
-        break;
       }
     }
   }

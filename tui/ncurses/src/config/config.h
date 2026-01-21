@@ -144,6 +144,14 @@ typedef enum {
  * ============================================================================
  */
 
+/* Daemon spawn mode */
+typedef enum {
+  SPAWN_MODE_UNIX = 0,   /* Unix socket (default, supports multi-client) */
+  SPAWN_MODE_STDIO = 1,  /* Stdio pipes (single client, auto-exit) */
+  SPAWN_MODE_TCP = 2,    /* TCP socket (network, multi-client) */
+  SPAWN_MODE_NONE = 3    /* Don't spawn, connect to existing only */
+} DaemonSpawnMode;
+
 /* General application settings */
 typedef struct {
   bool show_header;
@@ -159,6 +167,7 @@ typedef struct {
   bool close_conn_on_last_tab; /* Close connection when last tab closes */
   int history_mode;            /* 0=off, 1=session, 2=persistent */
   int history_max_size;        /* Max history entries per connection */
+  int daemon_spawn_mode;       /* 0=unix socket, 1=stdio pipes */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */

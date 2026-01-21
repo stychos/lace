@@ -541,6 +541,7 @@ Config *config_get_defaults(void) {
   config->general.history_mode =
       HISTORY_MODE_SESSION; /* Default: session only */
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
+  config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -758,6 +759,10 @@ Config *config_load(char **error) {
     val = json_get_int(general, "history_max_size", config->general.history_max_size);
     if (val >= HISTORY_SIZE_MIN && val <= HISTORY_SIZE_MAX)
       config->general.history_max_size = val;
+
+    val = json_get_int(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
+    if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_NONE)
+      config->general.daemon_spawn_mode = val;
   }
 
   /* Parse hotkeys */
@@ -824,6 +829,7 @@ bool config_save(const Config *config, char **error) {
   JSON_ADD_BOOL(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
   JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
+  JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */
