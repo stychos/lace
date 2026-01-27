@@ -5,6 +5,7 @@ build/src/./draw.o: src/./draw.c src/./config/config.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/./core/constants.h src/./core/history.h \
   src/../../../liblace/include/config/history.h \
   ../../liblace/include/util/connstr.h src/./render_helpers.h \
@@ -22,6 +23,7 @@ src/./core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/./core/constants.h:
 src/./core/history.h:
 src/../../../liblace/include/config/history.h:

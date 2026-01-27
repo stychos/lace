@@ -185,12 +185,15 @@ void tui_page_down(TuiState *state) {
   if (target_row >= loaded_rows) {
     size_t loaded_end = loaded_offset + loaded_count;
     if (loaded_end < total_rows) {
-      /* Need to load more data - show blocking dialog */
+      /* Need to load more data */
       tui_load_page_with_dialog(state, true);
       /* Re-read loaded row count after loading */
       loaded_rows = table_vm_row_count(vm);
     }
-    /* Clamp to available data */
+  }
+
+  /* Clamp target to available data (only if still beyond bounds) */
+  if (target_row >= loaded_rows) {
     target_row = loaded_rows > 0 ? loaded_rows - 1 : 0;
   }
 

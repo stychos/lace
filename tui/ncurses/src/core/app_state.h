@@ -200,6 +200,9 @@ typedef struct {
   bool bg_load_forward;         /* Direction: true=forward, false=backward */
   size_t bg_load_target_offset; /* Target offset being loaded */
 
+  /* Keyset pagination state (NULL if using offset pagination) */
+  LaceKeysetState *keyset;      /* Keyset state for cursor-based pagination */
+
   /* Row selection (for bulk operations) */
   size_t *selected_rows;    /* Array of selected global row indices */
   size_t num_selected;      /* Number of selected rows */

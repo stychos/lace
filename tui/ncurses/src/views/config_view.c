@@ -35,6 +35,7 @@ typedef enum {
   FIELD_PREFETCH_PAGES,
   FIELD_MAX_RESULT_ROWS,
   FIELD_DELETE_CONFIRM,
+  FIELD_PAGINATION_STRATEGY,
   FIELD_HISTORY_MODE,
   FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
@@ -249,6 +250,20 @@ static const char *spawn_mode_name(int mode) {
   }
 }
 
+/* Get pagination strategy name */
+static const char *pagination_strategy_name(int mode) {
+  switch (mode) {
+  case 0:  /* LACE_PAGINATION_OFFSET */
+    return "Offset (default)";
+  case 1:  /* LACE_PAGINATION_KEYSET */
+    return "Keyset (auto-fallback)";
+  case 2:  /* LACE_PAGINATION_SMART */
+    return "Keyset (smart)";
+  default:
+    return "Unknown";
+  }
+}
+
 /* ============================================================================
  * General Tab Drawing
  * ============================================================================
@@ -314,6 +329,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_checkbox(win, y++, start_x + 2, "Confirm before delete",
                 ds->config->general.delete_confirmation,
                 ds->selected_field == FIELD_DELETE_CONFIRM, focused);
+
+  draw_option(win, y++, start_x + 2, "Pagination strategy",
+              pagination_strategy_name(ds->config->general.pagination_strategy),
+              ds->selected_field == FIELD_PAGINATION_STRATEGY, focused);
 
   y++;
 
@@ -955,6 +974,11 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_DELETE_CONFIRM:
       ds->config->general.delete_confirmation =
           !ds->config->general.delete_confirmation;
+      break;
+    case FIELD_PAGINATION_STRATEGY:
+      /* Cycle through pagination strategies: Offset -> Keyset -> Smart -> Offset */
+      ds->config->general.pagination_strategy =
+          (ds->config->general.pagination_strategy + 1) % 3;
       break;
     case FIELD_HISTORY_MODE:
       /* Cycle through history modes: Off -> Session -> Persistent -> Off */

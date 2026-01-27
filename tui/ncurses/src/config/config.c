@@ -11,6 +11,7 @@
 #include "../core/ui_types.h"
 #include "../platform/platform.h"
 #include "util/json_helpers.h"
+#include "../../liblace/include/constants.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include <cjson/cJSON.h>
@@ -542,6 +543,7 @@ Config *config_get_defaults(void) {
       HISTORY_MODE_SESSION; /* Default: session only */
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
   config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
+  config->general.pagination_strategy = LACE_PAGINATION_OFFSET; /* Default: offset */
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -763,6 +765,10 @@ Config *config_load(char **error) {
     val = json_get_int(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
     if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_NONE)
       config->general.daemon_spawn_mode = val;
+
+    val = json_get_int(general, "pagination_strategy", config->general.pagination_strategy);
+    if (val >= LACE_PAGINATION_OFFSET && val <= LACE_PAGINATION_SMART)
+      config->general.pagination_strategy = val;
   }
 
   /* Parse hotkeys */
@@ -830,6 +836,7 @@ bool config_save(const Config *config, char **error) {
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
   JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
   JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
+  JSON_ADD_INT(general, "pagination_strategy", config->general.pagination_strategy);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */

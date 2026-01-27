@@ -6,6 +6,7 @@ build/src/config/session.o: src/config/session.c src/config/session.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/config/../core/constants.h src/config/../core/history.h \
   src/../../../liblace/include/config/history.h \
   ../../liblace/include/util/connstr.h src/config/../platform/platform.h \
@@ -30,6 +31,7 @@ src/config/../core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/config/../core/constants.h:
 src/config/../core/history.h:
 src/../../../liblace/include/config/history.h:

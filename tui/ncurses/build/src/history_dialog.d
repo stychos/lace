@@ -6,6 +6,7 @@ build/src/./history_dialog.o: src/./history_dialog.c \
   src/./db_compat.h ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   ../../liblace/include/../../liblace/include/util/str.h src/./tui.h \
   src/./async/async.h src/./async/../db_compat.h \
   src/./async/../platform/thread.h src/./core/app_state.h \
@@ -25,6 +26,7 @@ src/./db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 ../../liblace/include/../../liblace/include/util/str.h:
 src/./tui.h:
 src/./async/async.h:

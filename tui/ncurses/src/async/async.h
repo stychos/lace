@@ -22,6 +22,7 @@ typedef enum {
   ASYNC_OP_GET_SCHEMA,
   ASYNC_OP_QUERY_PAGE,
   ASYNC_OP_QUERY_PAGE_WHERE,
+  ASYNC_OP_QUERY_KEYSET,     /* Keyset (cursor-based) pagination query */
   ASYNC_OP_COUNT_ROWS,
   ASYNC_OP_COUNT_ROWS_WHERE,
   ASYNC_OP_QUERY,
@@ -54,6 +55,13 @@ typedef struct {
   size_t limit;
   bool desc;
   bool use_approximate;
+
+  /* Keyset pagination parameters (for ASYNC_OP_QUERY_KEYSET) */
+  LaceKeysetState *keyset;    /* Keyset state for cursor-based pagination */
+  bool keyset_forward;        /* true = forward, false = backward */
+
+  /* Row reversal flag (for backward keyset queries using pre-built WHERE) */
+  bool reverse_rows;          /* true = reverse result rows after query */
 
   /* Output results (set by worker thread) */
   void *result;        /* ResultSet*, TableSchema*, DbConnection*, char** */

@@ -3,9 +3,11 @@ build/src/./pagination.o: src/./pagination.c src/./async/async.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/./async/../platform/thread.h src/./config/config.h \
   src/./config/../core/constants.h \
   src/../../../liblace/include/constants.h \
+  ../../liblace/include/../../liblace/include/constants.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
   src/./tui_internal.h src/./core/constants.h src/./db_compat.h \
   ../../liblace/include/../../liblace/include/util/str.h \
@@ -20,10 +22,12 @@ src/./async/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/./async/../platform/thread.h:
 src/./config/config.h:
 src/./config/../core/constants.h:
 src/../../../liblace/include/constants.h:
+../../liblace/include/../../liblace/include/constants.h:
 ../../liblace/include/../../liblace/include/util/mem.h:
 src/./tui_internal.h:
 src/./core/constants.h:

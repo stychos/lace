@@ -1463,9 +1463,16 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         int x_pos = 1; /* Data starts at x=1 */
         size_t target_col = scroll_col;
 
+        /* Use widget col_widths if available (same as drawing code) */
+        int *col_widths = click_vm->col_widths;
+        size_t num_col_widths = click_vm->num_col_widths;
+
         for (size_t col = scroll_col; col < num_cols; col++) {
-          int width = tui_get_column_width(state, col);
-          if (rel_x >= x_pos && rel_x < x_pos + width) {
+          int width = (col_widths && col < num_col_widths)
+                          ? col_widths[col]
+                          : DEFAULT_COL_WIDTH;
+          /* Include separator in clickable area for preceding column */
+          if (rel_x >= x_pos && rel_x <= x_pos + width) {
             target_col = col;
             break;
           }

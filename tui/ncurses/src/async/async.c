@@ -48,6 +48,20 @@ static void *async_worker_thread(void *arg) {
                             op->where_clause, op->order_by, op->desc, &err);
     break;
 
+  case ASYNC_OP_QUERY_KEYSET: {
+    /* Keyset (cursor-based) pagination */
+    LaceResult *result = NULL;
+    int rc = lace_query_keyset(op->conn->client, op->conn->conn_id,
+                                op->table_name, op->keyset, op->keyset_forward,
+                                op->where_clause, op->limit, &result);
+    if (rc == LACE_OK) {
+      op->result = result;
+    } else {
+      err = str_dup(lace_client_error(op->conn->client));
+    }
+    break;
+  }
+
   case ASYNC_OP_COUNT_ROWS: {
     size_t count = 0;
     bool approximate = false;
@@ -94,6 +108,7 @@ static void *async_worker_thread(void *arg) {
       case ASYNC_OP_QUERY:
       case ASYNC_OP_QUERY_PAGE:
       case ASYNC_OP_QUERY_PAGE_WHERE:
+      case ASYNC_OP_QUERY_KEYSET:
         db_result_free(op->result);
         break;
       case ASYNC_OP_GET_SCHEMA:

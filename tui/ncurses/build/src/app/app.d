@@ -7,6 +7,7 @@ build/src/app/app.o: src/app/app.c src/app/app.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/app/../config/../core/history.h \
   src/../../../liblace/include/config/history.h \
   src/app/../core/app_state.h ../../liblace/include/util/connstr.h \
@@ -27,6 +28,7 @@ src/app/../config/../core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/app/../config/../core/history.h:
 src/../../../liblace/include/config/history.h:
 src/app/../core/app_state.h:

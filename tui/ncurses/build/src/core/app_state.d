@@ -4,6 +4,7 @@ build/src/core/app_state.o: src/core/app_state.c src/core/app_state.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/core/constants.h src/core/history.h \
   src/../../../liblace/include/config/history.h \
   src/core/../async/async.h src/core/../async/../db_compat.h \
@@ -18,6 +19,7 @@ src/core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/core/constants.h:
 src/core/history.h:
 src/../../../liblace/include/config/history.h:

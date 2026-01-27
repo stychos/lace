@@ -33,6 +33,7 @@
 
 #include "types.h"
 #include "error.h"
+#include "keyset.h"
 
 #ifdef __cplusplus
 extern "C" {

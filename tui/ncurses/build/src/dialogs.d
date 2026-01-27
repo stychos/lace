@@ -3,6 +3,7 @@ build/src/./dialogs.o: src/./dialogs.c src/./async/async.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/./async/../platform/thread.h src/./config/config.h \
   src/./config/../core/constants.h \
   src/../../../liblace/include/constants.h src/./core/history.h \
@@ -21,6 +22,7 @@ src/./async/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/./async/../platform/thread.h:
 src/./config/config.h:
 src/./config/../core/constants.h:

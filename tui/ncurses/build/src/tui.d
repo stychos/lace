@@ -7,6 +7,7 @@ build/src/./tui.o: src/./tui.c src/./config/session.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/./config/../core/constants.h src/./config/../core/history.h \
   src/../../../liblace/include/config/history.h src/./core/actions.h \
   src/./core/app_state.h \
@@ -27,6 +28,7 @@ src/./config/../core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/./config/../core/constants.h:
 src/./config/../core/history.h:
 src/../../../liblace/include/config/history.h:

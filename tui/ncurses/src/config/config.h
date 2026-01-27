@@ -168,6 +168,7 @@ typedef struct {
   int history_mode;            /* 0=off, 1=session, 2=persistent */
   int history_max_size;        /* Max history entries per connection */
   int daemon_spawn_mode;       /* 0=unix socket, 1=stdio pipes */
+  int pagination_strategy;     /* 0=offset, 1=keyset, 2=smart (see LacePaginationStrategy) */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */

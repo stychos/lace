@@ -39,6 +39,13 @@
  * Pagination
  * ========================================================================== */
 
+/* Pagination strategy selection */
+typedef enum {
+  LACE_PAGINATION_OFFSET = 0,  /* Traditional LIMIT/OFFSET (default) */
+  LACE_PAGINATION_KEYSET = 1,  /* Cursor-based, fallback to offset if no PK */
+  LACE_PAGINATION_SMART = 2    /* Cursor-based only when suitable index exists */
+} LacePaginationStrategy;
+
 /* Page size for data loading */
 #define PAGE_SIZE 1000
 

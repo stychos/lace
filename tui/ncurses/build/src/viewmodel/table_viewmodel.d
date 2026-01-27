@@ -7,6 +7,7 @@ build/src/viewmodel/table_viewmodel.o: src/viewmodel/table_viewmodel.c \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/viewmodel/../core/constants.h src/viewmodel/../core/history.h \
   src/../../../liblace/include/config/history.h \
   src/viewmodel/../db_compat.h \
@@ -21,6 +22,7 @@ src/viewmodel/../core/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/viewmodel/../core/constants.h:
 src/viewmodel/../core/history.h:
 src/../../../liblace/include/config/history.h:

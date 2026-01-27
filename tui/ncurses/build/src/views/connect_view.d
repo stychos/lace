@@ -4,6 +4,7 @@ build/src/views/connect_view.o: src/views/connect_view.c \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
+  ../../liblace/include/../../liblace/include/keyset.h \
   src/views/../async/../platform/thread.h src/views/../core/app_state.h \
   src/views/../core/../config/config.h \
   src/views/../core/../config/../core/constants.h \
@@ -27,6 +28,7 @@ src/views/../async/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
 ../../liblace/include/../../liblace/include/types.h:
 ../../liblace/include/../../liblace/include/error.h:
+../../liblace/include/../../liblace/include/keyset.h:
 src/views/../async/../platform/thread.h:
 src/views/../core/app_state.h:
 src/views/../core/../config/config.h:

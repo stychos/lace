@@ -142,6 +142,12 @@ void tab_free_data(Tab *tab) {
   tab->num_col_widths = 0;
   filters_free(&tab->filters);
 
+  /* Free keyset state */
+  if (tab->keyset) {
+    lace_keyset_free(tab->keyset);
+    tab->keyset = NULL;
+  }
+
   /* Free query data */
   FREE_NULL(tab->query_text);
   db_result_free(tab->query_results);
