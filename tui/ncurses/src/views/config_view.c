@@ -41,6 +41,7 @@ typedef enum {
   FIELD_AUTO_OPEN_TABLE,
   FIELD_CLOSE_CONN_LAST_TAB,
   FIELD_DAEMON_SPAWN_MODE,
+  FIELD_DAEMON_IDLE_TIMEOUT,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
   FIELD_COUNT
@@ -374,6 +375,15 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_option(win, y++, start_x + 2, "Daemon spawn mode",
               spawn_mode_name(ds->config->general.daemon_spawn_mode),
               ds->selected_field == FIELD_DAEMON_SPAWN_MODE, focused);
+
+  draw_number_field(win, y++, start_x + 2, "Daemon idle timeout (s)",
+                    ds->config->general.daemon_idle_timeout,
+                    ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT, focused,
+                    ds->editing_number, &ds->num_input, &cursor_x_temp);
+  if (ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT && ds->editing_number) {
+    *cursor_y = y - 1;
+    *cursor_x = cursor_x_temp;
+  }
 
   y++;
 
@@ -909,6 +919,8 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
         ds->config->general.max_result_rows = value;
       } else if (ds->selected_field == FIELD_HISTORY_MAX_SIZE) {
         ds->config->general.history_max_size = value;
+      } else if (ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT) {
+        ds->config->general.daemon_idle_timeout = value;
       }
 
       ds->editing_number = false;
@@ -1002,6 +1014,11 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       /* Cycle through spawn modes: Unix -> Stdio -> TCP -> None -> Unix */
       ds->config->general.daemon_spawn_mode =
           (ds->config->general.daemon_spawn_mode + 1) % 4;
+      break;
+    case FIELD_DAEMON_IDLE_TIMEOUT:
+      number_input_init(&ds->num_input, ds->config->general.daemon_idle_timeout,
+                        CONFIG_IDLE_TIMEOUT_MIN, CONFIG_IDLE_TIMEOUT_MAX);
+      ds->editing_number = true;
       break;
     default:
       break;

@@ -45,6 +45,7 @@ struct lace_client {
   bool connected;         /* Whether daemon is running */
   bool owns_daemon;       /* True if we spawned this daemon */
   char *socket_path;      /* Socket path for cleanup (if we spawned) */
+  int idle_timeout;       /* Daemon idle timeout to pass on spawn */
 
   /* Connection tracking */
   ConnEntry connections[MAX_CONNECTIONS];
@@ -472,7 +473,14 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path) {
     }
 
     /* Execute daemon in Unix socket mode */
-    execl(daemon_exe, daemon_exe, "--unix", socket_path, (char *)NULL);
+    if (client->idle_timeout > 0) {
+      char timeout_str[16];
+      snprintf(timeout_str, sizeof(timeout_str), "%d", client->idle_timeout);
+      execl(daemon_exe, daemon_exe, "--unix", socket_path,
+            "--idle-timeout", timeout_str, (char *)NULL);
+    } else {
+      execl(daemon_exe, daemon_exe, "--unix", socket_path, (char *)NULL);
+    }
 
     /* If exec fails, exit */
     _exit(127);
@@ -558,7 +566,7 @@ static bool spawn_daemon_unix(lace_client_t *client, const char *daemon_path) {
   client->socket_fd = fd;
   client->socket_path = socket_path;
   client->connected = true;
-  client->owns_daemon = true;
+  client->owns_daemon = false; /* Daemon manages its own lifecycle (idle timeout / signal) */
   client->conn_mode = LACE_CONN_UNIX;
 
   /* Verify daemon is responsive */
@@ -637,7 +645,14 @@ static bool spawn_daemon_tcp(lace_client_t *client, const char *daemon_path,
     }
 
     /* Execute daemon in TCP socket mode */
-    execl(daemon_exe, daemon_exe, "--tcp", addr_str, (char *)NULL);
+    if (client->idle_timeout > 0) {
+      char timeout_str[16];
+      snprintf(timeout_str, sizeof(timeout_str), "%d", client->idle_timeout);
+      execl(daemon_exe, daemon_exe, "--tcp", addr_str,
+            "--idle-timeout", timeout_str, (char *)NULL);
+    } else {
+      execl(daemon_exe, daemon_exe, "--tcp", addr_str, (char *)NULL);
+    }
 
     /* If exec fails, exit */
     _exit(127);
@@ -720,7 +735,7 @@ static bool spawn_daemon_tcp(lace_client_t *client, const char *daemon_path,
   client->daemon_pid = pid;
   client->socket_fd = fd;
   client->connected = true;
-  client->owns_daemon = true;
+  client->owns_daemon = false; /* Daemon manages its own lifecycle (idle timeout / signal) */
   client->conn_mode = LACE_CONN_TCP;
 
   /* Verify daemon is responsive */
@@ -750,12 +765,19 @@ static bool spawn_daemon_tcp(lace_client_t *client, const char *daemon_path,
  * ========================================================================== */
 
 lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode) {
+  return lace_client_create_ex2(daemon_path, spawn_mode, 0);
+}
+
+lace_client_t *lace_client_create_ex2(const char *daemon_path,
+                                      LaceSpawnMode spawn_mode,
+                                      int idle_timeout) {
   lace_client_t *client = safe_calloc(1, sizeof(lace_client_t));
 
   client->timeout_ms = DEFAULT_TIMEOUT_MS;
   client->next_id = 1;
   client->socket_fd = -1;
   client->conn_mode = LACE_CONN_SPAWN;
+  client->idle_timeout = idle_timeout;
 
   /* Try to connect to existing daemon first */
   if (spawn_mode == LACE_SPAWN_UNIX || spawn_mode == LACE_SPAWN_NONE) {

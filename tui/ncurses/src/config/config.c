@@ -543,6 +543,7 @@ Config *config_get_defaults(void) {
       HISTORY_MODE_SESSION; /* Default: session only */
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
   config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
+  config->general.daemon_idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
   config->general.pagination_strategy = LACE_PAGINATION_OFFSET; /* Default: offset */
 
   /* Hotkeys - copy from defaults */
@@ -766,6 +767,10 @@ Config *config_load(char **error) {
     if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_NONE)
       config->general.daemon_spawn_mode = val;
 
+    val = json_get_int(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
+    if (val >= CONFIG_IDLE_TIMEOUT_MIN && val <= CONFIG_IDLE_TIMEOUT_MAX)
+      config->general.daemon_idle_timeout = val;
+
     val = json_get_int(general, "pagination_strategy", config->general.pagination_strategy);
     if (val >= LACE_PAGINATION_OFFSET && val <= LACE_PAGINATION_SMART)
       config->general.pagination_strategy = val;
@@ -836,6 +841,7 @@ bool config_save(const Config *config, char **error) {
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
   JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
   JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
+  JSON_ADD_INT(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
   JSON_ADD_INT(general, "pagination_strategy", config->general.pagination_strategy);
   cJSON_AddItemToObject(json, "general", general);
 

@@ -11,6 +11,7 @@
 
 #include "session.h"
 #include <cjson/cJSON.h>
+#include <signal.h>
 
 /* Forward declarations */
 typedef struct AsyncQueue AsyncQueue;
@@ -28,17 +29,19 @@ typedef struct {
 /*
  * Dispatch a JSON-RPC method call to the appropriate handler.
  *
- * @param session     Session manager (connection pool)
- * @param async_queue Async queue for background queries (may be NULL for sync-only)
- * @param method      Method name
- * @param params      Method parameters (may be NULL)
- * @param request_id  Request ID for async response tracking (may be NULL)
- * @return            Handler result (check .deferred for async operations)
+ * @param session       Session manager (connection pool)
+ * @param async_queue   Async queue for background queries (may be NULL for sync-only)
+ * @param method        Method name
+ * @param params        Method parameters (may be NULL)
+ * @param request_id    Request ID for async response tracking (may be NULL)
+ * @param shutdown_flag Pointer to shutdown flag (set by "shutdown" method)
+ * @return              Handler result (check .deferred for async operations)
  */
 LacedHandlerResult laced_handler_dispatch(LacedSession *session,
                                           AsyncQueue *async_queue,
                                           const char *method,
                                           cJSON *params,
-                                          cJSON *request_id);
+                                          cJSON *request_id,
+                                          volatile sig_atomic_t *shutdown_flag);
 
 #endif /* LACED_HANDLER_H */

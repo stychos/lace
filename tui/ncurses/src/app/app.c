@@ -24,7 +24,8 @@
  * First tries to connect to an existing Unix socket daemon (for Unix mode),
  * then falls back to spawning a new daemon if none found.
  */
-static lace_client_t *create_client_with_mode(LaceSpawnMode spawn_mode) {
+static lace_client_t *create_client_with_mode(LaceSpawnMode spawn_mode,
+                                              int idle_timeout) {
   if (spawn_mode == LACE_SPAWN_UNIX) {
     /* First, try to connect to an existing daemon via Unix socket */
     lace_client_t *client = lace_client_connect(NULL);
@@ -39,7 +40,7 @@ static lace_client_t *create_client_with_mode(LaceSpawnMode spawn_mode) {
   }
 
   /* Spawn a new daemon with the preferred mode */
-  return lace_client_create_ex(NULL, spawn_mode);
+  return lace_client_create_ex2(NULL, spawn_mode, idle_timeout);
 }
 
 static struct option long_options[] = {{"help", no_argument, NULL, 'h'},
@@ -221,12 +222,14 @@ static int run_query_mode(AppConfig *config) {
   /* Load application config to get spawn mode preference */
   Config *app_config = config_load(NULL);
   LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX; /* Default */
+  int idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
   if (app_config) {
     spawn_mode = convert_spawn_mode(app_config->general.daemon_spawn_mode);
+    idle_timeout = app_config->general.daemon_idle_timeout;
   }
 
   /* Create liblace client with configured spawn mode */
-  lace_client_t *client = create_client_with_mode(spawn_mode);
+  lace_client_t *client = create_client_with_mode(spawn_mode, idle_timeout);
   config_free(app_config);
 
   if (!client) {
@@ -332,12 +335,14 @@ static int run_tui_mode(AppConfig *config) {
   /* Load application config first to get spawn mode preference */
   Config *early_config = config_load(NULL);
   LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX; /* Default */
+  int idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
   if (early_config) {
     spawn_mode = convert_spawn_mode(early_config->general.daemon_spawn_mode);
+    idle_timeout = early_config->general.daemon_idle_timeout;
   }
 
   /* Create liblace client with configured spawn mode */
-  lace_client_t *client = create_client_with_mode(spawn_mode);
+  lace_client_t *client = create_client_with_mode(spawn_mode, idle_timeout);
   if (!client) {
     config_free(early_config);
     fprintf(stderr, "Failed to allocate client\n");

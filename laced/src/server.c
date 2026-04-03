@@ -47,6 +47,14 @@ struct LacedServer {
   LacedClient *clients;      /* Linked list of connected clients */
   size_t num_clients;        /* Current client count */
   size_t max_clients;        /* Maximum allowed clients */
+
+  /* Shutdown */
+  volatile sig_atomic_t *shutdown_flag; /* Pointer to main shutdown flag */
+
+  /* Idle shutdown */
+  int idle_timeout;          /* Seconds with no clients before shutdown (0=disabled) */
+  time_t idle_since;         /* Timestamp when last client disconnected (0=has clients) */
+  bool had_clients;          /* True after first client connects */
 };
 
 /* Socket utility functions (implemented in socket.c) */
@@ -256,7 +264,8 @@ static bool process_request(LacedServer *server, FILE *output,
 
   /* Handle the request */
   LacedHandlerResult result = laced_handler_dispatch(
-      server->session, server->async_queue, method->valuestring, params, id);
+      server->session, server->async_queue, method->valuestring, params, id,
+      server->shutdown_flag);
 
   bool ok = true;
   if (!is_notification && !result.deferred) {
@@ -408,6 +417,8 @@ int laced_server_run_stdio(LacedServer *server,
     return 1;
   }
 
+  server->shutdown_flag = shutdown_flag;
+
   /* Set stdin to non-blocking */
   int stdin_fd = fileno(stdin);
   int flags = fcntl(stdin_fd, F_GETFL, 0);
@@ -482,6 +493,8 @@ static void add_client(LacedServer *server, LacedClient *client) {
   client->next = server->clients;
   server->clients = client;
   server->num_clients++;
+  server->had_clients = true;
+  server->idle_since = 0; /* Reset idle timer */
   LOG_INFO("Client connected (fd=%d, total=%zu)", client->fd, server->num_clients);
 }
 
@@ -498,6 +511,12 @@ static void remove_client(LacedServer *server, LacedClient *client) {
     LOG_INFO("Client disconnected (fd=%d, connected=%lds, requests=%llu, remaining=%zu)",
              client->fd, (long)connected_secs,
              (unsigned long long)client->requests_count, server->num_clients);
+
+    /* Start idle timer when last client disconnects */
+    if (server->num_clients == 0 && server->idle_timeout > 0) {
+      server->idle_since = time(NULL);
+      LOG_INFO("No clients remaining, idle shutdown in %ds", server->idle_timeout);
+    }
   }
   laced_client_free(client);
 }
@@ -611,7 +630,8 @@ static bool process_client_request(LacedServer *server, LacedClient *client,
 
   /* Handle the request */
   LacedHandlerResult result = laced_handler_dispatch(
-      server->session, server->async_queue, method->valuestring, params, id);
+      server->session, server->async_queue, method->valuestring, params, id,
+      server->shutdown_flag);
 
   /* Store client pointer for async response routing */
   if (result.deferred) {
@@ -776,13 +796,23 @@ static int run_socket_event_loop(LacedServer *server,
 
       client = next;
     }
+
+    /* Check idle timeout */
+    if (server->idle_timeout > 0 && server->had_clients &&
+        server->num_clients == 0 && server->idle_since > 0) {
+      if ((now - server->idle_since) >= server->idle_timeout) {
+        LOG_INFO("Idle timeout reached (%ds with no clients), shutting down",
+                 server->idle_timeout);
+        break;
+      }
+    }
   }
 
   return 0;
 }
 
 int laced_server_run_unix(LacedServer *server, const char *socket_path,
-                          size_t max_clients,
+                          size_t max_clients, int idle_timeout,
                           volatile sig_atomic_t *shutdown_flag) {
   if (!server || !server->initialized) {
     return 1;
@@ -819,9 +849,11 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
   server->listen_fd = listen_fd;
   server->socket_path = path;
   server->max_clients = max_clients > 0 ? max_clients : DEFAULT_MAX_CLIENTS;
+  server->idle_timeout = idle_timeout;
+  server->shutdown_flag = shutdown_flag;
 
-  LOG_INFO("Listening on Unix socket: %s (max_clients=%zu)", path,
-           server->max_clients);
+  LOG_INFO("Listening on Unix socket: %s (max_clients=%zu, idle_timeout=%ds)",
+           path, server->max_clients, server->idle_timeout);
 
   /* Run event loop */
   int result = run_socket_event_loop(server, shutdown_flag);
@@ -831,7 +863,7 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
 }
 
 int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
-                         size_t max_clients,
+                         size_t max_clients, int idle_timeout,
                          volatile sig_atomic_t *shutdown_flag) {
   if (!server || !server->initialized) {
     return 1;
@@ -853,9 +885,11 @@ int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
   server->transport = LACED_TRANSPORT_TCP;
   server->listen_fd = listen_fd;
   server->max_clients = max_clients > 0 ? max_clients : DEFAULT_MAX_CLIENTS;
+  server->idle_timeout = idle_timeout;
+  server->shutdown_flag = shutdown_flag;
 
-  LOG_INFO("Listening on TCP socket: %s:%d (max_clients=%zu)", actual_addr,
-           actual_port, server->max_clients);
+  LOG_INFO("Listening on TCP socket: %s:%d (max_clients=%zu, idle_timeout=%ds)",
+           actual_addr, actual_port, server->max_clients, server->idle_timeout);
 
   /* Run event loop */
   int result = run_socket_event_loop(server, shutdown_flag);

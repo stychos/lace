@@ -75,6 +75,7 @@ typedef struct {
   bool spawn_if_missing;      /* Spawn daemon if socket not found */
   int connect_timeout_ms;     /* Connection timeout (0 = default 5000) */
   LaceSpawnMode spawn_mode;   /* Preferred mode when spawning daemon */
+  int idle_timeout;           /* Daemon idle timeout in seconds (0=disabled) */
 } LaceClientConfig;
 
 /* Default values for config */
@@ -102,6 +103,18 @@ lace_client_t *lace_client_create(const char *daemon_path);
  * @return             Client handle, or NULL on failure (check errno)
  */
 lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode);
+
+/*
+ * Create a new client with specified spawn mode and idle timeout.
+ *
+ * @param daemon_path    Path to laced executable, or NULL to search PATH
+ * @param spawn_mode     LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
+ * @param idle_timeout   Daemon idle timeout in seconds (0=disabled)
+ * @return               Client handle, or NULL on failure
+ */
+lace_client_t *lace_client_create_ex2(const char *daemon_path,
+                                      LaceSpawnMode spawn_mode,
+                                      int idle_timeout);
 
 /*
  * Create a new client with extended configuration.

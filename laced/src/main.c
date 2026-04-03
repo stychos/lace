@@ -39,6 +39,7 @@ typedef struct {
   char *bind_addr;       /* TCP bind address (NULL for localhost) */
   int port;              /* TCP port (0 for default 7433) */
   size_t max_clients;    /* Max concurrent clients (0 for default 64) */
+  int idle_timeout;      /* Shutdown after N seconds with no clients (0=disabled) */
   bool daemonize;        /* Fork to background */
   char *pidfile;         /* PID file path */
   /* Logging options */
@@ -73,6 +74,8 @@ static void print_usage(const char *prog) {
           "  --daemonize, -d      Fork to background (socket modes only)\n"
           "  --pidfile PATH       Write PID to file\n"
           "  --max-clients N      Maximum concurrent clients (default: 64)\n"
+          "  --idle-timeout SECS  Shutdown after N seconds with no clients (0=disabled)\n"
+          "                       Default: 0 (disabled, daemon runs until signal)\n"
           "  -q, --quiet          Suppress log output to stderr\n"
           "  -h, --help           Show this help message\n"
           "  -v, --version        Show version information\n"
@@ -160,6 +163,7 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
   config->bind_addr = NULL;
   config->port = 0;
   config->max_clients = 0;
+  config->idle_timeout = 0;
   config->daemonize = false;
   config->pidfile = NULL;
   /* Log defaults */
@@ -236,6 +240,19 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       config->max_clients = (size_t)atoi(argv[i]);
       if (config->max_clients == 0 || config->max_clients > 10000) {
         fprintf(stderr, "Invalid --max-clients value: %s (must be 1-10000)\n", argv[i]);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--idle-timeout") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--idle-timeout requires an argument\n");
+        return -1;
+      }
+      i++;
+      config->idle_timeout = atoi(argv[i]);
+      if (config->idle_timeout < 0 || config->idle_timeout > 86400) {
+        fprintf(stderr, "Invalid --idle-timeout value: %s (must be 0-86400)\n", argv[i]);
         return -1;
       }
       continue;
@@ -466,12 +483,14 @@ int main(int argc, char **argv) {
 
   case MODE_UNIX:
     result = laced_server_run_unix(server, config.socket_path,
-                                   config.max_clients, &g_shutdown_requested);
+                                   config.max_clients, config.idle_timeout,
+                                   &g_shutdown_requested);
     break;
 
   case MODE_TCP:
     result = laced_server_run_tcp(server, config.bind_addr, config.port,
-                                  config.max_clients, &g_shutdown_requested);
+                                  config.max_clients, config.idle_timeout,
+                                  &g_shutdown_requested);
     break;
   }
 

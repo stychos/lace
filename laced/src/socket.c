@@ -364,14 +364,17 @@ bool laced_client_is_connected(LacedClient *client) {
     return false;
   }
 
-  /* Try a zero-byte read to check connection status */
+  /* Peek 1 byte to detect EOF vs no-data */
   char buf;
-  ssize_t n = recv(client->fd, &buf, 0, MSG_PEEK | MSG_DONTWAIT);
+  ssize_t n = recv(client->fd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
   if (n < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       return true; /* Socket is fine, just no data */
     }
     return false; /* Connection error */
+  }
+  if (n == 0) {
+    return false; /* EOF - peer closed connection */
   }
   return true;
 }

@@ -133,6 +133,19 @@ typedef enum {
  * History
  * ========================================================================== */
 
+/* ==========================================================================
+ * Daemon
+ * ========================================================================== */
+
+/* Daemon idle timeout (seconds, 0=disabled) */
+#define CONFIG_IDLE_TIMEOUT_MIN 0
+#define CONFIG_IDLE_TIMEOUT_MAX 86400
+#define CONFIG_IDLE_TIMEOUT_DEFAULT 0
+
+/* ==========================================================================
+ * History
+ * ========================================================================== */
+
 #define HISTORY_SIZE_MIN 10
 #define HISTORY_SIZE_MAX 100000
 #define HISTORY_SIZE_DEFAULT 1000

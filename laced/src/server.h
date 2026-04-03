@@ -92,11 +92,12 @@ int laced_server_run_stdio(LacedServer *server,
  * @param server            Server handle
  * @param socket_path       Path to Unix socket (NULL for default)
  * @param max_clients       Maximum concurrent clients (0 for default 64)
+ * @param idle_timeout      Shutdown after N seconds with no clients (0=disabled)
  * @param shutdown_flag     Pointer to flag that signals shutdown
  * @return                  0 on success, non-zero on error
  */
 int laced_server_run_unix(LacedServer *server, const char *socket_path,
-                          size_t max_clients,
+                          size_t max_clients, int idle_timeout,
                           volatile sig_atomic_t *shutdown_flag);
 
 /*
@@ -107,11 +108,12 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
  * @param bind_addr         Address to bind (NULL for localhost)
  * @param port              Port number (0 for default 7433)
  * @param max_clients       Maximum concurrent clients (0 for default 64)
+ * @param idle_timeout      Shutdown after N seconds with no clients (0=disabled)
  * @param shutdown_flag     Pointer to flag that signals shutdown
  * @return                  0 on success, non-zero on error
  */
 int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
-                         size_t max_clients,
+                         size_t max_clients, int idle_timeout,
                          volatile sig_atomic_t *shutdown_flag);
 
 /* ==========================================================================

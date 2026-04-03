@@ -282,7 +282,11 @@ static LacedHandlerResult handle_version(LacedSession *session,
   return HANDLER_OK(result);
 }
 
-/* shutdown: Request daemon shutdown */
+/*
+ * shutdown: Request daemon shutdown.
+ * The actual flag setting is done in laced_handler_dispatch() since
+ * regular handlers don't have access to the shutdown flag.
+ */
 static LacedHandlerResult handle_shutdown(LacedSession *session,
                                           AsyncQueue *async_queue,
                                           cJSON *params,
@@ -292,7 +296,7 @@ static LacedHandlerResult handle_shutdown(LacedSession *session,
   (void)params;
   (void)request_id;
 
-  /* TODO: Signal main loop to exit gracefully */
+  LOG_INFO("Shutdown requested via RPC");
   return HANDLER_OK(cJSON_CreateObject());
 }
 
@@ -394,7 +398,8 @@ LacedHandlerResult laced_handler_dispatch(LacedSession *session,
                                           AsyncQueue *async_queue,
                                           const char *method,
                                           cJSON *params,
-                                          cJSON *request_id) {
+                                          cJSON *request_id,
+                                          volatile sig_atomic_t *shutdown_flag) {
   if (!session || !method) {
     return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Invalid handler state");
   }
@@ -404,7 +409,16 @@ LacedHandlerResult laced_handler_dispatch(LacedSession *session,
   /* Find method handler */
   for (int i = 0; g_methods[i].name != NULL; i++) {
     if (strcmp(g_methods[i].name, method) == 0) {
-      return g_methods[i].handler(session, async_queue, params, request_id);
+      LacedHandlerResult result =
+          g_methods[i].handler(session, async_queue, params, request_id);
+
+      /* Set shutdown flag after handler returns success */
+      if (strcmp(method, "shutdown") == 0 && result.error_code == 0 &&
+          shutdown_flag) {
+        *shutdown_flag = 1;
+      }
+
+      return result;
     }
   }
 
