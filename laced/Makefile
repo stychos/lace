@@ -36,7 +36,8 @@ DAEMON_SRCS = \
 	$(SRC_DIR)/async.c \
 	$(SRC_DIR)/socket.c \
 	$(SRC_DIR)/log.c \
-	$(SRC_DIR)/crash.c
+	$(SRC_DIR)/crash.c \
+	$(SRC_DIR)/ssh_tunnel.c
 
 # Database source files
 # Note: connstr.c is now in liblace
@@ -114,6 +115,10 @@ $(BUILD_DIR)/log.o: $(SRC_DIR)/log.c
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/crash.o: $(SRC_DIR)/crash.c
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/ssh_tunnel.o: $(SRC_DIR)/ssh_tunnel.c
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
 

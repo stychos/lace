@@ -34,6 +34,145 @@ static char *decode_component(const char *s, size_t len) {
 /* Maximum connection string length (4KB is more than sufficient) */
 #define MAX_CONNSTR_LEN 4096
 
+/*
+ * Post-process a parsed connection string that contains +ssh in the driver.
+ *
+ * After standard parsing of "postgres+ssh://sshuser:sshpass@sshhost:22/dbuser:dbpass@dbhost:5432/mydb":
+ *   driver="postgres+ssh", user="sshuser", password="sshpass", host="sshhost",
+ *   port=22, database="dbuser:dbpass@dbhost:5432/mydb"
+ *
+ * This function:
+ * 1. Strips "+ssh" from driver
+ * 2. Moves user/pass/host/port to ssh_* fields
+ * 3. Re-parses the "database" field as [user[:pass]@]host[:port]/dbname
+ */
+static bool connstr_postprocess_ssh(ConnString *cs, char **err) {
+  if (!cs->driver)
+    return true;
+
+  char *plus = strstr(cs->driver, "+ssh");
+  if (!plus)
+    return true; /* Not SSH */
+
+  /* Ensure +ssh is at the end of the driver name */
+  if (plus[4] != '\0') {
+    err_setf(err, "Invalid driver scheme: %s", cs->driver);
+    return false;
+  }
+
+  /* Extract real driver name */
+  char *real_driver = str_ndup(cs->driver, (size_t)(plus - cs->driver));
+  if (!real_driver) {
+    err_setf(err, "Out of memory");
+    return false;
+  }
+
+  /* Reject sqlite+ssh */
+  if (str_eq(real_driver, "sqlite")) {
+    free(real_driver);
+    err_setf(err, "SSH tunneling is not supported for SQLite");
+    return false;
+  }
+
+  /* Move parsed authority fields to SSH fields */
+  cs->ssh = true;
+  cs->ssh_user = cs->user;
+  cs->user = NULL;
+  cs->ssh_password = cs->password;
+  cs->password = NULL;
+  cs->ssh_host = cs->host;
+  cs->host = NULL;
+  cs->ssh_port = cs->port;
+  cs->port = 0;
+
+  free(cs->driver);
+  cs->driver = real_driver;
+
+  /* Now re-parse cs->database which contains "dbuser:dbpass@dbhost:5432/mydb"
+   * or just "dbhost:5432/mydb" or "dbhost/mydb" */
+  if (!cs->database || *cs->database == '\0') {
+    err_setf(err, "SSH connection string missing database path");
+    return false;
+  }
+
+  char *db_part = cs->database;
+  cs->database = NULL;
+
+  const char *p = db_part;
+  const char *at = strchr(p, '@');
+  const char *slash = strchr(p, '/');
+
+  /* Parse [user[:pass]@] - only if @ comes before / */
+  if (at && (!slash || at < slash)) {
+    const char *colon = strchr(p, ':');
+    if (colon && colon < at) {
+      cs->user = decode_component(p, (size_t)(colon - p));
+      cs->password = decode_component(colon + 1, (size_t)(at - colon - 1));
+      if (!cs->user || !cs->password) {
+        free(db_part);
+        err_setf(err, "Out of memory");
+        return false;
+      }
+    } else {
+      cs->user = decode_component(p, (size_t)(at - p));
+      if (!cs->user) {
+        free(db_part);
+        err_setf(err, "Out of memory");
+        return false;
+      }
+    }
+    p = at + 1;
+  }
+
+  /* Parse host[:port] before the next / */
+  slash = strchr(p, '/');
+  const char *host_end = slash ? slash : (p + strlen(p));
+
+  if (host_end > p) {
+    /* Find last colon for port */
+    const char *colon = NULL;
+    for (const char *c = host_end - 1; c >= p; c--) {
+      if (*c == ':') {
+        colon = c;
+        break;
+      }
+    }
+    if (colon) {
+      cs->host = str_ndup(p, (size_t)(colon - p));
+      char *port_str = str_ndup(colon + 1, (size_t)(host_end - colon - 1));
+      if (port_str) {
+        char *endptr;
+        errno = 0;
+        long port_val = strtol(port_str, &endptr, 10);
+        if (errno == 0 && *endptr == '\0' && port_val > 0 && port_val <= 65535) {
+          cs->port = (int)port_val;
+        }
+        free(port_str);
+      }
+    } else {
+      cs->host = str_ndup(p, (size_t)(host_end - p));
+    }
+    if (!cs->host) {
+      free(db_part);
+      err_setf(err, "Out of memory");
+      return false;
+    }
+  }
+
+  /* Parse /database */
+  if (slash && *(slash + 1)) {
+    cs->database = str_url_decode(slash + 1);
+    if (!cs->database) {
+      free(db_part);
+      err_setf(err, "Out of memory");
+      return false;
+    }
+  }
+
+  free(db_part);
+  return true;
+}
+
 ConnString *connstr_parse(const char *str, char **err) {
   if (!str || *str == '\0') {
     err_setf(err, "Connection string is empty");
@@ -256,6 +395,12 @@ ConnString *connstr_parse(const char *str, char **err) {
     cs->num_options = i;
   }
 
+  /* Post-process SSH connection strings (+ssh in driver) */
+  if (!connstr_postprocess_ssh(cs, err)) {
+    connstr_free(cs);
+    return NULL;
+  }
+
   return cs;
 }
 
@@ -269,6 +414,12 @@ void connstr_free(ConnString *cs) {
   free(cs->host);
   free(cs->database);
   free(cs->schema);
+
+  /* SSH tunnel fields */
+  free(cs->ssh_user);
+  str_secure_free(cs->ssh_password);
+  free(cs->ssh_host);
+
   str_secure_free(cs->raw); /* Raw string may contain password */
 
   FREE_STRING_ARRAY(cs->option_keys, cs->num_options);
@@ -434,6 +585,15 @@ bool connstr_validate(const ConnString *cs, char **err) {
     return true;
   }
 
+  /* SSH tunnel validation */
+  if (cs->ssh) {
+    if (!cs->ssh_host || *cs->ssh_host == '\0') {
+      err_setf(err, "SSH tunnel requires a host");
+      return false;
+    }
+    /* ssh_user is optional -- ssh reads from ~/.ssh/config */
+  }
+
   /* Network database validation */
   if (!cs->host || *cs->host == '\0') {
     err_setf(err, "Host is required for %s", cs->driver);
@@ -516,6 +676,40 @@ char *connstr_mask_password(const char *connstr) {
   if (!cs) {
     /* Can't parse - return copy of original */
     return str_dup(connstr);
+  }
+
+  if (cs->ssh) {
+    /* Build: driver+ssh://[ssh_user@]ssh_host[:ssh_port]/[db_user@]db_host[:db_port]/db_name */
+    StringBuilder *sb = sb_new(256);
+    if (!sb) {
+      connstr_free(cs);
+      return NULL;
+    }
+    sb_append(sb, cs->driver);
+    sb_append(sb, "+ssh://");
+    if (cs->ssh_user) {
+      sb_append(sb, cs->ssh_user);
+      sb_append_char(sb, '@');
+    }
+    if (cs->ssh_host)
+      sb_append(sb, cs->ssh_host);
+    if (cs->ssh_port > 0)
+      sb_printf(sb, ":%d", cs->ssh_port);
+    sb_append_char(sb, '/');
+    if (cs->user) {
+      sb_append(sb, cs->user);
+      sb_append_char(sb, '@');
+    }
+    if (cs->host)
+      sb_append(sb, cs->host);
+    if (cs->port > 0)
+      sb_printf(sb, ":%d", cs->port);
+    sb_append_char(sb, '/');
+    if (cs->database)
+      sb_append(sb, cs->database);
+
+    connstr_free(cs);
+    return sb_to_string(sb);
   }
 
   /* Rebuild without password */

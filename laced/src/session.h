@@ -12,6 +12,7 @@
 #include "db/db.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* Forward declaration */
 typedef struct LacedSession LacedSession;
@@ -93,6 +94,16 @@ typedef struct {
   char *user;
 } LacedConnInfo;
 
+/* Connection statistics */
+typedef struct {
+  uint64_t uptime_ms;              /* Time since connection was established */
+  uint64_t query_count;            /* Total queries executed */
+  uint64_t total_query_time_ms;    /* Cumulative query execution time */
+  uint64_t failed_query_count;     /* Queries that failed */
+  bool query_running;              /* True if a query is currently running */
+  uint64_t current_query_time_ms;       /* Duration of current query (0 if not running) */
+} LacedConnStats;
+
 /*
  * List all active connections.
  *
@@ -112,6 +123,17 @@ bool laced_session_list_connections(LacedSession *session, LacedConnInfo **info,
  * @param count  Number of elements
  */
 void laced_conn_info_array_free(LacedConnInfo *info, size_t count);
+
+/*
+ * Get connection statistics.
+ *
+ * @param session  Session handle
+ * @param conn_id  Connection ID
+ * @param stats    Output: connection statistics
+ * @return         true if connection found, false otherwise
+ */
+bool laced_session_get_conn_stats(LacedSession *session, int conn_id,
+                                  LacedConnStats *stats);
 
 /* ==========================================================================
  * Query State Management
@@ -152,10 +174,12 @@ bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err);
 /*
  * Clean up cancellation state after a query completes.
  * Call this after each query (success or failure).
+ * Updates connection statistics.
  *
  * @param session  Session handle
  * @param conn_id  Connection ID
+ * @param success  true if query succeeded, false if it failed
  */
-void laced_session_finish_query(LacedSession *session, int conn_id);
+void laced_session_finish_query(LacedSession *session, int conn_id, bool success);
 
 #endif /* LACED_SESSION_H */

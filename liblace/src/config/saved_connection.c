@@ -98,6 +98,14 @@ LaceSavedConnection *lace_saved_conn_from_connstr(const char *connstr_str,
   conn->port = cs->port;
   conn->save_password = (cs->password != NULL);
 
+  /* SSH tunnel fields */
+  conn->ssh = cs->ssh;
+  conn->ssh_host = cs->ssh_host ? str_dup(cs->ssh_host) : NULL;
+  conn->ssh_user = cs->ssh_user ? str_dup(cs->ssh_user) : NULL;
+  conn->ssh_password = cs->ssh_password ? str_dup(cs->ssh_password) : NULL;
+  conn->ssh_port = cs->ssh_port;
+  conn->save_ssh_password = (cs->ssh_password != NULL);
+
   /* Generate default name from database path/name */
   if (conn->database) {
     /* For file paths, use just the filename */
@@ -129,7 +137,10 @@ void lace_saved_conn_free(LaceSavedConnection *conn) {
   free(conn->host);
   free(conn->database);
   free(conn->user);
-  str_secure_free(conn->password); /* Securely wipe password from memory */
+  str_secure_free(conn->password);
+  free(conn->ssh_host);
+  free(conn->ssh_user);
+  str_secure_free(conn->ssh_password);
   free(conn);
 }
 
@@ -151,6 +162,13 @@ LaceSavedConnection *lace_saved_conn_copy(const LaceSavedConnection *conn) {
   copy->port = conn->port;
   copy->save_password = conn->save_password;
 
+  copy->ssh = conn->ssh;
+  copy->ssh_host = conn->ssh_host ? str_dup(conn->ssh_host) : NULL;
+  copy->ssh_user = conn->ssh_user ? str_dup(conn->ssh_user) : NULL;
+  copy->ssh_password = conn->ssh_password ? str_dup(conn->ssh_password) : NULL;
+  copy->ssh_port = conn->ssh_port;
+  copy->save_ssh_password = conn->save_ssh_password;
+
   return copy;
 }
 
@@ -166,10 +184,56 @@ char *lace_saved_conn_to_connstr(const LaceSavedConnection *conn) {
   if (!sb)
     return NULL;
 
-  /* Start with driver:// */
+  if (conn->ssh) {
+    /* SSH tunnel format: driver+ssh://[sshuser[:sshpass]@]sshhost[:sshport]/[dbuser[:dbpass]@]dbhost[:dbport]/dbname */
+    sb_printf(sb, "%s+ssh://", conn->driver);
+
+    /* SSH user[:password]@ */
+    if (conn->ssh_user && conn->ssh_user[0]) {
+      sb_append(sb, conn->ssh_user);
+      if (conn->ssh_password && conn->ssh_password[0] && conn->save_ssh_password) {
+        sb_append_char(sb, ':');
+        sb_append(sb, conn->ssh_password);
+      }
+      sb_append_char(sb, '@');
+    }
+
+    /* SSH host[:port] */
+    if (conn->ssh_host && conn->ssh_host[0])
+      sb_append(sb, conn->ssh_host);
+    if (conn->ssh_port > 0)
+      sb_printf(sb, ":%d", conn->ssh_port);
+
+    sb_append_char(sb, '/');
+
+    /* DB user[:password]@ */
+    if (conn->user && conn->user[0]) {
+      sb_append(sb, conn->user);
+      if (conn->password && conn->password[0] && conn->save_password) {
+        sb_append_char(sb, ':');
+        sb_append(sb, conn->password);
+      }
+      sb_append_char(sb, '@');
+    }
+
+    /* DB host[:port] */
+    if (conn->host && conn->host[0])
+      sb_append(sb, conn->host);
+    if (conn->port > 0)
+      sb_printf(sb, ":%d", conn->port);
+
+    sb_append_char(sb, '/');
+
+    /* Database name */
+    if (conn->database && conn->database[0])
+      sb_append(sb, conn->database);
+
+    return sb_to_string(sb);
+  }
+
+  /* Standard (non-SSH) format: driver://[user[:password]@]host[:port]/database */
   sb_printf(sb, "%s://", conn->driver);
 
-  /* Add user[:password]@ if present */
   if (conn->user && conn->user[0]) {
     sb_append(sb, conn->user);
     if (conn->password && conn->password[0] && conn->save_password) {
@@ -179,7 +243,6 @@ char *lace_saved_conn_to_connstr(const LaceSavedConnection *conn) {
     sb_append_char(sb, '@');
   }
 
-  /* Add host[:port]/ if present (not for sqlite) */
   bool is_sqlite = str_eq(conn->driver, "sqlite");
   if (!is_sqlite && conn->host && conn->host[0]) {
     sb_append(sb, conn->host);
@@ -189,7 +252,6 @@ char *lace_saved_conn_to_connstr(const LaceSavedConnection *conn) {
     sb_append_char(sb, '/');
   }
 
-  /* Add database */
   if (conn->database && conn->database[0]) {
     sb_append(sb, conn->database);
   }

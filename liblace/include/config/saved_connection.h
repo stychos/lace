@@ -30,6 +30,14 @@ typedef struct {
   char *password; /* Password (if save_password is true) */
   int port;       /* Port number (0 for default) */
   bool save_password;
+
+  /* SSH tunnel fields */
+  bool ssh;            /* true if connection uses SSH tunnel */
+  char *ssh_host;      /* SSH server hostname */
+  char *ssh_user;      /* SSH username (NULL = use ~/.ssh/config) */
+  char *ssh_password;  /* SSH password (NULL = key auth) */
+  int ssh_port;        /* SSH port (0 = default 22) */
+  bool save_ssh_password;
 } LaceSavedConnection;
 
 /* ==========================================================================

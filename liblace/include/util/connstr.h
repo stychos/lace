@@ -22,6 +22,13 @@ typedef struct {
   char *database; /* Database name or file path */
   char *schema;   /* Schema name (optional) */
 
+  /* SSH tunnel fields (set when driver contains "+ssh") */
+  bool ssh;            /* true if +ssh tunnel requested */
+  char *ssh_user;      /* SSH username (NULL = use ~/.ssh/config) */
+  char *ssh_password;  /* SSH password (NULL = key auth) */
+  char *ssh_host;      /* SSH server hostname */
+  int ssh_port;        /* SSH port (0 = default 22) */
+
   /* Additional options as key-value pairs */
   char **option_keys;
   char **option_values;
@@ -76,6 +83,7 @@ bool connstr_validate(const ConnString *cs, char **err);
 /* Default ports for known drivers */
 #define CONNSTR_PORT_POSTGRES 5432
 #define CONNSTR_PORT_MYSQL 3306
+#define CONNSTR_PORT_SSH 22
 
 /*
  * Check if a file is a SQLite database by reading magic bytes.

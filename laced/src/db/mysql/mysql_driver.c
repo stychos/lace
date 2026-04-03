@@ -25,8 +25,13 @@
 /* MySQL connection data */
 typedef struct {
   MYSQL *mysql;
+  MYSQL *cancel_conn;    /* Dedicated connection for KILL QUERY (lazy init) */
+  char *host;
+  int port;
+  char *user;
+  char *password;        /* Stored for cancel connection creation */
   char *database;
-  bool is_mariadb; /* Connection scheme was mariadb:// */
+  bool is_mariadb;       /* Connection scheme was mariadb:// */
 } MySqlData;
 
 /*
@@ -410,6 +415,11 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
 
   MySqlData *data = safe_calloc(1, sizeof(MySqlData));
   data->mysql = mysql;
+  data->cancel_conn = NULL;  /* Lazily initialized when needed */
+  data->host = str_dup(host);
+  data->port = port;
+  data->user = str_dup(user);
+  data->password = password ? str_dup(password) : NULL;
   data->database = str_dup(database);
   data->is_mariadb = is_mariadb;
 
@@ -434,9 +444,15 @@ static void mysql_driver_disconnect(DbConnection *conn) {
 
   MySqlData *data = conn->driver_data;
   if (data) {
+    if (data->cancel_conn) {
+      mysql_close(data->cancel_conn);
+    }
     if (data->mysql) {
       mysql_close(data->mysql);
     }
+    free(data->host);
+    free(data->user);
+    str_secure_free(data->password);
     free(data->database);
     free(data);
   }
@@ -1184,12 +1200,55 @@ typedef struct {
   unsigned long thread_id;
 } MySqlCancelHandle;
 
+/*
+ * Create a dedicated cancel connection for KILL QUERY commands.
+ * This connection is used from a different thread to cancel running queries.
+ * Returns NULL on failure (cancellation won't be available).
+ */
+static MYSQL *mysql_create_cancel_connection(MySqlData *data) {
+  if (!data || !data->host)
+    return NULL;
+
+  MYSQL *cancel = mysql_init(NULL);
+  if (!cancel)
+    return NULL;
+
+  /* Use a short timeout for the cancel connection */
+  unsigned int timeout = 5;
+  if (mysql_options(cancel, MYSQL_OPT_CONNECT_TIMEOUT, &timeout) != 0) {
+    mysql_close(cancel);
+    return NULL;
+  }
+
+  /* Set character set */
+  if (mysql_options(cancel, MYSQL_SET_CHARSET_NAME, "utf8mb4") != 0) {
+    mysql_close(cancel);
+    return NULL;
+  }
+
+  MYSQL *result = mysql_real_connect(cancel, data->host, data->user,
+                                     data->password, data->database,
+                                     data->port, NULL, 0);
+  if (!result) {
+    mysql_close(cancel);
+    return NULL;
+  }
+
+  return cancel;
+}
+
 static void *mysql_driver_prepare_cancel(DbConnection *conn) {
   if (!conn)
     return NULL;
   MySqlData *data = conn->driver_data;
   if (!data || !data->mysql)
     return NULL;
+
+  /* Lazily create the cancel connection if it doesn't exist */
+  if (!data->cancel_conn) {
+    data->cancel_conn = mysql_create_cancel_connection(data);
+    /* If cancel connection fails, we continue - cancellation just won't work */
+  }
 
   MySqlCancelHandle *handle = safe_malloc(sizeof(MySqlCancelHandle));
   handle->thread_id = mysql_thread_id(data->mysql);
@@ -1209,24 +1268,27 @@ static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
     return false;
   }
 
+  /* Require the dedicated cancel connection for thread-safe cancellation */
+  if (!data->cancel_conn) {
+    err_set(err, "Cancel connection not available");
+    return false;
+  }
+
   MySqlCancelHandle *handle = (MySqlCancelHandle *)cancel_handle;
 
-  /* Execute KILL QUERY on the same connection
-   * Note: This works because mysql_query is thread-safe for different
-   * connections, and KILL QUERY is a fast operation that can interrupt
-   * a running query.
-   * For full robustness, a separate connection would be needed. */
+  /* Execute KILL QUERY on the dedicated cancel connection.
+   * This is thread-safe because cancel_conn is separate from the main
+   * connection that's executing the query. */
   char kill_sql[64];
   snprintf(kill_sql, sizeof(kill_sql), "KILL QUERY %lu", handle->thread_id);
 
-  /* We use mysql_send_query which is non-blocking for the send part */
-  if (mysql_query(data->mysql, kill_sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
+  if (mysql_query(data->cancel_conn, kill_sql) != 0) {
+    err_set(err, mysql_error(data->cancel_conn));
     return false;
   }
 
   /* Consume any result from KILL command */
-  MYSQL_RES *result = mysql_store_result(data->mysql);
+  MYSQL_RES *result = mysql_store_result(data->cancel_conn);
   if (result)
     mysql_free_result(result);
 

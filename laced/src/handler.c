@@ -193,8 +193,9 @@ static LacedHandlerResult handle_query(LacedSession *session,
   char *err = NULL;
   if (is_select) {
     ResultSet *rs = db_query(conn, sql, &err);
+    bool success = (rs != NULL);
 
-    laced_session_finish_query(session, conn_id);
+    laced_session_finish_query(session, conn_id, success);
 
     if (!rs) {
       cJSON_Delete(result);
@@ -210,8 +211,9 @@ static LacedHandlerResult handle_query(LacedSession *session,
     db_result_free(rs);
   } else {
     int64_t affected = db_exec(conn, sql, &err);
+    bool success = (affected >= 0);
 
-    laced_session_finish_query(session, conn_id);
+    laced_session_finish_query(session, conn_id, success);
 
     if (affected < 0) {
       cJSON_Delete(result);
@@ -294,104 +296,63 @@ static LacedHandlerResult handle_shutdown(LacedSession *session,
   return HANDLER_OK(cJSON_CreateObject());
 }
 
-/* queries: List active queries for a connection */
-static LacedHandlerResult handle_queries(LacedSession *session,
-                                         AsyncQueue *async_queue,
-                                         cJSON *params,
-                                         cJSON *request_id) {
-  (void)session;
+/* connection: Get connection statistics */
+static LacedHandlerResult handle_connection(LacedSession *session,
+                                            AsyncQueue *async_queue,
+                                            cJSON *params,
+                                            cJSON *request_id) {
+  (void)async_queue;
   (void)request_id;
   int conn_id = 0;
 
-  /* conn_id is optional - 0 means all connections */
-  laced_json_get_int(params, "conn_id", &conn_id);
-
-  if (!async_queue) {
-    /* No async queue - return empty array */
-    return HANDLER_OK(cJSON_CreateArray());
+  if (!laced_json_get_int(params, "conn_id", &conn_id)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
   }
 
-  AsyncQueryInfo *info = NULL;
-  size_t count = 0;
-  if (!async_get_active_queries(async_queue, conn_id, &info, &count)) {
-    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to get active queries");
+  LacedConnStats stats;
+  if (!laced_session_get_conn_stats(session, conn_id, &stats)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Connection not found");
   }
 
-  cJSON *result = cJSON_CreateArray();
+  cJSON *result = cJSON_CreateObject();
   if (result) {
-    for (size_t i = 0; i < count; i++) {
-      cJSON *query = cJSON_CreateObject();
-      if (query) {
-        cJSON_AddNumberToObject(query, "query_id", (double)info[i].query_id);
-        cJSON_AddNumberToObject(query, "conn_id", info[i].conn_id);
-        const char *type_str;
-        switch (info[i].type) {
-        case ASYNC_QUERY_TYPE_QUERY: type_str = "data"; break;
-        case ASYNC_QUERY_TYPE_EXEC: type_str = "query"; break;
-        case ASYNC_QUERY_TYPE_COUNT: type_str = "count"; break;
-        default: type_str = "unknown"; break;
-        }
-        cJSON_AddStringToObject(query, "type", type_str);
-        const char *status_str;
-        switch (info[i].status) {
-        case ASYNC_QUERY_PENDING: status_str = "pending"; break;
-        case ASYNC_QUERY_RUNNING: status_str = "running"; break;
-        case ASYNC_QUERY_COMPLETED: status_str = "completed"; break;
-        case ASYNC_QUERY_CANCELLED: status_str = "cancelled"; break;
-        case ASYNC_QUERY_ERROR: status_str = "error"; break;
-        default: status_str = "unknown"; break;
-        }
-        cJSON_AddStringToObject(query, "status", status_str);
-        if (info[i].description) {
-          cJSON_AddStringToObject(query, "description", info[i].description);
-        }
-        cJSON_AddNumberToObject(query, "started_at_ms", (double)info[i].started_at_ms);
-        cJSON_AddItemToArray(result, query);
-      }
+    cJSON_AddNumberToObject(result, "uptime_ms", (double)stats.uptime_ms);
+    cJSON_AddNumberToObject(result, "query_count", (double)stats.query_count);
+    cJSON_AddNumberToObject(result, "total_query_time_ms", (double)stats.total_query_time_ms);
+    cJSON_AddNumberToObject(result, "failed_query_count", (double)stats.failed_query_count);
+    cJSON_AddBoolToObject(result, "query_running", stats.query_running);
+    if (stats.query_running) {
+      cJSON_AddNumberToObject(result, "current_query_time_ms", (double)stats.current_query_time_ms);
     }
   }
-
-  async_query_info_free(info, count);
   return HANDLER_OK(result);
 }
 
-/* cancel: Cancel a running query by connection or query ID */
+/* cancel: Cancel a running query on a connection */
 static LacedHandlerResult handle_cancel(LacedSession *session,
                                         AsyncQueue *async_queue,
                                         cJSON *params,
                                         cJSON *request_id) {
   (void)request_id;
   int conn_id = 0;
-  int64_t query_id = 0;
-  bool has_conn_id = laced_json_get_int(params, "conn_id", &conn_id);
-  bool has_query_id = laced_json_get_int64(params, "query_id", &query_id);
 
-  if (!has_conn_id && !has_query_id) {
-    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS,
-                         "Missing 'conn_id' or 'query_id' parameter");
+  if (!laced_json_get_int(params, "conn_id", &conn_id)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
   }
 
-  bool cancelled = false;
-
-  if (has_query_id && async_queue) {
-    /* Cancel by specific query ID */
-    cancelled = async_cancel_by_query_id(async_queue, session, query_id);
-  } else if (has_conn_id) {
-    /* Cancel by connection ID (all queries on that connection) */
-    if (async_queue) {
-      (void)async_cancel_by_conn_id(async_queue, session, conn_id);
-    }
-    /* Also call session cancel directly (for synchronous operations) */
-    char *err = NULL;
-    laced_session_cancel_query(session, conn_id, &err);
-    free(err);
-    /* Always report cancelled for conn_id mode since we attempt all methods */
-    cancelled = true;
+  /* Cancel via async queue if available */
+  if (async_queue) {
+    (void)async_cancel_by_conn_id(async_queue, session, conn_id);
   }
+
+  /* Also call session cancel directly (for synchronous operations) */
+  char *err = NULL;
+  laced_session_cancel_query(session, conn_id, &err);
+  free(err);
 
   cJSON *result = cJSON_CreateObject();
   if (result) {
-    cJSON_AddBoolToObject(result, "cancelled", cancelled);
+    cJSON_AddBoolToObject(result, "cancelled", true);
   }
   return HANDLER_OK(result);
 }
@@ -423,7 +384,7 @@ static struct {
     {"ping", handle_ping},
     {"version", handle_version},
     {"shutdown", handle_shutdown},
-    {"queries", handle_queries},
+    {"connection", handle_connection},
     {"cancel", handle_cancel},
 
     {NULL, NULL}  /* Sentinel */

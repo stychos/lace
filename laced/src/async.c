@@ -235,7 +235,7 @@ static void *query_worker(void *arg) {
     query->status = ASYNC_QUERY_ERROR;
     LOG_ERROR("Query %lld failed: invalid connection ID %d",
               (long long)query->query_id, query->conn_id);
-    laced_session_finish_query(query->session, query->conn_id);
+    laced_session_finish_query(query->session, query->conn_id, false);
     async_queue_push(query->queue, query);
     return NULL;
   }
@@ -254,7 +254,8 @@ static void *query_worker(void *arg) {
 
   if (is_select) {
     ResultSet *rs = db_query(conn, query->sql, &err);
-    laced_session_finish_query(query->session, query->conn_id);
+    bool success = (rs != NULL && !query->cancel_requested);
+    laced_session_finish_query(query->session, query->conn_id, success);
 
     if (query->cancel_requested) {
       query->status = ASYNC_QUERY_CANCELLED;
@@ -280,7 +281,8 @@ static void *query_worker(void *arg) {
     }
   } else {
     int64_t affected = db_exec(conn, query->sql, &err);
-    laced_session_finish_query(query->session, query->conn_id);
+    bool success = (affected >= 0 && !query->cancel_requested);
+    laced_session_finish_query(query->session, query->conn_id, success);
 
     if (query->cancel_requested) {
       query->status = ASYNC_QUERY_CANCELLED;

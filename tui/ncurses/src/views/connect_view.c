@@ -712,6 +712,10 @@ static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y,
   mvwprintw(win, y++, start_x + 2, "sqlite:///path/to/db.sqlite");
   mvwprintw(win, y++, start_x + 2, "postgres://user:pass@host/db");
   mvwprintw(win, y++, start_x + 2, "mysql://user@host:3306/db");
+  y++;
+  mvwprintw(win, y++, start_x, "SSH tunnel:");
+  mvwprintw(win, y++, start_x + 2, "postgres+ssh://sshhost/user:pass@localhost/db");
+  mvwprintw(win, y++, start_x + 2, "mysql+ssh://user@sshhost/dbuser@localhost/db");
   wattroff(win, A_DIM);
 }
 
