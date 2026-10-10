@@ -7,7 +7,7 @@
 all: laced liblace ncurses
 
 # Build the daemon
-laced:
+laced: liblace
 	$(MAKE) -C laced
 
 # Build the client library

@@ -573,7 +573,7 @@ static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
 
   /* Use the table's scroll_col for horizontal alignment */
   VmTable *widget = state->vm_table;
-  size_t scroll_col = widget ? widget->base.state.scroll_col : 0;
+  size_t scroll_col = (widget && widget->tab) ? widget->tab->scroll_col : 0;
 
   /* Draw cells aligned with the main table */
   int x = params->start_x + 1;
@@ -635,13 +635,19 @@ void tui_draw_table(TuiState *state) {
   /* Read model data from Tab */
   ResultSet *data = tab->data;
 
+  /* Keep widths in step with the loaded rows (pages loaded after the first
+   * one used to keep the first page's widths and truncate wider values) */
+  if (widget) {
+    table_vm_update_column_widths(widget);
+  }
+
   /* Read view state from TableWidget (source of truth) */
   int *col_widths = widget ? widget->col_widths : tab->col_widths;
   size_t num_col_widths = widget ? widget->num_col_widths : tab->num_col_widths;
-  size_t cursor_row = widget ? widget->base.state.cursor_row : 0;
-  size_t cursor_col = widget ? widget->base.state.cursor_col : 0;
-  size_t scroll_row = widget ? widget->base.state.scroll_row : 0;
-  size_t scroll_col = widget ? widget->base.state.scroll_col : 0;
+  size_t cursor_row = (widget && widget->tab) ? widget->tab->cursor_row : 0;
+  size_t cursor_col = (widget && widget->tab) ? widget->tab->cursor_col : 0;
+  size_t scroll_row = (widget && widget->tab) ? widget->tab->scroll_row : 0;
+  size_t scroll_col = (widget && widget->tab) ? widget->tab->scroll_col : 0;
 
   bool is_editing = state->editing;
   char *edit_buffer = state->edit_buffer;
@@ -699,7 +705,7 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = cursor_col,
                            .scroll_row = scroll_row,
                            .scroll_col = scroll_col,
-                           .selection_offset = widget ? widget->loaded_offset : 0,
+                           .selection_offset = (widget && widget->tab) ? widget->tab->loaded_offset : 0,
                            .is_focused = !tui_sidebar_focused(state) &&
                                          !tui_filters_focused(state),
                            .is_editing = is_editing,
@@ -826,7 +832,8 @@ void tui_draw_status(TuiState *state) {
   bool query_results_active = false;
   if (tab && ui) {
     query_results_active = (tab->type == TAB_TYPE_QUERY &&
-                            ui->query_focus_results && tab->query_results);
+                            ui->query_focus_results && !ui->query_unfocused &&
+                            tab->query_results);
   }
 
   /* Left: show table name when sidebar focused, otherwise column info */
@@ -921,8 +928,8 @@ void tui_draw_status(TuiState *state) {
 
     mvwprintw(state->status_win, 0, 1, "%s", info);
   } else if (tab && tab->schema && widget &&
-             widget->base.state.cursor_col < tab->schema->num_columns) {
-    ColumnDef *col = &tab->schema->columns[widget->base.state.cursor_col];
+             tab->cursor_col < tab->schema->num_columns) {
+    ColumnDef *col = &tab->schema->columns[tab->cursor_col];
 
     /* Build column info string */
     char info[256];
@@ -990,11 +997,11 @@ void tui_draw_status(TuiState *state) {
     mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
   } else if (tab && tab->data && widget) {
     char pos[96];
-    size_t actual_row = widget->loaded_offset + widget->base.state.cursor_row + 1;
+    size_t actual_row = tab->loaded_offset + tab->cursor_row + 1;
     size_t total =
-        widget->total_rows > 0 ? widget->total_rows : tab->data->num_rows;
+        tab->total_rows > 0 ? tab->total_rows : tab->data->num_rows;
     /* Show ~ prefix for approximate counts */
-    bool approx = widget->row_count_approximate;
+    bool approx = tab->row_count_approximate;
     bool filtered = has_active_filters(tab);
     if (filtered && tab->unfiltered_total_rows > 0) {
       snprintf(pos, sizeof(pos), "Row %zu/%s%zu [%zu]", actual_row,
@@ -1054,8 +1061,10 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         if (mouse_y >= results_start_y) {
           /* Scroll query results using helper that handles pagination */
           UITabState *scroll_ui = TUI_TAB_UI(state);
-          if (scroll_ui)
+          if (scroll_ui) {
             scroll_ui->query_focus_results = true;
+            scroll_ui->query_unfocused = false;
+          }
           int delta = is_scroll_up ? -scroll_amount : scroll_amount;
           tui_query_scroll_results(state, delta);
           tui_set_sidebar_focused(state, false);
@@ -1322,11 +1331,13 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     if (mouse_y < results_start_y) {
       /* Clicked in editor area */
       query_click_ui->query_focus_results = false;
+      query_click_ui->query_unfocused = false;
     } else if (query_click_tab->query_results &&
                query_click_tab->query_results->num_rows > 0 &&
                mouse_y >= results_data_y) {
       /* Clicked in results data area */
       query_click_ui->query_focus_results = true;
+      query_click_ui->query_unfocused = false;
 
       /* Calculate which row was clicked */
       int clicked_row = mouse_y - results_data_y;
@@ -1369,6 +1380,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
     } else {
       /* Clicked in results header area */
       query_click_ui->query_focus_results = true;
+      query_click_ui->query_unfocused = false;
     }
     return true;
   }

@@ -33,6 +33,8 @@ typedef enum {
 /* Client connection (for socket modes) */
 typedef struct LacedClient {
   int fd;                     /* Client socket file descriptor */
+  bool closed;                /* Peer hung up or socket errored; remove on next pass */
+  uint64_t serial;            /* Unique per accepted client; pointers get reused */
   char *partial_buf;          /* Partial line buffer */
   size_t partial_len;         /* Current length in buffer */
   size_t partial_cap;         /* Buffer capacity */
@@ -69,6 +71,13 @@ void laced_server_destroy(LacedServer *server);
  * @return        Async queue, or NULL if invalid
  */
 AsyncQueue *laced_server_get_async_queue(LacedServer *server);
+
+/*
+ * Make socket modes exit once no client has been connected for `seconds`
+ * (0 disables). Used for daemons spawned on demand by liblace, so a client
+ * that crashes does not leave the daemon and its database connections behind.
+ */
+void laced_server_set_exit_when_idle(LacedServer *server, int seconds);
 
 /* ==========================================================================
  * Server Execution

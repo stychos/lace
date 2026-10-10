@@ -633,3 +633,41 @@ bool json_save_to_file(cJSON *json, const char *path, bool secure,
 
   return true;
 }
+
+bool str_sql_returns_rows(const char *sql) {
+  if (!sql) {
+    return false;
+  }
+  const char *p = sql;
+  for (;;) {
+    while (*p && (isspace((unsigned char)*p) || *p == '(')) {
+      p++;
+    }
+    if (p[0] == '-' && p[1] == '-') {
+      while (*p && *p != '\n') p++;
+      continue;
+    }
+    if (p[0] == '/' && p[1] == '*') {
+      p += 2;
+      while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+      if (*p) p += 2;
+      continue;
+    }
+    if (p[0] == '#') { /* MySQL comment */
+      while (*p && *p != '\n') p++;
+      continue;
+    }
+    break;
+  }
+  static const char *const kw[] = {"SELECT", "WITH",    "VALUES",  "TABLE",
+                                   "PRAGMA", "SHOW",    "DESCRIBE", "DESC",
+                                   "EXPLAIN", NULL};
+  for (int i = 0; kw[i]; i++) {
+    size_t n = strlen(kw[i]);
+    if (strncasecmp(p, kw[i], n) == 0 && !isalnum((unsigned char)p[n]) &&
+        p[n] != '_') {
+      return true;
+    }
+  }
+  return false;
+}

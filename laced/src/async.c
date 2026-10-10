@@ -7,6 +7,7 @@
  */
 
 #include "async.h"
+#include "server.h"
 #include "db/db.h"
 #include "json.h"
 #include "log.h"
@@ -63,7 +64,7 @@ struct AsyncQuery {
   AsyncQueue *queue;
 
   /* Client tracking (for socket mode) */
-  struct LacedClient *client;
+  uint64_t client_serial;  /* Owning socket client (0 = stdio) */
 };
 
 /* ==========================================================================
@@ -242,15 +243,8 @@ static void *query_worker(void *arg) {
 
   char *err = NULL;
 
-  /* Execute SQL - check if it's a SELECT statement */
-  const char *p = query->sql;
-  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-
-  bool is_select = (strncasecmp(p, "SELECT", 6) == 0 ||
-                    strncasecmp(p, "PRAGMA", 6) == 0 ||
-                    strncasecmp(p, "SHOW", 4) == 0 ||
-                    strncasecmp(p, "DESCRIBE", 8) == 0 ||
-                    strncasecmp(p, "EXPLAIN", 7) == 0);
+  /* Does this statement produce a result set? */
+  bool is_select = str_sql_returns_rows(query->sql);
 
   if (is_select) {
     ResultSet *rs = db_query(conn, query->sql, &err);
@@ -589,10 +583,10 @@ void async_query_info_free(AsyncQueryInfo *info, size_t count) {
 
 void async_query_set_client(AsyncQuery *query, struct LacedClient *client) {
   if (query) {
-    query->client = client;
+    query->client_serial = client ? client->serial : 0;
   }
 }
 
-struct LacedClient *async_query_get_client(const AsyncQuery *query) {
-  return query ? query->client : NULL;
+uint64_t async_query_get_client_serial(const AsyncQuery *query) {
+  return query ? query->client_serial : 0;
 }

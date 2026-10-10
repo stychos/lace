@@ -7,6 +7,27 @@
  */
 
 #include "table_viewmodel.h"
+
+/* The bound Tab is the single source of truth for data, schema, pagination,
+ * cursor, scroll and sort. Pagination code replaces tab->data and adjusts
+ * offsets directly, so the viewmodel must never cache copies of them (a
+ * cached data pointer was freed underneath it on "jump to last row").
+ * Before a tab is bound, accesses land in a zeroed scratch Tab. */
+static Tab g_vm_unbound_tab;
+
+/* Resolve the tab freshly on every access. Workspace tab arrays are
+ * realloc'ed when tabs are added and shifted when tabs close, so a stored
+ * Tab* can dangle; the viewmodel always represents the current tab. */
+static Tab *vm_tab(const TableViewModel *vm) {
+  if (vm->app) {
+    Tab *cur = app_current_tab(vm->app);
+    if (cur) {
+      return cur;
+    }
+  }
+  return vm->tab ? vm->tab : &g_vm_unbound_tab;
+}
+#define VM_T(v) vm_tab(v)
 #include "../core/constants.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
@@ -119,8 +140,8 @@ static void table_vm_ops_destroy(ViewModel *vm) {
   /* Clear bindings (we don't own these) */
   tvm->tab = NULL;
   tvm->app = NULL;
-  tvm->data = NULL;
-  tvm->schema = NULL;
+  VM_T(tvm)->data = NULL;
+  VM_T(tvm)->schema = NULL;
 }
 
 /* ============================================================================
@@ -166,31 +187,18 @@ void table_vm_bind(TableViewModel *vm, Tab *tab) {
   vm->tab = tab;
 
   if (tab) {
-    vm->data = tab->data;
-    vm->schema = tab->schema;
-    vm->loaded_offset = tab->loaded_offset;
-    vm->loaded_count = tab->loaded_count;
-    vm->total_rows = tab->total_rows;
-    vm->row_count_approximate = tab->row_count_approximate;
 
     /* Copy sort state */
-    vm->num_sort_entries = tab->num_sort_entries;
-    memcpy(vm->sort_entries, tab->sort_entries,
-           tab->num_sort_entries * sizeof(SortEntry));
 
     /* Sync cursor/scroll from tab (during migration) */
     table_vm_sync_from_tab(vm);
 
     /* Recalculate column widths */
     table_vm_recalc_column_widths(vm);
-  } else {
-    vm->data = NULL;
-    vm->schema = NULL;
-    vm->loaded_offset = 0;
-    vm->loaded_count = 0;
-    vm->total_rows = 0;
-    vm->num_sort_entries = 0;
+    vm->widths_data = NULL; /* Re-measure on next draw against live data */
   }
+  /* Unbinding leaves the tabs alone: their state is owned by the Tab, and
+   * VM_T() would resolve to the current tab here. */
 
   vm_notify(&vm->base, VM_CHANGE_DATA);
 }
@@ -213,43 +221,43 @@ void table_vm_set_callbacks(TableViewModel *vm,
  */
 
 size_t table_vm_row_count(const TableViewModel *vm) {
-  if (!vm || !vm->data)
+  if (!vm || !VM_T(vm)->data)
     return 0;
-  return vm->data->num_rows;
+  return VM_T(vm)->data->num_rows;
 }
 
 size_t table_vm_col_count(const TableViewModel *vm) {
-  if (!vm || !vm->data)
+  if (!vm || !VM_T(vm)->data)
     return 0;
-  return vm->data->num_columns;
+  return VM_T(vm)->data->num_columns;
 }
 
 size_t table_vm_total_rows(const TableViewModel *vm) {
-  return vm ? vm->total_rows : 0;
+  return vm ? VM_T(vm)->total_rows : 0;
 }
 
 const char *table_vm_column_name(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return NULL;
-  return vm->schema->columns[col].name;
+  return VM_T(vm)->schema->columns[col].name;
 }
 
 DbValueType table_vm_column_type(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return DB_TYPE_NULL;
-  return vm->schema->columns[col].type;
+  return VM_T(vm)->schema->columns[col].type;
 }
 
 bool table_vm_column_nullable(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return true;
-  return vm->schema->columns[col].nullable;
+  return VM_T(vm)->schema->columns[col].nullable;
 }
 
 bool table_vm_column_is_pk(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return false;
-  return vm->schema->columns[col].primary_key;
+  return VM_T(vm)->schema->columns[col].primary_key;
 }
 
 int table_vm_column_width(const TableViewModel *vm, size_t col) {
@@ -259,12 +267,12 @@ int table_vm_column_width(const TableViewModel *vm, size_t col) {
 }
 
 const DbValue *table_vm_cell(const TableViewModel *vm, size_t row, size_t col) {
-  if (!vm || !vm->data || row >= vm->data->num_rows ||
-      col >= vm->data->num_columns)
+  if (!vm || !VM_T(vm)->data || row >= VM_T(vm)->data->num_rows ||
+      col >= VM_T(vm)->data->num_columns)
     return NULL;
-  if (!vm->data->rows)
+  if (!VM_T(vm)->data->rows)
     return NULL;
-  Row *r = &vm->data->rows[row];
+  Row *r = &VM_T(vm)->data->rows[row];
   if (!r->cells || col >= r->num_cells)
     return NULL;
   return &r->cells[col];
@@ -296,43 +304,43 @@ bool table_vm_cell_is_null(const TableViewModel *vm, size_t row, size_t col) {
 }
 
 const char *table_vm_table_name(const TableViewModel *vm) {
-  if (!vm || !vm->tab)
+  if (!vm)
     return NULL;
-  return vm->tab->table_name;
+  return VM_T(vm)->table_name;
 }
 
 const TableSchema *table_vm_get_schema(const TableViewModel *vm) {
   if (!vm || !vm->tab)
     return NULL;
-  return vm->tab->schema;
+  return VM_T(vm)->schema;
 }
 
 const char *table_vm_column_fk(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return NULL;
-  return vm->schema->columns[col].foreign_key;
+  return VM_T(vm)->schema->columns[col].foreign_key;
 }
 
 bool table_vm_column_auto_increment(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return false;
-  return vm->schema->columns[col].auto_increment;
+  return VM_T(vm)->schema->columns[col].auto_increment;
 }
 
 const char *table_vm_column_default(const TableViewModel *vm, size_t col) {
-  if (!vm || !vm->schema || col >= vm->schema->num_columns)
+  if (!vm || !VM_T(vm)->schema || col >= VM_T(vm)->schema->num_columns)
     return NULL;
-  return vm->schema->columns[col].default_val;
+  return VM_T(vm)->schema->columns[col].default_val;
 }
 
 size_t table_vm_pk_columns(const TableViewModel *vm, size_t *pk_cols,
                            size_t max_cols) {
-  if (!vm || !vm->schema)
+  if (!vm || !VM_T(vm)->schema)
     return 0;
 
   size_t count = 0;
-  for (size_t i = 0; i < vm->schema->num_columns; i++) {
-    if (vm->schema->columns[i].primary_key) {
+  for (size_t i = 0; i < VM_T(vm)->schema->num_columns; i++) {
+    if (VM_T(vm)->schema->columns[i].primary_key) {
       if (pk_cols && count < max_cols)
         pk_cols[count] = i;
       count++;
@@ -342,7 +350,7 @@ size_t table_vm_pk_columns(const TableViewModel *vm, size_t *pk_cols,
 }
 
 bool table_vm_valid(const TableViewModel *vm) {
-  return vm && vm->tab && vm->data;
+  return vm && VM_T(vm)->data;
 }
 
 /* ============================================================================
@@ -351,11 +359,11 @@ bool table_vm_valid(const TableViewModel *vm) {
  */
 
 size_t table_vm_loaded_offset(const TableViewModel *vm) {
-  return vm ? vm->loaded_offset : 0;
+  return vm ? VM_T(vm)->loaded_offset : 0;
 }
 
 size_t table_vm_loaded_count(const TableViewModel *vm) {
-  return vm ? vm->loaded_count : 0;
+  return vm ? VM_T(vm)->loaded_count : 0;
 }
 
 bool table_vm_is_loading(const TableViewModel *vm) {
@@ -375,15 +383,15 @@ void table_vm_update_pagination(TableViewModel *vm, size_t offset, size_t count,
   if (!vm)
     return;
 
-  vm->loaded_offset = offset;
-  vm->loaded_count = count;
-  vm->total_rows = total;
+  VM_T(vm)->loaded_offset = offset;
+  VM_T(vm)->loaded_count = count;
+  VM_T(vm)->total_rows = total;
 
   /* Also update tab for sync */
   if (vm->tab) {
-    vm->tab->loaded_offset = offset;
-    vm->tab->loaded_count = count;
-    vm->tab->total_rows = total;
+    VM_T(vm)->loaded_offset = offset;
+    VM_T(vm)->loaded_count = count;
+    VM_T(vm)->total_rows = total;
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_LOADING);
@@ -482,7 +490,7 @@ void table_vm_extend_selection(TableViewModel *vm, size_t to_row) {
     return;
 
   if (!vm->selection.anchor_set) {
-    vm->selection.anchor = vm->base.state.cursor_row;
+    vm->selection.anchor = VM_T(vm)->cursor_row;
     vm->selection.anchor_set = true;
   }
 
@@ -574,8 +582,8 @@ bool table_vm_start_edit(TableViewModel *vm, size_t row, size_t col) {
 bool table_vm_start_edit_at_cursor(TableViewModel *vm) {
   if (!vm)
     return false;
-  return table_vm_start_edit(vm, vm->base.state.cursor_row,
-                             vm->base.state.cursor_col);
+  return table_vm_start_edit(vm, VM_T(vm)->cursor_row,
+                             VM_T(vm)->cursor_col);
 }
 
 void table_vm_edit_insert_char(TableViewModel *vm, char ch) {
@@ -779,14 +787,13 @@ void table_vm_sort_by(TableViewModel *vm, size_t col, bool descending) {
   if (!vm)
     return;
 
-  vm->num_sort_entries = 1;
-  vm->sort_entries[0].column = col;
-  vm->sort_entries[0].direction = descending ? SORT_DESC : SORT_ASC;
+  VM_T(vm)->num_sort_entries = 1;
+  VM_T(vm)->sort_entries[0].column = col;
+  VM_T(vm)->sort_entries[0].direction = descending ? SORT_DESC : SORT_ASC;
 
   /* Sync to tab */
   if (vm->tab) {
-    vm->tab->num_sort_entries = 1;
-    vm->tab->sort_entries[0] = vm->sort_entries[0];
+    VM_T(vm)->num_sort_entries = 1;
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_SORT);
@@ -797,53 +804,47 @@ void table_vm_toggle_sort(TableViewModel *vm, size_t col) {
     return;
 
   /* Check if already sorting by this column */
-  if (vm->num_sort_entries == 1 && vm->sort_entries[0].column == col) {
+  if (VM_T(vm)->num_sort_entries == 1 && VM_T(vm)->sort_entries[0].column == col) {
     /* Toggle direction */
-    vm->sort_entries[0].direction =
-        (vm->sort_entries[0].direction == SORT_ASC) ? SORT_DESC : SORT_ASC;
+    VM_T(vm)->sort_entries[0].direction =
+        (VM_T(vm)->sort_entries[0].direction == SORT_ASC) ? SORT_DESC : SORT_ASC;
   } else {
     /* Sort by this column ascending */
-    vm->num_sort_entries = 1;
-    vm->sort_entries[0].column = col;
-    vm->sort_entries[0].direction = SORT_ASC;
+    VM_T(vm)->num_sort_entries = 1;
+    VM_T(vm)->sort_entries[0].column = col;
+    VM_T(vm)->sort_entries[0].direction = SORT_ASC;
   }
 
   /* Sync to tab */
   if (vm->tab) {
-    vm->tab->num_sort_entries = vm->num_sort_entries;
-    memcpy(vm->tab->sort_entries, vm->sort_entries,
-           vm->num_sort_entries * sizeof(SortEntry));
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_SORT);
 }
 
 void table_vm_add_sort(TableViewModel *vm, size_t col, bool descending) {
-  if (!vm || vm->num_sort_entries >= MAX_SORT_COLUMNS)
+  if (!vm || VM_T(vm)->num_sort_entries >= MAX_SORT_COLUMNS)
     return;
 
   SortDirection dir = descending ? SORT_DESC : SORT_ASC;
 
   /* Check if already sorting by this column */
-  for (size_t i = 0; i < vm->num_sort_entries; i++) {
-    if (vm->sort_entries[i].column == col) {
+  for (size_t i = 0; i < VM_T(vm)->num_sort_entries; i++) {
+    if (VM_T(vm)->sort_entries[i].column == col) {
       /* Just update direction */
-      vm->sort_entries[i].direction = dir;
+      VM_T(vm)->sort_entries[i].direction = dir;
       goto sync_and_notify;
     }
   }
 
   /* Add new sort column */
-  vm->sort_entries[vm->num_sort_entries].column = col;
-  vm->sort_entries[vm->num_sort_entries].direction = dir;
-  vm->num_sort_entries++;
+  VM_T(vm)->sort_entries[VM_T(vm)->num_sort_entries].column = col;
+  VM_T(vm)->sort_entries[VM_T(vm)->num_sort_entries].direction = dir;
+  VM_T(vm)->num_sort_entries++;
 
 sync_and_notify:
   /* Sync to tab */
   if (vm->tab) {
-    vm->tab->num_sort_entries = vm->num_sort_entries;
-    memcpy(vm->tab->sort_entries, vm->sort_entries,
-           vm->num_sort_entries * sizeof(SortEntry));
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_SORT);
@@ -853,26 +854,26 @@ void table_vm_clear_sort(TableViewModel *vm) {
   if (!vm)
     return;
 
-  vm->num_sort_entries = 0;
+  VM_T(vm)->num_sort_entries = 0;
 
   /* Sync to tab */
   if (vm->tab) {
-    vm->tab->num_sort_entries = 0;
+    VM_T(vm)->num_sort_entries = 0;
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_SORT);
 }
 
 bool table_vm_is_sorted(const TableViewModel *vm) {
-  return vm && vm->num_sort_entries > 0;
+  return vm && VM_T(vm)->num_sort_entries > 0;
 }
 
 size_t table_vm_sort_column_count(const TableViewModel *vm) {
-  return vm ? vm->num_sort_entries : 0;
+  return vm ? VM_T(vm)->num_sort_entries : 0;
 }
 
 const SortEntry *table_vm_sort_entries(const TableViewModel *vm) {
-  return vm ? vm->sort_entries : NULL;
+  return vm ? VM_T(vm)->sort_entries : NULL;
 }
 
 /* ============================================================================
@@ -881,15 +882,15 @@ const SortEntry *table_vm_sort_entries(const TableViewModel *vm) {
  */
 
 void table_vm_recalc_column_widths(TableViewModel *vm) {
-  if (!vm || !vm->data)
+  if (!vm || !VM_T(vm)->data)
     return;
 
-  size_t num_cols = vm->data->num_columns;
+  size_t num_cols = VM_T(vm)->data->num_columns;
   if (num_cols == 0)
     return;
 
   /* Resize array if needed */
-  if (vm->num_col_widths != num_cols) {
+  if (!vm->col_widths || vm->num_col_widths != num_cols) {
     vm->col_widths = safe_reallocarray(vm->col_widths, num_cols, sizeof(int));
     vm->num_col_widths = num_cols;
   }
@@ -899,16 +900,16 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
     int width = MIN_COL_WIDTH;
 
     /* Consider header width */
-    if (vm->schema && col < vm->schema->num_columns &&
-        vm->schema->columns[col].name) {
-      int header_len = (int)strlen(vm->schema->columns[col].name);
+    if (VM_T(vm)->schema && col < VM_T(vm)->schema->num_columns &&
+        VM_T(vm)->schema->columns[col].name) {
+      int header_len = (int)strlen(VM_T(vm)->schema->columns[col].name);
       if (header_len > width)
         width = header_len;
     }
 
     /* Consider data width (sample first PAGE_SIZE rows) - handle all types */
     size_t sample_count =
-        vm->data->num_rows < PAGE_SIZE ? vm->data->num_rows : PAGE_SIZE;
+        VM_T(vm)->data->num_rows < PAGE_SIZE ? VM_T(vm)->data->num_rows : PAGE_SIZE;
     for (size_t row = 0; row < sample_count; row++) {
       const DbValue *val = table_vm_cell(vm, row, col);
       if (val) {
@@ -930,6 +931,40 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
   }
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_COLUMN_WIDTHS);
+}
+
+void table_vm_update_column_widths(TableViewModel *vm) {
+  if (!vm) {
+    return;
+  }
+  Tab *tab = VM_T(vm);
+  ResultSet *data = tab->data;
+  if (!data || data->num_columns == 0) {
+    return;
+  }
+  if (vm->widths_data == data && vm->widths_rows == data->num_rows &&
+      vm->widths_offset == tab->loaded_offset &&
+      vm->num_col_widths == data->num_columns) {
+    return; /* Same window as last time */
+  }
+
+  if (vm->num_col_widths != data->num_columns || !vm->col_widths) {
+    table_vm_recalc_column_widths(vm);
+  } else {
+    /* Grow-only: keep current widths, widen where new rows need more */
+    int *old = safe_calloc(vm->num_col_widths, sizeof(int));
+    memcpy(old, vm->col_widths, vm->num_col_widths * sizeof(int));
+    table_vm_recalc_column_widths(vm);
+    for (size_t i = 0; i < vm->num_col_widths; i++) {
+      if (old[i] > vm->col_widths[i]) {
+        vm->col_widths[i] = old[i];
+      }
+    }
+    free(old);
+  }
+  vm->widths_data = data;
+  vm->widths_rows = data->num_rows;
+  vm->widths_offset = tab->loaded_offset;
 }
 
 void table_vm_set_column_width(TableViewModel *vm, size_t col, int width) {
@@ -970,7 +1005,7 @@ char *table_vm_copy_cell(const TableViewModel *vm) {
     return NULL;
 
   const DbValue *val =
-      table_vm_cell(vm, vm->base.state.cursor_row, vm->base.state.cursor_col);
+      table_vm_cell(vm, VM_T(vm)->cursor_row, VM_T(vm)->cursor_col);
   if (!val)
     return NULL;
 
@@ -1045,55 +1080,13 @@ char *table_vm_copy_selection(const TableViewModel *vm, bool include_headers) {
  */
 
 void table_vm_sync_from_tab(TableViewModel *vm) {
-  if (!vm || !vm->tab)
-    return;
-
-  Tab *tab = vm->tab;
-
-  /* Sync cursor/scroll */
-  vm->base.state.cursor_row = tab->cursor_row;
-  vm->base.state.cursor_col = tab->cursor_col;
-  vm->base.state.scroll_row = tab->scroll_row;
-  vm->base.state.scroll_col = tab->scroll_col;
-
-  /* Sync pagination */
-  vm->loaded_offset = tab->loaded_offset;
-  vm->loaded_count = tab->loaded_count;
-  vm->total_rows = tab->total_rows;
-  vm->row_count_approximate = tab->row_count_approximate;
-
-  /* Sync data pointers */
-  vm->data = tab->data;
-  vm->schema = tab->schema;
-
-  /* Sync sort */
-  vm->num_sort_entries = tab->num_sort_entries;
-  memcpy(vm->sort_entries, tab->sort_entries,
-         tab->num_sort_entries * sizeof(SortEntry));
+  /* State lives in vm->tab; nothing to copy. Kept for API compatibility. */
+  (void)vm;
 }
 
 void table_vm_sync_to_tab(TableViewModel *vm) {
-  if (!vm || !vm->tab)
-    return;
-
-  Tab *tab = vm->tab;
-
-  /* Sync cursor/scroll */
-  tab->cursor_row = vm->base.state.cursor_row;
-  tab->cursor_col = vm->base.state.cursor_col;
-  tab->scroll_row = vm->base.state.scroll_row;
-  tab->scroll_col = vm->base.state.scroll_col;
-
-  /* Sync pagination */
-  tab->loaded_offset = vm->loaded_offset;
-  tab->loaded_count = vm->loaded_count;
-  tab->total_rows = vm->total_rows;
-  tab->row_count_approximate = vm->row_count_approximate;
-
-  /* Sync sort */
-  tab->num_sort_entries = vm->num_sort_entries;
-  memcpy(tab->sort_entries, vm->sort_entries,
-         vm->num_sort_entries * sizeof(SortEntry));
+  /* State lives in vm->tab; nothing to copy. Kept for API compatibility. */
+  (void)vm;
 }
 
 /* ============================================================================
@@ -1107,8 +1100,8 @@ void table_vm_get_cursor(const TableViewModel *vm, size_t *row, size_t *col) {
     if (col) *col = 0;
     return;
   }
-  if (row) *row = vm->base.state.cursor_row;
-  if (col) *col = vm->base.state.cursor_col;
+  if (row) *row = VM_T(vm)->cursor_row;
+  if (col) *col = VM_T(vm)->cursor_col;
 }
 
 void table_vm_set_cursor(TableViewModel *vm, size_t row, size_t col) {
@@ -1124,17 +1117,17 @@ void table_vm_set_cursor(TableViewModel *vm, size_t row, size_t col) {
     col = max_col - 1;
 
   bool changed =
-      (vm->base.state.cursor_row != row || vm->base.state.cursor_col != col);
+      (VM_T(vm)->cursor_row != row || VM_T(vm)->cursor_col != col);
 
-  vm->base.state.cursor_row = row;
-  vm->base.state.cursor_col = col;
+  VM_T(vm)->cursor_row = row;
+  VM_T(vm)->cursor_col = col;
 
   if (changed) {
     vm_notify(&vm->base, VM_CHANGE_CURSOR);
     /* Also sync to tab for compatibility */
     if (vm->tab) {
-      vm->tab->cursor_row = row;
-      vm->tab->cursor_col = col;
+      VM_T(vm)->cursor_row = row;
+      VM_T(vm)->cursor_col = col;
     }
   }
 }
@@ -1216,8 +1209,8 @@ void table_vm_get_scroll(const TableViewModel *vm, size_t *row, size_t *col) {
     if (col) *col = 0;
     return;
   }
-  if (row) *row = vm->base.state.scroll_row;
-  if (col) *col = vm->base.state.scroll_col;
+  if (row) *row = VM_T(vm)->scroll_row;
+  if (col) *col = VM_T(vm)->scroll_col;
 }
 
 void table_vm_set_scroll(TableViewModel *vm, size_t row, size_t col) {
@@ -1225,17 +1218,17 @@ void table_vm_set_scroll(TableViewModel *vm, size_t row, size_t col) {
     return;
 
   bool changed =
-      (vm->base.state.scroll_row != row || vm->base.state.scroll_col != col);
+      (VM_T(vm)->scroll_row != row || VM_T(vm)->scroll_col != col);
 
-  vm->base.state.scroll_row = row;
-  vm->base.state.scroll_col = col;
+  VM_T(vm)->scroll_row = row;
+  VM_T(vm)->scroll_col = col;
 
   if (changed) {
     vm_notify(&vm->base, VM_CHANGE_SCROLL);
     /* Also sync to tab for compatibility */
     if (vm->tab) {
-      vm->tab->scroll_row = row;
-      vm->tab->scroll_col = col;
+      VM_T(vm)->scroll_row = row;
+      VM_T(vm)->scroll_col = col;
     }
   }
 }
@@ -1245,10 +1238,10 @@ void table_vm_ensure_cursor_visible(TableViewModel *vm, size_t visible_rows,
   if (!vm)
     return;
 
-  size_t cursor_row = vm->base.state.cursor_row;
-  size_t cursor_col = vm->base.state.cursor_col;
-  size_t scroll_row = vm->base.state.scroll_row;
-  size_t scroll_col = vm->base.state.scroll_col;
+  size_t cursor_row = VM_T(vm)->cursor_row;
+  size_t cursor_col = VM_T(vm)->cursor_col;
+  size_t scroll_row = VM_T(vm)->scroll_row;
+  size_t scroll_col = VM_T(vm)->scroll_col;
 
   /* Adjust vertical scroll */
   if (cursor_row < scroll_row) {
@@ -1276,7 +1269,7 @@ bool table_vm_row_loaded(const TableViewModel *vm, size_t row) {
   if (!vm)
     return false;
 
-  return row >= vm->loaded_offset && row < vm->loaded_offset + vm->loaded_count;
+  return row >= VM_T(vm)->loaded_offset && row < VM_T(vm)->loaded_offset + VM_T(vm)->loaded_count;
 }
 
 void table_vm_ensure_row_loaded(TableViewModel *vm, size_t row) {
@@ -1324,6 +1317,6 @@ DbConnection *table_vm_connection(const TableViewModel *vm) {
   if (!vm || !vm->app || !vm->tab)
     return NULL;
 
-  Connection *conn = app_get_tab_connection(vm->app, vm->tab);
+  Connection *conn = app_get_tab_connection(vm->app, VM_T(vm));
   return conn ? conn->conn : NULL;
 }

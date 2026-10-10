@@ -127,6 +127,10 @@ bool render_translate_key(int ncurses_key, UiEvent *event) {
     event->key.key = UI_KEY_TAB;
     event->key.is_special = true;
     break;
+  case KEY_BTAB:
+    event->key.key = UI_KEY_BTAB;
+    event->key.is_special = true;
+    break;
   case 27: /* ESC */
     event->key.key = UI_KEY_ESCAPE;
     event->key.is_special = true;

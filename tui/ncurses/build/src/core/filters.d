@@ -1,4 +1,6 @@
-build/src/core/filters.o: src/core/filters.c \
+build/src/core/filters.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/core/filters.c \
   ../../liblace/include/../../liblace/include/util/mem.h \
   ../../liblace/include/../../liblace/include/util/str.h \
   src/core/app_state.h src/core/../config/config.h \
@@ -9,6 +11,7 @@ build/src/core/filters.o: src/core/filters.c \
   ../../liblace/include/../../liblace/include/error.h \
   src/core/constants.h src/core/history.h \
   src/../../../liblace/include/config/history.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 ../../liblace/include/../../liblace/include/util/mem.h:
 ../../liblace/include/../../liblace/include/util/str.h:
 src/core/app_state.h:

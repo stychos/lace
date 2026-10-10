@@ -1,6 +1,7 @@
-build/src/./workspace.o: src/./workspace.c src/./core/workspace.h \
-  src/./core/app_state.h src/./core/../config/config.h \
-  src/./core/../config/../core/constants.h \
+build/src/./workspace.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/./workspace.c src/./core/workspace.h src/./core/app_state.h \
+  src/./core/../config/config.h src/./core/../config/../core/constants.h \
   src/../../../liblace/include/constants.h src/./core/../db_compat.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
@@ -13,10 +14,13 @@ build/src/./workspace.o: src/./workspace.c src/./core/workspace.h \
   src/./async/async.h src/./async/../db_compat.h \
   src/./async/../platform/thread.h src/./viewmodel/table_viewmodel.h \
   src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h
+  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/./core/workspace.h:
 src/./core/app_state.h:
 src/./core/../config/config.h:
@@ -41,7 +45,9 @@ src/./async/../platform/thread.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:

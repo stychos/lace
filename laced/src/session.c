@@ -27,6 +27,8 @@ typedef struct {
   bool reserved;          /* Slot reserved during connection setup */
   void *cancel_handle;    /* Active cancel handle during query execution */
   bool query_active;      /* True while a query is running */
+  int cancel_refs;        /* Cancels in flight using cancel_handle/conn */
+  void *orphan_handle;    /* Handle released by finish_query during a cancel */
 } ConnectionSlot;
 
 /* Session structure */
@@ -205,8 +207,8 @@ bool laced_session_disconnect(LacedSession *session, int conn_id, char **err) {
 
   ConnectionSlot *cs = &session->connections[slot];
 
-  /* Reject disconnect if query is active */
-  if (cs->query_active) {
+  /* Reject disconnect if a query or a cancel still uses the connection */
+  if (cs->query_active || cs->cancel_refs > 0) {
     pthread_mutex_unlock(&session->mutex);
     err_set(err, "Cannot disconnect: query in progress");
     LOG_WARN("Disconnect rejected for conn_id=%d: query in progress", conn_id);
@@ -442,14 +444,29 @@ bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err) 
     return false;
   }
 
-  /* Get what we need for cancel call */
+  /* Get what we need for cancel call. The reference keeps finish_query from
+   * freeing the handle and disconnect from freeing conn while we use them
+   * outside the lock (the query worker runs on another thread). */
   DbConnection *conn = cs->conn;
   void *cancel_handle = cs->cancel_handle;
+  cs->cancel_refs++;
 
   pthread_mutex_unlock(&session->mutex);
 
   /* Cancel query (may involve network I/O, don't hold lock) */
-  return conn->driver->cancel_query(conn, cancel_handle, err);
+  bool ok = conn->driver->cancel_query(conn, cancel_handle, err);
+
+  pthread_mutex_lock(&session->mutex);
+  cs->cancel_refs--;
+  if (cs->cancel_refs == 0 && cs->orphan_handle) {
+    if (conn->driver->free_cancel_handle) {
+      conn->driver->free_cancel_handle(cs->orphan_handle);
+    }
+    cs->orphan_handle = NULL;
+  }
+  pthread_mutex_unlock(&session->mutex);
+
+  return ok;
 }
 
 void laced_session_finish_query(LacedSession *session, int conn_id) {
@@ -466,8 +483,15 @@ void laced_session_finish_query(LacedSession *session, int conn_id) {
   }
 
   ConnectionSlot *cs = &session->connections[slot];
-  if (cs->cancel_handle && cs->conn && cs->conn->driver &&
-      cs->conn->driver->free_cancel_handle) {
+  if (cs->cancel_handle && cs->cancel_refs > 0) {
+    /* A cancel is using this handle right now; it frees it when done */
+    cs->orphan_handle = cs->cancel_handle;
+    if (cs->conn && cs->conn->driver &&
+        cs->conn->driver->cancel_handle_finished) {
+      cs->conn->driver->cancel_handle_finished(cs->cancel_handle);
+    }
+  } else if (cs->cancel_handle && cs->conn && cs->conn->driver &&
+             cs->conn->driver->free_cancel_handle) {
     cs->conn->driver->free_cancel_handle(cs->cancel_handle);
   }
   cs->cancel_handle = NULL;

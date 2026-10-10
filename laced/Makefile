@@ -58,14 +58,21 @@ SRCS = $(DAEMON_SRCS) $(DB_SRCS)
 OBJS = $(patsubst %.c,$(BUILD_DIR)/%.o,$(notdir $(SRCS)))
 DEPS = $(OBJS:.o=.d)
 
-# Detect OS
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-    # macOS - use Homebrew paths
-    CFLAGS += $(shell pkg-config --cflags libpq 2>/dev/null || echo "-I/opt/homebrew/opt/libpq/include")
-    LDFLAGS += $(shell pkg-config --libs libpq 2>/dev/null || echo "-L/opt/homebrew/opt/libpq/lib")
-    CFLAGS += $(shell pkg-config --cflags mariadb 2>/dev/null || echo "-I/opt/homebrew/opt/mariadb/include")
-    LDFLAGS += $(shell pkg-config --libs mariadb 2>/dev/null || echo "-L/opt/homebrew/opt/mariadb/lib")
+# Database client libraries. pkg-config is consulted on every platform; the
+# Homebrew paths are fallbacks for macOS installs without .pc files.
+# mariadb's .pc points at the directory that holds mysql.h itself
+# (Homebrew: .../include/mysql, Debian: /usr/include/mariadb), so the driver
+# includes <mysql.h>, not <mysql/mysql.h>.
+INCLUDES += $(shell pkg-config --cflags libpq 2>/dev/null || echo "-I/opt/homebrew/opt/libpq/include")
+LDFLAGS  += $(shell pkg-config --libs-only-L libpq 2>/dev/null || echo "-L/opt/homebrew/opt/libpq/lib")
+INCLUDES += $(shell pkg-config --cflags mariadb 2>/dev/null || echo "-I/opt/homebrew/opt/mariadb/include/mysql")
+LDFLAGS  += $(shell pkg-config --libs-only-L mariadb 2>/dev/null || echo "-L/opt/homebrew/opt/mariadb/lib")
+
+# make SANITIZE=1 builds with AddressSanitizer + UndefinedBehaviorSanitizer.
+# Run `make clean` first so sanitized and plain objects do not mix.
+ifeq ($(SANITIZE),1)
+    CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer -O1
+    LDFLAGS += -fsanitize=address,undefined
 endif
 
 # Default target

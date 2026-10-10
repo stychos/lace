@@ -26,6 +26,20 @@ cJSON *laced_json_from_value(const DbValue *val) {
     return cJSON_CreateNull();
 
   case DB_TYPE_INT:
+    /* JSON numbers are doubles: integers beyond +/-2^53 would be rounded,
+     * and a rounded primary key makes edits hit the wrong row. Send those
+     * as {"$int": "<decimal>"} so the client restores an exact integer.
+     * (A plain string is not enough: MySQL compares a string literal with
+     * a BIGINT column as double, which matches neighbouring ids.) */
+    if (val->int_val > 9007199254740992LL || val->int_val < -9007199254740992LL) {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%lld", (long long)val->int_val);
+      cJSON *obj = cJSON_CreateObject();
+      if (obj) {
+        cJSON_AddStringToObject(obj, "$int", buf);
+      }
+      return obj;
+    }
     return cJSON_CreateNumber((double)val->int_val);
 
   case DB_TYPE_FLOAT:

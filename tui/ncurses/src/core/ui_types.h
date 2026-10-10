@@ -98,6 +98,7 @@ typedef enum {
   UI_KEY_INSERT,
   UI_KEY_ENTER,
   UI_KEY_TAB,
+  UI_KEY_BTAB, /* Shift+Tab */
   UI_KEY_ESCAPE,
 
   /* Function keys */

@@ -295,6 +295,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
           TableSchema *old_schema = tab->schema;
           tab->data = NULL;
           tab->schema = NULL;
+          tab_data_replaced(tab);
           db_result_free(old_data);
           db_schema_free(old_schema);
           free(tab->col_widths);

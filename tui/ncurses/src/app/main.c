@@ -8,11 +8,15 @@
  */
 
 #include "app.h"
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 int main(int argc, char **argv) {
   AppConfig config;
+
+  /* A daemon that goes away must surface as an error, not kill the TUI */
+  signal(SIGPIPE, SIG_IGN);
 
   if (!app_parse_args(argc, argv, &config)) {
     app_print_usage(argv[0]);

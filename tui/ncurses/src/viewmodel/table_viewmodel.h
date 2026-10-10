@@ -172,22 +172,21 @@ struct TableViewModel {
   /* Model bindings (references, not owned) */
   Tab *tab;            /* Underlying tab (owns data, schema) */
   AppState *app;       /* App state for connection access */
-  ResultSet *data;     /* Current data (convenience pointer to tab->data) */
-  TableSchema *schema; /* Schema (convenience pointer to tab->schema) */
 
   /* Table-specific callbacks */
   TableViewModelCallbacks table_callbacks;
 
-  /* Pagination state (owned by viewmodel, Tab is updated) */
-  size_t loaded_offset;       /* First loaded row index (global) */
-  size_t loaded_count;        /* Number of loaded rows */
-  size_t total_rows;          /* Total rows in table (may be approximate) */
-  bool row_count_approximate; /* Is total_rows approximate? */
+  /* Data, schema, pagination, cursor/scroll and sort live in `tab`. */
   bool is_loading;            /* Currently loading data */
 
   /* Column widths (calculated from data) */
   int *col_widths;
   size_t num_col_widths;
+  /* Which loaded window the widths were measured on (see
+   * table_vm_update_column_widths) */
+  const void *widths_data;
+  size_t widths_rows;
+  size_t widths_offset;
 
   /* Selection state */
   TableSelection selection;
@@ -195,9 +194,6 @@ struct TableViewModel {
   /* Edit state */
   TableEditState edit;
 
-  /* Sort state (mirrors Tab for convenience) */
-  SortEntry sort_entries[MAX_SORT_COLUMNS];
-  size_t num_sort_entries;
 
   /* UI hints for visible range (for lazy loading) */
   size_t visible_first_row;
@@ -369,6 +365,11 @@ const SortEntry *table_vm_sort_entries(const TableViewModel *vm);
 
 /* Recalculate column widths from data */
 void table_vm_recalc_column_widths(TableViewModel *vm);
+
+/* Re-measure widths if the loaded rows changed since the last measurement.
+ * Widths only grow (no jitter while scrolling); a column-count change
+ * triggers a full recalculation. Cheap when nothing changed. */
+void table_vm_update_column_widths(TableViewModel *vm);
 
 /* Set column width manually */
 void table_vm_set_column_width(TableViewModel *vm, size_t col, int width);

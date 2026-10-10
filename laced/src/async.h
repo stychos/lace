@@ -178,11 +178,9 @@ struct LacedClient;
 void async_query_set_client(AsyncQuery *query, struct LacedClient *client);
 
 /*
- * Get the client associated with an async query.
- *
- * @param query   Query handle
- * @return        Client pointer, or NULL if not set or stdio mode
+ * Get the serial of the client that issued an async query (0 for stdio).
+ * Match against LacedClient.serial; client pointers can be reused after free.
  */
-struct LacedClient *async_query_get_client(const AsyncQuery *query);
+uint64_t async_query_get_client_serial(const AsyncQuery *query);
 
 #endif /* LACED_ASYNC_H */

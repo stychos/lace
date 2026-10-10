@@ -1,5 +1,7 @@
-build/src/./history_dialog.o: src/./history_dialog.c \
-  src/./config/config.h src/./config/../core/constants.h \
+build/src/./history_dialog.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/./history_dialog.c src/./config/config.h \
+  src/./config/../core/constants.h \
   src/../../../liblace/include/constants.h src/./core/history.h \
   src/../../../liblace/include/config/history.h src/./render_helpers.h \
   src/./core/ui_types.h src/./tui_internal.h src/./core/constants.h \
@@ -12,10 +14,13 @@ build/src/./history_dialog.o: src/./history_dialog.c \
   src/./core/../config/config.h src/./core/../db_compat.h \
   src/./viewmodel/table_viewmodel.h src/./viewmodel/../core/app_state.h \
   src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
-  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h
+  /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/./config/config.h:
 src/./config/../core/constants.h:
 src/../../../liblace/include/constants.h:
@@ -40,7 +45,9 @@ src/./core/../db_compat.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:

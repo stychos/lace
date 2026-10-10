@@ -13,10 +13,23 @@ ifeq ($(UNAME_S),Darwin)
     # macOS - use Homebrew paths
     CFLAGS += $(shell pkg-config --cflags libcjson 2>/dev/null || echo "-I/opt/homebrew/opt/cjson/include")
     LDFLAGS += $(shell pkg-config --libs-only-L libcjson 2>/dev/null || echo "-L/opt/homebrew/opt/cjson/lib")
-    CFLAGS += $(shell pkg-config --cflags ncursesw 2>/dev/null || echo "-I/opt/homebrew/opt/ncurses/include")
-    LDFLAGS += $(shell pkg-config --libs-only-L ncursesw 2>/dev/null || echo "-L/opt/homebrew/opt/ncurses/lib")
+    # The macOS SDK ships ncurses headers but no libncursesw, and Homebrew's
+    # ncursesw.pc shim emits neither -I nor -L. Compile and link against the
+    # same Homebrew ncurses so header and library versions match.
+    NCURSES_PREFIX := $(shell brew --prefix ncurses 2>/dev/null || echo /opt/homebrew/opt/ncurses)
+    CFLAGS += -I$(NCURSES_PREFIX)/include/ncursesw -I$(NCURSES_PREFIX)/include
+    LDFLAGS += -L$(NCURSES_PREFIX)/lib
 else
-    CFLAGS += -I/usr/include/cjson
+    CFLAGS += $(shell pkg-config --cflags libcjson 2>/dev/null || echo "-I/usr/include/cjson")
+    CFLAGS += $(shell pkg-config --cflags ncursesw 2>/dev/null)
+    LDFLAGS += $(shell pkg-config --libs-only-L ncursesw 2>/dev/null)
+endif
+
+# make SANITIZE=1 builds with AddressSanitizer + UndefinedBehaviorSanitizer.
+# Run `make clean` first so sanitized and plain objects do not mix.
+ifeq ($(SANITIZE),1)
+    CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer -O1
+    LDFLAGS += -fsanitize=address,undefined
 endif
 
 # Build and source directories

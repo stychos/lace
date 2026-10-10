@@ -7,6 +7,7 @@
  */
 
 #include "handler.h"
+#include "db/db_common.h"
 #include "async.h"
 #include "json.h"
 #include "log.h"
@@ -14,6 +15,9 @@
 #include <util/str.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <time.h>
 
 /* ==========================================================================
  * Helper Macros
@@ -173,15 +177,8 @@ static LacedHandlerResult handle_query(LacedSession *session,
 
   /* Fallback: synchronous execution if no async queue */
 
-  /* Check if it's a SELECT statement */
-  const char *p = sql;
-  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-
-  bool is_select = (strncasecmp(p, "SELECT", 6) == 0 ||
-                    strncasecmp(p, "PRAGMA", 6) == 0 ||
-                    strncasecmp(p, "SHOW", 4) == 0 ||
-                    strncasecmp(p, "DESCRIBE", 8) == 0 ||
-                    strncasecmp(p, "EXPLAIN", 7) == 0);
+  /* Does this statement produce a result set? */
+  bool is_select = str_sql_returns_rows(sql);
 
   cJSON *result = cJSON_CreateObject();
   if (!result) {
@@ -261,6 +258,16 @@ static LacedHandlerResult handle_version(LacedSession *session,
   cJSON *result = cJSON_CreateObject();
   if (result) {
     cJSON_AddStringToObject(result, "daemon_version", "0.1.0");
+    /* Unique per daemon process: clients compare it after reconnecting to
+     * learn whether their connection ids still refer to this daemon. */
+    static char instance[64];
+    if (!instance[0]) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      snprintf(instance, sizeof(instance), "%ld-%lld-%ld", (long)getpid(),
+               (long long)ts.tv_sec, (long)ts.tv_nsec);
+    }
+    cJSON_AddStringToObject(result, "instance", instance);
     cJSON_AddStringToObject(result, "protocol_version", "1.0");
 
     /* List available drivers */

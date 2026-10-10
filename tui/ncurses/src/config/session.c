@@ -890,10 +890,15 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     return (size_t)-1;
   }
 
-  /* Check if we already have this connection in the pool */
+  /* Check if we already have this connection in the pool. Match by saved
+   * connection id first: a connection opened after a password prompt stores
+   * a connstr with the password, which never equals the rebuilt one, so every
+   * further tab used to reconnect without a password and fail. */
   for (size_t i = 0; i < state->app->num_connections; i++) {
     Connection *conn = &state->app->connections[i];
-    if (conn->active && conn->connstr && str_eq(conn->connstr, connstr)) {
+    if (conn->active && ((conn->saved_conn_id &&
+                          str_eq(conn->saved_conn_id, conn_id)) ||
+                         (conn->connstr && str_eq(conn->connstr, connstr)))) {
       str_secure_free(connstr); /* Connection string may contain password */
       return i;
     }
@@ -1143,8 +1148,9 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       }
     }
 
-    /* Get unfiltered row count first */
-    bool is_approx = false;
+    /* Get unfiltered row count first (display only: an estimate is fine and
+     * avoids a full-table COUNT(*) per restored tab on startup) */
+    bool is_approx = true;
     size_t unfiltered_count = 0;
     if (db_count_rows(conn->conn, stab->table_name, NULL, 0,
                       &unfiltered_count, &is_approx, &err)) {
@@ -1207,6 +1213,7 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
 
     /* Load data at the calculated offset (near saved cursor position) */
+    tab_data_replaced(tab);
     if (where) {
       tab->data = db_query_page_where(conn->conn, stab->table_name, load_offset,
                                       page_size, where, order_by, false, &err);

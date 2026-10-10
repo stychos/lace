@@ -72,6 +72,13 @@ typedef struct DbConnection {
   LaceDriver driver_type;   /* Driver type enum */
   const DbDriver *driver;   /* Driver stub (for conn->driver->name) */
   char *last_error;         /* Last error message */
+  uint64_t generation;      /* lace_client_generation() when conn_id was issued */
+
+  /* Called on the calling thread after a successful data change made
+   * through db_update_cell/db_delete_row/db_insert_row (type is a
+   * LaceHistoryType). Set by the app layer to record query history. */
+  void (*on_sql)(void *ctx, struct DbConnection *conn, const char *sql, int type);
+  void *on_sql_ctx;
 } DbConnection;
 
 /* Connection status (compatibility) */
@@ -158,6 +165,13 @@ bool db_delete_row(DbConnection *conn, const char *table,
 bool db_insert_row(DbConnection *conn, const char *table,
                    const LaceColumn *columns, const LaceValue *values,
                    size_t num_columns, char **err);
+
+/* Fetch `columns` of the rows a primary-key WHERE clause matches, exactly
+ * as db_update_cell/db_delete_row would target them (at most 2 rows). */
+ResultSet *db_select_by_pk(DbConnection *conn, const char *table,
+                           const char **pk_cols, const LaceValue *pk_vals,
+                           size_t num_pk, const char **columns,
+                           size_t num_columns, char **err);
 
 /* Cancel a running query on a connection */
 bool db_cancel_query(DbConnection *conn, char **err);

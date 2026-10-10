@@ -13,18 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Access to client internals - must match definition in client.c */
-struct lace_client {
-  pid_t daemon_pid;
-  FILE *to_daemon;
-  FILE *from_daemon;
-  int socket_fd;
-  LaceConnMode conn_mode;
-  int timeout_ms;
-  char *last_error;
-  int64_t next_id;
-  bool connected;
-};
+#include "client_internal.h"
+#include <errno.h>
+#include <poll.h>
+#include <sys/socket.h>
 
 /* ==========================================================================
  * Internal Helpers
@@ -32,12 +24,15 @@ struct lace_client {
 
 /* Set error message in client */
 static void rpc_set_error(lace_client_t *client, const char *msg) {
-  free(client->last_error);
-  client->last_error = msg ? str_dup(msg) : NULL;
+  (void)client;
+  lace_set_thread_error(msg);
 }
 
 /* Read a line from daemon (newline-delimited) */
 static char *read_response_line(FILE *from_daemon) {
+  if (!from_daemon) {
+    return NULL;
+  }
   size_t cap = 4096;
   size_t len = 0;
   char *buf = malloc(cap);
@@ -47,6 +42,10 @@ static char *read_response_line(FILE *from_daemon) {
 
   while (1) {
     int c = fgetc(from_daemon);
+    if (c == EOF && ferror(from_daemon) && errno == EINTR) {
+      clearerr(from_daemon);
+      continue;
+    }
     if (c == EOF || c == '\n') {
       if (c == EOF && len == 0) {
         free(buf);
@@ -82,15 +81,54 @@ static char *read_response_line(FILE *from_daemon) {
  * RPC Call
  * ========================================================================== */
 
-int lace_rpc_call(lace_client_t *client, const char *method,
-                  cJSON *params, cJSON **result) {
-  if (!client || !method) {
-    return LACE_ERR_INVALID_PARAMS;
-  }
+/* Socket helpers (socket.c) */
+extern int lace_connect_unix(const char *path, int timeout_ms);
+extern char *lace_get_default_socket_path(void);
 
-  if (!client->connected || !client->to_daemon || !client->from_daemon) {
-    return LACE_ERR_CONNECTION_CLOSED;
+/* True if the daemon end of the socket has closed (EOF or error pending).
+ * Never blocks. Data waiting to be read is not a hangup. */
+static bool socket_is_stale(int fd) {
+  if (fd < 0) {
+    return true;
   }
+  struct pollfd pfd = {.fd = fd, .events = POLLIN};
+  int r = poll(&pfd, 1, 0);
+  if (r <= 0) {
+    return false; /* Nothing pending: healthy idle socket */
+  }
+  if (pfd.revents & (POLLERR | POLLNVAL)) {
+    return true;
+  }
+  char c;
+  ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+  if (n == 0) {
+    return true; /* Orderly shutdown by daemon */
+  }
+  if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+    return true;
+  }
+  return false;
+}
+
+static bool rpc_reconnect(lace_client_t *client);
+
+/* Send one request line. Returns false on any write failure. */
+static bool rpc_send_line(lace_client_t *client, const char *line) {
+  if (!client->to_daemon) {
+    return false;
+  }
+  if (fprintf(client->to_daemon, "%s\n", line) < 0) {
+    return false;
+  }
+  return fflush(client->to_daemon) == 0;
+}
+
+/* One request/response exchange on the current link. `allow_resend`
+ * permits reconnecting and resending once if the write fails (the daemon
+ * cannot have seen a request whose write failed). Caller holds the lock. */
+static int rpc_exchange(lace_client_t *client, const char *method,
+                        cJSON *params, cJSON **result, bool allow_resend) {
+  int64_t req_id = client->next_id++;
 
   /* Build request */
   cJSON *req = cJSON_CreateObject();
@@ -99,45 +137,57 @@ int lace_rpc_call(lace_client_t *client, const char *method,
   }
 
   cJSON_AddStringToObject(req, "jsonrpc", "2.0");
-  cJSON_AddNumberToObject(req, "id", (double)client->next_id++);
+  cJSON_AddNumberToObject(req, "id", (double)req_id);
   cJSON_AddStringToObject(req, "method", method);
 
   if (params) {
     cJSON_AddItemToObject(req, "params", cJSON_Duplicate(params, true));
   }
 
-  /* Serialize to JSON */
   char *req_str = cJSON_PrintUnformatted(req);
   cJSON_Delete(req);
-
   if (!req_str) {
     return LACE_ERR_OUT_OF_MEMORY;
   }
 
-  /* Send request */
-  if (fprintf(client->to_daemon, "%s\n", req_str) < 0) {
-    free(req_str);
-    rpc_set_error(client, "Failed to send request");
-    return LACE_ERR_PIPE_ERROR;
+  if (!rpc_send_line(client, req_str)) {
+    /* Write failed before the daemon could have seen the request, so it is
+     * safe to reconnect and send it once more. */
+    if (!allow_resend || !rpc_reconnect(client) ||
+        !rpc_send_line(client, req_str)) {
+      free(req_str);
+      lace_client_close_streams(client);
+      rpc_set_error(client, "Failed to send request to lace daemon");
+      return LACE_ERR_PIPE_ERROR;
+    }
   }
-  fflush(client->to_daemon);
   free(req_str);
 
-  /* Read response */
-  char *resp_str = read_response_line(client->from_daemon);
-  if (!resp_str) {
-    rpc_set_error(client, "No response from daemon");
-    client->connected = false;
-    return LACE_ERR_CONNECTION_LOST;
-  }
-
-  /* Parse response */
-  cJSON *resp = cJSON_Parse(resp_str);
-  free(resp_str);
-
-  if (!resp) {
-    rpc_set_error(client, "Invalid JSON response");
-    return LACE_ERR_PARSE_ERROR;
+  /* Read lines until the response carrying our id arrives. Anything else
+   * (notifications, a late reply to an abandoned request) is discarded. */
+  cJSON *resp = NULL;
+  for (;;) {
+    char *resp_str = read_response_line(client->from_daemon);
+    if (!resp_str) {
+      rpc_set_error(client, "No response from lace daemon");
+      lace_client_close_streams(client); /* Reconnect on next call */
+      return LACE_ERR_CONNECTION_LOST;
+    }
+    resp = cJSON_Parse(resp_str);
+    free(resp_str);
+    if (!resp) {
+      rpc_set_error(client, "Invalid JSON response from lace daemon");
+      lace_client_close_streams(client); /* Stream is out of sync */
+      return LACE_ERR_PARSE_ERROR;
+    }
+    cJSON *id = cJSON_GetObjectItem(resp, "id");
+    if (id && cJSON_IsNumber(id) && (int64_t)id->valuedouble == req_id) {
+      break;
+    }
+    if (id && cJSON_IsNull(id) && cJSON_GetObjectItem(resp, "error")) {
+      break; /* Daemon could not parse our request; report its error */
+    }
+    cJSON_Delete(resp);
   }
 
   /* Check for error */
@@ -146,21 +196,19 @@ int lace_rpc_call(lace_client_t *client, const char *method,
     cJSON *msg = cJSON_GetObjectItem(error, "message");
     cJSON *code = cJSON_GetObjectItem(error, "code");
 
-    if (msg && cJSON_IsString(msg)) {
-      rpc_set_error(client, msg->valuestring);
-    }
+    rpc_set_error(client, (msg && cJSON_IsString(msg)) ? msg->valuestring
+                                                       : "Daemon error");
 
     int err_code = LACE_ERR_INTERNAL_ERROR;
     if (code && cJSON_IsNumber(code)) {
-      /* Map JSON-RPC error codes to lace error codes */
       int json_code = code->valueint;
-      switch (json_code) {
-      case -32700: err_code = LACE_ERR_PARSE_ERROR; break;
-      case -32600: err_code = LACE_ERR_INVALID_REQUEST; break;
-      case -32601: err_code = LACE_ERR_METHOD_NOT_FOUND; break;
-      case -32602: err_code = LACE_ERR_INVALID_PARAMS; break;
-      case -32603: err_code = LACE_ERR_INTERNAL_ERROR; break;
-      default: err_code = LACE_ERR_INTERNAL_ERROR; break;
+      /* Pass through every code liblace defines; keep unknown ones generic */
+      if ((json_code <= -32000 && json_code >= -32099) ||
+          json_code == LACE_ERR_PARSE_ERROR ||
+          json_code == LACE_ERR_INVALID_REQUEST ||
+          json_code == LACE_ERR_METHOD_NOT_FOUND ||
+          json_code == LACE_ERR_INVALID_PARAMS) {
+        err_code = json_code;
       }
     }
 
@@ -168,18 +216,121 @@ int lace_rpc_call(lace_client_t *client, const char *method,
     return err_code;
   }
 
-  /* Extract result */
   cJSON *res = cJSON_GetObjectItem(resp, "result");
   if (result) {
-    if (res) {
-      *result = cJSON_Duplicate(res, true);
-    } else {
-      *result = NULL;
-    }
+    *result = res ? cJSON_Duplicate(res, true) : NULL;
   }
 
   cJSON_Delete(resp);
   return LACE_OK;
+}
+
+/* Ask the daemon for its instance id ("" if it does not report one). */
+static void rpc_fetch_instance(lace_client_t *client, char *out, size_t out_size) {
+  out[0] = '\0';
+  cJSON *res = NULL;
+  if (rpc_exchange(client, "version", NULL, &res, false) == LACE_OK && res) {
+    cJSON *inst = cJSON_GetObjectItem(res, "instance");
+    if (inst && cJSON_IsString(inst) && inst->valuestring) {
+      snprintf(out, out_size, "%s", inst->valuestring);
+    }
+  }
+  cJSON_Delete(res);
+}
+
+/* Re-establish the daemon link and decide whether it is still the same
+ * daemon. A different daemon (respawned by us, or by another frontend
+ * sharing the socket) has an unrelated connection pool whose ids restart
+ * at 1, so any conn_id from before would address someone else's database:
+ * bump the generation so callers re-open their connections first.
+ * Caller holds client->lock. */
+static bool rpc_reconnect(lace_client_t *client) {
+  int how = lace_client_reattach(client);
+  if (how == 0) {
+    return false;
+  }
+  char inst[sizeof(client->daemon_instance)];
+  rpc_fetch_instance(client, inst, sizeof(inst));
+  bool changed = how == 2 || strcmp(inst, client->daemon_instance) != 0 ||
+                 inst[0] == '\0';
+  if (changed) {
+    client->generation++;
+    client->num_connections = 0;
+  }
+  snprintf(client->daemon_instance, sizeof(client->daemon_instance), "%s", inst);
+  return true;
+}
+
+/* Methods whose params carry a conn_id from a specific daemon generation */
+static bool method_uses_conn_id(const char *method) {
+  return strcmp(method, "query") == 0 || strcmp(method, "disconnect") == 0 ||
+         strcmp(method, "cancel") == 0;
+}
+
+/* Caller must hold client->lock. */
+static int rpc_call_locked(lace_client_t *client, const char *method,
+                           cJSON *params, cJSON **result) {
+  if (!client->connected) {
+    rpc_set_error(client, "Client is not connected to lace daemon");
+    return LACE_ERR_CONNECTION_CLOSED;
+  }
+
+  /* Learn the daemon's identity once, so a later reconnect can tell
+   * whether it reached the same daemon. */
+  if (!client->daemon_instance[0] && client->to_daemon &&
+      !socket_is_stale(client->socket_fd)) {
+    rpc_fetch_instance(client, client->daemon_instance,
+                       sizeof(client->daemon_instance));
+  }
+
+  /* The daemon may have dropped this socket (restart, idle reaping). Detect
+   * that before sending so a request is never written into a dead link. */
+  if (!client->to_daemon || socket_is_stale(client->socket_fd)) {
+    if (!rpc_reconnect(client)) {
+      rpc_set_error(client, "Lost connection to lace daemon");
+      return LACE_ERR_CONNECTION_LOST;
+    }
+  }
+
+  /* A caller that captured its conn_id under an older generation (another
+   * thread reconnected meanwhile) must not send it to the new daemon,
+   * where the same number may belong to a different database. */
+  if (method_uses_conn_id(method) && lace_thread_generation_mismatch(client)) {
+    rpc_set_error(client, "Lace daemon was restarted; reconnecting");
+    return LACE_ERR_CONNECTION_LOST;
+  }
+
+  return rpc_exchange(client, method, params, result, true);
+}
+
+int lace_rpc_call(lace_client_t *client, const char *method, cJSON *params,
+                  cJSON **result) {
+  if (result) {
+    *result = NULL;
+  }
+  if (!client || !method) {
+    return LACE_ERR_INVALID_PARAMS;
+  }
+  pthread_mutex_lock(&client->lock);
+  int err = rpc_call_locked(client, method, params, result);
+  pthread_mutex_unlock(&client->lock);
+  return err;
+}
+
+int lace_rpc_try_call(lace_client_t *client, const char *method,
+                      cJSON *params, cJSON **result) {
+  if (result) {
+    *result = NULL;
+  }
+  if (!client || !method) {
+    return LACE_ERR_INVALID_PARAMS;
+  }
+  if (pthread_mutex_trylock(&client->lock) != 0) {
+    return LACE_ERR_TIMEOUT; /* Busy: another call is in flight */
+  }
+  int err = rpc_call_locked(client, method, params, result);
+  pthread_mutex_unlock(&client->lock);
+  return err;
 }
 
 /* ==========================================================================
@@ -216,6 +367,22 @@ bool lace_rpc_parse_value(cJSON *json, LaceValue *val) {
       val->float_val = num;
     }
     return true;
+  }
+
+  /* Exact 64-bit integer that does not fit a JSON double: {"$int": "..."} */
+  if (cJSON_IsObject(json)) {
+    cJSON *iv = cJSON_GetObjectItem(json, "$int");
+    if (iv && cJSON_IsString(iv) && iv->valuestring) {
+      char *end = NULL;
+      errno = 0;
+      long long n = strtoll(iv->valuestring, &end, 10);
+      if (errno == 0 && end && *end == '\0' && end != iv->valuestring) {
+        val->type = LACE_TYPE_INT;
+        val->int_val = (int64_t)n;
+        return true;
+      }
+    }
+    return false;
   }
 
   if (cJSON_IsString(json)) {

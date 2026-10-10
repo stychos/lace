@@ -47,6 +47,7 @@ struct LacedServer {
   LacedClient *clients;      /* Linked list of connected clients */
   size_t num_clients;        /* Current client count */
   size_t max_clients;        /* Maximum allowed clients */
+  int exit_when_idle;        /* Seconds without clients before exit (0 = never) */
 };
 
 /* Socket utility functions (implemented in socket.c) */
@@ -135,6 +136,12 @@ void laced_server_destroy(LacedServer *server) {
 }
 
 /* Get async queue (for handler use) */
+void laced_server_set_exit_when_idle(LacedServer *server, int seconds) {
+  if (server) {
+    server->exit_when_idle = seconds > 0 ? seconds : 0;
+  }
+}
+
 AsyncQueue *laced_server_get_async_queue(LacedServer *server) {
   return server ? server->async_queue : NULL;
 }
@@ -451,6 +458,8 @@ int laced_server_run_stdio(LacedServer *server,
 
 /* Add a client to the server's client list */
 static void add_client(LacedServer *server, LacedClient *client) {
+  static uint64_t next_serial = 1;
+  client->serial = next_serial++;
   time_t now = time(NULL);
   client->connected_at = now;
   client->last_activity = now;
@@ -625,14 +634,15 @@ static void process_async_completions_socket(LacedServer *server) {
   while ((query = async_queue_pop(server->async_queue)) != NULL) {
     cJSON *request_id = async_query_get_request_id(query);
     AsyncQueryStatus status = async_query_status(query);
-    LacedClient *client = async_query_get_client(query);
+    uint64_t serial = async_query_get_client_serial(query);
+    LacedClient *client = NULL;
 
-    /* Only send response if client is still connected */
-    if (client) {
-      /* Verify client is still in our list */
+    /* Only send response if the issuing client is still connected */
+    if (serial != 0) {
       bool client_valid = false;
       for (LacedClient *c = server->clients; c; c = c->next) {
-        if (c == client) {
+        if (c->serial == serial && !c->closed) {
+          client = c;
           client_valid = true;
           break;
         }
@@ -660,7 +670,16 @@ static void process_async_completions_socket(LacedServer *server) {
 /* Unified socket event loop */
 static int run_socket_event_loop(LacedServer *server,
                                  volatile sig_atomic_t *shutdown_flag) {
+  time_t last_client_seen = time(NULL);
   while (!*shutdown_flag) {
+    if (server->num_clients > 0) {
+      last_client_seen = time(NULL);
+    } else if (server->exit_when_idle > 0 &&
+               time(NULL) - last_client_seen >= server->exit_when_idle) {
+      LOG_INFO("No clients for %ds, exiting", server->exit_when_idle);
+      break;
+    }
+
     fd_set read_fds;
     FD_ZERO(&read_fds);
 
@@ -739,8 +758,17 @@ static int run_socket_event_loop(LacedServer *server,
         }
       }
 
-      /* Check for idle timeout */
-      if (!should_remove && (now - client->last_activity) > CLIENT_IDLE_TIMEOUT) {
+      /* A write failure (e.g. while delivering an async result) marks the
+       * client closed outside the read path; drop it here as well. */
+      if (client->closed) {
+        should_remove = true;
+      }
+
+      /* Idle timeout applies only to clients that never sent a request
+       * (half-open probes). A TUI holds its connection for the whole
+       * session and must not be dropped while the user is idle. */
+      if (!should_remove && client->requests_count == 0 &&
+          (now - client->last_activity) > CLIENT_IDLE_TIMEOUT) {
         LOG_INFO("Client fd=%d idle timeout (%lds)", client->fd,
                  (long)(now - client->last_activity));
         should_remove = true;

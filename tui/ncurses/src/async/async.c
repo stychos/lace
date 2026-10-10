@@ -16,9 +16,7 @@
 static void *async_worker_thread(void *arg) {
   AsyncOperation *op = (AsyncOperation *)arg;
 
-  lace_mutex_lock(&op->mutex);
-  op->state = ASYNC_STATE_RUNNING;
-  lace_mutex_unlock(&op->mutex);
+  /* state is already RUNNING (set by async_start before the thread exists) */
 
   /* Execute the operation */
   char *err = NULL;
@@ -50,7 +48,7 @@ static void *async_worker_thread(void *arg) {
 
   case ASYNC_OP_COUNT_ROWS: {
     size_t count = 0;
-    bool approximate = false;
+    bool approximate = op->use_approximate; /* in: estimate allowed */
     if (db_count_rows(op->conn, op->table_name, NULL, 0, &count, &approximate, &err)) {
       op->count = (int64_t)count;
       op->is_approximate = approximate;
@@ -147,7 +145,10 @@ bool async_start(AsyncOperation *op) {
     lace_mutex_destroy(&op->mutex);
     return false;
   }
-  op->state = ASYNC_STATE_IDLE;
+  /* Mark RUNNING before the thread exists. Every waiter loops on
+   * `state == RUNNING`; leaving IDLE here let a fast cancel see "not
+   * running", free the operation, and have the worker start on freed memory. */
+  op->state = ASYNC_STATE_RUNNING;
   op->cancel_requested = false;
   op->cancel_handle = NULL;
 
@@ -159,6 +160,7 @@ bool async_start(AsyncOperation *op) {
 
   lace_thread_t thread;
   if (!lace_thread_create(&thread, &attr, async_worker_thread, op)) {
+    op->state = ASYNC_STATE_ERROR;
     lace_mutex_destroy(&op->mutex);
     lace_cond_destroy(&op->cond);
     return false;

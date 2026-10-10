@@ -96,7 +96,9 @@ static bool app_ensure_workspace_capacity(AppState *app) {
 void tab_init(Tab *tab) {
   if (!tab)
     return;
+  static uint64_t next_uid = 1; /* Tabs are created on the main thread only */
   memset(tab, 0, sizeof(Tab));
+  tab->uid = next_uid++;
   filters_init(&tab->filters);
 }
 
@@ -447,6 +449,31 @@ void connection_free_data(Connection *conn) {
   conn->active = false;
 }
 
+/* Record a statement in the history of the connection that ran it.
+ * Main thread only (history is not locked). */
+void app_record_history(AppState *app, DbConnection *db_conn, const char *sql,
+                        int type) {
+  if (!app || !db_conn || !sql || !*sql) {
+    return;
+  }
+  if (!app->config || app->config->general.history_mode == HISTORY_MODE_OFF) {
+    return;
+  }
+  for (size_t i = 0; i < app->num_connections; i++) {
+    Connection *c = &app->connections[i];
+    if (c->active && c->conn == db_conn && c->history) {
+      history_add(c->history, sql, (HistoryEntryType)type,
+                  (size_t)app->config->general.history_max_size);
+      return;
+    }
+  }
+}
+
+static void app_history_hook(void *ctx, DbConnection *db_conn, const char *sql,
+                             int type) {
+  app_record_history((AppState *)ctx, db_conn, sql, type);
+}
+
 Connection *app_add_connection(AppState *app, DbConnection *db_conn,
                                const char *connstr) {
   if (!app)
@@ -464,9 +491,14 @@ Connection *app_add_connection(AppState *app, DbConnection *db_conn,
   conn->connstr = str_dup(connstr);
 
   /* Create history object if history tracking is enabled */
-  /* Note: With liblace, history tracking is done at the TUI level, not via db callbacks */
   if (app->config && app->config->general.history_mode != HISTORY_MODE_OFF) {
     conn->history = history_create(NULL); /* ID set later when known */
+  }
+
+  /* Record data changes made through this connection */
+  if (db_conn) {
+    db_conn->on_sql = app_history_hook;
+    db_conn->on_sql_ctx = app;
   }
 
   app->num_connections++;

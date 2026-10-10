@@ -913,7 +913,8 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
       focus = FOCUS_NEXT(focus, 3);
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+    } else if (render_event_is_special(&event, UI_KEY_UP) ||
+               render_event_is_special(&event, UI_KEY_BTAB)) {
       focus = FOCUS_PREV(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 2) {
@@ -1035,6 +1036,7 @@ static bool show_confirm_dialog(WINDOW *parent, const char *title,
     if (render_event_is_special(&event, UI_KEY_ESCAPE)) {
       running = false;
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
+               render_event_is_special(&event, UI_KEY_BTAB) ||
                render_event_is_special(&event, UI_KEY_LEFT) ||
                render_event_is_special(&event, UI_KEY_RIGHT) ||
                render_event_get_char(&event) == 'h' ||
@@ -1146,7 +1148,8 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
       focus = FOCUS_NEXT(focus, 3);
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+    } else if (render_event_is_special(&event, UI_KEY_UP) ||
+               render_event_is_special(&event, UI_KEY_BTAB)) {
       focus = FOCUS_PREV(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 2) {
@@ -1419,7 +1422,8 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
       focus = FOCUS_NEXT(focus, 4);
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+    } else if (render_event_is_special(&event, UI_KEY_UP) ||
+               render_event_is_special(&event, UI_KEY_BTAB)) {
       focus = FOCUS_PREV(focus, 4);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 3) {
@@ -1745,7 +1749,8 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
       focus = FOCUS_NEXT(focus, FLD_COUNT);
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+    } else if (render_event_is_special(&event, UI_KEY_UP) ||
+               render_event_is_special(&event, UI_KEY_BTAB)) {
       focus = FOCUS_PREV(focus, FLD_COUNT);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == FLD_CANCEL_BTN) {
@@ -2594,16 +2599,18 @@ ConnectResult connect_view_show(TuiState *state) {
     free(ds.success_msg);
     ds.success_msg = NULL;
 
-    /* Tab cycles focus */
-    if (render_event_is_special(&event, UI_KEY_TAB)) {
+    /* Tab / Shift+Tab cycle focus in screen order: tree, URL, buttons */
+    if (render_event_is_special(&event, UI_KEY_TAB) ||
+        render_event_is_special(&event, UI_KEY_BTAB)) {
+      bool back = render_event_is_special(&event, UI_KEY_BTAB);
+      if (ds.focus == FOCUS_TREE || ds.focus == FOCUS_URL)
+        ds.prev_panel_focus = ds.focus;
       if (ds.focus == FOCUS_TREE) {
-        ds.prev_panel_focus = FOCUS_TREE;
-        ds.focus = FOCUS_URL;
+        ds.focus = back ? FOCUS_BUTTONS : FOCUS_URL;
       } else if (ds.focus == FOCUS_URL) {
-        ds.prev_panel_focus = FOCUS_URL;
-        ds.focus = FOCUS_BUTTONS;
+        ds.focus = back ? FOCUS_TREE : FOCUS_BUTTONS;
       } else {
-        ds.focus = FOCUS_TREE;
+        ds.focus = back ? FOCUS_URL : FOCUS_TREE;
       }
       continue;
     }

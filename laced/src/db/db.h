@@ -69,6 +69,10 @@ typedef struct DbDriver {
   void *(*prepare_cancel)(DbConnection *conn);
   bool (*cancel_query)(DbConnection *conn, void *cancel_handle, char **err);
   void (*free_cancel_handle)(void *cancel_handle);
+  /* Optional. Called (under the session lock) when the query a handle was
+   * prepared for has finished while a cancel still uses the handle, so the
+   * driver can skip a late cancel that would hit the connection's next query. */
+  void (*cancel_handle_finished)(void *cancel_handle);
 
   /* Approximate row count (fast estimate from system tables) */
   int64_t (*estimate_row_count)(DbConnection *conn, const char *table,

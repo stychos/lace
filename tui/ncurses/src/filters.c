@@ -99,23 +99,20 @@ void tui_draw_filters_panel(TuiState *state) {
   char *add_key = hotkey_get_display(state->app->config, HOTKEY_ADD_FILTER);
   char *rem_key = hotkey_get_display(state->app->config, HOTKEY_REMOVE_FILTER);
   char *clr_key = hotkey_get_display(state->app->config, HOTKEY_CLEAR_FILTERS);
-  char *sw_key =
-      hotkey_get_display(state->app->config, HOTKEY_FILTERS_SWITCH_FOCUS);
   if (active_count > 0) {
     mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%zu) (%s/%s:add/del, %s:clear, %s:switch, Esc)",
+              "Filters (%zu) (%s/%s:add/del, %s:clear, Tab:next, Esc:close)",
               active_count, add_key ? add_key : "+", rem_key ? rem_key : "-",
-              clr_key ? clr_key : "c", sw_key ? sw_key : "^W");
+              clr_key ? clr_key : "c");
   } else {
     mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%s/%s:add/del, %s:clear, %s:switch, Esc)",
+              "Filters (%s/%s:add/del, %s:clear, Tab:next, Esc:close)",
               add_key ? add_key : "+", rem_key ? rem_key : "-",
-              clr_key ? clr_key : "c", sw_key ? sw_key : "^W");
+              clr_key ? clr_key : "c");
   }
   free(add_key);
   free(rem_key);
   free(clr_key);
-  free(sw_key);
   wattroff(state->main_win, A_BOLD);
 
   /* Position indicator - right-aligned with delete button */
@@ -642,18 +639,17 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
 
   int key_char = render_event_get_char(event);
 
-  /* Ctrl+W - switch focus to table */
-  if (render_event_is_ctrl(event, 'W')) {
-    tui_set_filters_focused(state, false);
-    return true;
-  }
+  bool is_tab = render_event_is_special(event, UI_KEY_TAB);
+  bool is_btab = render_event_is_special(event, UI_KEY_BTAB);
 
   /* Handle editing mode */
   if (state->filters_editing) {
     if (render_event_is_special(event, UI_KEY_ESCAPE)) {
       /* Escape - cancel edit */
       state->filters_editing = false;
-    } else if (render_event_is_special(event, UI_KEY_ENTER)) {
+    } else if (render_event_is_special(event, UI_KEY_ENTER) || is_tab ||
+               is_btab) {
+      /* Enter, or Tab/Shift+Tab before moving on: confirm edit */
       /* Confirm edit and auto-apply */
       if (state->filters_cursor_row < f->num_filters) {
         size_t filter_idx = state->filters_cursor_row;
@@ -712,7 +708,9 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     }
     /* Sync focus state to Tab so it persists across tab switches */
     tab_sync_focus(state);
-    return true;
+    if (!(is_tab || is_btab))
+      return true;
+    /* Tab/Shift+Tab confirmed the edit; now move like in navigation mode */
   }
 
   /* Navigation mode */
@@ -800,19 +798,31 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         state->filters_cursor_col = 3;
     }
   }
-  /* Tab - move to next field/row */
-  else if (render_event_is_special(event, UI_KEY_TAB)) {
-    size_t idx = state->filters_cursor_row;
-    ColumnFilter *cf = &f->filters[idx];
-    bool is_between = (cf->op == FILTER_OP_BETWEEN);
-    size_t max_col = is_between ? 4 : 3;
-    state->filters_cursor_col++;
-    if (state->filters_cursor_col > max_col) {
-      state->filters_cursor_col = 0;
-      if (state->filters_cursor_row < f->num_filters - 1) {
+  /* Tab / Shift+Tab - next or previous field, row by row; past the last
+   * field (or before the first) focus moves on to the next panel */
+  else if (is_tab || is_btab) {
+    size_t row = state->filters_cursor_row;
+    size_t max_col = f->filters[row].op == FILTER_OP_BETWEEN ? 4 : 3;
+    if (is_tab) {
+      if (state->filters_cursor_col < max_col) {
+        state->filters_cursor_col++;
+      } else if (row + 1 < f->num_filters) {
         state->filters_cursor_row++;
+        state->filters_cursor_col = 0;
       } else {
-        state->filters_cursor_row = 0; /* Wrap to first */
+        tui_focus_cycle(state, 1);
+        return true;
+      }
+    } else {
+      if (state->filters_cursor_col > 0) {
+        state->filters_cursor_col--;
+      } else if (row > 0) {
+        state->filters_cursor_row--;
+        state->filters_cursor_col =
+            f->filters[row - 1].op == FILTER_OP_BETWEEN ? 4 : 3;
+      } else {
+        tui_focus_cycle(state, -1);
+        return true;
       }
     }
   }

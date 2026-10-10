@@ -195,6 +195,17 @@ typedef struct {
   size_t query_loaded_count;
   bool query_paginated;
 
+  /* Data generation: bumped by tab_data_replaced() whenever tab->data is
+   * replaced wholesale (table switch, sort, filter, refresh, jump). A
+   * background page load remembers the generation it started under and is
+   * discarded if it changed, so rows from an older view are never merged. */
+  uint64_t load_generation;
+  uint64_t bg_load_generation;
+
+  /* Unique for the life of the process (tabs[] shifts, so indices and
+   * addresses do not identify a tab). Assigned by tab_init. */
+  uint64_t uid;
+
   /* Background pagination state */
   void *bg_load_op;             /* AsyncOperation* - current background load */
   bool bg_load_forward;         /* Direction: true=forward, false=backward */
@@ -279,6 +290,11 @@ Connection *app_get_connection(AppState *app, size_t index);
 bool app_close_connection(AppState *app, size_t index);
 size_t app_find_connection_index(AppState *app, DbConnection *conn);
 
+/* Add a statement to the query history of the connection that ran it
+ * (type is a HistoryEntryType). Main thread only. */
+void app_record_history(AppState *app, DbConnection *db_conn, const char *sql,
+                        int type);
+
 /* Workspace management */
 void workspace_init(Workspace *ws);
 void workspace_free_data(Workspace *ws);
@@ -356,5 +372,17 @@ const size_t *tab_get_selections(Tab *tab, size_t *count);
 /* Mark all tabs with the same table as needing refresh (except current tab) */
 void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
                                const char *table_name, Tab *exclude_tab);
+
+/* Call whenever tab->data is replaced (not merged): invalidates in-flight
+ * background page loads for this tab and clears row selections, which are
+ * stored as row positions and would otherwise point at different rows
+ * after a sort, filter, refresh or table switch (and `x` would delete
+ * those). */
+static inline void tab_data_replaced(Tab *tab) {
+  if (tab) {
+    tab->load_generation++;
+    tab_clear_selections(tab);
+  }
+}
 
 #endif /* LACE_APP_STATE_H */

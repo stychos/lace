@@ -1,7 +1,8 @@
-build/src/./query_editor.o: src/./query_editor.c src/./query_internal.h \
-  src/./tui_internal.h src/./core/constants.h \
-  src/../../../liblace/include/constants.h src/./db_compat.h \
-  ../../liblace/include/../../liblace/include/lace.h \
+build/src/./query_editor.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/./query_editor.c src/./query_internal.h src/./tui_internal.h \
+  src/./core/constants.h src/../../../liblace/include/constants.h \
+  src/./db_compat.h ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
   ../../liblace/include/../../liblace/include/util/str.h \
@@ -13,11 +14,14 @@ build/src/./query_editor.o: src/./query_editor.c src/./query_internal.h \
   src/../../../liblace/include/config/history.h \
   src/./viewmodel/table_viewmodel.h src/./viewmodel/../core/app_state.h \
   src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h \
   ../../liblace/include/../../liblace/include/util/mem.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/./query_internal.h:
 src/./tui_internal.h:
 src/./core/constants.h:
@@ -42,8 +46,10 @@ src/../../../liblace/include/config/history.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:
 ../../liblace/include/../../liblace/include/util/mem.h:

@@ -64,7 +64,11 @@ bool query_find_bounds_at_cursor(const char *text, size_t cursor,
                                  size_t *out_start, size_t *out_end);
 
 /* Find the query at cursor position (caller must free result) */
-char *query_find_at_cursor(const char *text, size_t cursor);
+char *query_find_at_cursor(const char *text, size_t cursor, const char *driver);
+
+/* Length of the SQL statement at p up to its terminating ';' (or end).
+ * Dialect-aware: quotes, comments, and PostgreSQL $$ bodies. */
+size_t query_statement_length(const char *p, const char *driver);
 
 /* ============================================================================
  * query_executor.c - Query execution and pagination
@@ -72,7 +76,7 @@ char *query_find_at_cursor(const char *text, size_t cursor);
  */
 
 /* Extract table name from a simple SELECT query */
-char *query_extract_table_name(const char *sql);
+char *query_extract_table_name(const char *sql, LaceDriver driver);
 
 /* Check if query has LIMIT or OFFSET clause */
 bool query_has_limit_offset(const char *sql);
@@ -82,6 +86,9 @@ int64_t query_count_rows(TuiState *state, const char *base_sql);
 
 /* Execute a SQL query and store results */
 void query_execute(TuiState *state, const char *sql);
+
+/* True if the last query_execute() call was cancelled by the user */
+bool query_last_execute_cancelled(void);
 
 /* Calculate column widths for query results */
 void query_calculate_result_widths(Tab *tab);

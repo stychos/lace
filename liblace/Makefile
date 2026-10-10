@@ -18,6 +18,13 @@ else
     CFLAGS += -I/usr/include/cjson
 endif
 
+# make SANITIZE=1 builds with AddressSanitizer + UndefinedBehaviorSanitizer.
+# Run `make clean` first so sanitized and plain objects do not mix.
+ifeq ($(SANITIZE),1)
+    CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer -O1
+    LDFLAGS += -fsanitize=address,undefined
+endif
+
 # Build directory
 BUILD_DIR = build
 

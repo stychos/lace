@@ -465,3 +465,4 @@ void db_common_free_pg_array(char **array, size_t count) {
     free(array[i]);
   free(array);
 }
+

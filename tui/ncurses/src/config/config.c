@@ -88,13 +88,13 @@ static const char *def_open_query[] = {"p"};
 static const char *def_execute_query[] = {"CTRL+R"};
 static const char *def_execute_all[] = {"CTRL+A"};
 static const char *def_execute_transaction[] = {"CTRL+T"};
-static const char *def_query_switch_focus[] = {"CTRL+W", "ESCAPE"};
+static const char *def_query_focus_editor[] = {"ENTER"};
+static const char *def_query_unfocus[] = {"ESCAPE"};
 
 /* Filters Panel */
 static const char *def_add_filter[] = {"+", "=", "INSERT"};
 static const char *def_remove_filter[] = {"-", "x", "DELETE"};
 static const char *def_clear_filters[] = {"X"}; /* Shift+X to clear all */
-static const char *def_filters_switch_focus[] = {"CTRL+W", "ESCAPE"};
 
 /* Sidebar */
 static const char *def_sidebar_filter[] = {"/", "f"};
@@ -234,7 +234,12 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                                     DEF_KEYS(def_execute_transaction)},
     [HOTKEY_QUERY_SWITCH_FOCUS] = {"query_switch_focus",
                                    "Switch editor/results", HOTKEY_CAT_QUERY,
-                                   DEF_KEYS(def_query_switch_focus)},
+                                   NULL, 0}, /* Unbound by default */
+    [HOTKEY_QUERY_FOCUS_EDITOR] = {"query_focus_editor", "Focus query editor",
+                                   HOTKEY_CAT_QUERY,
+                                   DEF_KEYS(def_query_focus_editor)},
+    [HOTKEY_QUERY_UNFOCUS] = {"query_unfocus", "Leave editor/results",
+                              HOTKEY_CAT_QUERY, DEF_KEYS(def_query_unfocus)},
 
     /* Filters Panel */
     [HOTKEY_ADD_FILTER] = {"add_filter", "Add filter", HOTKEY_CAT_FILTERS,
@@ -245,7 +250,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                               HOTKEY_CAT_FILTERS, DEF_KEYS(def_clear_filters)},
     [HOTKEY_FILTERS_SWITCH_FOCUS] = {"filters_switch_focus", "Switch to table",
                                      HOTKEY_CAT_FILTERS,
-                                     DEF_KEYS(def_filters_switch_focus)},
+                                     NULL, 0 /* Unbound: Tab moves between panels */},
 
     /* Sidebar */
     [HOTKEY_SIDEBAR_FILTER] = {"sidebar_filter", "Filter tables",
@@ -393,6 +398,7 @@ static const KeyNameEntry key_name_table[] = {
     {"INSERT", UI_KEY_INSERT},
     {"BACKSPACE", UI_KEY_BACKSPACE},
     {"TAB", UI_KEY_TAB},
+    {"SHIFT+TAB", UI_KEY_BTAB},
     {"SPACE", ' '},
     {"COMMA", ','},
 };
@@ -475,6 +481,7 @@ static const KeyDisplayEntry key_display_table[] = {
     {UI_KEY_INSERT, "Ins"},
     {UI_KEY_BACKSPACE, "Bksp"},
     {UI_KEY_TAB, "Tab"},
+    {UI_KEY_BTAB, "S-Tab"},
     {UI_KEY_F1, "F1"},
     {UI_KEY_F2, "F2"},
     {UI_KEY_F3, "F3"},

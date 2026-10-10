@@ -170,6 +170,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   tab->table_error = NULL;
 
   /* Free old data */
+  tab_data_replaced(tab);
   if (tab->data) {
     db_result_free(tab->data);
     tab->data = NULL;
@@ -290,6 +291,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   }
 
   tab->data = (ResultSet *)data_op.result;
+  tab_data_replaced(tab);
   async_free(&data_op);
 
   if (!tab->data) {
@@ -562,6 +564,7 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     db_result_free(tab->data);
   }
   tab->data = data;
+  tab_data_replaced(tab);
   tab->loaded_offset = offset;
   tab->loaded_count = data->num_rows;
 
@@ -838,9 +841,23 @@ void tui_check_load_more(TuiState *state) {
 
 /* Merge new page result into existing data */
 static bool merge_page_result(TuiState *state, ResultSet *new_data,
-                              bool forward) {
+                              bool forward, size_t fetched_offset) {
   Tab *tab = TUI_TAB(state);
   if (!tab || !tab->data || !new_data || new_data->num_rows == 0)
+    return false;
+
+  /* The fetched rows must join the loaded window exactly: no gap, no
+   * overlap, same columns. Anything else (rows inserted/deleted meanwhile,
+   * a stale request) is discarded; the next scroll loads a fresh page. */
+  if (forward) {
+    if (fetched_offset != tab->loaded_offset + tab->data->num_rows)
+      return false;
+  } else {
+    if (fetched_offset > tab->loaded_offset ||
+        fetched_offset + new_data->num_rows != tab->loaded_offset)
+      return false;
+  }
+  if (new_data->num_columns != tab->data->num_columns)
     return false;
 
   size_t old_count = tab->data->num_rows;
@@ -1037,6 +1054,7 @@ bool tui_load_rows_at_with_dialog(TuiState *state, size_t offset) {
       db_result_free(tab->data);
     }
     tab->data = new_data;
+    tab_data_replaced(tab);
     tab->loaded_offset = offset;
     tab->loaded_count = new_data->num_rows;
 
@@ -1089,8 +1107,10 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
         }
       }
 
-      /* Merge into existing data */
-      success = merge_page_result(state, new_data, forward);
+      /* Merge into existing data (only if started for the current view) */
+      success = tab->bg_load_generation == tab->load_generation &&
+                merge_page_result(state, new_data, forward,
+                                  tab->bg_load_target_offset);
       if (success) {
         tui_trim_loaded_data(state);
         tui_set_status(state, "Loaded %zu/%zu rows", tab->loaded_count,
@@ -1127,10 +1147,15 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   } else {
     if (tab->loaded_offset == 0)
       return false; /* Already at beginning */
-    target_offset = tab->loaded_offset >= PAGE_SIZE
-                        ? tab->loaded_offset - PAGE_SIZE
+    /* Fetch exactly the rows just before the window. (This used to start
+     * one page back but fetch two, overlapping the window by a page and
+     * driving loaded_offset below zero.) */
+    target_offset = tab->loaded_offset >= PAGE_SIZE * PREFETCH_PAGES
+                        ? tab->loaded_offset - PAGE_SIZE * PREFETCH_PAGES
                         : 0;
   }
+  size_t fetch_limit = forward ? PAGE_SIZE * PREFETCH_PAGES
+                               : tab->loaded_offset - target_offset;
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
@@ -1142,7 +1167,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   op.conn = conn;
   op.table_name = str_dup(tab->table_name);
   op.offset = target_offset;
-  op.limit = PAGE_SIZE * PREFETCH_PAGES;
+  op.limit = fetch_limit;
   op.order_by = order_clause; /* Takes ownership */
   op.desc = false;
 
@@ -1182,7 +1207,7 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     }
 
     /* Merge into existing data */
-    success = merge_page_result(state, new_data, forward);
+    success = merge_page_result(state, new_data, forward, target_offset);
     if (success) {
       /* Trim old data to keep memory bounded */
       tui_trim_loaded_data(state);
@@ -1228,10 +1253,15 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   } else {
     if (tab->loaded_offset == 0)
       return false; /* Already at beginning */
-    target_offset = tab->loaded_offset >= PAGE_SIZE
-                        ? tab->loaded_offset - PAGE_SIZE
+    /* Fetch exactly the rows just before the window. (This used to start
+     * one page back but fetch two, overlapping the window by a page and
+     * driving loaded_offset below zero.) */
+    target_offset = tab->loaded_offset >= PAGE_SIZE * PREFETCH_PAGES
+                        ? tab->loaded_offset - PAGE_SIZE * PREFETCH_PAGES
                         : 0;
   }
+  size_t fetch_limit = forward ? PAGE_SIZE * PREFETCH_PAGES
+                               : tab->loaded_offset - target_offset;
 
   /* Build WHERE clause from filters */
   char *where_clause = build_filter_where(state);
@@ -1244,7 +1274,7 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   op->conn = conn;
   op->table_name = str_dup(tab->table_name);
   op->offset = target_offset;
-  op->limit = PAGE_SIZE * PREFETCH_PAGES;
+  op->limit = fetch_limit;
   op->order_by = order_clause; /* Takes ownership */
   op->desc = false;
 
@@ -1266,6 +1296,7 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   tab->bg_load_op = op;
   tab->bg_load_forward = forward;
   tab->bg_load_target_offset = target_offset;
+  tab->bg_load_generation = tab->load_generation;
   state->bg_loading_active = true;
 
   return true;
@@ -1310,7 +1341,9 @@ BgPollResult tui_poll_background_load(TuiState *state) {
     }
 
     /* Merge into existing data */
-    if (merge_page_result(state, new_data, tab->bg_load_forward)) {
+    if (tab->bg_load_generation == tab->load_generation &&
+        merge_page_result(state, new_data, tab->bg_load_forward,
+                          tab->bg_load_target_offset)) {
       tui_trim_loaded_data(state);
       result = BG_POLL_MERGED;
     }

@@ -1,5 +1,6 @@
-build/src/./dialogs.o: src/./dialogs.c src/./async/async.h \
-  src/./async/../db_compat.h \
+build/src/./dialogs.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/./dialogs.c src/./async/async.h src/./async/../db_compat.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
@@ -14,12 +15,15 @@ build/src/./dialogs.o: src/./dialogs.c src/./async/async.h \
   src/./core/app_state.h src/./core/../config/config.h \
   src/./core/../db_compat.h src/./viewmodel/table_viewmodel.h \
   src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h \
   src/./views/config_view.h src/./views/../tui.h \
   src/./views/connect_view.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/./async/async.h:
 src/./async/../db_compat.h:
 ../../liblace/include/../../liblace/include/lace.h:
@@ -45,10 +49,12 @@ src/./core/../db_compat.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:
 src/./views/config_view.h:
 src/./views/../tui.h:
 src/./views/connect_view.h:

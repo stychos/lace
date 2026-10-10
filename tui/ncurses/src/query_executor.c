@@ -16,8 +16,153 @@
 
 /* Extract table name from a simple SELECT query (e.g., SELECT ... FROM table)
  * Returns allocated string or NULL if not a simple single-table query */
-char *query_extract_table_name(const char *sql) {
+/* True if `sql` is a plain single-table SELECT whose rows map 1:1 onto
+ * rows of that table, i.e. safe to edit through primary keys. Rejects
+ * JOIN, set operations, subqueries, grouping, DISTINCT, aggregates and
+ * multi-table FROM lists. Strings, quoted identifiers and comments are
+ * skipped, so keywords inside them do not count. */
+static bool query_is_simple_select(const char *sql) {
+  static const char *const banned_words[] = {
+      "JOIN", "UNION", "INTERSECT", "EXCEPT", "MINUS", "GROUP", "HAVING",
+      "DISTINCT", "WINDOW", "OVER", "LATERAL", "WITH", NULL};
+  static const char *const aggregates[] = {
+      "COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "STRING_AGG",
+      "ARRAY_AGG", "JSON_AGG", "JSONB_AGG", "JSON_GROUP_ARRAY", "TOTAL", NULL};
+  const char *p = sql;
+  bool first_word = true;
+  bool in_from = false; /* between FROM and WHERE/ORDER/LIMIT/... */
+  int depth = 0;
+  while (*p) {
+    char c = *p;
+    if (c == '\'' || c == '"' || c == '`') { /* string or quoted identifier */
+      char q = c;
+      p++;
+      while (*p && !(*p == q && p[1] != q)) {
+        p += (*p == q) ? 2 : 1;
+      }
+      if (*p) p++;
+      continue;
+    }
+    if (c == '-' && p[1] == '-') {
+      while (*p && *p != '\n') p++;
+      continue;
+    }
+    if (c == '/' && p[1] == '*') {
+      p += 2;
+      while (*p && !(p[0] == '*' && p[1] == '/')) p++;
+      if (*p) p += 2;
+      continue;
+    }
+    if (c == '(') {
+      depth++;
+      /* "( SELECT" anywhere is a subquery */
+      const char *n = p + 1;
+      while (*n && isspace((unsigned char)*n)) n++;
+      if (strncasecmp(n, "SELECT", 6) == 0 && !isalnum((unsigned char)n[6]))
+        return false;
+      p++;
+      continue;
+    }
+    if (c == ')') {
+      depth--;
+      p++;
+      continue;
+    }
+    if (c == ',' && in_from && depth == 0) {
+      return false; /* FROM a, b */
+    }
+    if (c == ';') {
+      break;
+    }
+    if (isalpha((unsigned char)c) || c == '_') {
+      const char *w = p;
+      while (*p && (isalnum((unsigned char)*p) || *p == '_')) p++;
+      size_t len = (size_t)(p - w);
+      if (first_word) {
+        if (!(len == 6 && strncasecmp(w, "SELECT", 6) == 0))
+          return false;
+        first_word = false;
+        continue;
+      }
+      for (int i = 0; banned_words[i]; i++) {
+        if (strlen(banned_words[i]) == len && strncasecmp(w, banned_words[i], len) == 0)
+          return false;
+      }
+      /* aggregate call: NAME followed by '(' */
+      const char *n = p;
+      while (*n && isspace((unsigned char)*n)) n++;
+      if (*n == '(') {
+        for (int i = 0; aggregates[i]; i++) {
+          if (strlen(aggregates[i]) == len && strncasecmp(w, aggregates[i], len) == 0)
+            return false;
+        }
+      }
+      if (depth == 0) {
+        if (len == 4 && strncasecmp(w, "FROM", 4) == 0) {
+          in_from = true;
+        } else if ((len == 5 && (strncasecmp(w, "WHERE", 5) == 0 ||
+                                 strncasecmp(w, "ORDER", 5) == 0 ||
+                                 strncasecmp(w, "LIMIT", 5) == 0)) ||
+                   (len == 6 && strncasecmp(w, "OFFSET", 6) == 0)) {
+          in_from = false;
+        }
+      }
+      continue;
+    }
+    p++;
+  }
+  return !first_word;
+}
+
+/* Parse one SQL identifier at *p (quoted with "", `` or [], or bare) and
+ * advance past it. Bare PostgreSQL identifiers fold to lower case like the
+ * server does. Returns NULL if there is no identifier. */
+static char *query_parse_identifier(const char **p, LaceDriver driver) {
+  const char *s = *p;
+  StringBuilder *sb = sb_new(32);
+  if (!sb)
+    return NULL;
+  if (*s == '"' || *s == '`' || *s == '[') {
+    char close = *s == '[' ? ']' : *s;
+    s++;
+    for (;;) {
+      if (!*s) {
+        sb_free(sb);
+        return NULL;
+      }
+      if (*s == close) {
+        if (close == ']' || s[1] != close)
+          break;
+        s++; /* Doubled quote */
+      }
+      sb_append_char(sb, *s++);
+    }
+    s++;
+  } else {
+    while (*s && (isalnum((unsigned char)*s) || *s == '_' || *s == '$' ||
+                  (unsigned char)*s >= 0x80)) {
+      char c = *s++;
+      if (driver == LACE_DRIVER_POSTGRES && c >= 'A' && c <= 'Z')
+        c = (char)(c - 'A' + 'a');
+      sb_append_char(sb, c);
+    }
+  }
+  if (sb->len == 0) {
+    sb_free(sb);
+    return NULL;
+  }
+  *p = s;
+  return sb_finish(sb);
+}
+
+char *query_extract_table_name(const char *sql, LaceDriver driver) {
   if (!sql)
+    return NULL;
+
+  /* Results of anything but a plain single-table SELECT are not editable:
+   * a JOIN/UNION/subquery used to be treated as its first FROM table and
+   * edits went to the wrong table or rows. */
+  if (!query_is_simple_select(sql))
     return NULL;
 
   const char *p = sql;
@@ -63,39 +208,54 @@ char *query_extract_table_name(const char *sql) {
   if (!*from_pos)
     return NULL;
 
-  /* Extract table name (handle quoted identifiers) */
-  const char *table_start = from_pos;
-  const char *table_end = from_pos;
-  char quote = 0;
-
-  if (*from_pos == '`' || *from_pos == '"' || *from_pos == '[') {
-    quote = (*from_pos == '[') ? ']' : *from_pos;
-    table_start++;
-    table_end = table_start;
-    while (*table_end && *table_end != quote)
-      table_end++;
-  } else {
-    while (*table_end && !isspace((unsigned char)*table_end) &&
-           *table_end != ',' && *table_end != ';' && *table_end != ')')
-      table_end++;
+  /* Parse "name" or "schema.name"; each part bare or quoted */
+  char *parts[2] = {NULL, NULL};
+  size_t num_parts = 0;
+  const char *q = from_pos;
+  for (;;) {
+    if (num_parts == 2) {
+      free(parts[0]);
+      free(parts[1]);
+      return NULL; /* db.schema.table: not supported */
+    }
+    char *part = query_parse_identifier(&q, driver);
+    if (!part) {
+      free(parts[0]);
+      return NULL;
+    }
+    parts[num_parts++] = part;
+    const char *after = q;
+    while (*after && isspace((unsigned char)*after))
+      after++;
+    if (*after != '.')
+      break;
+    q = after + 1;
+    while (*q && isspace((unsigned char)*q))
+      q++;
   }
 
-  if (table_end == table_start)
-    return NULL;
-
   /* Check if there's a comma (multiple tables = can't edit) */
-  const char *check = table_end;
-  if (quote)
-    check++; /* Skip closing quote */
-  while (*check && isspace((unsigned char)*check))
-    check++;
-  if (*check == ',')
-    return NULL; /* JOIN or multiple tables */
+  while (*q && isspace((unsigned char)*q))
+    q++;
+  if (*q == ',') {
+    free(parts[0]);
+    free(parts[1]);
+    return NULL;
+  }
 
-  size_t len = table_end - table_start;
-  char *table = safe_malloc(len + 1);
-  memcpy(table, table_start, len);
-  table[len] = '\0';
+  char *table = NULL;
+  if (driver == LACE_DRIVER_POSTGRES) {
+    table = num_parts == 2 ? lace_table_ref(parts[0], parts[1])
+                           : lace_table_ref(NULL, parts[0]);
+  } else if (num_parts == 1) {
+    table = str_dup(parts[0]);
+  } else if (driver == LACE_DRIVER_SQLITE && str_eq_nocase(parts[0], "main")) {
+    table = str_dup(parts[1]);
+  }
+  /* Other qualified names (another MySQL database, an attached SQLite
+   * database) cannot be addressed by a table reference: not editable */
+  free(parts[0]);
+  free(parts[1]);
   return table;
 }
 
@@ -185,7 +345,28 @@ int64_t query_count_rows(TuiState *state, const char *base_sql) {
 }
 
 /* Execute a SQL query and store results */
+/* True if the most recent query_execute() was cancelled by the user.
+ * Multi-statement runs must stop (and roll back) instead of continuing. */
+static bool g_last_execute_cancelled = false;
+
+bool query_last_execute_cancelled(void) {
+  return g_last_execute_cancelled;
+}
+
+static void query_execute_impl(TuiState *state, const char *sql);
+
 void query_execute(TuiState *state, const char *sql) {
+  query_execute_impl(state, sql);
+
+  /* Record successful user statements in the connection's history */
+  Tab *tab = TUI_TAB(state);
+  if (!g_last_execute_cancelled && tab && !tab->query_error && state->conn) {
+    app_record_history(state->app, state->conn, sql, history_detect_type(sql));
+  }
+}
+
+static void query_execute_impl(TuiState *state, const char *sql) {
+  g_last_execute_cancelled = false;
   if (!state || !sql || !*sql)
     return;
 
@@ -236,11 +417,11 @@ void query_execute(TuiState *state, const char *sql) {
   while (*p && isspace((unsigned char)*p))
     p++;
 
-  bool is_select = (strncasecmp(p, "SELECT", 6) == 0);
-  bool is_readonly = is_select || (strncasecmp(p, "SHOW", 4) == 0) ||
-                     (strncasecmp(p, "DESCRIBE", 8) == 0) ||
-                     (strncasecmp(p, "EXPLAIN", 7) == 0) ||
-                     (strncasecmp(p, "PRAGMA", 6) == 0);
+  /* Statements that return rows (incl. WITH ... SELECT, VALUES, a SELECT
+   * after a comment) go through db_query; the rest through db_exec. */
+  bool is_readonly = str_sql_returns_rows(p);
+  /* Only plain SELECTs are wrapped for pagination/COUNT(*) */
+  bool is_select = is_readonly && strncasecmp(p, "SELECT", 6) == 0;
 
   char *err = NULL;
 
@@ -283,6 +464,7 @@ void query_execute(TuiState *state, const char *sql) {
           } else if (op.state == ASYNC_STATE_ERROR) {
             err = op.error ? str_dup(op.error) : str_dup("Query failed");
           } else if (op.state == ASYNC_STATE_CANCELLED) {
+            g_last_execute_cancelled = true;
             tui_set_status(state, "Query cancelled");
           }
         }
@@ -305,6 +487,7 @@ void query_execute(TuiState *state, const char *sql) {
         } else if (op.state == ASYNC_STATE_ERROR) {
           err = op.error ? str_dup(op.error) : str_dup("Query failed");
         } else if (op.state == ASYNC_STATE_CANCELLED) {
+            g_last_execute_cancelled = true;
           tui_set_status(state, "Query cancelled");
         }
       }
@@ -316,7 +499,9 @@ void query_execute(TuiState *state, const char *sql) {
     } else if (tab->query_results) {
       query_calculate_result_widths(tab);
       /* Try to extract table name for editing support */
-      tab->query_source_table = query_extract_table_name(sql);
+      tab->query_source_table =
+          query_extract_table_name(sql, state->conn ? state->conn->driver_type
+                                                    : LACE_DRIVER_SQLITE);
       /* Load table schema for primary key info (needed for SQLite/PostgreSQL)
        */
       if (tab->query_source_table) {
@@ -354,6 +539,7 @@ void query_execute(TuiState *state, const char *sql) {
         err = op.error ? str_dup(op.error) : str_dup("Statement failed");
         tab->query_error = err;
       } else if (op.state == ASYNC_STATE_CANCELLED) {
+            g_last_execute_cancelled = true;
         tui_set_status(state, "Statement cancelled");
       }
     }
@@ -364,6 +550,7 @@ void query_execute(TuiState *state, const char *sql) {
   if (!tab->query_error && tab->query_results &&
       tab->query_results->num_rows > 0) {
     ui->query_focus_results = true;
+    ui->query_unfocused = false;
   }
 }
 

@@ -1,5 +1,7 @@
-build/src/viewmodel/table_viewmodel.o: src/viewmodel/table_viewmodel.c \
-  src/viewmodel/table_viewmodel.h src/viewmodel/../core/app_state.h \
+build/src/viewmodel/table_viewmodel.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/viewmodel/table_viewmodel.c src/viewmodel/table_viewmodel.h \
+  src/viewmodel/../core/app_state.h \
   src/viewmodel/../core/../config/config.h \
   src/viewmodel/../core/../config/../core/constants.h \
   src/../../../liblace/include/constants.h \
@@ -12,6 +14,7 @@ build/src/viewmodel/table_viewmodel.o: src/viewmodel/table_viewmodel.c \
   src/viewmodel/../db_compat.h \
   ../../liblace/include/../../liblace/include/util/mem.h \
   ../../liblace/include/../../liblace/include/util/str.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/viewmodel/table_viewmodel.h:
 src/viewmodel/../core/app_state.h:
 src/viewmodel/../core/../config/config.h:

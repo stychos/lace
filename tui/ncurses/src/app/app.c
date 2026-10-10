@@ -194,6 +194,15 @@ static int run_query_mode(AppConfig *config) {
     return 1;
   }
 
+  /* Statements without a result set (INSERT/UPDATE/DDL) report a count */
+  if (rs->num_columns == 0) {
+    printf("%lld rows affected\n", (long long)rs->rows_affected);
+    db_result_free(rs);
+    db_disconnect(conn);
+    lace_client_destroy(client);
+    return 0;
+  }
+
   /* Validate result set structure */
   if (!rs->columns || (rs->num_rows > 0 && !rs->rows)) {
     fprintf(stderr, "Invalid result set structure\n");

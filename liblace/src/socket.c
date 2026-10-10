@@ -22,6 +22,17 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+/* A write to a socket whose daemon end has closed must fail with EPIPE,
+ * not kill the client process with SIGPIPE. */
+static void socket_no_sigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#else
+  (void)fd;
+#endif
+}
+
 /* ==========================================================================
  * Socket Path Discovery
  * ========================================================================== */
@@ -186,6 +197,7 @@ int lace_connect_unix(const char *path, int timeout_ms) {
   if (fd < 0) {
     return -1;
   }
+  socket_no_sigpipe(fd);
 
   /* Set non-blocking for timeout handling */
   int flags = fcntl(fd, F_GETFL, 0);
@@ -241,6 +253,7 @@ int lace_connect_tcp(const char *host, int port, int timeout_ms) {
   if (fd < 0) {
     return -1;
   }
+  socket_no_sigpipe(fd);
 
   /* Set non-blocking for timeout handling */
   int flags = fcntl(fd, F_GETFL, 0);

@@ -778,6 +778,9 @@ static char *capture_hotkey(WINDOW *parent) {
     case UI_KEY_TAB:
       key_name = "TAB";
       break;
+    case UI_KEY_BTAB:
+      key_name = "SHIFT+TAB";
+      break;
     case UI_KEY_BACKSPACE:
       key_name = "BACKSPACE";
       break;
@@ -1203,8 +1206,10 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
     free(ds.success_msg);
     ds.success_msg = NULL;
 
-    /* Tab cycles focus */
-    if (render_event_is_special(&event, UI_KEY_TAB)) {
+    /* Tab / Shift+Tab cycle focus in screen order: tabs, settings, buttons */
+    if (render_event_is_special(&event, UI_KEY_TAB) ||
+        render_event_is_special(&event, UI_KEY_BTAB)) {
+      bool back = render_event_is_special(&event, UI_KEY_BTAB);
       if (ds.editing_number) {
         /* Finish number editing first */
         int value = number_input_value(&ds.num_input);
@@ -1221,11 +1226,11 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
       }
 
       if (ds.focus == FOCUS_TABS) {
-        ds.focus = FOCUS_SETTINGS;
+        ds.focus = back ? FOCUS_BUTTONS : FOCUS_SETTINGS;
       } else if (ds.focus == FOCUS_SETTINGS) {
-        ds.focus = FOCUS_BUTTONS;
+        ds.focus = back ? FOCUS_TABS : FOCUS_BUTTONS;
       } else {
-        ds.focus = FOCUS_TABS;
+        ds.focus = back ? FOCUS_SETTINGS : FOCUS_TABS;
       }
       continue;
     }

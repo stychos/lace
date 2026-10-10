@@ -1184,11 +1184,26 @@ bool tui_confirm_add_row(TuiState *state) {
     return false;
   }
 
-  /* Prepare column definitions and values for insert */
+  /* Insert only the columns the user set. A column still showing its
+   * placeholder (auto-increment, or a default the database fills in) is left
+   * out so the database applies the real default instead of its text. */
+  size_t n = state->new_row_num_cols;
+  ColumnDef *ins_cols = safe_calloc(n ? n : 1, sizeof(ColumnDef));
+  DbValue *ins_vals = safe_calloc(n ? n : 1, sizeof(DbValue));
+  size_t num_ins = 0;
+  for (size_t i = 0; i < n && i < schema->num_columns; i++) {
+    if (state->new_row_placeholders[i] && !state->new_row_edited[i])
+      continue;
+    ins_cols[num_ins] = schema->columns[i]; /* Shallow: borrowed strings */
+    ins_vals[num_ins] = state->new_row_values[i];
+    num_ins++;
+  }
+
   char *err = NULL;
   bool success =
-      db_insert_row(conn, table, schema->columns, state->new_row_values,
-                    state->new_row_num_cols, &err);
+      db_insert_row(conn, table, ins_cols, ins_vals, num_ins, &err);
+  free(ins_cols);
+  free(ins_vals);
 
   if (success) {
     /* Clean up add-row state */

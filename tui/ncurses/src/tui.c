@@ -563,6 +563,11 @@ bool tui_init(TuiState *state, AppState *app) {
 
   /* Initialize ncurses */
   initscr();
+  /* ncurses waits ESCDELAY (default 1000 ms) after Esc for an escape
+   * sequence, which made every Esc lag a second. Respect a user setting. */
+  if (!getenv("ESCDELAY")) {
+    set_escdelay(25);
+  }
   cbreak();
   noecho();
   keypad(stdscr, TRUE);
@@ -1065,7 +1070,137 @@ bool tui_load_tables(TuiState *state) {
   return true;
 }
 
+/* Arriving at a query tab (tab keys, mouse, closing a tab, workspace switch,
+ * session restore) must not put keystrokes into its editor, where '[' and
+ * ']' are text: leave it unfocused until Enter or Tab. */
+static void tui_note_tab_switch(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  uint64_t uid = tab ? tab->uid : 0;
+  if (uid == state->shown_tab_uid)
+    return;
+  state->shown_tab_uid = uid;
+  UITabState *ui = TUI_TAB_UI(state);
+  if (tab && tab->type == TAB_TYPE_QUERY && ui && !ui->query_result_editing) {
+    ui->query_unfocused = true;
+  }
+}
+
+/* Focus stops of the main screen in spatial order (Tab / Shift+Tab) */
+typedef enum {
+  FOCUS_STOP_SIDEBAR,
+  FOCUS_STOP_FILTERS,
+  FOCUS_STOP_TABLE,
+  FOCUS_STOP_EDITOR,
+  FOCUS_STOP_RESULTS,
+} FocusStop;
+
+bool tui_focus_cycle(TuiState *state, int dir) {
+  Tab *tab = TUI_TAB(state);
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab || dir == 0)
+    return false;
+
+  FocusStop stops[5];
+  size_t n = 0;
+  if (state->sidebar_visible)
+    stops[n++] = FOCUS_STOP_SIDEBAR;
+  if (tab->type == TAB_TYPE_TABLE) {
+    if (tui_filters_visible(state))
+      stops[n++] = FOCUS_STOP_FILTERS;
+    stops[n++] = FOCUS_STOP_TABLE;
+  } else if (tab->type == TAB_TYPE_QUERY && ui) {
+    stops[n++] = FOCUS_STOP_EDITOR;
+    if (tab->query_results)
+      stops[n++] = FOCUS_STOP_RESULTS;
+  }
+  if (n == 0)
+    return false;
+
+  /* Where focus is now. An unfocused query tab sits just before its editor:
+   * Tab enters the editor, Shift+Tab the panel before it. */
+  FocusStop cur;
+  bool between = false;
+  if (state->sidebar_focused) {
+    cur = FOCUS_STOP_SIDEBAR;
+  } else if (tab->type == TAB_TYPE_TABLE) {
+    cur = tui_filters_focused(state) ? FOCUS_STOP_FILTERS : FOCUS_STOP_TABLE;
+  } else if (tab->type == TAB_TYPE_QUERY && ui) {
+    if (ui->query_unfocused) {
+      cur = FOCUS_STOP_EDITOR;
+      between = true;
+    } else {
+      cur = ui->query_focus_results && tab->query_results ? FOCUS_STOP_RESULTS
+                                                          : FOCUS_STOP_EDITOR;
+    }
+  } else {
+    return false; /* Connection tab: the sidebar is the only panel */
+  }
+
+  size_t idx = 0;
+  while (idx < n && stops[idx] != cur)
+    idx++;
+  if (idx == n)
+    idx = 0;
+  size_t target_idx;
+  if (between && dir > 0)
+    target_idx = idx; /* Enter the editor itself */
+  else
+    target_idx = (idx + n + (dir > 0 ? 1 : n - 1)) % n;
+  FocusStop target = stops[target_idx];
+  if (!between && target == cur)
+    return false;
+
+  /* Leave the current panel */
+  if (state->sidebar_focused && target != FOCUS_STOP_SIDEBAR) {
+    state->sidebar_last_position = tui_sidebar_highlight(state);
+    state->sidebar_filter_active = false;
+    tui_set_sidebar_focused(state, false);
+  }
+  if (tab->type == TAB_TYPE_TABLE && target != FOCUS_STOP_FILTERS) {
+    state->filters_editing = false;
+    tui_set_filters_focused(state, false);
+  }
+
+  switch (target) {
+  case FOCUS_STOP_SIDEBAR:
+    state->filters_was_focused = false;
+    tui_set_sidebar_focused(state, true);
+    state->sidebar_highlight = state->sidebar_last_position;
+    break;
+  case FOCUS_STOP_FILTERS: {
+    TableFilters *f = &tab->filters;
+    if (f->num_filters == 0)
+      filters_add(f, 0, FILTER_OP_EQ, "");
+    state->filters_editing = false;
+    if (dir > 0) {
+      state->filters_cursor_row = 0;
+      state->filters_cursor_col = 0;
+    } else {
+      /* Entering backwards lands on the last field, like a form */
+      state->filters_cursor_row = f->num_filters - 1;
+      state->filters_cursor_col =
+          f->filters[f->num_filters - 1].op == FILTER_OP_BETWEEN ? 4 : 3;
+    }
+    tui_set_filters_focused(state, true);
+    break;
+  }
+  case FOCUS_STOP_TABLE:
+    break;
+  case FOCUS_STOP_EDITOR:
+  case FOCUS_STOP_RESULTS:
+    if (ui) {
+      ui->query_unfocused = false;
+      ui->query_focus_results = target == FOCUS_STOP_RESULTS;
+    }
+    break;
+  }
+  tab_sync_focus(state);
+  return true;
+}
+
 void tui_refresh(TuiState *state) {
+  tui_note_tab_switch(state);
+
   /* Sync table viewmodel from Tab before drawing (Tab is modified by pagination) */
   Tab *tab = TUI_TAB(state);
   if (state->vm_table && tab && tab->type == TAB_TYPE_TABLE) {
@@ -1667,6 +1802,30 @@ void tui_run(TuiState *state) {
     if (state->adding_row && tui_handle_add_row_input(state, &event)) {
       tui_refresh(state);
       continue;
+    }
+
+    /* Tab / Shift+Tab move focus between panels. Exceptions keep their own
+     * meaning: Tab inserts a tab in a focused query editor, the filters panel
+     * walks its fields first, and an inline result edit consumes keys. */
+    if (render_event_is_special(&event, UI_KEY_TAB) ||
+        render_event_is_special(&event, UI_KEY_BTAB)) {
+      bool is_tab = render_event_is_special(&event, UI_KEY_TAB);
+      Tab *ft = TUI_TAB(state);
+      UITabState *fui = TUI_TAB_UI(state);
+      bool in_main = ft && !state->sidebar_focused;
+      bool editor_tab = in_main && is_tab && ft->type == TAB_TYPE_QUERY &&
+                        fui && !fui->query_unfocused &&
+                        !fui->query_focus_results;
+      bool result_edit = in_main && ft->type == TAB_TYPE_QUERY && fui &&
+                         fui->query_result_editing;
+      bool filters_walk = in_main && ft->type == TAB_TYPE_TABLE &&
+                          tui_filters_visible(state) &&
+                          tui_filters_focused(state);
+      if (!editor_tab && !result_edit && !filters_walk) {
+        tui_focus_cycle(state, is_tab ? 1 : -1);
+        tui_refresh(state);
+        continue;
+      }
     }
 
     /* Handle query tab input */

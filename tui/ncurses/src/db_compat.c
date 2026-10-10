@@ -7,11 +7,89 @@
  */
 
 #include "db_compat.h"
+#include "../../liblace/include/config/history.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+
+/* ==========================================================================
+ * Daemon recovery
+ * If the daemon died, liblace spawns a new one and bumps the client
+ * generation; our conn_id then refers to nothing. Re-open the database from
+ * the stored connection string so the session continues transparently.
+ * ========================================================================== */
+
+/* Serializes conn_refresh: the main thread and prefetch workers can both
+ * notice a new generation at once; only one may re-open the database. */
+static pthread_mutex_t g_refresh_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Reconnect if the daemon was replaced, then declare this thread's
+ * generation so liblace refuses to send a stale conn_id to a different
+ * daemon. Returns true if conn_id changed. */
+static bool conn_refresh(DbConnection *conn) {
+  bool changed = false;
+  pthread_mutex_lock(&g_refresh_lock);
+  uint64_t gen = lace_client_generation(conn->client);
+  if (gen != conn->generation && conn->connstr) {
+    int new_id = -1;
+    if (lace_connect(conn->client, conn->connstr, NULL, &new_id) == LACE_OK) {
+      conn->conn_id = new_id;
+      /* lace_connect may itself have hit another restart */
+      conn->generation = lace_client_generation(conn->client);
+      changed = true;
+    }
+  }
+  uint64_t mine = conn->generation;
+  pthread_mutex_unlock(&g_refresh_lock);
+  lace_expect_generation(conn->client, mine);
+  return changed;
+}
+
+/* After a failed read-only call: retry once if the link dropped or the
+ * daemon was replaced. Writes are never retried (they may have applied). */
+static bool conn_should_retry(DbConnection *conn, int rc) {
+  if (rc == LACE_ERR_CONNECTION_LOST || rc == LACE_ERR_PIPE_ERROR) {
+    conn_refresh(conn);
+    return true;
+  }
+  return conn_refresh(conn);
+}
+
+static bool sql_is_read_only(const char *sql) {
+  while (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r') sql++;
+  return strncasecmp(sql, "SELECT", 6) == 0 || strncasecmp(sql, "PRAGMA", 6) == 0 ||
+         strncasecmp(sql, "SHOW", 4) == 0 || strncasecmp(sql, "EXPLAIN", 7) == 0 ||
+         strncasecmp(sql, "DESCRIBE", 8) == 0;
+}
+
+/* Quote a table reference for this connection's dialect, e.g.
+ * "schema"."table" on PostgreSQL (caller frees). */
+static char *quote_table(const DbConnection *conn, const char *table) {
+  return lace_quote_table(conn->driver_type, table);
+}
+
+/* Build "SELECT * FROM t [WHERE w] [ORDER BY o] LIMIT n OFFSET m" without
+ * a fixed-size buffer (long raw filters used to be silently truncated). */
+static char *build_page_sql(const DbConnection *conn, const char *table,
+                            const char *where_clause, const char *order_clause,
+                            size_t limit, size_t offset) {
+  char *qt = quote_table(conn, table);
+  if (!qt) {
+    return NULL;
+  }
+  bool has_where = where_clause && where_clause[0];
+  bool has_order = order_clause && order_clause[0];
+  char *sql = str_printf("SELECT * FROM %s%s%s%s%s LIMIT %zu OFFSET %zu", qt,
+                         has_where ? " WHERE " : "", has_where ? where_clause : "",
+                         has_order ? " ORDER BY " : "", has_order ? order_clause : "",
+                         limit, offset);
+  free(qt);
+  return sql;
+}
 
 /* Static driver stubs for each supported driver */
 static const DbDriver g_driver_sqlite = {"sqlite", "SQLite"};
@@ -40,6 +118,7 @@ DbConnection *db_conn_wrap(lace_client_t *client, int conn_id, const char *conns
   conn->conn_id = conn_id;
   conn->client = client;
   conn->connstr = connstr ? str_dup(connstr) : NULL;
+  conn->generation = lace_client_generation(client);
   conn->driver = &g_driver_unknown;
 
   /* Get connection info from liblace */
@@ -66,7 +145,7 @@ DbConnection *db_conn_wrap(lace_client_t *client, int conn_id, const char *conns
 /* Free a DbConnection wrapper (does NOT close the connection) */
 void db_conn_free(DbConnection *conn) {
   if (!conn) return;
-  free(conn->connstr);
+  str_secure_free(conn->connstr); /* May embed a password */
   free(conn->database);
   free(conn->host);
   free(conn->user);
@@ -124,7 +203,11 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
   }
 
   char **tables = NULL;
+  conn_refresh(conn);
   int rc = lace_list_tables(conn->client, conn->conn_id, &tables, count);
+  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
+    rc = lace_list_tables(conn->client, conn->conn_id, &tables, count);
+  }
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return NULL;
@@ -146,7 +229,11 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **e
   }
 
   LaceSchema *schema = NULL;
+  conn_refresh(conn);
   int rc = lace_get_schema(conn->client, conn->conn_id, table, &schema);
+  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
+    rc = lace_get_schema(conn->client, conn->conn_id, table, &schema);
+  }
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return NULL;
@@ -163,7 +250,11 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
   }
 
   LaceResult *result = NULL;
+  conn_refresh(conn);
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
+  if (rc != LACE_OK && sql_is_read_only(sql) && conn_should_retry(conn, rc)) {
+    rc = lace_exec(conn->client, conn->conn_id, sql, &result);
+  }
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return NULL;
@@ -180,6 +271,7 @@ int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
   }
 
   LaceResult *result = NULL;
+  conn_refresh(conn);
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
@@ -202,9 +294,15 @@ ResultSet *db_query_table(DbConnection *conn, const char *table,
   }
 
   LaceResult *result = NULL;
+  conn_refresh(conn);
   int rc = lace_query(conn->client, conn->conn_id, table,
                       filters, num_filters, sorts, num_sorts,
                       offset, limit, &result);
+  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
+    rc = lace_query(conn->client, conn->conn_id, table,
+                        filters, num_filters, sorts, num_sorts,
+                        offset, limit, &result);
+  }
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return NULL;
@@ -217,27 +315,8 @@ ResultSet *db_query_table(DbConnection *conn, const char *table,
 ResultSet *db_query_page(DbConnection *conn, const char *table,
                          size_t offset, size_t limit,
                          const char *order_clause, bool order_desc, char **err) {
-  if (!conn || !table) {
-    if (err) *err = str_dup("Invalid arguments");
-    return NULL;
-  }
-
-  (void)order_desc; /* order_clause already includes direction */
-
-  /* Build SQL query */
-  char sql[2048];
-  const char *q = conn->driver_type == LACE_DRIVER_MYSQL ||
-                  conn->driver_type == LACE_DRIVER_MARIADB ? "`" : "\"";
-
-  if (order_clause && order_clause[0]) {
-    snprintf(sql, sizeof(sql), "SELECT * FROM %s%s%s ORDER BY %s LIMIT %zu OFFSET %zu",
-             q, table, q, order_clause, limit, offset);
-  } else {
-    snprintf(sql, sizeof(sql), "SELECT * FROM %s%s%s LIMIT %zu OFFSET %zu",
-             q, table, q, limit, offset);
-  }
-
-  return db_query(conn, sql, err);
+  return db_query_page_where(conn, table, offset, limit, NULL, order_clause,
+                             order_desc, err);
 }
 
 /* Query page with WHERE clause */
@@ -253,30 +332,14 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
 
   (void)order_desc; /* order_clause already includes direction */
 
-  /* Build SQL query with WHERE clause */
-  char sql[4096];
-  const char *q = conn->driver_type == LACE_DRIVER_MYSQL ||
-                  conn->driver_type == LACE_DRIVER_MARIADB ? "`" : "\"";
-
-  if (where_clause && where_clause[0] && order_clause && order_clause[0]) {
-    snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s WHERE %s ORDER BY %s LIMIT %zu OFFSET %zu",
-             q, table, q, where_clause, order_clause, limit, offset);
-  } else if (where_clause && where_clause[0]) {
-    snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s WHERE %s LIMIT %zu OFFSET %zu",
-             q, table, q, where_clause, limit, offset);
-  } else if (order_clause && order_clause[0]) {
-    snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s ORDER BY %s LIMIT %zu OFFSET %zu",
-             q, table, q, order_clause, limit, offset);
-  } else {
-    snprintf(sql, sizeof(sql),
-             "SELECT * FROM %s%s%s LIMIT %zu OFFSET %zu",
-             q, table, q, limit, offset);
+  char *sql = build_page_sql(conn, table, where_clause, order_clause, limit, offset);
+  if (!sql) {
+    if (err) *err = str_dup("Out of memory");
+    return NULL;
   }
-
-  return db_query(conn, sql, err);
+  ResultSet *rs = db_query(conn, sql, err);
+  free(sql);
+  return rs;
 }
 
 /* Count rows in table (with optional filters) */
@@ -288,8 +351,13 @@ bool db_count_rows(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
   int rc = lace_count(conn->client, conn->conn_id, table,
                       filters, num_filters, count, approximate);
+  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
+    rc = lace_count(conn->client, conn->conn_id, table,
+                        filters, num_filters, count, approximate);
+  }
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return false;
@@ -306,20 +374,25 @@ bool db_count_rows_where(DbConnection *conn, const char *table,
     return false;
   }
 
-  char sql[4096];
-  const char *q = conn->driver_type == LACE_DRIVER_MYSQL ||
-                  conn->driver_type == LACE_DRIVER_MARIADB ? "`" : "\"";
-
-  if (where_clause && where_clause[0]) {
-    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM %s%s%s WHERE %s",
-             q, table, q, where_clause);
-  } else {
-    snprintf(sql, sizeof(sql), "SELECT COUNT(*) FROM %s%s%s",
-             q, table, q);
+  char *qt = quote_table(conn, table);
+  bool has_where = where_clause && where_clause[0];
+  char *sql = qt ? str_printf("SELECT COUNT(*) FROM %s%s%s", qt,
+                              has_where ? " WHERE " : "",
+                              has_where ? where_clause : "")
+                 : NULL;
+  free(qt);
+  if (!sql) {
+    if (err) *err = str_dup("Out of memory");
+    return false;
   }
 
   LaceResult *result = NULL;
+  conn_refresh(conn);
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
+  if (rc != LACE_OK && sql_is_read_only(sql) && conn_should_retry(conn, rc)) {
+    rc = lace_exec(conn->client, conn->conn_id, sql, &result);
+  }
+  free(sql);
   if (rc != LACE_OK) {
     if (err) *err = str_dup(lace_client_error(conn->client));
     return false;
@@ -378,6 +451,7 @@ bool db_update_cell(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
   int rc = lace_update(conn->client, conn->conn_id, table,
                        pk, num_pk, column, value);
   free_pk_array(pk, num_pk);
@@ -387,6 +461,9 @@ bool db_update_cell(DbConnection *conn, const char *table,
     return false;
   }
 
+  if (conn->on_sql && lace_last_sql()) {
+    conn->on_sql(conn->on_sql_ctx, conn, lace_last_sql(), LACE_HISTORY_UPDATE);
+  }
   return true;
 }
 
@@ -405,6 +482,7 @@ bool db_delete_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
   int rc = lace_delete(conn->client, conn->conn_id, table, pk, num_pk);
   free_pk_array(pk, num_pk);
 
@@ -413,6 +491,9 @@ bool db_delete_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  if (conn->on_sql && lace_last_sql()) {
+    conn->on_sql(conn->on_sql_ctx, conn, lace_last_sql(), LACE_HISTORY_DELETE);
+  }
   return true;
 }
 
@@ -425,17 +506,13 @@ bool db_insert_row(DbConnection *conn, const char *table,
     return false;
   }
 
-  /* Extract column names from LaceColumn array */
-  const char **col_names = safe_malloc(num_columns * sizeof(char *));
-  if (!col_names) {
-    if (err) *err = str_dup("Memory allocation failed");
-    return false;
-  }
-
+  /* Extract column names from LaceColumn array (0 columns: all defaults) */
+  const char **col_names = safe_malloc((num_columns ? num_columns : 1) * sizeof(char *));
   for (size_t i = 0; i < num_columns; i++) {
     col_names[i] = columns[i].name;
   }
 
+  conn_refresh(conn);
   int rc = lace_insert(conn->client, conn->conn_id, table,
                        col_names, values, num_columns, NULL, NULL);
   free(col_names);
@@ -445,7 +522,36 @@ bool db_insert_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  if (conn->on_sql && lace_last_sql()) {
+    conn->on_sql(conn->on_sql_ctx, conn, lace_last_sql(), LACE_HISTORY_INSERT);
+  }
   return true;
+}
+
+/* Fetch `columns` of the rows a PK WHERE clause matches (at most 2) */
+ResultSet *db_select_by_pk(DbConnection *conn, const char *table,
+                           const char **pk_cols, const LaceValue *pk_vals,
+                           size_t num_pk, const char **columns,
+                           size_t num_columns, char **err) {
+  if (!conn || !table || !pk_cols || !pk_vals || num_pk == 0) {
+    if (err) *err = str_dup("Invalid arguments");
+    return NULL;
+  }
+  LacePkValue *pk = build_pk_array(pk_cols, pk_vals, num_pk);
+  if (!pk) {
+    if (err) *err = str_dup("Out of memory");
+    return NULL;
+  }
+  LaceResult *result = NULL;
+  conn_refresh(conn);
+  int rc = lace_select_by_pk(conn->client, conn->conn_id, table, pk, num_pk,
+                             columns, num_columns, &result);
+  free_pk_array(pk, num_pk);
+  if (rc != LACE_OK) {
+    if (err) *err = str_dup(lace_client_error(conn->client));
+    return NULL;
+  }
+  return result;
 }
 
 /* Cancel a running query on a connection */

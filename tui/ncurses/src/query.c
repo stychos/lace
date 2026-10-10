@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 
+
 /* Note: History recording is now handled automatically by the database layer
  * via the history callback set up in app_add_connection(). */
 
@@ -73,9 +74,11 @@ bool tab_create_query(TuiState *state) {
     ui->filters_visible = false;
     ui->filters_focused = false;
 
-    /* Query starts with focus on editor, not results */
+    /* A new query tab starts with focus on the editor, ready to type */
     ui->query_focus_results = false;
+    ui->query_unfocused = false;
   }
+  state->shown_tab_uid = tab->uid;
 
   /* Update tab name (free the default "Query" name set by
    * workspace_create_query_tab) */
@@ -199,6 +202,7 @@ void tui_draw_query(TuiState *state) {
   size_t query_cursor = tab->query_cursor;
   size_t query_scroll_line = tab->query_scroll_line;
   bool focus_results = ui->query_focus_results;
+  bool focus_editor = !ui->query_unfocused && !focus_results;
 
   werase(state->main_win);
 
@@ -241,12 +245,14 @@ void tui_draw_query(TuiState *state) {
       query_find_bounds_at_cursor(tab->query_text, query_cursor, &query_start, &query_end);
 
   /* Draw editor area */
-  if (!focus_results) {
+  if (focus_editor) {
     wattron(state->main_win, A_BOLD);
   }
-  mvwprintw(state->main_win, 0, 1,
-            "SQL Query (^R: run, ^A: all, ^T: transaction, ^W: switch)");
-  if (!ui->query_focus_results) {
+  mvwprintw(state->main_win, 0, 1, "%s",
+            ui->query_unfocused
+                ? "SQL Query (Enter/Tab: edit, ^R: run, Down: results)"
+                : "SQL Query (^R: run, ^A: all, ^T: transaction, Esc: leave)");
+  if (focus_editor) {
     wattroff(state->main_win, A_BOLD);
   }
 
@@ -298,8 +304,11 @@ void tui_draw_query(TuiState *state) {
     }
 
     /* Draw cursor if on this line and editor focused */
-    if (!ui->query_focus_results && line_idx == cursor_line) {
-      int cursor_x = 4 + (int)cursor_col;
+    if (focus_editor && line_idx == cursor_line) {
+      /* Tabs are drawn 4 columns wide */
+      int cursor_x = 4;
+      for (size_t i = 0; i < cursor_col && i < li->len; i++)
+        cursor_x += tab->query_text[li->start + i] == '\t' ? 4 : 1;
       if (cursor_x < win_cols) {
         char cursor_char = ' ';
         if (cursor_col < li->len) {
@@ -362,7 +371,8 @@ void tui_draw_query(TuiState *state) {
                              .scroll_row = tab->query_result_scroll_row,
                              .scroll_col = tab->query_result_scroll_col,
                              .selection_offset = tab->query_loaded_offset,
-                             .is_focused = ui->query_focus_results,
+                             .is_focused = ui->query_focus_results &&
+                                           !ui->query_unfocused,
                              .is_editing = ui->query_result_editing,
                              .edit_buffer = ui->query_result_edit_buf,
                              .edit_pos = ui->query_result_edit_pos,
@@ -491,7 +501,40 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     return query_result_handle_edit_input(state, tab, event);
   }
 
-  /* Ctrl+W or Esc toggles focus between editor and results */
+  /* Unfocused (just arrived at this tab): only keys that pick a focus are
+   * handled here; everything else goes to global hotkeys such as [ and ] */
+  if (ui->query_unfocused) {
+    if (hotkey_matches(cfg, event, HOTKEY_QUERY_FOCUS_EDITOR)) {
+      ui->query_unfocused = false;
+      ui->query_focus_results = false;
+      return true;
+    }
+    if (hotkey_matches(cfg, event, HOTKEY_QUERY_SWITCH_FOCUS) ||
+        (tab->query_results && hotkey_matches(cfg, event, HOTKEY_MOVE_DOWN))) {
+      ui->query_unfocused = false;
+      ui->query_focus_results = tab->query_results != NULL;
+      return true;
+    }
+    if (hotkey_matches(cfg, event, HOTKEY_MOVE_LEFT) && state->sidebar_visible) {
+      state->sidebar_focused = true;
+      return true;
+    }
+    /* Running needs no focus: run from the editor's cursor like the editor
+     * does; a successful run moves focus to the results */
+    if (!hotkey_matches(cfg, event, HOTKEY_EXECUTE_QUERY) &&
+        !hotkey_matches(cfg, event, HOTKEY_EXECUTE_ALL) &&
+        !hotkey_matches(cfg, event, HOTKEY_EXECUTE_TRANSACTION)) {
+      return false;
+    }
+    ui->query_focus_results = false;
+  } else if (hotkey_matches(cfg, event, HOTKEY_QUERY_UNFOCUS) &&
+             !(ui->query_focus_results && tab->num_selected > 0)) {
+    /* Esc leaves the editor or results (with selections it clears them) */
+    ui->query_unfocused = true;
+    return true;
+  }
+
+  /* Toggle focus between editor and results (unbound by default) */
   if (hotkey_matches(cfg, event, HOTKEY_QUERY_SWITCH_FOCUS)) {
     ui->query_focus_results = !ui->query_focus_results;
     return true;
@@ -580,7 +623,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
         sql_copy = str_dup(tab->query_base_sql);
       } else if (tab->query_text && *tab->query_text) {
         /* Fall back to finding query at cursor */
-        sql_copy = query_find_at_cursor(tab->query_text, tab->query_cursor);
+        sql_copy = query_find_at_cursor(tab->query_text, tab->query_cursor,
+                             db_conn_driver_name(state->conn));
       }
       if (sql_copy && *sql_copy) {
         query_execute(state, sql_copy);
@@ -804,7 +848,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
   /* Ctrl+R - run query under cursor */
   if (hotkey_matches(cfg, event, HOTKEY_EXECUTE_QUERY)) {
-    char *query = query_find_at_cursor(tab->query_text, tab->query_cursor);
+    char *query = query_find_at_cursor(tab->query_text, tab->query_cursor,
+                             db_conn_driver_name(state->conn));
     if (query && *query) {
       query_execute(state, query);
     } else {
@@ -826,6 +871,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     char *p = text;
     int count = 0;
     int errors = 0;
+    bool cancelled = false;
 
     while (p && *p) {
       /* Skip whitespace */
@@ -834,25 +880,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       if (!*p)
         break;
 
-      /* Find end of query */
-      char *end = p;
-      bool in_string = false;
-      char quote_char = 0;
-      while (*end) {
-        if (in_string) {
-          if (*end == quote_char && (end == p || *(end - 1) != '\\')) {
-            in_string = false;
-          }
-        } else {
-          if (*end == '\'' || *end == '"') {
-            in_string = true;
-            quote_char = *end;
-          } else if (*end == ';') {
-            break;
-          }
-        }
-        end++;
-      }
+      /* Find end of statement (dialect-aware: quotes, comments, $$) */
+      char *end = p + query_statement_length(p, db_conn_driver_name(state->conn));
 
       /* Extract query */
       char saved = *end;
@@ -871,11 +900,15 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
         memcpy(query, q, qlen);
         query[qlen] = '\0';
         query_execute(state, query);
+        free(query);
+        if (query_last_execute_cancelled()) {
+          cancelled = true;
+          break; /* User cancelled: do not run the remaining statements */
+        }
         count++;
         if (tab->query_error) {
           errors++;
         }
-        free(query);
       }
 
       *end = saved;
@@ -884,7 +917,9 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     free(text);
 
-    if (errors > 0) {
+    if (cancelled) {
+      tui_set_status(state, "Cancelled after %d of the queries", count);
+    } else if (errors > 0) {
       tui_set_error(state, "Executed %d queries, %d errors", count, errors);
     } else {
       tui_set_status(state, "Executed %d queries", count);
@@ -918,6 +953,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     char *p = text;
     int count = 0;
     bool had_error = false;
+    bool tx_cancelled = false;
 
     while (p && *p && !had_error) {
       /* Skip whitespace */
@@ -926,25 +962,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       if (!*p)
         break;
 
-      /* Find end of query */
-      char *end = p;
-      bool in_string = false;
-      char quote_char = 0;
-      while (*end) {
-        if (in_string) {
-          if (*end == quote_char && (end == p || *(end - 1) != '\\')) {
-            in_string = false;
-          }
-        } else {
-          if (*end == '\'' || *end == '"') {
-            in_string = true;
-            quote_char = *end;
-          } else if (*end == ';') {
-            break;
-          }
-        }
-        end++;
-      }
+      /* Find end of statement (dialect-aware: quotes, comments, $$) */
+      char *end = p + query_statement_length(p, db_conn_driver_name(state->conn));
 
       /* Extract query */
       char saved = *end;
@@ -963,11 +982,17 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
         memcpy(query, q, qlen);
         query[qlen] = '\0';
         query_execute(state, query);
+        free(query);
+        if (query_last_execute_cancelled()) {
+          /* A cancel must never lead to COMMIT of a partial transaction */
+          had_error = true;
+          tx_cancelled = true;
+          break;
+        }
         count++;
         if (tab->query_error) {
           had_error = true;
         }
-        free(query);
       }
 
       *end = saved;
@@ -981,8 +1006,12 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     if (had_error) {
       db_exec(state->conn, "ROLLBACK", &err);
       free(err);
-      tui_set_error(state, "Transaction rolled back after error in query %d",
-                    count);
+      if (tx_cancelled) {
+        tui_set_status(state, "Transaction cancelled and rolled back");
+      } else {
+        tui_set_error(state, "Transaction rolled back after error in query %d",
+                      count + 1);
+      }
     } else {
       db_exec(state->conn, "COMMIT", &err);
       if (err) {
@@ -1028,6 +1057,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* On last line - move focus to results panel */
       ui->query_focus_results = true;
+      ui->query_unfocused = false;
     }
 
     free(lines);
@@ -1054,6 +1084,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* At end of text - move focus to results panel */
       ui->query_focus_results = true;
+      ui->query_unfocused = false;
     }
     return true;
   }
@@ -1296,6 +1327,12 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       }
     }
     free(paste_text);
+    return true;
+  }
+
+  /* Tab - insert a tab character (Shift+Tab leaves the editor) */
+  if (render_event_is_special(event, UI_KEY_TAB)) {
+    query_insert_char(tab, '\t');
     return true;
   }
 

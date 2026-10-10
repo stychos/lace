@@ -84,9 +84,10 @@ bool tui_show_confirm_dialog(TuiState *state, const char *message) {
     case KEY_LEFT:
     case KEY_RIGHT:
     case '\t':
+    case KEY_BTAB:
     case 'h':
     case 'l':
-      dialog_ctx_cycle_button(&ctx, 2);
+      dialog_ctx_cycle_button(&ctx, 2); /* Two buttons: either way toggles */
       break;
 
     case 'y':
@@ -232,7 +233,8 @@ char *tui_show_password_dialog(TuiState *state, const char *title,
     } else if (render_event_is_special(&event, UI_KEY_TAB) ||
                render_event_is_special(&event, UI_KEY_DOWN)) {
       focus = FOCUS_NEXT(focus, 3);
-    } else if (render_event_is_special(&event, UI_KEY_UP)) {
+    } else if (render_event_is_special(&event, UI_KEY_UP) ||
+               render_event_is_special(&event, UI_KEY_BTAB)) {
       focus = FOCUS_PREV(focus, 3);
     } else if (render_event_is_special(&event, UI_KEY_ENTER)) {
       if (focus == 2) {
@@ -385,7 +387,8 @@ void tui_show_goto_dialog(TuiState *state) {
 
     switch (ch) {
     case '\t':
-      selected = 1 - selected;
+    case KEY_BTAB:
+      selected = 1 - selected; /* Two buttons: either way toggles */
       break;
 
     case 27: /* Escape */
@@ -458,8 +461,10 @@ void tui_show_goto_dialog(TuiState *state) {
             }
 
             /* Ensure focus is on results */
-            if (ui)
+            if (ui) {
               ui->query_focus_results = true;
+              ui->query_unfocused = false;
+            }
           } else {
             /* Handle regular table navigation */
             /* Check if target is in currently loaded range */
@@ -606,6 +611,7 @@ void tui_show_goto_dialog(TuiState *state) {
                       db_result_free(upd_tab->data);
                     }
                     upd_tab->data = new_data;
+                    tab_data_replaced(upd_tab);
                     upd_tab->loaded_offset = load_offset;
                     upd_tab->loaded_count = new_data->num_rows;
 

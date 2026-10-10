@@ -125,12 +125,37 @@ void lace_client_destroy(lace_client_t *client);
 bool lace_client_connected(const lace_client_t *client);
 
 /*
- * Get last error message from client.
+ * Get the error message of the calling thread's last failed liblace call.
+ * Errors are kept per thread, so concurrent callers sharing one client
+ * never see (or free) each other's messages.
  *
  * @param client  Client handle
- * @return        Error message string (valid until next call)
+ * @return        Error message string (valid until this thread's next call)
  */
 const char *lace_client_error(const lace_client_t *client);
+
+/*
+ * Daemon generation. Starts at 0 and increases each time liblace had to
+ * spawn a replacement daemon. Connection IDs obtained under an older
+ * generation are invalid; reconnect with lace_connect().
+ */
+uint64_t lace_client_generation(const lace_client_t *client);
+
+/*
+ * Declare, for the calling thread, which generation its connection IDs
+ * belong to. If the daemon has been replaced since, calls that carry a
+ * conn_id fail with LACE_ERR_CONNECTION_LOST instead of reaching a
+ * different database that reuses the same ID. Call after (re)connecting.
+ */
+void lace_expect_generation(lace_client_t *client, uint64_t generation);
+
+/*
+ * The last SQL statement the calling thread sent to the daemon (including
+ * statements liblace builds itself for lace_update/lace_delete/lace_insert).
+ * Valid until this thread's next liblace call; NULL if none. Used by
+ * frontends to record query history.
+ */
+const char *lace_last_sql(void);
 
 /* ==========================================================================
  * Database Connection
@@ -184,11 +209,35 @@ void lace_conn_info_array_free(LaceConnInfo *info, size_t count);
  * ========================================================================== */
 
 /*
+ * Table references.
+ *
+ * Every `table` argument in this API is a table reference. For SQLite and
+ * MySQL/MariaDB it is the plain table name. For PostgreSQL it is either
+ * "table" (resolved through search_path, like unqualified SQL) or
+ * "schema.table". A part is written in double quotes, with embedded quotes
+ * doubled, when it contains '.' or '"' or is empty: "my.schema"."a""b".
+ * Unlike SQL, bare parts are not case-folded: Orders means the table Orders.
+ */
+
+/* Build a reference from a schema (NULL for unqualified) and a table name.
+ * Use LACE_DRIVER_POSTGRES rules; for other drivers pass the name as is.
+ * Caller frees. */
+char *lace_table_ref(const char *schema, const char *name);
+
+/* Quote a table reference as SQL for the driver: "schema"."table", "table"
+ * or `table`. Caller frees; NULL on allocation failure. */
+char *lace_quote_table(LaceDriver driver, const char *ref);
+
+/*
  * List tables in a database.
+ *
+ * PostgreSQL lists every table in every non-system schema the user can use,
+ * excluding partitions. Tables in "public" that unqualified SQL reaches are
+ * listed bare; all others as "schema.table". Bare names sort first.
  *
  * @param client   Client handle
  * @param conn_id  Connection ID
- * @param tables   Output: array of table names (caller must free with lace_tables_free)
+ * @param tables   Output: array of table references (caller must free with lace_tables_free)
  * @param count    Output: number of tables
  * @return         LACE_OK on success, error code on failure
  */
@@ -242,7 +291,9 @@ int lace_query(lace_client_t *client, int conn_id, const char *table,
  * @param filters      Array of filters (NULL for none)
  * @param num_filters  Number of filters
  * @param count        Output: row count
- * @param approximate  Output: true if count is approximate
+ * @param approximate  In: if non-NULL and true, a catalog estimate may be
+ *                     returned for large PostgreSQL/MySQL tables.
+ *                     Out: true if the returned count is an estimate.
  * @return             LACE_OK on success, error code on failure
  */
 int lace_count(lace_client_t *client, int conn_id, const char *table,
@@ -319,7 +370,7 @@ int lace_delete(lace_client_t *client, int conn_id, const char *table,
  * @param table        Table name
  * @param columns      Array of column names
  * @param values       Array of values (parallel to columns)
- * @param num_columns  Number of columns
+ * @param num_columns  Number of columns; 0 inserts a row of column defaults
  * @param out_pk       Output: primary key of inserted row (caller must free, may be NULL)
  * @param out_num_pk   Output: number of primary key columns
  * @return             LACE_OK on success, error code on failure
@@ -327,6 +378,17 @@ int lace_delete(lace_client_t *client, int conn_id, const char *table,
 int lace_insert(lace_client_t *client, int conn_id, const char *table,
                 const char **columns, const LaceValue *values, size_t num_columns,
                 LacePkValue **out_pk, size_t *out_num_pk);
+
+/*
+ * Fetch the given columns of the row(s) a primary-key WHERE clause matches,
+ * using exactly the WHERE that lace_update/lace_delete would build. At most
+ * two rows are returned, so callers can tell "exactly one" from "several".
+ * Used to verify a target row before writing.
+ */
+int lace_select_by_pk(lace_client_t *client, int conn_id, const char *table,
+                      const LacePkValue *pk, size_t num_pk,
+                      const char **columns, size_t num_columns,
+                      LaceResult **result);
 
 /* Free primary key array */
 void lace_pk_free(LacePkValue *pk, size_t num_pk);

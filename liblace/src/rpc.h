@@ -28,6 +28,11 @@
 int lace_rpc_call(lace_client_t *client, const char *method,
                   cJSON *params, cJSON **result);
 
+/* Like lace_rpc_call, but returns LACE_ERR_TIMEOUT immediately instead of
+ * waiting when another call holds the client. */
+int lace_rpc_try_call(lace_client_t *client, const char *method,
+                      cJSON *params, cJSON **result);
+
 /* ==========================================================================
  * JSON to Types Conversion
  * ========================================================================== */

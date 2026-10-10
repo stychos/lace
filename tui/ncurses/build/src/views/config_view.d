@@ -1,6 +1,7 @@
-build/src/views/config_view.o: src/views/config_view.c \
-  src/views/config_view.h src/views/../tui.h src/views/../async/async.h \
-  src/views/../async/../db_compat.h \
+build/src/views/config_view.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/views/config_view.c src/views/config_view.h src/views/../tui.h \
+  src/views/../async/async.h src/views/../async/../db_compat.h \
   ../../liblace/include/../../liblace/include/lace.h \
   ../../liblace/include/../../liblace/include/types.h \
   ../../liblace/include/../../liblace/include/error.h \
@@ -14,13 +15,16 @@ build/src/views/config_view.o: src/views/config_view.c \
   src/views/../viewmodel/table_viewmodel.h \
   src/views/../viewmodel/../core/app_state.h \
   src/views/../viewmodel/../db_compat.h src/views/../core/ui_types.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   src/views/../config/config.h \
   ../../liblace/include/../../liblace/include/util/str.h \
-  src/views/../render_helpers.h src/views/../tui_internal.h
+  src/views/../render_helpers.h src/views/../tui_internal.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/views/config_view.h:
 src/views/../tui.h:
 src/views/../async/async.h:
@@ -42,7 +46,7 @@ src/views/../viewmodel/table_viewmodel.h:
 src/views/../viewmodel/../core/app_state.h:
 src/views/../viewmodel/../db_compat.h:
 src/views/../core/ui_types.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
@@ -50,3 +54,5 @@ src/views/../config/config.h:
 ../../liblace/include/../../liblace/include/util/str.h:
 src/views/../render_helpers.h:
 src/views/../tui_internal.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:

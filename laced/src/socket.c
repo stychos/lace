@@ -12,6 +12,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -217,6 +218,9 @@ int laced_create_tcp_socket(const char *bind_addr, int port) {
  * Client Management
  * ========================================================================== */
 
+/* How long a write may wait for a client to drain its socket buffer */
+#define LACED_WRITE_TIMEOUT_MS 5000
+
 LacedClient *laced_accept_client(int listen_fd) {
   struct sockaddr_storage addr;
   socklen_t addr_len = sizeof(addr);
@@ -270,20 +274,35 @@ bool laced_client_write_line(LacedClient *client, const char *line) {
   memcpy(buf, line, len);
   buf[len] = '\n';
 
-  /* Write in a loop to handle partial writes */
+  /* Write in a loop to handle partial writes. The socket is non-blocking.
+   * LACED_WRITE_TIMEOUT_MS bounds a *stall* (no progress at all), not the
+   * whole transfer: a reader that keeps draining may take as long as it
+   * needs for a large result, while one that stopped reading is dropped so
+   * it cannot freeze the event loop. */
   size_t written = 0;
   while (written < total) {
     ssize_t n = write(client->fd, buf + written, total - written);
-    if (n < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        /* Socket buffer full, try again */
-        usleep(1000);
+    if (n > 0) {
+      written += (size_t)n;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) {
+      continue;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      struct pollfd pfd = {.fd = client->fd, .events = POLLOUT};
+      int r = poll(&pfd, 1, LACED_WRITE_TIMEOUT_MS);
+      if (r > 0 && !(pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+        continue; /* Writable again */
+      }
+      if (r < 0 && errno == EINTR) {
         continue;
       }
-      free(buf);
-      return false;
+      /* Timed out with zero progress, or the peer went away */
     }
-    written += (size_t)n;
+    client->closed = true; /* Stalled, EPIPE, ECONNRESET, ... */
+    free(buf);
+    return false;
   }
 
   free(buf);
@@ -299,18 +318,26 @@ char *laced_client_try_read_line(LacedClient *client) {
   char temp[4096];
   ssize_t n = read(client->fd, temp, sizeof(temp));
 
-  if (n <= 0) {
-    if (n == 0) {
-      /* EOF - return any partial data as final line */
-      if (client->partial_len > 0) {
-        char *line = client->partial_buf;
-        line[client->partial_len] = '\0';
-        client->partial_buf = NULL;
-        client->partial_len = 0;
-        client->partial_cap = 0;
-        return line;
-      }
+  if (n == 0) {
+    /* EOF: the peer closed its end. Flag the client so the event loop drops
+     * it now instead of spinning on a permanently-readable fd until the idle
+     * timeout fires. Hand back any trailing partial line first. */
+    client->closed = true;
+    if (client->partial_len > 0) {
+      char *line = client->partial_buf;
+      line[client->partial_len] = '\0';
+      client->partial_buf = NULL;
+      client->partial_len = 0;
+      client->partial_cap = 0;
+      return line;
     }
+    return NULL;
+  }
+  if (n < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+      return NULL; /* No data right now */
+    }
+    client->closed = true; /* ECONNRESET and friends */
     return NULL;
   }
 
@@ -360,18 +387,7 @@ char *laced_client_try_read_line(LacedClient *client) {
 
 /* Check if client connection is still alive */
 bool laced_client_is_connected(LacedClient *client) {
-  if (!client || client->fd < 0) {
-    return false;
-  }
-
-  /* Try a zero-byte read to check connection status */
-  char buf;
-  ssize_t n = recv(client->fd, &buf, 0, MSG_PEEK | MSG_DONTWAIT);
-  if (n < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      return true; /* Socket is fine, just no data */
-    }
-    return false; /* Connection error */
-  }
-  return true;
+  /* A zero-length recv() returns 0 for both live and closed sockets, so it
+   * cannot detect hangups. The read path records EOF/errors in `closed`. */
+  return client && client->fd >= 0 && !client->closed;
 }

@@ -51,7 +51,10 @@ typedef struct UITabState {
   bool filters_visible;
   bool filters_focused;
 
-  /* Query tab UI state */
+  /* Query tab UI state. query_unfocused: neither editor nor results has
+   * focus, so keys reach global hotkeys (tab switching etc.); set whenever
+   * the user arrives at the tab. Enter/Tab focus the editor. */
+  bool query_unfocused;
   bool query_focus_results;
   bool query_result_editing;
   char *query_result_edit_buf;
@@ -147,6 +150,7 @@ struct TuiState {
 
   /* Running flag */
   bool running;
+  uint64_t shown_tab_uid; /* Tab drawn last; detects switching to a tab */
 
   /* Background loading indicator */
   bool bg_loading_active;
@@ -487,6 +491,11 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset);
 
 void tui_draw_filters_panel(TuiState *state);
 bool tui_handle_filters_input(TuiState *state, const UiEvent *event);
+
+/* Move keyboard focus to the next (dir > 0) or previous (dir < 0) panel in
+ * screen order: sidebar, then filters and table, or query editor and
+ * results. Returns false when there is nowhere to move. */
+bool tui_focus_cycle(TuiState *state, int dir);
 bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y);
 void tui_apply_filters(TuiState *state);
 int tui_get_filters_panel_height(TuiState *state);

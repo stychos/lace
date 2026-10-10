@@ -47,6 +47,7 @@ typedef struct {
   size_t log_max_size;   /* Max log file size (0 for default 10MB) */
   int log_rotate;        /* Number of rotated files to keep */
   bool quiet;            /* Suppress stderr output */
+  int exit_when_idle;    /* Exit after N seconds with no clients (0 = never) */
 } DaemonConfig;
 
 /* Signal handler for graceful shutdown */
@@ -73,6 +74,7 @@ static void print_usage(const char *prog) {
           "  --daemonize, -d      Fork to background (socket modes only)\n"
           "  --pidfile PATH       Write PID to file\n"
           "  --max-clients N      Maximum concurrent clients (default: 64)\n"
+          "  --exit-when-idle N   Exit after N seconds with no connected clients\n"
           "  -q, --quiet          Suppress log output to stderr\n"
           "  -h, --help           Show this help message\n"
           "  -v, --version        Show version information\n"
@@ -236,6 +238,19 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       config->max_clients = (size_t)atoi(argv[i]);
       if (config->max_clients == 0 || config->max_clients > 10000) {
         fprintf(stderr, "Invalid --max-clients value: %s (must be 1-10000)\n", argv[i]);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--exit-when-idle") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--exit-when-idle requires an argument\n");
+        return -1;
+      }
+      i++;
+      config->exit_when_idle = atoi(argv[i]);
+      if (config->exit_when_idle < 0) {
+        fprintf(stderr, "Invalid --exit-when-idle value: %s\n", argv[i]);
         return -1;
       }
       continue;
@@ -454,6 +469,8 @@ int main(int argc, char **argv) {
     free_config(&config);
     return 1;
   }
+
+  laced_server_set_exit_when_idle(server, config.exit_when_idle);
 
   LOG_INFO("Server initialized, entering main loop");
 

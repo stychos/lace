@@ -1,5 +1,7 @@
-build/src/app/app.o: src/app/app.c src/app/app.h \
-  src/app/../config/session.h src/app/../config/../core/app_state.h \
+build/src/app/app.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/app/app.c src/app/app.h src/app/../config/session.h \
+  src/app/../config/../core/app_state.h \
   src/app/../config/../core/../config/config.h \
   src/app/../config/../core/../config/../core/constants.h \
   src/../../../liblace/include/constants.h \
@@ -16,11 +18,12 @@ build/src/app/app.o: src/app/app.c src/app/app.h \
   src/app/../core/constants.h src/app/../viewmodel/table_viewmodel.h \
   src/app/../viewmodel/../core/app_state.h \
   src/app/../viewmodel/../db_compat.h src/app/../core/ui_types.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
   ../../liblace/include/../../liblace/include/util/str.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/app/app.h:
 src/app/../config/session.h:
 src/app/../config/../core/app_state.h:
@@ -46,7 +49,7 @@ src/app/../viewmodel/table_viewmodel.h:
 src/app/../viewmodel/../core/app_state.h:
 src/app/../viewmodel/../db_compat.h:
 src/app/../core/ui_types.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:

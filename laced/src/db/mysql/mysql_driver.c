@@ -13,7 +13,8 @@
 #include "../db_common.h"
 #include <ctype.h>
 #include <errno.h>
-#include <mysql/mysql.h>
+#include <mysql.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,6 +154,7 @@ static void *mysql_driver_prepare_cancel(DbConnection *conn);
 static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
                                       char **err);
 static void mysql_driver_free_cancel_handle(void *cancel_handle);
+static void mysql_driver_cancel_handle_finished(void *cancel_handle);
 static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
                                                const char *table, char **err);
 
@@ -183,6 +185,7 @@ DbDriver mysql_driver = {
     .prepare_cancel = mysql_driver_prepare_cancel,
     .cancel_query = mysql_driver_cancel_query,
     .free_cancel_handle = mysql_driver_free_cancel_handle,
+    .cancel_handle_finished = mysql_driver_cancel_handle_finished,
     .estimate_row_count = mysql_driver_estimate_row_count,
     .library_cleanup = mysql_driver_library_cleanup,
 };
@@ -213,6 +216,7 @@ DbDriver mariadb_driver = {
     .prepare_cancel = mysql_driver_prepare_cancel,
     .cancel_query = mysql_driver_cancel_query,
     .free_cancel_handle = mysql_driver_free_cancel_handle,
+    .cancel_handle_finished = mysql_driver_cancel_handle_finished,
     .estimate_row_count = mysql_driver_estimate_row_count,
     .library_cleanup = mysql_driver_library_cleanup,
 };
@@ -343,6 +347,60 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
   return val;
 }
 
+/* Open a connection for a parsed connection string. reconnect enables
+ * MYSQL_OPT_RECONNECT; timeout_sec bounds connect (and, for short-lived
+ * side connections without reconnect, reads and writes too). */
+static MYSQL *mysql_open(const ConnString *cs, unsigned int timeout_sec,
+                         bool reconnect, char **err) {
+  /* Initialize MySQL library (safe to call multiple times) */
+  mysql_library_init(0, NULL, NULL);
+
+  MYSQL *mysql = mysql_init(NULL);
+  if (!mysql) {
+    err_set(err, "Failed to initialize MySQL connection");
+    return NULL;
+  }
+
+  if (mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &timeout_sec) != 0) {
+    mysql_close(mysql);
+    err_set(err, "Failed to set connection timeout");
+    return NULL;
+  }
+
+  if (!reconnect) {
+    /* Side connections must not hang on a dead server */
+    mysql_options(mysql, MYSQL_OPT_READ_TIMEOUT, &timeout_sec);
+    mysql_options(mysql, MYSQL_OPT_WRITE_TIMEOUT, &timeout_sec);
+  }
+
+  my_bool reconnect_opt = reconnect ? 1 : 0;
+  if (mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect_opt) != 0) {
+    mysql_close(mysql);
+    err_set(err, "Failed to set reconnect option");
+    return NULL;
+  }
+
+  /* Set character set */
+  if (mysql_options(mysql, MYSQL_SET_CHARSET_NAME, "utf8mb4") != 0) {
+    mysql_close(mysql);
+    err_set(err, "Failed to set character set");
+    return NULL;
+  }
+
+  const char *host = cs->host ? cs->host : "localhost";
+  int port = cs->port > 0 ? cs->port : 3306;
+  const char *user = cs->user ? cs->user : "root";
+  const char *database = cs->database ? cs->database : "mysql";
+
+  if (!mysql_real_connect(mysql, host, user, cs->password, database, port,
+                          NULL, 0)) {
+    err_setf(err, "Connection failed: %s", mysql_error(mysql));
+    mysql_close(mysql);
+    return NULL;
+  }
+  return mysql;
+}
+
 static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
   ConnString *cs = connstr_parse(connstr, err);
   if (!cs) {
@@ -357,53 +415,13 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
     return NULL;
   }
 
-  /* Initialize MySQL library (safe to call multiple times) */
-  mysql_library_init(0, NULL, NULL);
-
-  MYSQL *mysql = mysql_init(NULL);
-  if (!mysql) {
-    connstr_free(cs);
-    err_set(err, "Failed to initialize MySQL connection");
-    return NULL;
-  }
-
-  /* Set connection timeout */
-  unsigned int timeout = 10;
-  if (mysql_options(mysql, MYSQL_OPT_CONNECT_TIMEOUT, &timeout) != 0) {
-    mysql_close(mysql);
-    connstr_free(cs);
-    err_set(err, "Failed to set connection timeout");
-    return NULL;
-  }
-
-  /* Enable automatic reconnection */
-  my_bool reconnect = 1;
-  if (mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect) != 0) {
-    mysql_close(mysql);
-    connstr_free(cs);
-    err_set(err, "Failed to set reconnect option");
-    return NULL;
-  }
-
-  /* Set character set */
-  if (mysql_options(mysql, MYSQL_SET_CHARSET_NAME, "utf8mb4") != 0) {
-    mysql_close(mysql);
-    connstr_free(cs);
-    err_set(err, "Failed to set character set");
-    return NULL;
-  }
-
   const char *host = cs->host ? cs->host : "localhost";
   int port = cs->port > 0 ? cs->port : 3306;
   const char *user = cs->user ? cs->user : "root";
-  const char *password = cs->password;
   const char *database = cs->database ? cs->database : "mysql";
 
-  MYSQL *result =
-      mysql_real_connect(mysql, host, user, password, database, port, NULL, 0);
-  if (!result) {
-    err_setf(err, "Connection failed: %s", mysql_error(mysql));
-    mysql_close(mysql);
+  MYSQL *mysql = mysql_open(cs, 10, true, err);
+  if (!mysql) {
     connstr_free(cs);
     return NULL;
   }
@@ -1179,62 +1197,87 @@ static void mysql_driver_library_cleanup(void) {
   mysql_library_end();
 }
 
-/* Cancel handle stores the thread ID for KILL QUERY */
+/* Cancel handle: the server thread running the query, plus what is needed to
+ * reach the server on a separate connection. KILL QUERY cannot go over the
+ * query's own connection, which is busy until the query returns. */
 typedef struct {
   unsigned long thread_id;
+  char *connstr;        /* Copy; may hold a password */
+  atomic_bool finished; /* Query returned; a pending KILL must not be sent */
 } MySqlCancelHandle;
 
 static void *mysql_driver_prepare_cancel(DbConnection *conn) {
-  if (!conn)
+  if (!conn || !conn->connstr)
     return NULL;
   MySqlData *data = conn->driver_data;
   if (!data || !data->mysql)
     return NULL;
 
-  MySqlCancelHandle *handle = safe_malloc(sizeof(MySqlCancelHandle));
+  char *connstr = str_dup(conn->connstr);
+  if (!connstr)
+    return NULL;
+
+  MySqlCancelHandle *handle = safe_calloc(1, sizeof(MySqlCancelHandle));
   handle->thread_id = mysql_thread_id(data->mysql);
+  handle->connstr = connstr;
+  atomic_init(&handle->finished, false);
   return handle;
 }
 
+#define MYSQL_CANCEL_TIMEOUT_SEC 3
+
 static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
                                       char **err) {
-  if (!conn || !cancel_handle) {
+  (void)conn; /* Busy with the query on another thread; never touch it */
+  if (!cancel_handle) {
     err_set(err, "Invalid parameters");
     return false;
   }
 
-  MySqlData *data = conn->driver_data;
-  if (!data || !data->mysql) {
-    err_set(err, "Not connected");
-    return false;
-  }
-
   MySqlCancelHandle *handle = (MySqlCancelHandle *)cancel_handle;
+  if (atomic_load(&handle->finished) || handle->thread_id == 0)
+    return true;
 
-  /* Execute KILL QUERY on the same connection
-   * Note: This works because mysql_query is thread-safe for different
-   * connections, and KILL QUERY is a fast operation that can interrupt
-   * a running query.
-   * For full robustness, a separate connection would be needed. */
-  char kill_sql[64];
-  snprintf(kill_sql, sizeof(kill_sql), "KILL QUERY %lu", handle->thread_id);
-
-  /* We use mysql_send_query which is non-blocking for the send part */
-  if (mysql_query(data->mysql, kill_sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
+  ConnString *cs = connstr_parse(handle->connstr, err);
+  if (!cs)
     return false;
+  MYSQL *side = mysql_open(cs, MYSQL_CANCEL_TIMEOUT_SEC, false, err);
+  connstr_free(cs);
+  if (!side)
+    return false;
+
+  bool ok = true;
+  /* Connecting is the slow part; re-check so a cancel that arrives as the
+   * query finishes does not interrupt the connection's next statement. */
+  if (!atomic_load(&handle->finished)) {
+    char kill_sql[64];
+    snprintf(kill_sql, sizeof(kill_sql), "KILL QUERY %lu", handle->thread_id);
+    if (mysql_query(side, kill_sql) != 0) {
+      /* 1094 ER_NO_SUCH_THREAD: the query already ended */
+      if (mysql_errno(side) != 1094) {
+        err_set(err, mysql_error(side));
+        ok = false;
+      }
+    } else {
+      mysql_consume_pending_results(side);
+    }
   }
 
-  /* Consume any result from KILL command */
-  MYSQL_RES *result = mysql_store_result(data->mysql);
-  if (result)
-    mysql_free_result(result);
+  mysql_close(side);
+  return ok;
+}
 
-  return true;
+static void mysql_driver_cancel_handle_finished(void *cancel_handle) {
+  if (cancel_handle)
+    atomic_store(&((MySqlCancelHandle *)cancel_handle)->finished, true);
 }
 
 static void mysql_driver_free_cancel_handle(void *cancel_handle) {
-  free(cancel_handle);
+  MySqlCancelHandle *handle = (MySqlCancelHandle *)cancel_handle;
+  if (!handle)
+    return;
+  str_secure_free(handle->connstr);
+  free(handle);
 }
 
 /* Approximate row count using information_schema */

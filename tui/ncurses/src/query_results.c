@@ -173,32 +173,32 @@ size_t query_find_pk_columns(Tab *tab, size_t *pk_indices, size_t max_pks) {
   if (!tab || !tab->query_results || !pk_indices || max_pks == 0)
     return 0;
 
-  size_t count = 0;
+  /* Editing needs the source table's schema, and every primary-key column
+   * must appear exactly once in the results. A partial composite key
+   * matched many rows; a duplicated name (e.g. from SELECT *, id) is
+   * ambiguous. Without a schema there is no reliable key at all. */
+  TableSchema *schema = tab->query_source_schema;
+  if (!schema)
+    return 0;
 
-  /* First try using the loaded schema (more reliable for SQLite/PostgreSQL) */
-  if (tab->query_source_schema) {
-    for (size_t i = 0;
-         i < tab->query_source_schema->num_columns && count < max_pks; i++) {
-      if (tab->query_source_schema->columns[i].primary_key) {
-        /* Find this column in the result set */
-        const char *pk_name = tab->query_source_schema->columns[i].name;
-        size_t result_idx = query_find_column_by_name(tab, pk_name);
-        if (result_idx != (size_t)-1) {
-          pk_indices[count++] = result_idx;
-        }
+  size_t count = 0;
+  for (size_t i = 0; i < schema->num_columns; i++) {
+    if (!schema->columns[i].primary_key)
+      continue;
+    const char *pk_name = schema->columns[i].name;
+    if (!pk_name || count >= max_pks)
+      return 0;
+    size_t found = (size_t)-1, hits = 0;
+    for (size_t j = 0; j < tab->query_results->num_columns; j++) {
+      const char *n = tab->query_results->columns[j].name;
+      if (n && strcmp(n, pk_name) == 0) {
+        found = j;
+        hits++;
       }
     }
-    if (count > 0) {
-      return count; /* Found PKs via schema */
-    }
-  }
-
-  /* Fall back to result set metadata (works for MySQL) */
-  for (size_t i = 0; i < tab->query_results->num_columns && count < max_pks;
-       i++) {
-    if (tab->query_results->columns[i].primary_key) {
-      pk_indices[count++] = i;
-    }
+    if (hits != 1)
+      return 0;
+    pk_indices[count++] = found;
   }
   return count;
 }
@@ -248,6 +248,80 @@ void query_pk_info_free(QueryPkInfo *pk) {
   pk->count = 0;
 }
 
+/* Re-read the target row by primary key, exactly as the following UPDATE
+ * or DELETE will address it, and require that it is one row whose values
+ * still equal what the results show (for every result column that is a
+ * column of the source table). Guards against wrong-table detection,
+ * aliased/computed columns and rows changed since the query ran. */
+static bool query_verify_target_row(TuiState *state, Tab *tab, size_t row_idx,
+                                    const QueryPkInfo *pk, char **why) {
+  ResultSet *res = tab->query_results;
+  TableSchema *schema = tab->query_source_schema;
+  if (!res || !schema || row_idx >= res->num_rows) {
+    *why = str_dup("results changed");
+    return false;
+  }
+  Row *row = &res->rows[row_idx];
+
+  /* Result columns that name a real column of the table */
+  const char **cols = safe_calloc(res->num_columns, sizeof(char *));
+  size_t *idx = safe_calloc(res->num_columns, sizeof(size_t));
+  size_t n = 0;
+  for (size_t j = 0; j < res->num_columns && j < row->num_cells; j++) {
+    const char *name = res->columns[j].name;
+    if (!name)
+      continue;
+    for (size_t k = 0; k < schema->num_columns; k++) {
+      if (schema->columns[k].name && strcmp(schema->columns[k].name, name) == 0) {
+        cols[n] = name;
+        idx[n] = j;
+        n++;
+        break;
+      }
+    }
+  }
+
+  bool ok = false;
+  char *err = NULL;
+  ResultSet *db = n ? db_select_by_pk(state->conn, tab->query_source_table,
+                                      (const char **)pk->col_names, pk->values,
+                                      pk->count, cols, n, &err)
+                    : NULL;
+  if (!db) {
+    *why = err ? err : str_dup("cannot re-read the row");
+    err = NULL;
+  } else if (db->num_rows != 1 || !db->rows) {
+    *why = str_dup(db->num_rows == 0 ? "row no longer exists"
+                                     : "key matches more than one row");
+  } else {
+    ok = true;
+    for (size_t i = 0; i < n && ok; i++) {
+      if (i >= db->rows[0].num_cells) {
+        ok = false;
+        break;
+      }
+      char *shown = db_value_to_string(&row->cells[idx[i]]);
+      char *actual = db_value_to_string(&db->rows[0].cells[i]);
+      bool shown_null = row->cells[idx[i]].is_null;
+      bool actual_null = db->rows[0].cells[i].is_null;
+      if (shown_null != actual_null ||
+          (!shown_null && (!shown || !actual || strcmp(shown, actual) != 0))) {
+        ok = false;
+        *why = str_printf("column '%s' differs from the database "
+                          "(computed/aliased column, or row changed; re-run the query)",
+                          cols[i]);
+      }
+      free(shown);
+      free(actual);
+    }
+  }
+  free(err);
+  if (db) db_result_free(db);
+  free(cols);
+  free(idx);
+  return ok;
+}
+
 /* Confirm edit and update database */
 void query_result_confirm_edit(TuiState *state, Tab *tab) {
   UITabState *ui = TUI_TAB_UI(state);
@@ -281,6 +355,16 @@ void query_result_confirm_edit(TuiState *state, Tab *tab) {
     QueryPkInfo pk = {0};
     if (query_pk_info_build(&pk, tab, tab->query_result_row)) {
       can_update_db = true;
+
+      char *why = NULL;
+      if (!query_verify_target_row(state, tab, tab->query_result_row, &pk, &why)) {
+        tui_set_error(state, "Not updated: %s", why ? why : "verification failed");
+        free(why);
+        query_pk_info_free(&pk);
+        db_value_free(&new_val);
+        query_result_cancel_edit(state, tab);
+        return;
+      }
 
       const char *col_name =
           tab->query_results->columns[tab->query_result_col].name;
@@ -493,6 +577,14 @@ static bool query_result_delete_single_row(TuiState *state, Tab *tab,
     return false;
   }
 
+  char *why = NULL;
+  if (!query_verify_target_row(state, tab, local_row, &pk, &why)) {
+    *err = str_printf("row %zu: %s", local_row + 1, why ? why : "verification failed");
+    free(why);
+    query_pk_info_free(&pk);
+    return false;
+  }
+
   bool success = db_delete_row(state->conn, tab->query_source_table,
                                pk.col_names, pk.values, pk.count, err);
   query_pk_info_free(&pk);
@@ -692,6 +784,14 @@ void query_result_delete_row(TuiState *state, Tab *tab) {
 
   if (needs_confirm && !tui_show_confirm_dialog(state, "Delete this row?")) {
     tui_set_status(state, "Delete cancelled");
+    query_pk_info_free(&pk);
+    return;
+  }
+
+  char *why = NULL;
+  if (!query_verify_target_row(state, tab, tab->query_result_row, &pk, &why)) {
+    tui_set_error(state, "Not deleted: %s", why ? why : "verification failed");
+    free(why);
     query_pk_info_free(&pk);
     return;
   }

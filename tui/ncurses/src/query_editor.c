@@ -205,7 +205,85 @@ bool query_find_bounds_at_cursor(const char *text, size_t cursor,
 }
 
 /* Find the query at cursor position (caller must free result) */
-char *query_find_at_cursor(const char *text, size_t cursor) {
+/* Length of the SQL statement starting at p, up to (not including) the
+ * terminating ';' or end of text. Semicolons inside string literals,
+ * quoted identifiers, -- and / * * / comments, and PostgreSQL dollar-quoted
+ * bodies ($$ ... $$, $tag$ ... $tag$) do not end a statement. Backslash
+ * escapes inside strings only exist in MySQL/MariaDB. */
+size_t query_statement_length(const char *p, const char *driver) {
+  bool mysql = driver && (strcmp(driver, "mysql") == 0 || strcmp(driver, "mariadb") == 0);
+  bool pg = driver && strcmp(driver, "postgres") == 0;
+  const char *s = p;
+  while (*s) {
+    char c = *s;
+    if (c == ';') {
+      break;
+    }
+    if (c == '\'' || c == '"' || (mysql && c == '`')) {
+      char quote = c;
+      s++;
+      while (*s) {
+        if (mysql && *s == '\\' && s[1]) {
+          s += 2;
+          continue;
+        }
+        if (*s == quote) {
+          if (s[1] == quote) { /* doubled quote = literal quote */
+            s += 2;
+            continue;
+          }
+          break;
+        }
+        s++;
+      }
+      if (*s) s++;
+      continue;
+    }
+    if (c == '-' && s[1] == '-') {
+      while (*s && *s != '\n') s++;
+      continue;
+    }
+    if (c == '#' && mysql) {
+      while (*s && *s != '\n') s++;
+      continue;
+    }
+    if (c == '/' && s[1] == '*') {
+      s += 2;
+      while (*s && !(s[0] == '*' && s[1] == '/')) s++;
+      if (*s) s += 2;
+      continue;
+    }
+    if (pg && c == '$') {
+      /* $tag$ where tag is [A-Za-z0-9_]* */
+      const char *t = s + 1;
+      while (*t && (isalnum((unsigned char)*t) || *t == '_')) t++;
+      if (*t == '$') {
+        size_t taglen = (size_t)(t - s) + 1;
+        const char *body = t + 1;
+        const char *close = body;
+        while (*close && strncmp(close, s, taglen) != 0) close++;
+        s = *close ? close + taglen : close;
+        continue;
+      }
+    }
+    s++;
+  }
+  return (size_t)(s - p);
+}
+
+/* Copy text[start, start+len) without surrounding whitespace */
+static char *dup_trimmed(const char *text, size_t start, size_t len) {
+  while (len > 0 && isspace((unsigned char)text[start])) {
+    start++;
+    len--;
+  }
+  while (len > 0 && isspace((unsigned char)text[start + len - 1])) {
+    len--;
+  }
+  return str_ndup(text + start, len);
+}
+
+char *query_find_at_cursor(const char *text, size_t cursor, const char *driver) {
   if (!text || !*text)
     return str_dup("");
 
@@ -213,116 +291,30 @@ char *query_find_at_cursor(const char *text, size_t cursor) {
   if (cursor > len)
     cursor = len;
 
-  /* Scan backward to find query start (after ';' or at beginning) */
-  bool in_string = false;
-  char quote_char = 0;
-
-  /* First pass: find start by scanning from beginning to cursor */
-  size_t last_semi = 0;
-  in_string = false;
-  for (size_t i = 0; i < cursor; i++) {
-    char c = text[i];
-    if (in_string) {
-      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
-        in_string = false;
+  /* Walk statements with the same splitter "run all" uses. The statement
+   * containing the cursor (or ending at it) wins; if the cursor sits in
+   * blank space after the last ';', fall back to the previous statement. */
+  size_t start = 0;
+  char *prev = NULL;
+  while (start <= len) {
+    size_t slen = query_statement_length(text + start, driver);
+    char *stmt = dup_trimmed(text, start, slen);
+    bool blank = !stmt || !*stmt;
+    if (cursor <= start + slen) {
+      if (blank && prev) {
+        free(stmt);
+        return prev;
       }
+      free(prev);
+      return stmt ? stmt : str_dup("");
+    }
+    if (!blank) {
+      free(prev);
+      prev = stmt;
     } else {
-      if (c == '\'' || c == '"') {
-        in_string = true;
-        quote_char = c;
-      } else if (c == ';') {
-        last_semi = i + 1;
-      }
+      free(stmt);
     }
+    start += slen + 1; /* skip the ';' */
   }
-  size_t start = last_semi;
-
-  /* Scan forward to find query end */
-  size_t end = cursor;
-  in_string = false;
-  for (size_t i = cursor; i < len; i++) {
-    char c = text[i];
-    if (in_string) {
-      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
-        in_string = false;
-      }
-    } else {
-      if (c == '\'' || c == '"') {
-        in_string = true;
-        quote_char = c;
-      } else if (c == ';') {
-        end = i;
-        break;
-      }
-    }
-    end = i + 1;
-  }
-
-  /* Extract query */
-  size_t query_len = end - start;
-  char *query = safe_malloc(query_len + 1);
-
-  memcpy(query, text + start, query_len);
-  query[query_len] = '\0';
-
-  /* Trim whitespace */
-  char *trimmed = query;
-  while (*trimmed && isspace((unsigned char)*trimmed))
-    trimmed++;
-
-  size_t trim_len = strlen(trimmed);
-  while (trim_len > 0 && isspace((unsigned char)trimmed[trim_len - 1]))
-    trim_len--;
-
-  /* If empty, try to find the last available query */
-  if (trim_len == 0 && last_semi > 0) {
-    free(query);
-
-    /* Find the query before last_semi */
-    size_t prev_end = last_semi - 1; /* Position of the ';' */
-    size_t prev_start = 0;
-
-    /* Scan from beginning to find the start of the previous query */
-    in_string = false;
-    size_t prev_semi = 0;
-    for (size_t i = 0; i < prev_end; i++) {
-      char c = text[i];
-      if (in_string) {
-        if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
-          in_string = false;
-        }
-      } else {
-        if (c == '\'' || c == '"') {
-          in_string = true;
-          quote_char = c;
-        } else if (c == ';') {
-          prev_semi = i + 1;
-        }
-      }
-    }
-    prev_start = prev_semi;
-
-    /* Extract the previous query */
-    query_len = prev_end - prev_start;
-    query = safe_malloc(query_len + 1);
-
-    memcpy(query, text + prev_start, query_len);
-    query[query_len] = '\0';
-
-    /* Trim again */
-    trimmed = query;
-    while (*trimmed && isspace((unsigned char)*trimmed))
-      trimmed++;
-
-    trim_len = strlen(trimmed);
-    while (trim_len > 0 && isspace((unsigned char)trimmed[trim_len - 1]))
-      trim_len--;
-  }
-
-  char *result = safe_malloc(trim_len + 1);
-  memcpy(result, trimmed, trim_len);
-  result[trim_len] = '\0';
-
-  free(query);
-  return result;
+  return prev ? prev : str_dup("");
 }

@@ -1,5 +1,6 @@
-build/src/./tui.o: src/./tui.c src/./config/session.h \
-  src/./config/../core/app_state.h \
+build/src/./tui.o: \
+  /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json \
+  src/./tui.c src/./config/session.h src/./config/../core/app_state.h \
   src/./config/../core/../config/config.h \
   src/./config/../core/../config/../core/constants.h \
   src/../../../liblace/include/constants.h \
@@ -17,11 +18,14 @@ build/src/./tui.o: src/./tui.c src/./config/session.h \
   src/./async/async.h src/./async/../db_compat.h \
   src/./async/../platform/thread.h src/./viewmodel/table_viewmodel.h \
   src/./viewmodel/../core/app_state.h src/./viewmodel/../db_compat.h \
-  /opt/homebrew/opt/ncurses/include/ncurses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h \
   /opt/homebrew/opt/ncurses/include/ncursesw/curses.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/menu.h \
+  /opt/homebrew/opt/ncurses/include/ncursesw/eti.h \
   src/./views/config_view.h src/./views/../tui.h
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.json:
 src/./config/session.h:
 src/./config/../core/app_state.h:
 src/./config/../core/../config/config.h:
@@ -50,9 +54,11 @@ src/./async/../platform/thread.h:
 src/./viewmodel/table_viewmodel.h:
 src/./viewmodel/../core/app_state.h:
 src/./viewmodel/../db_compat.h:
-/opt/homebrew/opt/ncurses/include/ncurses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/ncurses.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/ncurses_dll.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/unctrl.h:
 /opt/homebrew/opt/ncurses/include/ncursesw/curses.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/menu.h:
+/opt/homebrew/opt/ncurses/include/ncursesw/eti.h:
 src/./views/config_view.h:
 src/./views/../tui.h:
