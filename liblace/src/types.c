@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <ctype.h>
+#include <locale.h>
+#include <math.h>
 
 /* ==========================================================================
  * Type Name Functions
@@ -23,6 +27,7 @@ const char *lace_type_name(LaceValueType type) {
   case LACE_TYPE_INT:       return "INTEGER";
   case LACE_TYPE_FLOAT:     return "FLOAT";
   case LACE_TYPE_TEXT:      return "TEXT";
+  case LACE_TYPE_DECIMAL:   return "DECIMAL";
   case LACE_TYPE_BLOB:      return "BLOB";
   case LACE_TYPE_BOOL:      return "BOOLEAN";
   case LACE_TYPE_DATE:      return "DATE";
@@ -170,12 +175,14 @@ LaceValue lace_value_copy(const LaceValue *src) {
 
   v.type = src->type;
   v.is_null = src->is_null;
+  v.omitted = src->omitted;
 
   if (src->is_null) {
     return v;
   }
 
   switch (src->type) {
+  case LACE_TYPE_DECIMAL:
   case LACE_TYPE_TEXT:
   case LACE_TYPE_DATE:
   case LACE_TYPE_TIMESTAMP:
@@ -234,9 +241,12 @@ char *lace_value_to_string(const LaceValue *val) {
     return str_dup(buf);
 
   case LACE_TYPE_FLOAT:
-    snprintf(buf, sizeof(buf), "%g", val->float_val);
+    /* Exact (shortest round-trip, '.' whatever the locale): "%g" showed 6
+     * digits, and edits wrote the rounded value back */
+    lace_format_double(val->float_val, buf, sizeof(buf));
     return str_dup(buf);
 
+  case LACE_TYPE_DECIMAL:
   case LACE_TYPE_TEXT:
     return val->text.data ? str_dup(val->text.data) : str_dup("");
 
@@ -278,6 +288,145 @@ char *lace_value_to_string(const LaceValue *val) {
   }
 }
 
+void lace_format_double(double v, char *buf, size_t size) {
+  if (isnan(v)) {
+    snprintf(buf, size, "NaN");
+    return;
+  }
+  if (isinf(v)) {
+    snprintf(buf, size, v > 0 ? "Infinity" : "-Infinity");
+    return;
+  }
+  snprintf(buf, size, "%.15g", v);
+  const char *dp = localeconv()->decimal_point;
+  char sep = (dp && dp[0]) ? dp[0] : '.';
+  if (strtod(buf, NULL) != v) {
+    snprintf(buf, size, "%.17g", v);
+  }
+  if (sep != '.') {
+    for (char *p = buf; *p; p++) {
+      if (*p == sep) {
+        *p = '.';
+      }
+    }
+  }
+}
+
+char *lace_value_to_edit_text(const LaceValue *val) {
+  if (!val || val->is_null) {
+    return str_dup("");
+  }
+  if (val->type == LACE_TYPE_BLOB) {
+    /* Every byte as hex (the display form shows only the first 32) */
+    static const char hex[] = "0123456789abcdef";
+    size_t n = val->blob.data ? val->blob.len : 0;
+    char *out = safe_malloc(n * 2 + 1);
+    for (size_t i = 0; i < n; i++) {
+      out[2 * i] = hex[val->blob.data[i] >> 4];
+      out[2 * i + 1] = hex[val->blob.data[i] & 15];
+    }
+    out[2 * n] = '\0';
+    return out;
+  }
+  return lace_value_to_string(val);
+}
+
+static int hex_digit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+/* A number as SQL accepts it: [+-]digits[.digits][e[+-]digits] */
+static bool is_plain_number(const char *s) {
+  const char *p = s;
+  if (*p == '+' || *p == '-') p++;
+  bool digits = false;
+  while (isdigit((unsigned char)*p)) { p++; digits = true; }
+  if (*p == '.') {
+    p++;
+    while (isdigit((unsigned char)*p)) { p++; digits = true; }
+  }
+  if (!digits) return false;
+  if (*p == 'e' || *p == 'E') {
+    p++;
+    if (*p == '+' || *p == '-') p++;
+    if (!isdigit((unsigned char)*p)) return false;
+    while (isdigit((unsigned char)*p)) p++;
+  }
+  return *p == '\0';
+}
+
+bool lace_value_from_edit_text(const char *text, LaceValueType like,
+                               LaceValue *out, char **err) {
+  memset(out, 0, sizeof(*out));
+  if (!text) {
+    text = "";
+  }
+  switch (like) {
+  case LACE_TYPE_BLOB: {
+    /* Hex digits, optionally as x'..', X'..', \x.. or 0x.. */
+    const char *p = text;
+    size_t len = strlen(p);
+    if ((p[0] == 'x' || p[0] == 'X') && p[1] == '\'' && len >= 3 &&
+        p[len - 1] == '\'') {
+      p += 2;
+      len -= 3;
+    } else if ((p[0] == '\\' && (p[1] == 'x' || p[1] == 'X')) ||
+               (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))) {
+      p += 2;
+      len -= 2;
+    }
+    if (len % 2 != 0) {
+      if (err) *err = str_dup("BLOB value: enter an even number of hex digits");
+      return false;
+    }
+    uint8_t *bytes = safe_malloc(len / 2 + 1);
+    for (size_t i = 0; i < len / 2; i++) {
+      int hi = hex_digit(p[2 * i]), lo = hex_digit(p[2 * i + 1]);
+      if (hi < 0 || lo < 0) {
+        free(bytes);
+        if (err) *err = str_dup("BLOB value: only hex digits (0-9, a-f) are allowed");
+        return false;
+      }
+      bytes[i] = (uint8_t)(hi << 4 | lo);
+    }
+    out->type = LACE_TYPE_BLOB;
+    out->blob.data = bytes;
+    out->blob.len = len / 2;
+    return true;
+  }
+  case LACE_TYPE_DECIMAL:
+    if (is_plain_number(text)) {
+      out->type = LACE_TYPE_DECIMAL; /* Sent unquoted: exact on every DB */
+      out->text.data = str_dup(text);
+      out->text.len = strlen(text);
+      return true;
+    }
+    break;
+  case LACE_TYPE_INT: {
+    char *end = NULL;
+    errno = 0;
+    long long n = strtoll(text, &end, 10);
+    if (*text && errno == 0 && end && *end == '\0') {
+      out->type = LACE_TYPE_INT;
+      out->int_val = n;
+      return true;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  /* Anything else as text: the database converts it to the column's type
+   * (or rejects it), exactly as typed */
+  out->type = LACE_TYPE_TEXT;
+  out->text.data = str_dup(text);
+  out->text.len = strlen(text);
+  return true;
+}
+
 /* ==========================================================================
  * Memory Management
  * ========================================================================== */
@@ -286,6 +435,7 @@ void lace_value_free(LaceValue *val) {
   if (!val) return;
 
   switch (val->type) {
+  case LACE_TYPE_DECIMAL:
   case LACE_TYPE_TEXT:
   case LACE_TYPE_DATE:
   case LACE_TYPE_TIMESTAMP:

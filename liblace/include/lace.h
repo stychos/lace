@@ -33,6 +33,7 @@
 
 #include "types.h"
 #include "error.h"
+#include "keyset.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +57,14 @@ typedef enum {
   LACE_CONN_TCP       /* Connect to existing TCP socket */
 } LaceConnMode;
 
+/* Preferred spawn mode when starting a new daemon */
+typedef enum {
+  LACE_SPAWN_UNIX,   /* Unix socket mode (default, multi-client) */
+  LACE_SPAWN_STDIO,  /* Stdio pipes (single client, auto-exit on EOF) */
+  LACE_SPAWN_TCP,    /* TCP socket mode (network, multi-client) */
+  LACE_SPAWN_NONE    /* Don't spawn, connect to existing daemon only */
+} LaceSpawnMode;
+
 /* Client configuration for extended creation */
 typedef struct {
   LaceConnMode mode;          /* Connection mode */
@@ -65,6 +74,8 @@ typedef struct {
   const char *daemon_path;    /* Path to laced for spawn mode */
   bool spawn_if_missing;      /* Spawn daemon if socket not found */
   int connect_timeout_ms;     /* Connection timeout (0 = default 5000) */
+  LaceSpawnMode spawn_mode;   /* Preferred mode when spawning daemon */
+  int idle_timeout;           /* Daemon idle timeout in seconds (0=disabled) */
 } LaceClientConfig;
 
 /* Default values for config */
@@ -77,18 +88,46 @@ typedef struct {
 
 /*
  * Create a new client and spawn the laced daemon.
+ * Uses Unix socket mode by default.
  *
  * @param daemon_path  Path to laced executable, or NULL to search PATH
- * @return             Client handle, or NULL on failure (check errno)
+ * @return             Client handle, never NULL; on failure lace_client_connected()
+ *                     is false and lace_client_error() says why
  */
 lace_client_t *lace_client_create(const char *daemon_path);
+
+/*
+ * Create a new client with specified spawn mode.
+ *
+ * @param daemon_path  Path to laced executable, or NULL to search PATH
+ * @param spawn_mode   LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
+ * @return             Client handle, never NULL; on failure lace_client_connected()
+ *                     is false and lace_client_error() says why
+ */
+lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode);
+
+/*
+ * Create a new client with specified spawn mode and idle timeout.
+ *
+ * @param daemon_path    Path to laced executable, or NULL to search PATH
+ * @param spawn_mode     LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
+ * @param idle_timeout   Daemon idle timeout in seconds (0=disabled); also
+ *                       used if the daemon has to be respawned later
+ * @return               Client handle, never NULL; on failure
+ *                       lace_client_connected() is false and
+ *                       lace_client_error() says why
+ */
+lace_client_t *lace_client_create_ex2(const char *daemon_path,
+                                      LaceSpawnMode spawn_mode,
+                                      int idle_timeout);
 
 /*
  * Create a new client with extended configuration.
  * Allows connecting to existing daemon via socket instead of spawning.
  *
  * @param config  Client configuration (NULL for defaults, same as lace_client_create(NULL))
- * @return        Client handle, or NULL on failure (check lace_client_error)
+ * @return        Client handle, or NULL for an unknown mode; on failure
+ *                lace_client_connected() is false and lace_client_error() says why
  */
 lace_client_t *lace_client_create_with_config(const LaceClientConfig *config);
 
@@ -110,7 +149,9 @@ lace_client_t *lace_client_connect(const char *socket_path);
 lace_client_t *lace_client_connect_tcp(const char *host, int port);
 
 /*
- * Destroy client and terminate the daemon process.
+ * Destroy client. A socket daemon is never shut down here (other frontends
+ * may share it; it exits by its own --idle-timeout or a signal). A stdio
+ * daemon belongs to this client and is waited for, then killed if needed.
  *
  * @param client  Client handle (NULL is safe)
  */
@@ -156,6 +197,14 @@ void lace_expect_generation(lace_client_t *client, uint64_t generation);
  * frontends to record query history.
  */
 const char *lace_last_sql(void);
+
+/*
+ * Transaction state of the connection after the calling thread's last
+ * lace_exec() (or a call built on it), whether the statement succeeded or
+ * failed: 0 none, 1 open, 2 open but failed (PostgreSQL: only ROLLBACK
+ * works), -1 unknown (the daemon did not say, e.g. the link dropped).
+ */
+int lace_last_transaction_state(void);
 
 /* ==========================================================================
  * Database Connection
@@ -427,7 +476,10 @@ int lace_shutdown(lace_client_t *client);
  * ========================================================================== */
 
 /*
- * Set request timeout in milliseconds.
+ * Reply timeout in milliseconds for every call except "query" (default 30 s;
+ * "connect" always gets at least 60 s for SSH tunnels). 0 waits forever.
+ * Each concurrent call uses its own connection to the daemon, so a slow call
+ * never delays another one.
  *
  * @param client      Client handle
  * @param timeout_ms  Timeout in milliseconds (0 for infinite)
@@ -442,17 +494,51 @@ void lace_set_timeout(lace_client_t *client, int timeout_ms);
  */
 int lace_get_timeout(const lace_client_t *client);
 
+/*
+ * Reply timeout for "query" calls in milliseconds (0 = wait as long as the
+ * query runs; the default). Other calls use lace_set_timeout. A timed-out
+ * call returns LACE_ERR_TIMEOUT; its connection to the daemon is discarded,
+ * other calls are unaffected.
+ */
+void lace_set_query_timeout(lace_client_t *client, int timeout_ms);
+
 /* ==========================================================================
  * Daemon Discovery
  * ========================================================================== */
 
 /*
- * Get the default Unix socket path for the daemon.
- * Checks: $XDG_RUNTIME_DIR/laced.sock, /tmp/laced-{uid}.sock
+ * The canonical Unix socket path for this user's daemon (not a search):
+ * macOS ~/Library/Caches/laced.sock; root /run/laced.sock; otherwise
+ * $XDG_RUNTIME_DIR/laced.sock when that directory is private (0700, ours),
+ * else ~/.cache/lace/laced.sock. lace_connect_unix() refuses this path
+ * unless the socket and the daemon behind it belong to the current user.
  *
  * @return  Allocated string with socket path (caller must free), or NULL
  */
 char *lace_get_default_socket_path(void);
+
+/*
+ * TCP authentication. A daemon in TCP mode writes a random token to a 0600
+ * file (by default laced-<port>.token next to the default socket) and serves
+ * TCP clients only after they send it in "hello". liblace sends it
+ * automatically: lace_client_set_token(), else $LACE_TOKEN, else the
+ * default token file for the client's port.
+ */
+char *lace_default_token_path(int port);
+
+/* Read a token file; NULL unless it is a regular file owned by the current
+ * user with no group/other permissions. Caller frees. */
+char *lace_read_token_file(const char *path);
+
+/* Use this token for TCP links (e.g. a remote daemon). */
+void lace_client_set_token(lace_client_t *client, const char *token);
+
+/* True if path is a socket owned by the current (effective) user. */
+bool lace_socket_owned_by_me(const char *path);
+
+/* True if the process at the other end of a Unix socket runs as the current
+ * (effective) user. */
+bool lace_peer_is_me(int fd);
 
 /*
  * Check if a daemon is running at the given socket path.

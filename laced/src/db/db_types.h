@@ -23,7 +23,8 @@ typedef enum {
   DB_TYPE_BLOB,
   DB_TYPE_BOOL,
   DB_TYPE_DATE,
-  DB_TYPE_TIMESTAMP
+  DB_TYPE_TIMESTAMP,
+  DB_TYPE_DECIMAL /* Exact numeric (NUMERIC/DECIMAL), kept as its text */
 } DbValueType;
 
 /* A single database value */
@@ -43,6 +44,8 @@ typedef struct {
     bool bool_val;
   };
   bool is_null;
+  size_t omitted;  /* > 0: a value this large was not loaded; text holds a
+                      "[TEXT: N bytes]" label (read-only for clients) */
 } DbValue;
 
 /* Column definition */
@@ -73,6 +76,7 @@ typedef struct {
   size_t total_rows;     /* Total matching rows (for pagination) */
   int64_t rows_affected; /* For INSERT/UPDATE/DELETE */
   char *error;           /* Error message if any */
+  bool truncated;        /* Stopped at MAX_RESULT_ROWS / MAX_RESULT_BYTES */
 } ResultSet;
 
 /* Index definition */

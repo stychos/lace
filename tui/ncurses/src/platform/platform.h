@@ -180,6 +180,13 @@ bool platform_dir_exists(const char *path);
 /* Create a directory (and parents if needed) */
 bool platform_mkdir(const char *path);
 
+/* Replace path's contents atomically with data, owner-only (0600): written
+ * to a temp file in the same directory, flushed, then renamed over path, so
+ * a crash or full disk leaves the old file intact. A symlinked path is
+ * followed. Returns false with errno set on failure. */
+bool platform_write_file_private(const char *path, const char *data,
+                                 size_t len);
+
 /* Get environment variable (returns NULL if not set) */
 const char *platform_getenv(const char *name);
 

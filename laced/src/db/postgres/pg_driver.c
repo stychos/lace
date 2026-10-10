@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /* Helper to safely cast size_t to int for libpq paramLengths.
  * Returns 0 on overflow (safe default for text format where length is ignored).
@@ -63,7 +64,14 @@ static bool pg_parse_table_name(const char *full_name, char **schema_out,
 typedef struct {
   PGconn *conn;
   char *database;
+  bool broken;  /* The connection was lost: reset before the next use */
+  bool tx_lost; /* ... with a transaction open: refuse until ROLLBACK */
+  bool had_tx;  /* A transaction was open after the last statement */
 } PgData;
+
+#define PG_TX_LOST_MSG                                                         \
+  "Connection to the PostgreSQL server was lost; the open transaction was "    \
+  "rolled back. Run ROLLBACK to acknowledge, then redo the work."
 
 /* Forward declarations */
 static DbConnection *pg_connect(const char *connstr, char **err);
@@ -96,6 +104,8 @@ static void *pg_prepare_cancel(DbConnection *conn);
 static bool pg_cancel_query(DbConnection *conn, void *cancel_handle,
                             char **err);
 static void pg_free_cancel_handle(void *cancel_handle);
+static int pg_transaction_state(DbConnection *conn);
+static void pg_connection_lost(DbConnection *conn);
 static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
                                      char **err);
 
@@ -126,6 +136,8 @@ DbDriver postgres_driver = {
     .prepare_cancel = pg_prepare_cancel,
     .cancel_query = pg_cancel_query,
     .free_cancel_handle = pg_free_cancel_handle,
+    .transaction_state = pg_transaction_state,
+    .connection_lost = pg_connection_lost,
     .estimate_row_count = pg_estimate_row_count,
     .library_cleanup = NULL,
 };
@@ -190,8 +202,10 @@ static DbValueType pg_oid_to_db_type(Oid oid) {
 
   case 700:  /* float4 */
   case 701:  /* float8 */
-  case 1700: /* numeric */
     return DB_TYPE_FLOAT;
+
+  case 1700: /* numeric: exact, any precision; a double would round it */
+    return DB_TYPE_DECIMAL;
 
   case 16: /* bool */
     return DB_TYPE_BOOL;
@@ -335,6 +349,14 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
     }
     break;
 
+  case DB_TYPE_DECIMAL:
+    val.text.data = safe_malloc(len + 1);
+    val.type = DB_TYPE_DECIMAL;
+    val.text.len = len;
+    memcpy(val.text.data, value, len);
+    val.text.data[len] = '\0';
+    break;
+
   default:
     val.text.data = safe_malloc(len + 1);
     val.type = DB_TYPE_TEXT;
@@ -465,29 +487,15 @@ static const char *pg_get_error(DbConnection *conn) {
 }
 
 static int64_t pg_exec(DbConnection *conn, const char *sql, char **err) {
-  DB_REQUIRE_PARAMS_CONN(sql, conn, PgData, data, conn, err, -1);
-
-  PGresult *res = PQexec(data->conn, sql);
-  ExecStatusType status = PQresultStatus(res);
-
-  if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
+  /* One code path for all statements: pg_query drains every result and
+   * catches a COMMIT that rolled back */
+  ResultSet *rs = pg_query(conn, sql, err);
+  if (!rs) {
     return -1;
   }
-
-  char *affected = PQcmdTuples(res);
-  int64_t count = 0;
-  if (affected && *affected) {
-    char *endptr;
-    errno = 0;
-    long long parsed = strtoll(affected, &endptr, 10);
-    if (errno == 0 && endptr != affected) {
-      count = parsed;
-    }
-  }
-  PQclear(res);
-  return count;
+  int64_t n = rs->num_columns > 0 ? (int64_t)rs->num_rows : rs->rows_affected;
+  db_result_free(rs);
+  return n;
 }
 
 static bool pg_update_cell(DbConnection *conn, const char *table,
@@ -1035,79 +1043,201 @@ static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
   return schema;
 }
 
-static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
-  DB_REQUIRE_PARAMS_CONN(sql, conn, PgData, data, conn, err, NULL);
-
-  PGresult *res = PQexec(data->conn, sql);
-  ExecStatusType status = PQresultStatus(res);
-
-  if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return NULL;
-  }
-
-  ResultSet *rs = db_result_alloc_empty();
-  if (!rs) {
-    PQclear(res);
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
-
-  if (status == PGRES_COMMAND_OK) {
-    /* Non-SELECT statement */
-    PQclear(res);
-    return rs;
-  }
-
-  /* Get column info */
+/* Append the rows of res to rs (columns are taken from res if rs has none),
+ * honouring the row and byte limits. Returns false once a limit was hit. */
+static bool pg_append_rows(ResultSet *rs, PGresult *res, size_t max_rows,
+                           size_t *bytes, size_t *cap) {
   int num_fields = PQnfields(res);
   if (num_fields < 0) {
-    PQclear(res);
-    free(rs);
-    err_set(err, "Invalid column count from database");
-    return NULL;
+    num_fields = 0;
   }
-  rs->num_columns = (size_t)num_fields;
-  rs->columns = safe_calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(ColumnDef));
-
-  for (int i = 0; i < num_fields; i++) {
-    const char *fname = PQfname(res, i);
-    rs->columns[i].name = fname ? str_dup(fname) : str_dup("?");
-    rs->columns[i].type = pg_oid_to_db_type(PQftype(res, i));
+  if (!rs->columns && num_fields > 0) {
+    rs->num_columns = (size_t)num_fields;
+    rs->columns = safe_calloc((size_t)num_fields, sizeof(ColumnDef));
+    for (int i = 0; i < num_fields; i++) {
+      const char *fname = PQfname(res, i);
+      rs->columns[i].name = fname ? str_dup(fname) : str_dup("?");
+      rs->columns[i].type = pg_oid_to_db_type(PQftype(res, i));
+    }
   }
-
-  /* Get rows */
-  int num_rows = PQntuples(res);
-  if (num_rows < 0) {
-    PQclear(res);
-    db_result_free(rs);
-    err_set(err, "Invalid row count from database");
-    return NULL;
-  }
-  /* Limit result set size to prevent unbounded memory growth */
-  int max_rows =
-      conn->max_result_rows > 0 ? (int)conn->max_result_rows : MAX_RESULT_ROWS;
-  if (num_rows > max_rows) {
-    num_rows = max_rows;
-  }
-  if (num_rows > 0) {
-    rs->rows = safe_calloc((size_t)num_rows, sizeof(Row));
-  }
-
-  for (int r = 0; r < num_rows; r++) {
+  int n = PQntuples(res);
+  for (int r = 0; r < n; r++) {
+    if (rs->num_rows >= max_rows || *bytes >= MAX_RESULT_BYTES) {
+      rs->truncated = true;
+      return false;
+    }
+    if (rs->num_rows == *cap) {
+      *cap = *cap ? *cap * 2 : 256;
+      rs->rows = safe_realloc(rs->rows, *cap * sizeof(Row));
+    }
     Row *row = &rs->rows[rs->num_rows];
     row->cells = safe_calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(DbValue));
     row->num_cells = (size_t)num_fields;
-
     for (int c = 0; c < num_fields; c++) {
       row->cells[c] = pg_get_value(res, r, c, PQftype(res, c));
+      *bytes += (size_t)PQgetlength(res, r, c) + 16;
     }
-
     rs->num_rows++;
   }
+  return true;
+}
 
-  PQclear(res);
+/* Run sql and collect rows one at a time (single-row mode), so a huge
+ * result is never held whole in libpq's memory, and stop at the row/byte
+ * limits instead of after the fact. With several statements: the last one
+ * that produced rows (SELECT, ... RETURNING), else the row count of the last
+ * statement. A statement without rows returns an empty result carrying its
+ * row count (rows_affected), so callers decide by shape, not by keyword. */
+static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
+                               const char *sql, char **err);
+
+static void pg_connection_lost(DbConnection *conn) {
+  PgData *data = conn ? conn->driver_data : NULL;
+  if (!data)
+    return;
+  data->broken = true;
+  if (data->had_tx)
+    data->tx_lost = true;
+}
+
+/*
+ * Run sql on a live connection. A lost connection (server restart, network,
+ * SSH tunnel) is reset before the next statement, unless a transaction was
+ * open: its work is gone, and statements are refused until the client
+ * acknowledges with ROLLBACK (carrying on would run them in autocommit on
+ * a new session, and COMMIT would "succeed" with nothing in it).
+ */
+static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
+  DB_REQUIRE_PARAMS_CONN(sql, conn, PgData, data, conn, err, NULL);
+
+  if (data->tx_lost) {
+    if (!db_common_sql_starts_with_word(sql, "ROLLBACK") &&
+        !db_common_sql_starts_with_word(sql, "ABORT")) {
+      err_set(err, PG_TX_LOST_MSG);
+      return NULL;
+    }
+    data->tx_lost = false; /* Acknowledged: nothing is left to roll back */
+    data->had_tx = false;
+    data->broken = true;
+    PQreset(data->conn);
+    if (PQstatus(data->conn) != CONNECTION_OK) {
+      err_setf(err, "Reconnect failed: %s", PQerrorMessage(data->conn));
+      return NULL;
+    }
+    data->broken = false;
+    return db_result_alloc_empty();
+  }
+  if (data->broken || PQstatus(data->conn) != CONNECTION_OK) {
+    PQreset(data->conn);
+    if (PQstatus(data->conn) != CONNECTION_OK) {
+      data->broken = true;
+      err_setf(err, "Reconnect failed: %s", PQerrorMessage(data->conn));
+      return NULL;
+    }
+    data->broken = false;
+    data->had_tx = false;
+  }
+
+  ResultSet *rs = pg_query_run(conn, data, sql, err);
+  if (PQstatus(data->conn) != CONNECTION_OK) {
+    data->broken = true;
+    if (data->had_tx) {
+      data->tx_lost = true;
+      err_set(err, PG_TX_LOST_MSG);
+      db_result_free(rs);
+      return NULL;
+    }
+  }
+  data->had_tx = PQtransactionStatus(data->conn) != PQTRANS_IDLE &&
+                 PQtransactionStatus(data->conn) != PQTRANS_UNKNOWN;
+  return rs;
+}
+
+static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
+                               const char *sql, char **err) {
+  if (!PQsendQuery(data->conn, sql)) {
+    err_set(err, PQerrorMessage(data->conn));
+    return NULL;
+  }
+  PQsetSingleRowMode(data->conn); /* Applies to the first statement */
+
+  size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
+                                              : (size_t)MAX_RESULT_ROWS;
+  ResultSet *rows = NULL;  /* Last complete row result */
+  ResultSet *cur = NULL;   /* Rows of the statement being read */
+  int64_t last_affected = 0;
+  size_t bytes = 0, cap = 0;
+  bool limited = false;    /* Hit a limit: discard the rest of the stream */
+  bool commit_rolled_back = false;
+  char *error = NULL;
+
+  PGresult *res;
+  while ((res = PQgetResult(data->conn)) != NULL) {
+    ExecStatusType status = PQresultStatus(res);
+    if (limited || error) {
+      PQclear(res); /* Drain what is left */
+      continue;
+    }
+    if (status == PGRES_FATAL_ERROR || status == PGRES_BAD_RESPONSE ||
+        status == PGRES_NONFATAL_ERROR) {
+      const char *msg = PQresultErrorMessage(res);
+      error = str_dup(msg && msg[0] ? msg : PQerrorMessage(data->conn));
+      PQclear(res);
+      continue;
+    }
+    if (status == PGRES_SINGLE_TUPLE || status == PGRES_TUPLES_OK) {
+      if (!cur) {
+        cur = db_result_alloc_empty();
+        bytes = cap = 0;
+      }
+      if (!pg_append_rows(cur, res, max_rows, &bytes, &cap)) {
+        /* Limit reached: stop the server instead of reading the rest */
+        limited = true;
+        PGcancel *cancel = PQgetCancel(data->conn);
+        if (cancel) {
+          char ebuf[256];
+          PQcancel(cancel, ebuf, sizeof(ebuf));
+          PQfreeCancel(cancel);
+        }
+      }
+      if (status == PGRES_TUPLES_OK || limited) {
+        /* This statement's rows are complete */
+        db_result_free(rows);
+        rows = cur;
+        cur = NULL;
+      }
+    } else {
+      /* PGRES_COMMAND_OK and friends: no rows, a row count */
+      const char *n = PQcmdTuples(res);
+      last_affected = (n && *n) ? strtoll(n, NULL, 10) : 0;
+      const char *tag = PQcmdStatus(res);
+      if (tag && strcmp(tag, "ROLLBACK") == 0 &&
+          (db_common_sql_starts_with_word(sql, "COMMIT") || db_common_sql_starts_with_word(sql, "END"))) {
+        /* COMMIT of a transaction that had already failed: the server
+         * rolled it back and says so only in the command tag */
+        commit_rolled_back = true;
+      }
+    }
+    PQclear(res);
+  }
+  if (cur) {
+    db_result_free(rows);
+    rows = cur;
+  }
+
+  if (error || commit_rolled_back) {
+    db_result_free(rows);
+    err_set(err, error ? error
+                       : "COMMIT did not commit: the transaction had failed "
+                         "earlier and was rolled back");
+    free(error);
+    return NULL;
+  }
+  if (rows) {
+    return rows;
+  }
+  ResultSet *rs = db_result_alloc_empty();
+  rs->rows_affected = last_affected;
   return rs;
 }
 
@@ -1225,4 +1355,23 @@ static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
 
   PQclear(res);
   return count;
+}
+
+static int pg_transaction_state(DbConnection *conn) {
+  PgData *data = conn ? conn->driver_data : NULL;
+  if (!data || !data->conn) {
+    return 0;
+  }
+  if (data->tx_lost) {
+    return 1; /* Until ROLLBACK acknowledges the loss */
+  }
+  switch (PQtransactionStatus(data->conn)) {
+  case PQTRANS_INTRANS:
+  case PQTRANS_ACTIVE:
+    return 1;
+  case PQTRANS_INERROR:
+    return 2;
+  default:
+    return 0;
+  }
 }

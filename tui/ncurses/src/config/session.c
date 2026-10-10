@@ -540,48 +540,15 @@ bool session_save(struct TuiState *state, char **error) {
     return false;
   }
 
-  /* Open file with secure permissions atomically (0600 = owner read/write only)
-   */
-  FILE *f = NULL;
-#ifndef LACE_OS_WINDOWS
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if (fd < 0) {
-    str_secure_free(content); /* Content may contain connection strings */
-    err_setf(error, "Failed to open %s for writing: %s", path,
-              strerror(errno));
-    free(path);
-    return false;
-  }
-  f = fdopen(fd, "w");
-  if (!f) {
-    close(fd);
-    str_secure_free(content); /* Content may contain connection strings */
-    err_setf(error, "Failed to open %s for writing: %s", path,
-              strerror(errno));
-    free(path);
-    return false;
-  }
-#else
-  f = fopen(path, "w");
-  if (!f) {
-    str_secure_free(content); /* Content may contain connection strings */
-    err_setf(error, "Failed to open %s for writing: %s", path,
-              strerror(errno));
-    free(path);
-    return false;
-  }
-#endif
-
-  size_t len = strlen(content);
-  size_t written = fwrite(content, 1, len, f);
-  fclose(f);
+  bool ok = platform_write_file_private(path, content, strlen(content));
+  int e = errno;
   str_secure_free(content); /* Content may contain connection strings */
-  free(path);
-
-  if (written != len) {
-    err_setf(error, "Failed to write all data");
+  if (!ok) {
+    err_setf(error, "Failed to write %s: %s", path, strerror(e));
+    free(path);
     return false;
   }
+  free(path);
 
   return true;
 }
@@ -941,12 +908,10 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     free(conn_err);
     conn_err = NULL;
 
-    connstr = connstr_build(
-        saved->driver, (saved->user && saved->user[0]) ? saved->user : NULL,
-        password, (saved->host && saved->host[0]) ? saved->host : NULL,
-        saved->port,
-        (saved->database && saved->database[0]) ? saved->database : NULL, NULL,
-        NULL, 0);
+    /* Same builder as the first attempt, so an SSH tunnel is kept (a plain
+     * rebuild connected straight to the database host, often "localhost":
+     * a different database) */
+    connstr = lace_saved_conn_build_connstr(saved, password, NULL);
 
     str_secure_free(password);
 

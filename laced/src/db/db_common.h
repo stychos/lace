@@ -142,6 +142,10 @@ void db_common_free_connection(DbConnection *conn);
  * On failure, value_out is unchanged. */
 bool db_common_parse_int64(const char *str, int64_t *value_out);
 
+/* True if sql (ignoring leading space and comments) starts with word,
+ * case-insensitively and as a whole word */
+bool db_common_sql_starts_with_word(const char *sql, const char *word);
+
 /* Parse double from string with error handling.
  * Returns true on success, false if parsing fails.
  * On failure, value_out is unchanged. */

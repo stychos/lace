@@ -9,6 +9,7 @@
 #include "query_internal.h"
 #include "../../liblace/include/util/mem.h"
 #include <ctype.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,7 +68,7 @@ void query_cursor_to_line_col(Tab *tab, size_t *line, size_t *col) {
 }
 
 /* Convert line/column to cursor offset */
-size_t query_line_col_to_cursor(Tab *tab __attribute__((unused)), size_t line,
+size_t query_line_col_to_cursor(Tab *tab, size_t line,
                                 size_t col, QueryLineInfo *lines,
                                 size_t num_lines) {
   if (!lines || num_lines == 0)
@@ -76,11 +77,40 @@ size_t query_line_col_to_cursor(Tab *tab __attribute__((unused)), size_t line,
   if (line >= num_lines)
     line = num_lines - 1;
 
-  size_t cursor = lines[line].start + col;
-  if (col > lines[line].len)
-    cursor = lines[line].start + lines[line].len;
+  const char *text = tab->query_text + lines[line].start;
+  size_t len = lines[line].len;
+  size_t pos = 0, width = 0;
+  while (pos < len) {
+    size_t next = text[pos] == '\t' ? pos + 1 : utf8_next(text, len, pos);
+    size_t w = query_display_width(text + pos, next - pos);
+    if (width + w > col)
+      break;
+    width += w;
+    pos = next;
+  }
+  return lines[line].start + pos;
+}
 
-  return cursor;
+size_t query_display_width(const char *text, size_t n) {
+  /* As the editor draws: tabs 4 columns, other control characters not at
+   * all */
+  size_t width = 0, start = 0;
+  for (size_t i = 0; i <= n; i++) {
+    unsigned char c = i < n ? (unsigned char)text[i] : 0;
+    if (i == n || c < 32 || c == 127) {
+      width += (size_t)utf8_width(text + start, i - start);
+      if (c == '\t')
+        width += 4;
+      start = i + 1;
+    }
+  }
+  return width;
+}
+
+size_t query_cursor_display_col(Tab *tab) {
+  size_t line, col;
+  query_cursor_to_line_col(tab, &line, &col);
+  return query_display_width(tab->query_text + tab->query_cursor - col, col);
 }
 
 /* Insert character at cursor */
@@ -105,10 +135,10 @@ void query_delete_char(Tab *tab) {
   if (tab->query_cursor >= tab->query_len)
     return;
 
-  memmove(tab->query_text + tab->query_cursor,
-          tab->query_text + tab->query_cursor + 1,
-          tab->query_len - tab->query_cursor);
-  tab->query_len--;
+  size_t next = utf8_next(tab->query_text, tab->query_len, tab->query_cursor);
+  memmove(tab->query_text + tab->query_cursor, tab->query_text + next,
+          tab->query_len - next);
+  tab->query_len -= next - tab->query_cursor;
   tab->query_text[tab->query_len] = '\0';
 }
 
@@ -117,7 +147,7 @@ void query_backspace(Tab *tab) {
   if (tab->query_cursor == 0)
     return;
 
-  tab->query_cursor--;
+  tab->query_cursor = utf8_prev(tab->query_text, tab->query_cursor);
   query_delete_char(tab);
 }
 
@@ -271,6 +301,126 @@ size_t query_statement_length(const char *p, const char *driver) {
   return (size_t)(s - p);
 }
 
+void query_sql_shape(const char *sql, const char *driver, QuerySqlShape *out) {
+  memset(out, 0, sizeof(*out));
+  if (!sql) {
+    return;
+  }
+  bool mysql = driver && (strcmp(driver, "mysql") == 0 || strcmp(driver, "mariadb") == 0);
+  bool pg = driver && strcmp(driver, "postgres") == 0;
+  int depth = 0;
+  const char *s = sql;
+  while (*s) {
+    char c = *s;
+    /* Strings and quoted identifiers */
+    if (c == '\'' || c == '"' || (mysql && c == '`')) {
+      char quote = c;
+      s++;
+      while (*s) {
+        if (mysql && *s == '\\' && s[1]) {
+          s += 2;
+          continue;
+        }
+        if (*s == quote) {
+          if (s[1] == quote) {
+            s += 2;
+            continue;
+          }
+          break;
+        }
+        s++;
+      }
+      if (*s) {
+        s++;
+      }
+      out->end = (size_t)(s - sql);
+      continue;
+    }
+    /* Comments: skipped, never part of the significant end */
+    if (c == '-' && s[1] == '-') {
+      while (*s && *s != '\n') s++;
+      continue;
+    }
+    if (c == '#' && mysql) {
+      while (*s && *s != '\n') s++;
+      continue;
+    }
+    if (c == '/' && s[1] == '*') {
+      s += 2;
+      while (*s && !(s[0] == '*' && s[1] == '/')) s++;
+      if (*s) s += 2;
+      continue;
+    }
+    if (pg && c == '$') {
+      const char *t = s + 1;
+      while (*t && (isalnum((unsigned char)*t) || *t == '_')) t++;
+      if (*t == '$') {
+        size_t taglen = (size_t)(t - s) + 1;
+        const char *close = t + 1;
+        while (*close && strncmp(close, s, taglen) != 0) close++;
+        s = *close ? close + taglen : close;
+        out->end = (size_t)(s - sql);
+        continue;
+      }
+    }
+    if (isspace((unsigned char)c) || c == ';') {
+      s++; /* Trailing ';' and whitespace do not count */
+      continue;
+    }
+    if (c == '(') {
+      depth++;
+    } else if (c == ')' && depth > 0) {
+      depth--;
+    }
+    if (isalpha((unsigned char)c) || c == '_') {
+      const char *w = s;
+      while (*s && (isalnum((unsigned char)*s) || *s == '_' || *s == '$')) s++;
+      size_t len = (size_t)(s - w);
+      if (!out->first_keyword[0] && len < sizeof(out->first_keyword)) {
+        for (size_t i = 0; i < len; i++) {
+          out->first_keyword[i] = (char)toupper((unsigned char)w[i]);
+        }
+        out->first_keyword[len] = '\0';
+      }
+      /* The statement's verb: the first top-level DML/query keyword, so a
+       * WITH list (its bodies are in parentheses) is looked through */
+      static const char *const verbs[] = {"SELECT", "INSERT", "UPDATE", "DELETE",
+                                          "MERGE",  "REPLACE", "VALUES", "TABLE",
+                                          "UPSERT", NULL};
+      if (depth == 0 && !out->verb[0]) {
+        for (int v = 0; verbs[v]; v++) {
+          if (strlen(verbs[v]) == len && strncasecmp(w, verbs[v], len) == 0) {
+            memcpy(out->verb, verbs[v], len + 1);
+            break;
+          }
+        }
+      }
+      if (depth == 0 && len == 4 && strncasecmp(w, "INTO", 4) == 0) {
+        out->top_level_into = true;
+      }
+      if (depth == 0 && ((len == 5 && strncasecmp(w, "LIMIT", 5) == 0) ||
+                         (len == 6 && strncasecmp(w, "OFFSET", 6) == 0) ||
+                         (len == 5 && strncasecmp(w, "FETCH", 5) == 0))) {
+        out->top_level_limit = true;
+      }
+      out->end = (size_t)(s - sql);
+      continue;
+    }
+    s++;
+    out->end = (size_t)(s - sql);
+  }
+}
+
+bool query_sql_pageable(const QuerySqlShape *shape) {
+  const char *kw = shape->first_keyword;
+  const char *v = shape->verb;
+  bool starts_query = strcmp(kw, "SELECT") == 0 || strcmp(kw, "WITH") == 0 ||
+                      strcmp(kw, "VALUES") == 0 || strcmp(kw, "TABLE") == 0;
+  bool reads = strcmp(v, "SELECT") == 0 || strcmp(v, "VALUES") == 0 ||
+               strcmp(v, "TABLE") == 0;
+  return starts_query && reads && !shape->top_level_into && shape->end > 0;
+}
+
 /* Copy text[start, start+len) without surrounding whitespace */
 static char *dup_trimmed(const char *text, size_t start, size_t len) {
   while (len > 0 && isspace((unsigned char)text[start])) {
@@ -299,7 +449,9 @@ char *query_find_at_cursor(const char *text, size_t cursor, const char *driver) 
   while (start <= len) {
     size_t slen = query_statement_length(text + start, driver);
     char *stmt = dup_trimmed(text, start, slen);
-    bool blank = !stmt || !*stmt;
+    QuerySqlShape shape;
+    query_sql_shape(stmt, driver, &shape);
+    bool blank = !stmt || shape.end == 0; /* Whitespace or comments only */
     if (cursor <= start + slen) {
       if (blank && prev) {
         free(stmt);

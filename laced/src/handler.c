@@ -45,12 +45,47 @@
  * ========================================================================== */
 
 /* connect: Open a database connection */
+/* Owner key of the client whose request is being dispatched. Dispatch runs
+ * on the daemon's main thread only; handlers that start jobs copy it. */
+static const char *g_request_owner = "";
+
+/* connect: may take seconds (network, SSH tunnel), so it runs on a worker */
+typedef struct {
+  char *connstr;
+  char *password;
+  char owner[64];
+} ConnectJobArg;
+
+static void connect_job_free(void *p) {
+  ConnectJobArg *a = p;
+  if (a) {
+    str_secure_free(a->connstr);
+    str_secure_free(a->password);
+    free(a);
+  }
+}
+
+static cJSON *connect_job(LacedSession *session, void *p, char **err,
+                          int *err_code) {
+  ConnectJobArg *a = p;
+  int conn_id = 0;
+  if (!laced_session_connect(session, a->connstr, a->password, a->owner,
+                             &conn_id, err)) {
+    *err_code = JSONRPC_INTERNAL_ERROR;
+    if (!*err) {
+      *err = str_dup("Connection failed");
+    }
+    return NULL;
+  }
+  cJSON *result = cJSON_CreateObject();
+  cJSON_AddNumberToObject(result, "conn_id", conn_id);
+  return result;
+}
+
 static LacedHandlerResult handle_connect(LacedSession *session,
                                          AsyncQueue *async_queue,
                                          cJSON *params,
                                          cJSON *request_id) {
-  (void)async_queue;
-  (void)request_id;
   const char *connstr = NULL;
   const char *password = NULL;
 
@@ -61,39 +96,52 @@ static LacedHandlerResult handle_connect(LacedSession *session,
   /* Password is optional */
   laced_json_get_string(params, "password", &password);
 
-  int conn_id = 0;
-  char *err = NULL;
-  if (!laced_session_connect(session, connstr, password, &conn_id, &err)) {
-    return HANDLER_ERROR_DYN(JSONRPC_INTERNAL_ERROR,
-                             err ? err : str_dup("Connection failed"));
+  ConnectJobArg *arg = safe_calloc(1, sizeof(ConnectJobArg));
+  arg->connstr = str_dup(connstr);
+  arg->password = password ? str_dup(password) : NULL;
+  snprintf(arg->owner, sizeof(arg->owner), "%s", g_request_owner);
+  AsyncQuery *job = async_job_start(async_queue, session, request_id,
+                                    connect_job, arg, connect_job_free);
+  if (!job) {
+    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start connect");
   }
-
-  cJSON *result = cJSON_CreateObject();
-  if (result) {
-    cJSON_AddNumberToObject(result, "conn_id", conn_id);
-  }
-  return HANDLER_OK(result);
+  return HANDLER_DEFERRED(job);
 }
 
 /* disconnect: Close a database connection */
+/* disconnect: closing a connection (and its SSH tunnel) can block */
+static void int_job_free(void *p) { free(p); }
+
+static cJSON *disconnect_job(LacedSession *session, void *p, char **err,
+                             int *err_code) {
+  int conn_id = *(int *)p;
+  if (!laced_session_disconnect(session, conn_id, err)) {
+    *err_code = JSONRPC_INTERNAL_ERROR;
+    if (!*err) {
+      *err = str_dup("Disconnect failed");
+    }
+    return NULL;
+  }
+  return cJSON_CreateObject();
+}
+
 static LacedHandlerResult handle_disconnect(LacedSession *session,
                                             AsyncQueue *async_queue,
                                             cJSON *params,
                                             cJSON *request_id) {
-  (void)async_queue;
-  (void)request_id;
   int conn_id = 0;
   if (!laced_json_get_int(params, "conn_id", &conn_id)) {
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
   }
 
-  char *err = NULL;
-  if (!laced_session_disconnect(session, conn_id, &err)) {
-    return HANDLER_ERROR_DYN(JSONRPC_INTERNAL_ERROR,
-                             err ? err : str_dup("Disconnect failed"));
+  int *arg = safe_malloc(sizeof(int));
+  *arg = conn_id;
+  AsyncQuery *job = async_job_start(async_queue, session, request_id,
+                                    disconnect_job, arg, int_job_free);
+  if (!job) {
+    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start disconnect");
   }
-
-  return HANDLER_OK(cJSON_CreateObject());
+  return HANDLER_DEFERRED(job);
 }
 
 /* connections: List active connections */
@@ -165,63 +213,16 @@ static LacedHandlerResult handle_query(LacedSession *session,
     return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Invalid connection ID");
   }
 
-  /* Dispatch async exec - response will be sent when exec completes */
-  if (async_queue && request_id) {
-    AsyncQuery *query = async_exec_start(async_queue, session, conn_id,
-                                         sql, request_id);
-    if (!query) {
-      return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start async exec");
-    }
-    return HANDLER_DEFERRED(query);
+  /* Always on a worker, also for a notification (no id): the old inline
+   * fallback ran on the main thread and ignored a busy connection, so it
+   * could use a DbConnection a worker was already using. The reply of a
+   * notification is dropped. */
+  AsyncQuery *query = async_exec_start(async_queue, session, conn_id, sql,
+                                       request_id);
+  if (!query) {
+    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start async exec");
   }
-
-  /* Fallback: synchronous execution if no async queue */
-
-  /* Does this statement produce a result set? */
-  bool is_select = str_sql_returns_rows(sql);
-
-  cJSON *result = cJSON_CreateObject();
-  if (!result) {
-    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Memory allocation failed");
-  }
-
-  laced_session_prepare_cancel(session, conn_id);
-
-  char *err = NULL;
-  if (is_select) {
-    ResultSet *rs = db_query(conn, sql, &err);
-
-    laced_session_finish_query(session, conn_id);
-
-    if (!rs) {
-      cJSON_Delete(result);
-      return HANDLER_ERROR_DYN(JSONRPC_INTERNAL_ERROR,
-                               err ? err : str_dup("Query failed"));
-    }
-
-    cJSON_AddStringToObject(result, "type", "select");
-    cJSON *data = laced_json_from_result(rs);
-    if (data) {
-      cJSON_AddItemToObject(result, "data", data);
-    }
-    db_result_free(rs);
-  } else {
-    int64_t affected = db_exec(conn, sql, &err);
-
-    laced_session_finish_query(session, conn_id);
-
-    if (affected < 0) {
-      cJSON_Delete(result);
-      return HANDLER_ERROR_DYN(JSONRPC_INTERNAL_ERROR,
-                               err ? err : str_dup("Execution failed"));
-    }
-
-    cJSON_AddStringToObject(result, "type", "exec");
-    cJSON_AddNumberToObject(result, "affected", (double)affected);
-  }
-  free(err);
-
-  return HANDLER_OK(result);
+  return HANDLER_DEFERRED(query);
 }
 
 /* ==========================================================================
@@ -287,7 +288,11 @@ static LacedHandlerResult handle_version(LacedSession *session,
   return HANDLER_OK(result);
 }
 
-/* shutdown: Request daemon shutdown */
+/*
+ * shutdown: Request daemon shutdown.
+ * The actual flag setting is done in laced_handler_dispatch() since
+ * regular handlers don't have access to the shutdown flag.
+ */
 static LacedHandlerResult handle_shutdown(LacedSession *session,
                                           AsyncQueue *async_queue,
                                           cJSON *params,
@@ -297,110 +302,80 @@ static LacedHandlerResult handle_shutdown(LacedSession *session,
   (void)params;
   (void)request_id;
 
-  /* TODO: Signal main loop to exit gracefully */
+  LOG_INFO("Shutdown requested via RPC");
   return HANDLER_OK(cJSON_CreateObject());
 }
 
-/* queries: List active queries for a connection */
-static LacedHandlerResult handle_queries(LacedSession *session,
-                                         AsyncQueue *async_queue,
-                                         cJSON *params,
-                                         cJSON *request_id) {
-  (void)session;
+/* connection: Get connection statistics */
+static LacedHandlerResult handle_connection(LacedSession *session,
+                                            AsyncQueue *async_queue,
+                                            cJSON *params,
+                                            cJSON *request_id) {
+  (void)async_queue;
   (void)request_id;
   int conn_id = 0;
 
-  /* conn_id is optional - 0 means all connections */
-  laced_json_get_int(params, "conn_id", &conn_id);
-
-  if (!async_queue) {
-    /* No async queue - return empty array */
-    return HANDLER_OK(cJSON_CreateArray());
+  if (!laced_json_get_int(params, "conn_id", &conn_id)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
   }
 
-  AsyncQueryInfo *info = NULL;
-  size_t count = 0;
-  if (!async_get_active_queries(async_queue, conn_id, &info, &count)) {
-    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to get active queries");
-  }
-
-  cJSON *result = cJSON_CreateArray();
-  if (result) {
-    for (size_t i = 0; i < count; i++) {
-      cJSON *query = cJSON_CreateObject();
-      if (query) {
-        cJSON_AddNumberToObject(query, "query_id", (double)info[i].query_id);
-        cJSON_AddNumberToObject(query, "conn_id", info[i].conn_id);
-        const char *type_str;
-        switch (info[i].type) {
-        case ASYNC_QUERY_TYPE_QUERY: type_str = "data"; break;
-        case ASYNC_QUERY_TYPE_EXEC: type_str = "query"; break;
-        case ASYNC_QUERY_TYPE_COUNT: type_str = "count"; break;
-        default: type_str = "unknown"; break;
-        }
-        cJSON_AddStringToObject(query, "type", type_str);
-        const char *status_str;
-        switch (info[i].status) {
-        case ASYNC_QUERY_PENDING: status_str = "pending"; break;
-        case ASYNC_QUERY_RUNNING: status_str = "running"; break;
-        case ASYNC_QUERY_COMPLETED: status_str = "completed"; break;
-        case ASYNC_QUERY_CANCELLED: status_str = "cancelled"; break;
-        case ASYNC_QUERY_ERROR: status_str = "error"; break;
-        default: status_str = "unknown"; break;
-        }
-        cJSON_AddStringToObject(query, "status", status_str);
-        if (info[i].description) {
-          cJSON_AddStringToObject(query, "description", info[i].description);
-        }
-        cJSON_AddNumberToObject(query, "started_at_ms", (double)info[i].started_at_ms);
-        cJSON_AddItemToArray(result, query);
-      }
-    }
-  }
-
-  async_query_info_free(info, count);
-  return HANDLER_OK(result);
-}
-
-/* cancel: Cancel a running query by connection or query ID */
-static LacedHandlerResult handle_cancel(LacedSession *session,
-                                        AsyncQueue *async_queue,
-                                        cJSON *params,
-                                        cJSON *request_id) {
-  (void)request_id;
-  int conn_id = 0;
-  int64_t query_id = 0;
-  bool has_conn_id = laced_json_get_int(params, "conn_id", &conn_id);
-  bool has_query_id = laced_json_get_int64(params, "query_id", &query_id);
-
-  if (!has_conn_id && !has_query_id) {
-    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS,
-                         "Missing 'conn_id' or 'query_id' parameter");
-  }
-
-  bool cancelled = false;
-
-  if (has_query_id && async_queue) {
-    /* Cancel by specific query ID */
-    cancelled = async_cancel_by_query_id(async_queue, session, query_id);
-  } else if (has_conn_id) {
-    /* Cancel by connection ID (all queries on that connection) */
-    if (async_queue) {
-      (void)async_cancel_by_conn_id(async_queue, session, conn_id);
-    }
-    /* Also call session cancel directly (for synchronous operations) */
-    char *err = NULL;
-    laced_session_cancel_query(session, conn_id, &err);
-    free(err);
-    /* Always report cancelled for conn_id mode since we attempt all methods */
-    cancelled = true;
+  LacedConnStats stats;
+  if (!laced_session_get_conn_stats(session, conn_id, &stats)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Connection not found");
   }
 
   cJSON *result = cJSON_CreateObject();
   if (result) {
-    cJSON_AddBoolToObject(result, "cancelled", cancelled);
+    cJSON_AddNumberToObject(result, "uptime_ms", (double)stats.uptime_ms);
+    cJSON_AddNumberToObject(result, "query_count", (double)stats.query_count);
+    cJSON_AddNumberToObject(result, "total_query_time_ms", (double)stats.total_query_time_ms);
+    cJSON_AddNumberToObject(result, "failed_query_count", (double)stats.failed_query_count);
+    cJSON_AddBoolToObject(result, "query_running", stats.query_running);
+    if (stats.query_running) {
+      cJSON_AddNumberToObject(result, "current_query_time_ms", (double)stats.current_query_time_ms);
+    }
   }
   return HANDLER_OK(result);
+}
+
+/* cancel: Cancel a running query on a connection */
+/* cancel: the driver cancel opens a connection to the server (PostgreSQL
+ * PQcancel, MySQL KILL side connection), so it runs on a worker too */
+typedef struct {
+  AsyncQueue *queue;
+  int conn_id;
+} CancelJobArg;
+
+static cJSON *cancel_job(LacedSession *session, void *p, char **err,
+                         int *err_code) {
+  (void)err;
+  (void)err_code;
+  CancelJobArg *a = p;
+  (void)async_cancel_by_conn_id(a->queue, session, a->conn_id);
+  cJSON *result = cJSON_CreateObject();
+  cJSON_AddBoolToObject(result, "cancelled", true);
+  return result;
+}
+
+static LacedHandlerResult handle_cancel(LacedSession *session,
+                                        AsyncQueue *async_queue,
+                                        cJSON *params,
+                                        cJSON *request_id) {
+  int conn_id = 0;
+
+  if (!laced_json_get_int(params, "conn_id", &conn_id)) {
+    return HANDLER_ERROR(JSONRPC_INVALID_PARAMS, "Missing 'conn_id' parameter");
+  }
+
+  CancelJobArg *arg = safe_malloc(sizeof(CancelJobArg));
+  arg->queue = async_queue;
+  arg->conn_id = conn_id;
+  AsyncQuery *job = async_job_start(async_queue, session, request_id,
+                                    cancel_job, arg, int_job_free);
+  if (!job) {
+    return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Failed to start cancel");
+  }
+  return HANDLER_DEFERRED(job);
 }
 
 /* ==========================================================================
@@ -430,7 +405,7 @@ static struct {
     {"ping", handle_ping},
     {"version", handle_version},
     {"shutdown", handle_shutdown},
-    {"queries", handle_queries},
+    {"connection", handle_connection},
     {"cancel", handle_cancel},
 
     {NULL, NULL}  /* Sentinel */
@@ -440,17 +415,29 @@ LacedHandlerResult laced_handler_dispatch(LacedSession *session,
                                           AsyncQueue *async_queue,
                                           const char *method,
                                           cJSON *params,
-                                          cJSON *request_id) {
+                                          cJSON *request_id,
+                                          volatile sig_atomic_t *shutdown_flag,
+                                          const char *owner) {
   if (!session || !method) {
     return HANDLER_ERROR(JSONRPC_INTERNAL_ERROR, "Invalid handler state");
   }
+  g_request_owner = owner ? owner : "";
 
   LOG_DEBUG("RPC method: %s", method);
 
   /* Find method handler */
   for (int i = 0; g_methods[i].name != NULL; i++) {
     if (strcmp(g_methods[i].name, method) == 0) {
-      return g_methods[i].handler(session, async_queue, params, request_id);
+      LacedHandlerResult result =
+          g_methods[i].handler(session, async_queue, params, request_id);
+
+      /* Set shutdown flag after handler returns success */
+      if (strcmp(method, "shutdown") == 0 && result.error_code == 0 &&
+          shutdown_flag) {
+        *shutdown_flag = 1;
+      }
+
+      return result;
     }
   }
 

@@ -9,6 +9,8 @@
 #ifndef LACED_SERVER_H
 #define LACED_SERVER_H
 
+#include <sys/types.h>
+
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,10 +36,16 @@ typedef enum {
 typedef struct LacedClient {
   int fd;                     /* Client socket file descriptor */
   bool closed;                /* Peer hung up or socket errored; remove on next pass */
+  bool readable;              /* Set by the event loop's poll() each pass */
+  bool authed;                /* May call methods (TCP: after a valid token) */
+  int auth_failures;          /* Bad tokens sent; dropped after 3 */
+  char owner[64];             /* Owner key for its DB connections: "u:<id>"
+                                 from a liblace "hello", else "s:<serial>" */
   uint64_t serial;            /* Unique per accepted client; pointers get reused */
   char *partial_buf;          /* Partial line buffer */
   size_t partial_len;         /* Current length in buffer */
   size_t partial_cap;         /* Buffer capacity */
+  size_t partial_scanned;     /* Bytes already searched for '\n' */
   struct LacedClient *next;   /* Next client in linked list */
   /* Activity tracking */
   time_t connected_at;        /* Connection timestamp */
@@ -73,11 +81,17 @@ void laced_server_destroy(LacedServer *server);
 AsyncQueue *laced_server_get_async_queue(LacedServer *server);
 
 /*
- * Make socket modes exit once no client has been connected for `seconds`
- * (0 disables). Used for daemons spawned on demand by liblace, so a client
- * that crashes does not leave the daemon and its database connections behind.
+ * Unix socket mode: also let members of this group connect (the socket is
+ * created 0660 and given to the group; the default is owner-only 0600).
+ * Peers of other users are refused either way. Root may always connect.
  */
-void laced_server_set_exit_when_idle(LacedServer *server, int seconds);
+void laced_server_set_socket_group(LacedServer *server, gid_t group);
+
+/*
+ * TCP mode: where to write the authentication token (default: next to the
+ * default socket, laced-<port>.token). Clients must send it in "hello".
+ */
+void laced_server_set_token_file(LacedServer *server, const char *path);
 
 /* ==========================================================================
  * Server Execution
@@ -101,11 +115,12 @@ int laced_server_run_stdio(LacedServer *server,
  * @param server            Server handle
  * @param socket_path       Path to Unix socket (NULL for default)
  * @param max_clients       Maximum concurrent clients (0 for default 64)
+ * @param idle_timeout      Shutdown after N seconds with no clients (0=disabled)
  * @param shutdown_flag     Pointer to flag that signals shutdown
  * @return                  0 on success, non-zero on error
  */
 int laced_server_run_unix(LacedServer *server, const char *socket_path,
-                          size_t max_clients,
+                          size_t max_clients, int idle_timeout,
                           volatile sig_atomic_t *shutdown_flag);
 
 /*
@@ -116,11 +131,12 @@ int laced_server_run_unix(LacedServer *server, const char *socket_path,
  * @param bind_addr         Address to bind (NULL for localhost)
  * @param port              Port number (0 for default 7433)
  * @param max_clients       Maximum concurrent clients (0 for default 64)
+ * @param idle_timeout      Shutdown after N seconds with no clients (0=disabled)
  * @param shutdown_flag     Pointer to flag that signals shutdown
  * @return                  0 on success, non-zero on error
  */
 int laced_server_run_tcp(LacedServer *server, const char *bind_addr, int port,
-                         size_t max_clients,
+                         size_t max_clients, int idle_timeout,
                          volatile sig_atomic_t *shutdown_flag);
 
 /* ==========================================================================

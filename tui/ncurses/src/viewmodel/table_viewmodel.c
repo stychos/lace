@@ -29,6 +29,7 @@ static Tab *vm_tab(const TableViewModel *vm) {
 }
 #define VM_T(v) vm_tab(v)
 #include "../core/constants.h"
+#include "../core/utf8.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include <stdlib.h>
@@ -90,11 +91,7 @@ static void table_vm_on_focus_in(ViewModel *vm) {
 }
 
 static void table_vm_on_focus_out(ViewModel *vm) {
-  TableViewModel *tvm = (TableViewModel *)vm;
-  /* Cancel edit when losing focus */
-  if (tvm->edit.active) {
-    table_vm_cancel_edit(tvm);
-  }
+  (void)vm;
 }
 
 static void table_vm_validate_cursor_impl(ViewModel *vm) {
@@ -121,13 +118,6 @@ static void table_vm_ops_destroy(ViewModel *vm) {
   tvm->selection.rows = NULL;
   tvm->selection.count = 0;
   tvm->selection.capacity = 0;
-
-  /* Free edit state */
-  free(tvm->edit.buffer);
-  free(tvm->edit.original);
-  tvm->edit.buffer = NULL;
-  tvm->edit.original = NULL;
-  tvm->edit.active = false;
 
   /* Free column widths */
   free(tvm->col_widths);
@@ -173,11 +163,6 @@ void table_vm_destroy(TableViewModel *vm) {
 void table_vm_bind(TableViewModel *vm, Tab *tab) {
   if (!vm)
     return;
-
-  /* Clear edit state */
-  if (vm->edit.active) {
-    table_vm_cancel_edit(vm);
-  }
 
   /* Clear selection */
   vm->selection.count = 0;
@@ -530,255 +515,6 @@ const size_t *table_vm_selected_rows(const TableViewModel *vm) {
 }
 
 /* ============================================================================
- * Editing
- * ============================================================================
- */
-
-#define EDIT_BUFFER_INITIAL_SIZE 256
-
-bool table_vm_start_edit(TableViewModel *vm, size_t row, size_t col) {
-  if (!vm || !table_vm_valid(vm))
-    return false;
-
-  if (row >= table_vm_row_count(vm) || col >= table_vm_col_count(vm))
-    return false;
-
-  /* Cancel any existing edit */
-  if (vm->edit.active) {
-    table_vm_cancel_edit(vm);
-  }
-
-  /* Get current cell value */
-  const DbValue *val = table_vm_cell(vm, row, col);
-  const char *text = "";
-  if (val && !val->is_null && val->type == DB_TYPE_TEXT && val->text.data) {
-    text = val->text.data;
-  }
-
-  /* Allocate edit buffer */
-  size_t text_len = strlen(text);
-  size_t buf_cap = text_len + EDIT_BUFFER_INITIAL_SIZE;
-  char *buffer = safe_malloc(buf_cap);
-
-  memcpy(buffer, text, text_len + 1); /* +1 for null terminator */
-
-  /* Store original for cancel */
-  char *original = str_dup(text);
-
-  /* Set up edit state */
-  vm->edit.active = true;
-  vm->edit.row = row;
-  vm->edit.col = col;
-  vm->edit.buffer = buffer;
-  vm->edit.buffer_len = text_len;
-  vm->edit.buffer_cap = buf_cap;
-  vm->edit.cursor_pos = text_len;
-  vm->edit.original = original;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-  return true;
-}
-
-bool table_vm_start_edit_at_cursor(TableViewModel *vm) {
-  if (!vm)
-    return false;
-  return table_vm_start_edit(vm, VM_T(vm)->cursor_row,
-                             VM_T(vm)->cursor_col);
-}
-
-void table_vm_edit_insert_char(TableViewModel *vm, char ch) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  /* Grow buffer if needed */
-  if (vm->edit.buffer_len + 2 > vm->edit.buffer_cap) {
-    size_t new_cap = vm->edit.buffer_cap * 2;
-    vm->edit.buffer = safe_realloc(vm->edit.buffer, new_cap);
-    vm->edit.buffer_cap = new_cap;
-  }
-
-  /* Insert character at cursor position */
-  memmove(&vm->edit.buffer[vm->edit.cursor_pos + 1],
-          &vm->edit.buffer[vm->edit.cursor_pos],
-          vm->edit.buffer_len - vm->edit.cursor_pos + 1);
-  vm->edit.buffer[vm->edit.cursor_pos] = ch;
-  vm->edit.cursor_pos++;
-  vm->edit.buffer_len++;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_insert_text(TableViewModel *vm, const char *text) {
-  if (!vm || !vm->edit.active || !text)
-    return;
-
-  size_t insert_len = strlen(text);
-  if (insert_len == 0)
-    return;
-
-  /* Grow buffer if needed */
-  while (vm->edit.buffer_len + insert_len + 1 > vm->edit.buffer_cap) {
-    size_t new_cap = vm->edit.buffer_cap * 2;
-    vm->edit.buffer = safe_realloc(vm->edit.buffer, new_cap);
-    vm->edit.buffer_cap = new_cap;
-  }
-
-  /* Insert text at cursor position */
-  memmove(&vm->edit.buffer[vm->edit.cursor_pos + insert_len],
-          &vm->edit.buffer[vm->edit.cursor_pos],
-          vm->edit.buffer_len - vm->edit.cursor_pos + 1);
-  memcpy(&vm->edit.buffer[vm->edit.cursor_pos], text, insert_len);
-  vm->edit.cursor_pos += insert_len;
-  vm->edit.buffer_len += insert_len;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_delete_char(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  if (vm->edit.cursor_pos >= vm->edit.buffer_len)
-    return;
-
-  memmove(&vm->edit.buffer[vm->edit.cursor_pos],
-          &vm->edit.buffer[vm->edit.cursor_pos + 1],
-          vm->edit.buffer_len - vm->edit.cursor_pos);
-  vm->edit.buffer_len--;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_backspace(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  if (vm->edit.cursor_pos == 0)
-    return;
-
-  vm->edit.cursor_pos--;
-  table_vm_edit_delete_char(vm);
-}
-
-void table_vm_edit_clear(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  vm->edit.buffer[0] = '\0';
-  vm->edit.buffer_len = 0;
-  vm->edit.cursor_pos = 0;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_set_cursor(TableViewModel *vm, size_t pos) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  if (pos > vm->edit.buffer_len)
-    pos = vm->edit.buffer_len;
-  vm->edit.cursor_pos = pos;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_move_cursor(TableViewModel *vm, int delta) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  if (delta < 0) {
-    size_t d = (size_t)(-delta);
-    vm->edit.cursor_pos = (vm->edit.cursor_pos > d) ? vm->edit.cursor_pos - d : 0;
-  } else {
-    vm->edit.cursor_pos += (size_t)delta;
-    if (vm->edit.cursor_pos > vm->edit.buffer_len)
-      vm->edit.cursor_pos = vm->edit.buffer_len;
-  }
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-void table_vm_edit_home(TableViewModel *vm) { table_vm_edit_set_cursor(vm, 0); }
-
-void table_vm_edit_end(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return;
-  table_vm_edit_set_cursor(vm, vm->edit.buffer_len);
-}
-
-bool table_vm_is_editing(const TableViewModel *vm) {
-  return vm ? vm->edit.active : false;
-}
-
-const char *table_vm_edit_buffer(const TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return NULL;
-  return vm->edit.buffer;
-}
-
-size_t table_vm_edit_cursor(const TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return 0;
-  return vm->edit.cursor_pos;
-}
-
-void table_vm_get_edit_cell(const TableViewModel *vm, size_t *row,
-                            size_t *col) {
-  if (!vm || !vm->edit.active) {
-    if (row)
-      *row = 0;
-    if (col)
-      *col = 0;
-    return;
-  }
-
-  if (row)
-    *row = vm->edit.row;
-  if (col)
-    *col = vm->edit.col;
-}
-
-bool table_vm_commit_edit(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return false;
-
-  /* Note: Actual database update is handled by the TUI layer.
-   * This just cleans up the edit state and notifies. */
-
-  bool success = true; /* Assume success for now */
-
-  /* Notify callback */
-  if (vm->table_callbacks.on_edit_complete) {
-    vm->table_callbacks.on_edit_complete(vm, success, NULL,
-                                         vm->table_callbacks.context);
-  }
-
-  /* Clean up edit state */
-  free(vm->edit.buffer);
-  free(vm->edit.original);
-  vm->edit.buffer = NULL;
-  vm->edit.original = NULL;
-  vm->edit.active = false;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING | VM_CHANGE_DATA);
-  return success;
-}
-
-void table_vm_cancel_edit(TableViewModel *vm) {
-  if (!vm || !vm->edit.active)
-    return;
-
-  /* Clean up edit state */
-  free(vm->edit.buffer);
-  free(vm->edit.original);
-  vm->edit.buffer = NULL;
-  vm->edit.original = NULL;
-  vm->edit.active = false;
-
-  vm_notify(&vm->base, VM_CHANGE_EDITING);
-}
-
-/* ============================================================================
  * Sorting
  * ============================================================================
  */
@@ -902,7 +638,8 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
     /* Consider header width */
     if (VM_T(vm)->schema && col < VM_T(vm)->schema->num_columns &&
         VM_T(vm)->schema->columns[col].name) {
-      int header_len = (int)strlen(VM_T(vm)->schema->columns[col].name);
+      int header_len = utf8_width(VM_T(vm)->schema->columns[col].name,
+                                  strlen(VM_T(vm)->schema->columns[col].name));
       if (header_len > width)
         width = header_len;
     }
@@ -915,7 +652,7 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
       if (val) {
         char *str = db_value_to_string(val);
         if (str) {
-          int cell_len = (int)strlen(str);
+          int cell_len = utf8_width(str, strlen(str));
           if (cell_len > width)
             width = cell_len;
           free(str);

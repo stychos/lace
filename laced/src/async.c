@@ -11,6 +11,7 @@
 #include "db/db.h"
 #include "json.h"
 #include "log.h"
+#include "ssh_tunnel.h"
 #include <util/mem.h>
 #include <util/str.h>
 #include <fcntl.h>
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Get current time in milliseconds since epoch */
@@ -54,6 +56,7 @@ struct AsyncQuery {
   cJSON *result;
   char *error;
   int error_code;
+  int tx_state;  /* After a statement: 0 none, 1 open, 2 failed; -1 unknown */
 
   /* Threading */
   pthread_t thread;
@@ -65,6 +68,11 @@ struct AsyncQuery {
 
   /* Client tracking (for socket mode) */
   uint64_t client_serial;  /* Owning socket client (0 = stdio) */
+
+  /* Generic job (connect, disconnect, cancel): runs instead of SQL */
+  AsyncJobFn job_fn;
+  void *job_arg;
+  void (*job_arg_free)(void *arg);
 };
 
 /* ==========================================================================
@@ -81,6 +89,9 @@ struct AsyncQueue {
 
   /* Active queries (for cancellation lookup) */
   AsyncQuery *active_head;
+
+  /* Signalled whenever a worker finishes; shutdown waits on it */
+  pthread_cond_t idle_cond;
 
   /* Query ID counter */
   int64_t next_query_id;
@@ -101,7 +112,14 @@ AsyncQueue *async_queue_create(int *notify_fd) {
     return NULL;
   }
 
+  if (pthread_cond_init(&queue->idle_cond, NULL) != 0) {
+    pthread_mutex_destroy(&queue->mutex);
+    free(queue);
+    return NULL;
+  }
+
   if (pipe(queue->notify_pipe) < 0) {
+    pthread_cond_destroy(&queue->idle_cond);
     pthread_mutex_destroy(&queue->mutex);
     free(queue);
     return NULL;
@@ -143,8 +161,57 @@ void async_queue_destroy(AsyncQueue *queue) {
 
   close(queue->notify_pipe[0]);
   close(queue->notify_pipe[1]);
+  pthread_cond_destroy(&queue->idle_cond);
   pthread_mutex_destroy(&queue->mutex);
   free(queue);
+}
+
+bool async_queue_shutdown(AsyncQueue *queue, LacedSession *session,
+                          int timeout_ms) {
+  if (!queue) {
+    return true;
+  }
+
+  ssh_tunnel_abort_pending(); /* Connects waiting for a tunnel give up */
+
+  /* Ask every running query to stop, then cancel them in the database.
+   * The conn_ids are collected first: the driver cancel may block, and
+   * must not run under the queue lock the workers need to finish. */
+  int conn_ids[256];
+  size_t n = 0;
+  pthread_mutex_lock(&queue->mutex);
+  for (AsyncQuery *q = queue->active_head; q; q = q->next) {
+    q->cancel_requested = true;
+    if (!q->job_fn && n < sizeof(conn_ids) / sizeof(conn_ids[0])) {
+      conn_ids[n++] = q->conn_id;
+    }
+  }
+  pthread_mutex_unlock(&queue->mutex);
+  for (size_t i = 0; i < n; i++) {
+    char *err = NULL;
+    laced_session_cancel_query(session, conn_ids[i], &err);
+    free(err);
+  }
+
+  /* Wait for the workers: they use the session's connections and this
+   * queue until they push their result */
+  struct timespec deadline;
+  clock_gettime(CLOCK_REALTIME, &deadline);
+  deadline.tv_sec += timeout_ms / 1000;
+  deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec++;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  pthread_mutex_lock(&queue->mutex);
+  while (queue->active_head) {
+    if (pthread_cond_timedwait(&queue->idle_cond, &queue->mutex, &deadline) != 0) {
+      break; /* Timed out */
+    }
+  }
+  bool idle = queue->active_head == NULL;
+  pthread_mutex_unlock(&queue->mutex);
+  return idle;
 }
 
 /* Push completed query to queue (called by worker thread) */
@@ -169,6 +236,9 @@ static void async_queue_push(AsyncQueue *queue, AsyncQuery *query) {
   }
   queue->tail = query;
 
+  if (!queue->active_head) {
+    pthread_cond_broadcast(&queue->idle_cond);
+  }
   pthread_mutex_unlock(&queue->mutex);
 
   /* Signal the main loop */
@@ -215,6 +285,23 @@ static void *query_worker(void *arg) {
   AsyncQuery *query = (AsyncQuery *)arg;
   uint64_t start_time = get_time_ms();
 
+  if (query->job_fn) {
+    char *jerr = NULL;
+    int jcode = -32603;
+    cJSON *jres = query->job_fn(query->session, query->job_arg, &jerr, &jcode);
+    if (jres) {
+      query->result = jres;
+      query->status = ASYNC_QUERY_COMPLETED;
+      free(jerr);
+    } else {
+      query->status = ASYNC_QUERY_ERROR;
+      query->error = jerr ? jerr : str_dup("Operation failed");
+      query->error_code = jcode;
+    }
+    async_queue_push(query->queue, query);
+    return NULL;
+  }
+
   LOG_DEBUG("Query %lld starting (conn_id=%d, type=%d)",
             (long long)query->query_id, query->conn_id, query->type);
 
@@ -236,63 +323,66 @@ static void *query_worker(void *arg) {
     query->status = ASYNC_QUERY_ERROR;
     LOG_ERROR("Query %lld failed: invalid connection ID %d",
               (long long)query->query_id, query->conn_id);
-    laced_session_finish_query(query->session, query->conn_id);
+    laced_session_finish_query(query->session, query->conn_id, false);
     async_queue_push(query->queue, query);
     return NULL;
   }
 
   char *err = NULL;
+  if (!laced_session_check_tunnel(query->session, query->conn_id, &err)) {
+    query->error = err ? err : str_dup("SSH tunnel is down");
+    query->error_code = -32603;
+    query->status = ASYNC_QUERY_ERROR;
+    laced_session_finish_query(query->session, query->conn_id, false);
+    async_queue_push(query->queue, query);
+    return NULL;
+  }
 
-  /* Does this statement produce a result set? */
-  bool is_select = str_sql_returns_rows(query->sql);
+  /* Run it and reply with what it actually produced: rows (SELECT, but also
+   * INSERT/UPDATE/DELETE ... RETURNING, CALL, CHECK TABLE, SHOW) or a row
+   * count. Deciding by keyword dropped RETURNING rows and left MySQL result
+   * sets unread ("Commands out of sync"). */
+  ResultSet *rs = db_query(conn, query->sql, &err);
+  bool success = rs != NULL;
+  /* Read while this worker still owns the connection */
+  int tx_state = conn->driver && conn->driver->transaction_state
+                     ? conn->driver->transaction_state(conn)
+                     : 0;
+  query->tx_state = tx_state;
+  laced_session_finish_query(query->session, query->conn_id, success);
 
-  if (is_select) {
-    ResultSet *rs = db_query(conn, query->sql, &err);
-    laced_session_finish_query(query->session, query->conn_id);
-
-    if (query->cancel_requested) {
-      query->status = ASYNC_QUERY_CANCELLED;
-      query->error = str_dup("Query cancelled");
-      query->error_code = -32000;
-      if (rs) db_result_free(rs);
-      free(err);
-    } else if (!rs) {
-      query->status = ASYNC_QUERY_ERROR;
-      query->error = err ? err : str_dup("Query failed");
-      query->error_code = -32603;
-    } else {
-      cJSON *result = cJSON_CreateObject();
+  /* A cancel that arrived as the statement finished did not stop it:
+   * report what actually happened (a completed write is committed) */
+  if (!rs && query->cancel_requested) {
+    query->status = ASYNC_QUERY_CANCELLED;
+    query->error = str_dup("Query cancelled");
+    query->error_code = -32000;
+    free(err);
+  } else if (!rs) {
+    query->status = ASYNC_QUERY_ERROR;
+    query->error = err ? err : str_dup("Query failed");
+    query->error_code = -32603;
+  } else {
+    cJSON *result = cJSON_CreateObject();
+    if (rs->num_columns > 0) {
       cJSON_AddStringToObject(result, "type", "select");
       cJSON *data = laced_json_from_result(rs);
       if (data) {
         cJSON_AddItemToObject(result, "data", data);
       }
-      query->result = result;
-      query->status = ASYNC_QUERY_COMPLETED;
-      db_result_free(rs);
-      free(err);
-    }
-  } else {
-    int64_t affected = db_exec(conn, query->sql, &err);
-    laced_session_finish_query(query->session, query->conn_id);
-
-    if (query->cancel_requested) {
-      query->status = ASYNC_QUERY_CANCELLED;
-      query->error = str_dup("Query cancelled");
-      query->error_code = -32000;
-      free(err);
-    } else if (affected < 0) {
-      query->status = ASYNC_QUERY_ERROR;
-      query->error = err ? err : str_dup("Execution failed");
-      query->error_code = -32603;
     } else {
-      cJSON *result = cJSON_CreateObject();
       cJSON_AddStringToObject(result, "type", "exec");
-      cJSON_AddNumberToObject(result, "affected", (double)affected);
-      query->result = result;
-      query->status = ASYNC_QUERY_COMPLETED;
-      free(err);
+      cJSON_AddNumberToObject(result, "affected", (double)rs->rows_affected);
     }
+    /* Lets the client notice a transaction it would lose by reconnecting */
+    cJSON_AddBoolToObject(result, "in_transaction", tx_state != 0);
+    if (tx_state == 2) {
+      cJSON_AddBoolToObject(result, "transaction_failed", true);
+    }
+    query->result = result;
+    query->status = ASYNC_QUERY_COMPLETED;
+    db_result_free(rs);
+    free(err);
   }
 
   /* Log completion */
@@ -322,6 +412,7 @@ static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
   if (!query) {
     return NULL;
   }
+  query->tx_state = -1;
 
   query->queue = queue;
   query->session = session;
@@ -390,6 +481,27 @@ AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
   return query;
 }
 
+AsyncQuery *async_job_start(AsyncQueue *queue, LacedSession *session,
+                            cJSON *request_id, AsyncJobFn fn, void *arg,
+                            void (*arg_free)(void *arg)) {
+  AsyncQuery *query = async_query_create(queue, session, 0, request_id);
+  if (!query) {
+    if (arg_free) {
+      arg_free(arg);
+    }
+    return NULL;
+  }
+  query->type = ASYNC_QUERY_TYPE_EXEC;
+  query->job_fn = fn;
+  query->job_arg = arg;
+  query->job_arg_free = arg_free;
+
+  if (!async_query_launch(query)) {
+    async_queue_push(queue, query);
+  }
+  return query;
+}
+
 AsyncQueryStatus async_query_status(const AsyncQuery *query) {
   return query ? query->status : ASYNC_QUERY_ERROR;
 }
@@ -416,6 +528,20 @@ char *async_query_take_error(AsyncQuery *query) {
   return error;
 }
 
+cJSON *async_query_error_data(const AsyncQuery *query) {
+  if (!query || query->tx_state < 0)
+    return NULL;
+  /* A failed statement can leave a transaction open, or (PostgreSQL) open
+   * but failed: the client must not lose track of it */
+  cJSON *data = cJSON_CreateObject();
+  if (!data)
+    return NULL;
+  cJSON_AddBoolToObject(data, "in_transaction", query->tx_state != 0);
+  if (query->tx_state == 2)
+    cJSON_AddBoolToObject(data, "transaction_failed", true);
+  return data;
+}
+
 int async_query_get_error_code(const AsyncQuery *query) {
   return query ? query->error_code : -32603;
 }
@@ -425,7 +551,10 @@ void async_query_free(AsyncQuery *query) {
     return;
   }
 
-  free(query->sql);
+  if (query->job_arg_free) {
+    query->job_arg_free(query->job_arg);
+  }
+  str_secure_free(query->sql); /* SQL may embed passwords or data */
   free(query->error);
   if (query->result) {
     cJSON_Delete(query->result);
@@ -444,26 +573,20 @@ bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session, int conn_
   bool found = false;
 
   pthread_mutex_lock(&queue->mutex);
-
-  /* Find query by connection ID in active list */
-  AsyncQuery *q = queue->active_head;
-  while (q) {
-    if (q->conn_id == conn_id && q->status == ASYNC_QUERY_RUNNING) {
+  for (AsyncQuery *q = queue->active_head; q; q = q->next) {
+    if (!q->job_fn && q->conn_id == conn_id && q->status == ASYNC_QUERY_RUNNING) {
       q->cancel_requested = true;
       found = true;
       break;
     }
-    q = q->next;
   }
-
   pthread_mutex_unlock(&queue->mutex);
 
-  /* Call session cancel (this sends the actual cancel to the database) */
-  if (found) {
-    char *err = NULL;
-    laced_session_cancel_query(session, conn_id, &err);
-    free(err);
-  }
+  /* Send the cancel to the database once. The session knows whether a
+   * statement is running on this connection; with none it does nothing. */
+  char *err = NULL;
+  laced_session_cancel_query(session, conn_id, &err);
+  free(err);
 
   return found;
 }

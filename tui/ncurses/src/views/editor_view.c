@@ -36,11 +36,11 @@ typedef struct {
   /* Cursor position */
   size_t cursor;      /* Byte offset in buffer */
   size_t cursor_line; /* Line number (0-based) */
-  size_t cursor_col;  /* Column (0-based) */
+  size_t cursor_col;  /* Byte offset within the line (0-based) */
 
   /* View scroll */
   size_t scroll_line; /* First visible line */
-  size_t scroll_col;  /* Horizontal scroll */
+  size_t scroll_col;  /* Horizontal scroll, in display columns */
 
   /* Line cache */
   LineInfo *lines;
@@ -165,8 +165,17 @@ static void editor_update_cursor_pos(EditorState *state) {
   }
 }
 
-/* Update byte offset from cursor line/col */
-static void editor_update_cursor_offset(EditorState *state) {
+/* Display column of the cursor within its line */
+static size_t editor_cursor_dcol(const EditorState *state) {
+  if (state->cursor_line >= state->num_lines)
+    return 0;
+  const char *line = state->buf.data + state->lines[state->cursor_line].start;
+  return (size_t)utf8_width(line, state->cursor_col);
+}
+
+/* Update byte offset from cursor line and a display column, landing on a
+ * character boundary */
+static void editor_update_cursor_offset(EditorState *state, size_t dcol) {
   if (state->cursor_line >= state->num_lines) {
     state->cursor_line = state->num_lines > 0 ? state->num_lines - 1 : 0;
   }
@@ -178,9 +187,8 @@ static void editor_update_cursor_offset(EditorState *state) {
   }
 
   LineInfo *line = &state->lines[state->cursor_line];
-  if (state->cursor_col > line->len) {
-    state->cursor_col = line->len;
-  }
+  state->cursor_col =
+      utf8_offset_at_col(state->buf.data + line->start, line->len, (int)dcol);
   state->cursor = line->start + state->cursor_col;
 }
 
@@ -195,17 +203,19 @@ static void editor_ensure_visible(EditorState *state) {
   }
 
   /* Horizontal scroll */
-  if (state->cursor_col < state->scroll_col) {
-    state->scroll_col = state->cursor_col;
+  size_t dcol = editor_cursor_dcol(state);
+  if (dcol < state->scroll_col) {
+    state->scroll_col = dcol;
   }
-  if (state->cursor_col >= state->scroll_col + (size_t)state->view_cols) {
-    state->scroll_col = state->cursor_col - state->view_cols + 1;
+  if (state->view_cols > 0 &&
+      dcol >= state->scroll_col + (size_t)state->view_cols) {
+    state->scroll_col = dcol - state->view_cols + 1;
   }
 }
 
 static void editor_move_left(EditorState *state) {
   if (state->cursor > 0) {
-    state->cursor--;
+    state->cursor = utf8_prev(state->buf.data, state->cursor);
     editor_update_cursor_pos(state);
     editor_ensure_visible(state);
   }
@@ -213,24 +223,26 @@ static void editor_move_left(EditorState *state) {
 
 static void editor_move_right(EditorState *state) {
   if (state->cursor < state->buf.len) {
-    state->cursor++;
+    state->cursor = utf8_next(state->buf.data, state->buf.len, state->cursor);
     editor_update_cursor_pos(state);
     editor_ensure_visible(state);
   }
 }
 
 static void editor_move_up(EditorState *state) {
+  size_t dcol = editor_cursor_dcol(state);
   if (state->cursor_line > 0) {
     state->cursor_line--;
-    editor_update_cursor_offset(state);
+    editor_update_cursor_offset(state, dcol);
     editor_ensure_visible(state);
   }
 }
 
 static void editor_move_down(EditorState *state) {
+  size_t dcol = editor_cursor_dcol(state);
   if (state->cursor_line < state->num_lines - 1) {
     state->cursor_line++;
-    editor_update_cursor_offset(state);
+    editor_update_cursor_offset(state, dcol);
     editor_ensure_visible(state);
   }
 }
@@ -253,16 +265,18 @@ static void editor_move_end(EditorState *state) {
 }
 
 static void editor_page_up(EditorState *state) {
+  size_t dcol = editor_cursor_dcol(state);
   if (state->cursor_line > (size_t)state->view_rows) {
     state->cursor_line -= state->view_rows;
   } else {
     state->cursor_line = 0;
   }
-  editor_update_cursor_offset(state);
+  editor_update_cursor_offset(state, dcol);
   editor_ensure_visible(state);
 }
 
 static void editor_page_down(EditorState *state) {
+  size_t dcol = editor_cursor_dcol(state);
   if (state->num_lines == 0) {
     state->cursor_line = 0;
     return;
@@ -271,7 +285,7 @@ static void editor_page_down(EditorState *state) {
   if (state->cursor_line >= state->num_lines) {
     state->cursor_line = state->num_lines - 1;
   }
-  editor_update_cursor_offset(state);
+  editor_update_cursor_offset(state, dcol);
   editor_ensure_visible(state);
 }
 
@@ -293,7 +307,9 @@ static void editor_delete_char(EditorState *state) {
   if (state->cursor >= state->buf.len)
     return;
 
-  editor_buffer_delete(&state->buf, state->cursor);
+  size_t next = utf8_next(state->buf.data, state->buf.len, state->cursor);
+  for (size_t i = state->cursor; i < next; i++)
+    editor_buffer_delete(&state->buf, state->cursor);
   state->modified = true;
   editor_rebuild_lines(state);
   editor_update_cursor_pos(state);
@@ -305,8 +321,10 @@ static void editor_backspace(EditorState *state) {
   if (state->cursor == 0)
     return;
 
-  state->cursor--;
-  editor_buffer_delete(&state->buf, state->cursor);
+  size_t prev = utf8_prev(state->buf.data, state->cursor);
+  for (size_t i = prev; i < state->cursor; i++)
+    editor_buffer_delete(&state->buf, prev);
+  state->cursor = prev;
   state->modified = true;
   editor_rebuild_lines(state);
   editor_update_cursor_pos(state);
@@ -370,15 +388,13 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
       const char *line_data = state->buf.data + line->start;
       size_t line_len = line->len;
 
-      /* Apply horizontal scroll */
-      if (state->scroll_col < line_len) {
-        size_t visible_start = state->scroll_col;
-        size_t visible_len = line_len - visible_start;
-        if (visible_len > (size_t)content_w)
-          visible_len = content_w;
-
-        waddnstr(win, line_data + visible_start, visible_len);
-      }
+      /* Apply horizontal scroll (in display columns) */
+      size_t visible_start =
+          utf8_offset_at_col(line_data, line_len, (int)state->scroll_col);
+      size_t visible_len = utf8_fit(line_data + visible_start,
+                                    line_len - visible_start, content_w, NULL);
+      if (visible_len > 0)
+        waddnstr(win, line_data + visible_start, (int)visible_len);
     }
 
     /* Clear rest of line */
@@ -401,7 +417,8 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
   /* Status text */
   if (state->readonly) {
     mvwprintw(win, status_y, 2, "[Read-only] Line %zu/%zu  Col %zu",
-              state->cursor_line + 1, state->num_lines, state->cursor_col + 1);
+              state->cursor_line + 1, state->num_lines,
+              editor_cursor_dcol(state) + 1);
     char *cancel_key = hotkey_get_display(config, HOTKEY_EDITOR_CANCEL);
     char close_hint[32];
     snprintf(close_hint, sizeof(close_hint), "[%s] Close",
@@ -411,7 +428,7 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
               close_hint);
   } else {
     mvwprintw(win, status_y, 2, "L%zu/%zu C%zu", state->cursor_line + 1,
-              state->num_lines, state->cursor_col + 1);
+              state->num_lines, editor_cursor_dcol(state) + 1);
     /* Build status hint from configurable keys */
     char *save_key = hotkey_get_display(config, HOTKEY_EDITOR_SAVE);
     char *null_key = hotkey_get_display(config, HOTKEY_EDITOR_NULL);
@@ -436,8 +453,9 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
   if (state->cursor_line >= state->scroll_line) {
     cursor_y += (int)(state->cursor_line - state->scroll_line);
   }
-  if (state->cursor_col >= state->scroll_col) {
-    cursor_x += (int)(state->cursor_col - state->scroll_col);
+  size_t cursor_dcol = editor_cursor_dcol(state);
+  if (cursor_dcol >= state->scroll_col) {
+    cursor_x += (int)(cursor_dcol - state->scroll_col);
   }
   wmove(win, cursor_y, cursor_x);
 
@@ -762,7 +780,7 @@ EditorResult editor_view_show(TuiState *state, const char *title,
       }
     }
     /* Printable character - insert */
-    else if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
+    else if (render_event_is_char(&event) && utf8_is_text_key(key_char) &&
              !readonly) {
       editor_insert_char(&editor, (char)key_char);
     }

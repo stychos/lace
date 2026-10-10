@@ -10,6 +10,7 @@
 #define LACE_TUI_INTERNAL_H
 
 #include "core/constants.h"
+#include "core/utf8.h"
 #include "db_compat.h"
 #include "../../liblace/include/util/str.h"
 #include "render_helpers.h"
@@ -386,6 +387,16 @@ static inline void menu_cleanup(MENU *menu, ITEM **items, size_t num_items) {
 /* Sanitize string for single-line cell display */
 char *tui_sanitize_for_display(const char *str);
 
+/* Print text clipped (and for _fit, padded) to width display columns */
+void tui_print_clip(WINDOW *win, int y, int x, int width, const char *str);
+void tui_print_fit(WINDOW *win, int y, int x, int width, const char *str);
+
+/* Draw a single-line edit field: buf scrolled so the cursor (byte offset
+ * pos) is visible, in attr, with the character under the cursor reversed.
+ * Returns the cursor's screen column, or -1 if it is not visible. */
+int tui_draw_edit_field(WINDOW *win, int y, int x, int width, const char *buf,
+                        size_t pos, attr_t attr);
+
 /* Case-insensitive substring search */
 const char *tui_str_istr(const char *haystack, const char *needle);
 
@@ -594,5 +605,13 @@ void tui_show_goto_dialog(TuiState *state);
 
 /* Note: tui_show_schema, tui_show_connect_dialog, tui_show_table_selector,
  * tui_show_config are declared in tui.h as public API */
+
+/* New value for an edited cell. buffer NULL = set NULL. *unchanged is set
+ * (nothing to write) for an untouched value or a NULL cell left empty. The
+ * text is converted like the original value (BLOB hex -> bytes, DECIMAL
+ * exact); an empty text is the empty string, never NULL. */
+bool tui_edit_new_value(const DbValue *orig, LaceValueType col_type,
+                        const char *buffer, DbValue *out, bool *unchanged,
+                        char **err);
 
 #endif /* LACE_TUI_INTERNAL_H */

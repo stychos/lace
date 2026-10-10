@@ -164,7 +164,9 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       state->sidebar_scroll = 0;
     } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
       if (state->sidebar_filter_len > 0) {
-        state->sidebar_filter[--state->sidebar_filter_len] = '\0';
+        state->sidebar_filter_len =
+            utf8_prev(state->sidebar_filter, state->sidebar_filter_len);
+        state->sidebar_filter[state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
         state->sidebar_scroll = 0;
       }
@@ -187,7 +189,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
         size_t space_left =
             sizeof(state->sidebar_filter) - 1 - state->sidebar_filter_len;
         if (paste_len > space_left)
-          paste_len = space_left;
+          paste_len = utf8_truncate(paste_text, space_left);
         if (paste_len > 0) {
           memcpy(state->sidebar_filter + state->sidebar_filter_len, paste_text,
                  paste_len);
@@ -200,7 +202,9 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       free(paste_text);
     } else if (render_event_is_char(event)) {
       /* Printable character - add to filter */
-      if (state->sidebar_filter_len < sizeof(state->sidebar_filter) - 1) {
+      /* A lead byte needs room for its whole character */
+      size_t need = utf8_seq_len((unsigned char)key_char);
+      if (state->sidebar_filter_len + need < sizeof(state->sidebar_filter)) {
         state->sidebar_filter[state->sidebar_filter_len++] = (char)key_char;
         state->sidebar_filter[state->sidebar_filter_len] = '\0';
         state->sidebar_highlight = 0;
@@ -306,8 +310,10 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
           tab->table_index = actual_idx;
           tab->table_name = new_name;
 
-          /* Clear filters when switching to a different table */
+          /* Clear filters and sort when switching to a different table:
+           * both refer to columns of the old table by index */
           filters_clear(&tab->filters);
+          tab->num_sort_entries = 0;
 
           /* Load new table - tui_load_table_data handles Tab data */
           if (tables)
@@ -353,7 +359,8 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       }
       size_t paste_len = strlen(paste_text);
       if (paste_len >= sizeof(state->sidebar_filter))
-        paste_len = sizeof(state->sidebar_filter) - 1;
+        paste_len =
+            utf8_truncate(paste_text, sizeof(state->sidebar_filter) - 1);
       memcpy(state->sidebar_filter, paste_text, paste_len);
       state->sidebar_filter[paste_len] = '\0';
       state->sidebar_filter_len = paste_len;
@@ -447,8 +454,9 @@ void tui_draw_sidebar(TuiState *state) {
   if (state->sidebar_filter_active) {
     wattron(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
-  mvwprintw(state->sidebar_win, y, 1, "/%-*.*s", max_name_len, max_name_len,
-            filter_len > 0 ? filter_text : "");
+  mvwaddch(state->sidebar_win, y, 1, '/');
+  tui_print_fit(state->sidebar_win, y, 2, max_name_len,
+                filter_len > 0 ? filter_text : "");
   if (state->sidebar_filter_active) {
     wattroff(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
   }
@@ -472,7 +480,8 @@ void tui_draw_sidebar(TuiState *state) {
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
       curs_set(1);
-      wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
+      wmove(state->sidebar_win, filter_y,
+            2 + utf8_width(filter_text, filter_len));
     }
     wrefresh(state->sidebar_win);
     return;
@@ -501,7 +510,8 @@ void tui_draw_sidebar(TuiState *state) {
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
       curs_set(1);
-      wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
+      wmove(state->sidebar_win, filter_y,
+            2 + utf8_width(filter_text, filter_len));
     }
     wrefresh(state->sidebar_win);
     return;
@@ -588,7 +598,8 @@ void tui_draw_sidebar(TuiState *state) {
   /* Position cursor in filter field if active, before refresh */
   if (state->sidebar_filter_active) {
     curs_set(1);
-    wmove(state->sidebar_win, filter_y, 2 + (int)filter_len);
+    wmove(state->sidebar_win, filter_y,
+            2 + utf8_width(filter_text, filter_len));
   }
 
   wrefresh(state->sidebar_win);

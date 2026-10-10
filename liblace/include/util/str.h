@@ -61,12 +61,6 @@ bool str_to_double(const char *s, double *out);
 /* Secure memory handling */
 void str_secure_free(char *s); /* Zero memory before freeing (for passwords) */
 
-/* True if a SQL statement returns a result set (SELECT, WITH, VALUES, TABLE,
- * PRAGMA, SHOW, DESC/DESCRIBE, EXPLAIN), ignoring leading whitespace,
- * comments and parentheses. Shared by daemon and clients so both agree on
- * whether rows come back. */
-bool str_sql_returns_rows(const char *sql);
-
 /* Buffer capacity management for char arrays.
  * Ensures *buf has at least min_cap bytes allocated.
  * If *buf is NULL, allocates initial_cap bytes (or min_cap if larger).

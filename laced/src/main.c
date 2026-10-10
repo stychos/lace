@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -36,9 +37,12 @@ typedef enum {
 typedef struct {
   TransportMode mode;
   char *socket_path;     /* Unix socket path (NULL for default) */
+  char *socket_group;    /* Group allowed to connect besides the owner */
+  char *token_file;      /* TCP: where to write the authentication token */
   char *bind_addr;       /* TCP bind address (NULL for localhost) */
   int port;              /* TCP port (0 for default 7433) */
   size_t max_clients;    /* Max concurrent clients (0 for default 64) */
+  int idle_timeout;      /* Shutdown after N seconds with no clients (0=disabled) */
   bool daemonize;        /* Fork to background */
   char *pidfile;         /* PID file path */
   /* Logging options */
@@ -47,7 +51,6 @@ typedef struct {
   size_t log_max_size;   /* Max log file size (0 for default 10MB) */
   int log_rotate;        /* Number of rotated files to keep */
   bool quiet;            /* Suppress stderr output */
-  int exit_when_idle;    /* Exit after N seconds with no clients (0 = never) */
 } DaemonConfig;
 
 /* Signal handler for graceful shutdown */
@@ -65,6 +68,11 @@ static void print_usage(const char *prog) {
           "\n"
           "Transport modes (mutually exclusive):\n"
           "  --unix [PATH]        Listen on Unix socket (default)\n"
+          "  --token-file PATH    TCP mode: write the client token here (0600;\n"
+          "                       default laced-<port>.token next to the socket)\n"
+          "  --socket-group NAME  Let this group's members connect to the Unix\n"
+          "                       socket too (socket 0660; directory perms are\n"
+          "                       up to you). Other users are always refused.\n"
           "                       Default: $XDG_RUNTIME_DIR/laced.sock or /tmp/laced-{uid}.sock\n"
           "  --tcp [HOST:]PORT    Listen on TCP socket\n"
           "                       Default: localhost:7433\n"
@@ -74,7 +82,8 @@ static void print_usage(const char *prog) {
           "  --daemonize, -d      Fork to background (socket modes only)\n"
           "  --pidfile PATH       Write PID to file\n"
           "  --max-clients N      Maximum concurrent clients (default: 64)\n"
-          "  --exit-when-idle N   Exit after N seconds with no connected clients\n"
+          "  --idle-timeout SECS  Shutdown after N seconds with no clients (0=disabled)\n"
+          "                       Default: 0 (disabled, daemon runs until signal)\n"
           "  -q, --quiet          Suppress log output to stderr\n"
           "  -h, --help           Show this help message\n"
           "  -v, --version        Show version information\n"
@@ -162,6 +171,7 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
   config->bind_addr = NULL;
   config->port = 0;
   config->max_clients = 0;
+  config->idle_timeout = 0;
   config->daemonize = false;
   config->pidfile = NULL;
   /* Log defaults */
@@ -195,6 +205,27 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
         i++;
         config->socket_path = str_dup(argv[i]);
       }
+      continue;
+    }
+    if (strcmp(argv[i], "--token-file") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--token-file requires a path\n");
+        return -1;
+      }
+      i++;
+      free(config->token_file);
+      config->token_file = str_dup(argv[i]);
+      continue;
+    }
+    if (strcmp(argv[i], "--socket-group") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--socket-group requires a group name\n");
+        return -1;
+      }
+      i++;
+      free(config->socket_group);
+  free(config->token_file);
+      config->socket_group = str_dup(argv[i]);
       continue;
     }
     if (strcmp(argv[i], "--tcp") == 0) {
@@ -242,15 +273,15 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       }
       continue;
     }
-    if (strcmp(argv[i], "--exit-when-idle") == 0) {
+    if (strcmp(argv[i], "--idle-timeout") == 0) {
       if (i + 1 >= argc) {
-        fprintf(stderr, "--exit-when-idle requires an argument\n");
+        fprintf(stderr, "--idle-timeout requires an argument\n");
         return -1;
       }
       i++;
-      config->exit_when_idle = atoi(argv[i]);
-      if (config->exit_when_idle < 0) {
-        fprintf(stderr, "Invalid --exit-when-idle value: %s\n", argv[i]);
+      config->idle_timeout = atoi(argv[i]);
+      if (config->idle_timeout < 0 || config->idle_timeout > 86400) {
+        fprintf(stderr, "Invalid --idle-timeout value: %s (must be 0-86400)\n", argv[i]);
         return -1;
       }
       continue;
@@ -321,6 +352,7 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
 /* Free config resources */
 static void free_config(DaemonConfig *config) {
   free(config->socket_path);
+  free(config->socket_group);
   free(config->bind_addr);
   free(config->pidfile);
   free(config->log_path);
@@ -470,7 +502,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  laced_server_set_exit_when_idle(server, config.exit_when_idle);
+  if (config.socket_group) {
+    struct group *gr = getgrnam(config.socket_group);
+    if (!gr) {
+      LOG_ERROR("Unknown socket group: %s", config.socket_group);
+      fprintf(stderr, "Unknown socket group: %s\n", config.socket_group);
+      laced_server_destroy(server);
+      free_config(&config);
+      return 1;
+    }
+    laced_server_set_socket_group(server, gr->gr_gid);
+  }
+
+  if (config.token_file) {
+    laced_server_set_token_file(server, config.token_file);
+  }
 
   LOG_INFO("Server initialized, entering main loop");
 
@@ -483,12 +529,14 @@ int main(int argc, char **argv) {
 
   case MODE_UNIX:
     result = laced_server_run_unix(server, config.socket_path,
-                                   config.max_clients, &g_shutdown_requested);
+                                   config.max_clients, config.idle_timeout,
+                                   &g_shutdown_requested);
     break;
 
   case MODE_TCP:
     result = laced_server_run_tcp(server, config.bind_addr, config.port,
-                                  config.max_clients, &g_shutdown_requested);
+                                  config.max_clients, config.idle_timeout,
+                                  &g_shutdown_requested);
     break;
   }
 

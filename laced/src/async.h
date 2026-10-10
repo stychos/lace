@@ -45,6 +45,15 @@ typedef enum {
 AsyncQueue *async_queue_create(int *notify_fd);
 
 /*
+ * Stop all work before teardown: flag and cancel every running query, then
+ * wait up to timeout_ms for all workers to finish. Returns false if some are
+ * still running; the session and queue must then not be freed (workers still
+ * use them), so the caller should just exit.
+ */
+bool async_queue_shutdown(AsyncQueue *queue, LacedSession *session,
+                          int timeout_ms);
+
+/*
  * Destroy async queue.
  */
 void async_queue_destroy(AsyncQueue *queue);
@@ -83,6 +92,23 @@ AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
 /*
  * Get query status.
  */
+/*
+ * Generic job run on a worker thread, replied to like a query. Used for
+ * operations that may block (connect, disconnect, cancel) so the daemon's
+ * main loop keeps serving other clients. Returns the JSON result, or NULL
+ * with *err (allocated) and *err_code set.
+ */
+typedef cJSON *(*AsyncJobFn)(LacedSession *session, void *arg, char **err,
+                             int *err_code);
+
+/*
+ * Start a job. arg is owned by the job and released with arg_free (may be
+ * NULL) when the job is freed.
+ */
+AsyncQuery *async_job_start(AsyncQueue *queue, LacedSession *session,
+                            cJSON *request_id, AsyncJobFn fn, void *arg,
+                            void (*arg_free)(void *arg));
+
 AsyncQueryStatus async_query_status(const AsyncQuery *query);
 
 /*
@@ -106,6 +132,11 @@ char *async_query_take_error(AsyncQuery *query);
  * Get the error code (only valid after ERROR status).
  */
 int async_query_get_error_code(const AsyncQuery *query);
+
+/* JSON-RPC error "data" for a failed statement: the connection's
+ * transaction state ({"in_transaction", "transaction_failed"}), or NULL if
+ * unknown. Caller owns it. */
+cJSON *async_query_error_data(const AsyncQuery *query);
 
 /*
  * Free an async query.

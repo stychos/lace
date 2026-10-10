@@ -181,7 +181,8 @@ char *tui_show_password_dialog(TuiState *state, const char *title,
     }
     mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
     /* Show asterisks instead of actual password */
-    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
+    size_t nchars = utf8_count(buf, len);
+    for (size_t i = 0; i < nchars && (int)i < dlg_width - 5; i++) {
       mvwaddch(dlg, 3, 2 + (int)i, '*');
     }
     if (focus == 0) {
@@ -192,7 +193,7 @@ char *tui_show_password_dialog(TuiState *state, const char *title,
     if (error_msg && error_msg[0]) {
       wattron(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
       int max_err_len = dlg_width - 4;
-      mvwprintw(dlg, 4, 2, "%.*s", max_err_len, error_msg);
+      tui_print_clip(dlg, 4, 2, max_err_len, error_msg);
       wattroff(dlg, COLOR_PAIR(COLOR_ERROR_TEXT));
     }
 
@@ -217,7 +218,7 @@ char *tui_show_password_dialog(TuiState *state, const char *title,
       wattroff(dlg, A_REVERSE);
 
     if (focus == 0) {
-      wmove(dlg, 3, 2 + (int)cursor);
+      wmove(dlg, 3, 2 + (int)utf8_count(buf, cursor));
       curs_set(1);
     } else {
       curs_set(0);
@@ -249,24 +250,23 @@ char *tui_show_password_dialog(TuiState *state, const char *title,
       /* Input field handling */
       if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
         if (cursor > 0 && cursor <= len) {
-          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
-          cursor--;
-          len--;
+          size_t prev = utf8_prev(buf, cursor);
+          memmove(buf + prev, buf + cursor, len - cursor + 1);
+          len -= cursor - prev;
+          cursor = prev;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0)
-          cursor--;
+        cursor = utf8_prev(buf, cursor);
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len)
-          cursor++;
+        cursor = utf8_next(buf, len, cursor);
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
         cursor = len;
       } else {
         int key_char = render_event_get_char(&event);
-        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
-            len < sizeof(buf) - 1) {
+        if (render_event_is_char(&event) && utf8_is_text_key(key_char) &&
+            len + utf8_seq_len((unsigned char)key_char) < sizeof(buf)) {
           memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
           buf[cursor] = (char)key_char;
           cursor++;
@@ -316,8 +316,12 @@ void tui_show_goto_dialog(TuiState *state) {
     if (tab->type == TAB_TYPE_QUERY && tab->query_results &&
         tab->query_results->num_rows > 0) {
       is_query = true;
-      total_rows = tab->query_paginated ? tab->query_total_rows
-                                        : tab->query_results->num_rows;
+      if (tab->query_paginated) {
+        query_ensure_total(state, tab); /* Cancellable count if unknown */
+      }
+      total_rows = tab->query_paginated && tab->query_total_known
+                       ? tab->query_total_rows
+                       : tab->query_loaded_offset + tab->query_results->num_rows;
     }
   }
 

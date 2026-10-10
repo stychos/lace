@@ -7,11 +7,15 @@
  */
 
 #include "server.h"
+#include "log.h"
 #include <util/mem.h>
 #include <util/str.h>
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <pwd.h>
+#include <grp.h>
 #include <poll.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -29,53 +33,41 @@
  * Socket Path Resolution
  * ========================================================================== */
 
-/*
- * Get default socket path with platform-specific handling.
- * Priority:
- *   macOS sandbox: ~/Library/Caches/laced.sock
- *   Linux/other:   $XDG_RUNTIME_DIR/laced.sock or /tmp/laced-{uid}.sock
- */
+/* Shared with liblace (util), so the daemon listens exactly where clients
+ * look: one canonical, per-user path (see lace_get_default_socket_path). */
+extern char *lace_get_default_socket_path(void);
+
 char *laced_get_default_socket_path(void) {
-  char path[512];
-
-#ifdef __APPLE__
-  /* Check for macOS sandbox environment */
-  const char *sandbox_container = getenv("APP_SANDBOX_CONTAINER_ID");
-  const char *home = getenv("HOME");
-
-  if (sandbox_container && home) {
-    /* Sandboxed app - use Caches directory in container */
-    snprintf(path, sizeof(path), "%s/Library/Caches/laced.sock", home);
-    return str_dup(path);
+  char *path = lace_get_default_socket_path();
+  if (!path) {
+    return NULL;
   }
-
-  /* Non-sandboxed macOS - prefer user's Caches directory */
-  if (home) {
-    snprintf(path, sizeof(path), "%s/Library/Caches/laced.sock", home);
-    /* Check if we can write to the directory */
-    char cache_dir[512];
-    snprintf(cache_dir, sizeof(cache_dir), "%s/Library/Caches", home);
-    if (access(cache_dir, W_OK) == 0) {
-      return str_dup(path);
+  /* ~/.cache/lace or /tmp/lace-<uid> may not exist yet: create it private.
+   * An existing directory must be ours and closed to others. */
+  char *slash = strrchr(path, '/');
+  if (slash && slash != path) {
+    *slash = '\0';
+    const char *home = getenv("HOME");
+    char cache[512] = "";
+    if (home) {
+      snprintf(cache, sizeof(cache), "%s/.cache", home);
+      mkdir(cache, 0700); /* Parent of ~/.cache/lace; fine if it exists */
     }
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) {
+      LOG_WARN("Cannot create socket directory %s: %s", path, strerror(errno));
+    }
+    struct stat st;
+    bool is_private_dir = strstr(path, "/.cache/lace") || strstr(path, "/tmp/lace-");
+    if (is_private_dir && stat(path, &st) == 0 &&
+        (st.st_uid != geteuid() || (st.st_mode & 077) != 0)) {
+      LOG_ERROR("Socket directory %s is not private to this user; refusing it",
+                path);
+      free(path);
+      return NULL;
+    }
+    *slash = '/';
   }
-#endif
-
-  /* Option 1: /run/laced.sock (if writable, typically root on Linux) */
-  if (access("/run", W_OK) == 0) {
-    return str_dup("/run/laced.sock");
-  }
-
-  /* Option 2: $XDG_RUNTIME_DIR/laced.sock (Linux user session) */
-  const char *xdg_runtime = getenv("XDG_RUNTIME_DIR");
-  if (xdg_runtime && access(xdg_runtime, W_OK) == 0) {
-    snprintf(path, sizeof(path), "%s/laced.sock", xdg_runtime);
-    return str_dup(path);
-  }
-
-  /* Option 3: /tmp/laced-{uid}.sock (universal fallback) */
-  snprintf(path, sizeof(path), "/tmp/laced-%d.sock", (int)getuid());
-  return str_dup(path);
+  return path;
 }
 
 bool laced_remove_stale_socket(const char *path) {
@@ -125,10 +117,69 @@ bool laced_remove_stale_socket(const char *path) {
 }
 
 /* ==========================================================================
+ * Peer Authorization
+ * ========================================================================== */
+
+bool laced_peer_allowed(int fd, gid_t group) {
+  uid_t uid = (uid_t)-1;
+  gid_t gid = (gid_t)-1;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+  if (getpeereid(fd, &uid, &gid) != 0) {
+    return false;
+  }
+#elif defined(SO_PEERCRED)
+  struct ucred cred;
+  socklen_t len = sizeof(cred);
+  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+    return false;
+  }
+  uid = cred.uid;
+  gid = cred.gid;
+#else
+  (void)fd;
+  (void)group;
+  return true; /* Filesystem permissions are the only control here */
+#endif
+  if (uid == geteuid() || uid == 0) {
+    return true;
+  }
+  if (group == (gid_t)-1) {
+    return false;
+  }
+  if (gid == group) {
+    return true;
+  }
+  /* Supplementary groups of the peer's user */
+  struct passwd *pw = getpwuid(uid);
+  if (!pw) {
+    return false;
+  }
+  int ngroups = 64;
+#ifdef __APPLE__
+  int groups[64];
+  if (getgrouplist(pw->pw_name, (int)pw->pw_gid, groups, &ngroups) < 0) {
+    ngroups = 64;
+  }
+#else
+  gid_t groups[64];
+  if (getgrouplist(pw->pw_name, pw->pw_gid, groups, &ngroups) < 0) {
+    ngroups = 64;
+  }
+#endif
+  for (int i = 0; i < ngroups; i++) {
+    if ((gid_t)groups[i] == group) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* ==========================================================================
  * Socket Creation
  * ========================================================================== */
 
-int laced_create_unix_socket(const char *path) {
+int laced_create_unix_socket(const char *path, gid_t group) {
   if (!path) {
     return -1;
   }
@@ -153,13 +204,23 @@ int laced_create_unix_socket(const char *path) {
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
-  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+  /* Create the socket with its final permissions (no window in which it
+   * is open to others): owner only, or owner and group with a socket group */
+  bool shared = group != (gid_t)-1;
+  mode_t old_mask = umask(shared ? 0117 : 0177);
+  int bound = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
+  umask(old_mask);
+  if (bound < 0) {
     close(fd);
     return -1;
   }
-
-  /* Set socket permissions to allow user access */
-  chmod(path, 0600);
+  if (shared && chown(path, (uid_t)-1, group) != 0) {
+    LOG_ERROR("Cannot give socket %s to the socket group: %s", path,
+              strerror(errno));
+    close(fd);
+    unlink(path);
+    return -1;
+  }
 
   if (listen(fd, 16) < 0) {
     close(fd);
@@ -309,29 +370,59 @@ bool laced_client_write_line(LacedClient *client, const char *line) {
   return true;
 }
 
+/* Requests longer than this are refused: the client is dropped instead of
+ * growing the daemon's buffer without bound */
+#define LACED_MAX_REQUEST_LINE (64u * 1024u * 1024u)
+
+/* Take the first complete line out of the client's buffer, or NULL */
+static char *take_buffered_line(LacedClient *client) {
+  for (size_t i = client->partial_scanned; i < client->partial_len; i++) {
+    if (client->partial_buf[i] == '\n') {
+      char *line = safe_malloc(i + 1);
+      memcpy(line, client->partial_buf, i);
+      line[i] = '\0';
+      size_t remaining = client->partial_len - i - 1;
+      if (remaining > 0) {
+        memmove(client->partial_buf, client->partial_buf + i + 1, remaining);
+      }
+      client->partial_len = remaining;
+      client->partial_scanned = 0;
+      return line;
+    }
+  }
+  client->partial_scanned = client->partial_len;
+  return NULL;
+}
+
 char *laced_client_try_read_line(LacedClient *client) {
   if (!client || client->fd < 0) {
     return NULL;
   }
 
-  /* Read available data */
-  char temp[4096];
+  /* A complete request may already be buffered (several can arrive in one
+   * read): serve it before touching the socket, or it would wait for the
+   * client's next bytes */
+  char *line = take_buffered_line(client);
+  if (line || client->closed) {
+    if (!line && client->closed && client->partial_len > 0) {
+      /* Peer closed after an unterminated last request: hand it back */
+      line = client->partial_buf;
+      line[client->partial_len] = '\0';
+      client->partial_buf = NULL;
+      client->partial_len = client->partial_cap = client->partial_scanned = 0;
+    }
+    return line;
+  }
+
+  char temp[65536];
   ssize_t n = read(client->fd, temp, sizeof(temp));
 
   if (n == 0) {
     /* EOF: the peer closed its end. Flag the client so the event loop drops
-     * it now instead of spinning on a permanently-readable fd until the idle
-     * timeout fires. Hand back any trailing partial line first. */
+     * it now instead of spinning on a permanently-readable fd. Buffered
+     * lines are still handed out by the calls that follow. */
     client->closed = true;
-    if (client->partial_len > 0) {
-      char *line = client->partial_buf;
-      line[client->partial_len] = '\0';
-      client->partial_buf = NULL;
-      client->partial_len = 0;
-      client->partial_cap = 0;
-      return line;
-    }
-    return NULL;
+    return laced_client_try_read_line(client);
   }
   if (n < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -341,48 +432,28 @@ char *laced_client_try_read_line(LacedClient *client) {
     return NULL;
   }
 
-  /* Ensure buffer capacity */
   size_t needed = client->partial_len + (size_t)n + 1;
+  if (needed > LACED_MAX_REQUEST_LINE) {
+    LOG_WARN("Client fd=%d sent a request over %u bytes; dropping it",
+             client->fd, LACED_MAX_REQUEST_LINE);
+    free(client->partial_buf);
+    client->partial_buf = NULL;
+    client->partial_len = client->partial_cap = client->partial_scanned = 0;
+    client->closed = true;
+    return NULL;
+  }
   if (needed > client->partial_cap) {
     size_t new_cap = client->partial_cap ? client->partial_cap * 2 : 4096;
     while (new_cap < needed)
       new_cap *= 2;
-    char *new_buf = safe_realloc(client->partial_buf, new_cap);
-    if (!new_buf) {
-      return NULL;
-    }
-    client->partial_buf = new_buf;
+    client->partial_buf = safe_realloc(client->partial_buf, new_cap);
     client->partial_cap = new_cap;
   }
 
-  /* Append new data */
   memcpy(client->partial_buf + client->partial_len, temp, (size_t)n);
   client->partial_len += (size_t)n;
 
-  /* Look for newline */
-  for (size_t i = 0; i < client->partial_len; i++) {
-    if (client->partial_buf[i] == '\n') {
-      /* Extract complete line */
-      size_t line_len = i;
-      char *line = safe_malloc(line_len + 1);
-      if (!line) {
-        return NULL;
-      }
-      memcpy(line, client->partial_buf, line_len);
-      line[line_len] = '\0';
-
-      /* Shift remaining data */
-      size_t remaining = client->partial_len - i - 1;
-      if (remaining > 0) {
-        memmove(client->partial_buf, client->partial_buf + i + 1, remaining);
-      }
-      client->partial_len = remaining;
-
-      return line;
-    }
-  }
-
-  return NULL; /* No complete line yet */
+  return take_buffered_line(client);
 }
 
 /* Check if client connection is still alive */

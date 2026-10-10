@@ -11,6 +11,7 @@
 #include "../core/ui_types.h"
 #include "../platform/platform.h"
 #include "util/json_helpers.h"
+#include "../../liblace/include/constants.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include <cjson/cJSON.h>
@@ -548,6 +549,9 @@ Config *config_get_defaults(void) {
   config->general.history_mode =
       HISTORY_MODE_SESSION; /* Default: session only */
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
+  config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
+  config->general.daemon_idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
+  config->general.pagination_strategy = LACE_PAGINATION_OFFSET; /* Default: offset */
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -765,6 +769,18 @@ Config *config_load(char **error) {
     val = json_get_int(general, "history_max_size", config->general.history_max_size);
     if (val >= HISTORY_SIZE_MIN && val <= HISTORY_SIZE_MAX)
       config->general.history_max_size = val;
+
+    val = json_get_int(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
+    if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_NONE)
+      config->general.daemon_spawn_mode = val;
+
+    val = json_get_int(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
+    if (val >= CONFIG_IDLE_TIMEOUT_MIN && val <= CONFIG_IDLE_TIMEOUT_MAX)
+      config->general.daemon_idle_timeout = val;
+
+    val = json_get_int(general, "pagination_strategy", config->general.pagination_strategy);
+    if (val >= LACE_PAGINATION_OFFSET && val <= LACE_PAGINATION_SMART)
+      config->general.pagination_strategy = val;
   }
 
   /* Parse hotkeys */
@@ -831,6 +847,9 @@ bool config_save(const Config *config, char **error) {
   JSON_ADD_BOOL(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
   JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
+  JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
+  JSON_ADD_INT(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
+  JSON_ADD_INT(general, "pagination_strategy", config->general.pagination_strategy);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */
@@ -855,44 +874,15 @@ bool config_save(const Config *config, char **error) {
     return false;
   }
 
-  /* Open file with secure permissions */
-  FILE *f = NULL;
-#ifndef LACE_OS_WINDOWS
-  int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if (fd < 0) {
-    free(content);
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
-    free(path);
-    return false;
-  }
-  f = fdopen(fd, "w");
-  if (!f) {
-    close(fd);
-    free(content);
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
-    free(path);
-    return false;
-  }
-#else
-  f = fopen(path, "w");
-  if (!f) {
-    free(content);
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
-    free(path);
-    return false;
-  }
-#endif
-
-  size_t len = strlen(content);
-  size_t written = fwrite(content, 1, len, f);
-  fclose(f);
+  bool ok = platform_write_file_private(path, content, strlen(content));
+  int e = errno;
   free(content);
-  free(path);
-
-  if (written != len) {
-    err_setf(error, "Failed to write all data");
+  if (!ok) {
+    err_setf(error, "Failed to write %s: %s", path, strerror(e));
+    free(path);
     return false;
   }
+  free(path);
 
   return true;
 }

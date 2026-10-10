@@ -91,6 +91,14 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
   conn->port = json_get_int(json, "port", 0);
   conn->save_password = json_get_bool(json, "save_password", false);
 
+  /* SSH tunnel fields */
+  conn->ssh = json_get_bool(json, "ssh", false);
+  conn->ssh_host = NULL;
+  conn->ssh_user = NULL;
+  conn->ssh_password = NULL;
+  conn->ssh_port = json_get_int(json, "ssh_port", 0);
+  conn->save_ssh_password = json_get_bool(json, "save_ssh_password", false);
+
   conn->id = json_dup_string_or(json, "id", "");
   if (!conn->id)
     goto cleanup;
@@ -113,6 +121,19 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
   if (!conn->password)
     goto cleanup;
 
+  /* SSH fields (optional) */
+  if (conn->ssh) {
+    conn->ssh_host = json_dup_string_or(json, "ssh_host", "");
+    if (!conn->ssh_host)
+      goto cleanup;
+    conn->ssh_user = json_dup_string_or(json, "ssh_user", "");
+    if (!conn->ssh_user)
+      goto cleanup;
+    conn->ssh_password = json_dup_string_or(json, "ssh_password", "");
+    if (!conn->ssh_password)
+      goto cleanup;
+  }
+
   return true;
 
 cleanup:
@@ -124,6 +145,10 @@ cleanup:
   FREE_NULL(conn->user);
   str_secure_free(conn->password);
   conn->password = NULL;
+  FREE_NULL(conn->ssh_host);
+  FREE_NULL(conn->ssh_user);
+  str_secure_free(conn->ssh_password);
+  conn->ssh_password = NULL;
   return false;
 }
 
@@ -224,6 +249,17 @@ static cJSON *serialize_connection(const SavedConnection *conn) {
   JSON_ADD_STR(json, "password",
                (conn->save_password && conn->password) ? conn->password : "");
   JSON_ADD_BOOL(json, "save_password", conn->save_password);
+
+  /* SSH tunnel fields */
+  if (conn->ssh) {
+    JSON_ADD_BOOL(json, "ssh", true);
+    JSON_ADD_STR(json, "ssh_host", conn->ssh_host ? conn->ssh_host : "");
+    JSON_ADD_STR(json, "ssh_user", conn->ssh_user ? conn->ssh_user : "");
+    JSON_ADD_STR(json, "ssh_password",
+                 (conn->save_ssh_password && conn->ssh_password) ? conn->ssh_password : "");
+    JSON_ADD_INT(json, "ssh_port", conn->ssh_port);
+    JSON_ADD_BOOL(json, "save_ssh_password", conn->save_ssh_password);
+  }
 
   return json;
 }
@@ -407,26 +443,12 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
     return false;
   }
 
-  FILE *f = fopen(mgr->file_path, "w");
-  if (!f) {
-    str_secure_free(content); /* Content may contain passwords */
-    err_setf(error, "Failed to open %s for writing: %s", mgr->file_path,
-              strerror(errno));
-    return false;
-  }
-
-  /* Set file permissions to 0600 (owner read/write only) */
-#ifndef LACE_OS_WINDOWS
-  chmod(mgr->file_path, 0600);
-#endif
-
-  size_t len = strlen(content);
-  size_t written = fwrite(content, 1, len, f);
-  fclose(f);
+  bool ok = platform_write_file_private(mgr->file_path, content,
+                                        strlen(content));
+  int e = errno;
   str_secure_free(content); /* Content may contain passwords */
-
-  if (written != len) {
-    err_setf(error, "Failed to write all data");
+  if (!ok) {
+    err_setf(error, "Failed to write %s: %s", mgr->file_path, strerror(e));
     return false;
   }
 
@@ -444,6 +466,9 @@ void connmgr_free_connection(SavedConnection *conn) {
   free(conn->database);
   free(conn->user);
   str_secure_free(conn->password);
+  free(conn->ssh_host);
+  free(conn->ssh_user);
+  str_secure_free(conn->ssh_password);
 }
 
 void connmgr_free_folder(ConnectionFolder *folder) {
@@ -494,6 +519,13 @@ SavedConnection *connmgr_new_connection(void) {
   conn->password = str_dup("");
   conn->port = 0;
   conn->save_password = false;
+
+  conn->ssh = false;
+  conn->ssh_host = str_dup("");
+  conn->ssh_user = str_dup("");
+  conn->ssh_password = str_dup("");
+  conn->ssh_port = 0;
+  conn->save_ssh_password = false;
 
   return conn;
 }
@@ -911,6 +943,15 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
   conn->port = cs->port;
   conn->save_password = (cs->password && cs->password[0]);
 
+  /* SSH tunnel fields */
+  conn->ssh = cs->ssh;
+  conn->ssh_host = str_dup(cs->ssh_host ? cs->ssh_host : "");
+  conn->ssh_user = str_dup(cs->ssh_user ? cs->ssh_user : "");
+  str_secure_free(conn->ssh_password);
+  conn->ssh_password = str_dup(cs->ssh_password ? cs->ssh_password : "");
+  conn->ssh_port = cs->ssh_port;
+  conn->save_ssh_password = (cs->ssh_password && cs->ssh_password[0]);
+
   /* Generate a default name from the connection */
   free(conn->name);
   if (str_eq(cs->driver, "sqlite")) {
@@ -922,6 +963,19 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
         name = slash + 1;
     }
     conn->name = str_dup(name);
+  } else if (cs->ssh) {
+    /* For SSH connections: show ssh_host -> host/database */
+    conn->name = str_printf("%s/%s (via %s)",
+                            cs->host ? cs->host : "localhost",
+                            cs->database ? cs->database : "",
+                            cs->ssh_host ? cs->ssh_host : "ssh");
+    if (!conn->name) {
+      connmgr_free_connection(conn);
+      free(conn);
+      connstr_free(cs);
+      err_setf(error, "Out of memory");
+      return NULL;
+    }
   } else {
     /* Use host/database for network DBs */
     conn->name = str_printf("%s/%s", cs->host ? cs->host : "localhost",

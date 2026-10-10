@@ -38,13 +38,16 @@ typedef enum {
   LACE_TYPE_BLOB,
   LACE_TYPE_BOOL,
   LACE_TYPE_DATE,
-  LACE_TYPE_TIMESTAMP
+  LACE_TYPE_TIMESTAMP,
+  LACE_TYPE_DECIMAL  /* Exact numeric (NUMERIC/DECIMAL) kept as its digits in text */
 } LaceValueType;
 
 /* A single database value */
 typedef struct {
   LaceValueType type;
   bool is_null;
+  size_t omitted;   /* > 0: a value of this many bytes was too large to load;
+                       text holds a "[TEXT: N bytes]" label (never write it) */
   union {
     int64_t int_val;
     double float_val;
@@ -72,6 +75,8 @@ typedef struct {
   bool nullable;
   bool primary_key;
   bool auto_increment;
+  bool generated;      /* Computed by the database (GENERATED ... AS): never
+                          inserted or updated */
   char *default_val;
   char *foreign_key;   /* "table.column" or NULL */
   int max_length;      /* For VARCHAR etc, -1 if unlimited */
@@ -128,6 +133,9 @@ typedef struct {
   size_t num_columns;
   LaceRow *rows;
   size_t num_rows;
+  bool truncated;         /* The daemon stopped at its row or size limit */
+  bool in_transaction;    /* A transaction is open on the connection after
+                             this statement (as reported by the daemon) */
   size_t total_rows;      /* Total matching rows (for pagination info) */
   int64_t rows_affected;  /* For INSERT/UPDATE/DELETE, -1 for SELECT */
   bool has_more;          /* More rows available beyond this result */
@@ -262,5 +270,20 @@ const char *lace_filter_op_sql(LaceFilterOp op);
 
 /* Check if filter operator needs a value */
 bool lace_filter_op_needs_value(LaceFilterOp op);
+
+/* Exact text for a double: shortest form that reads back as the same
+ * value, '.' as decimal point; "NaN", "Infinity", "-Infinity" */
+void lace_format_double(double v, char *buf, size_t size);
+
+/* The full, exact text to put in an edit box (NULL -> ""; BLOB -> all of
+ * its bytes as hex). Caller frees. */
+char *lace_value_to_edit_text(const LaceValue *val);
+
+/* Turn edited text back into a value for a column whose values are of type
+ * `like`: hex for BLOB (bytes), exact digits for DECIMAL, an integer for INT
+ * when it is one; otherwise text the database converts. Returns false (with
+ * *err) for input that cannot be such a value (e.g. bad hex). */
+bool lace_value_from_edit_text(const char *text, LaceValueType like,
+                               LaceValue *out, char **err);
 
 #endif /* LIBLACE_TYPES_H */

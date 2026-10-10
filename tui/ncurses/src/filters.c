@@ -192,19 +192,16 @@ void tui_draw_filters_panel(TuiState *state) {
         /* Value 1 */
         if (row_selected && state->filters_cursor_col == 2) {
           if (state->filters_editing) {
-            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width,
-                      half_width, state->filters_edit_buffer);
-            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            tui_draw_edit_field(state->main_win, y, val_x, half_width,
+                                state->filters_edit_buffer,
+                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
           } else {
             wattron(state->main_win, A_REVERSE);
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width,
-                      half_width, cf->value);
+            tui_print_fit(state->main_win, y, val_x, half_width, cf->value);
             wattroff(state->main_win, A_REVERSE);
           }
         } else {
-          mvwprintw(state->main_win, y, val_x, "%-*.*s", half_width, half_width,
-                    cf->value);
+          tui_print_fit(state->main_win, y, val_x, half_width, cf->value);
         }
 
         /* " AND " separator */
@@ -213,51 +210,43 @@ void tui_draw_filters_panel(TuiState *state) {
         /* Value 2 */
         if (row_selected && state->filters_cursor_col == 3) {
           if (state->filters_editing) {
-            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
-            mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width,
-                      half_width, state->filters_edit_buffer);
-            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            tui_draw_edit_field(state->main_win, y, val2_x, half_width,
+                                state->filters_edit_buffer,
+                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
           } else {
             wattron(state->main_win, A_REVERSE);
-            mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width,
-                      half_width, cf->value2);
+            tui_print_fit(state->main_win, y, val2_x, half_width, cf->value2);
             wattroff(state->main_win, A_REVERSE);
           }
         } else {
-          mvwprintw(state->main_win, y, val2_x, "%-*.*s", half_width, half_width,
-                    cf->value2);
+          tui_print_fit(state->main_win, y, val2_x, half_width, cf->value2);
         }
       } else {
         /* Regular: single value field */
         const char *display_val = cf->value;
         if (row_selected && state->filters_cursor_col == 2) {
           if (state->filters_editing) {
-            wattron(state->main_win, COLOR_PAIR(COLOR_EDIT));
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                      state->filters_edit_buffer);
-            wattroff(state->main_win, COLOR_PAIR(COLOR_EDIT));
+            tui_draw_edit_field(state->main_win, y, val_x, val_width,
+                                state->filters_edit_buffer,
+                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
           } else {
             wattron(state->main_win, A_REVERSE);
             if (show_placeholder) {
               wattron(state->main_win, A_DIM);
-              mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width,
-                        val_width, "WHERE ...");
+              tui_print_fit(state->main_win, y, val_x, val_width, "WHERE ...");
               wattroff(state->main_win, A_DIM);
             } else {
-              mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width,
-                        val_width, display_val);
+              tui_print_fit(state->main_win, y, val_x, val_width, display_val);
             }
             wattroff(state->main_win, A_REVERSE);
           }
         } else {
           if (show_placeholder) {
             wattron(state->main_win, A_DIM);
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                      "WHERE ...");
+            tui_print_fit(state->main_win, y, val_x, val_width, "WHERE ...");
             wattroff(state->main_win, A_DIM);
           } else {
-            mvwprintw(state->main_win, y, val_x, "%-*.*s", val_width, val_width,
-                      display_val);
+            tui_print_fit(state->main_win, y, val_x, val_width, display_val);
           }
         }
       }
@@ -668,7 +657,9 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       tui_apply_filters(state); /* Auto-apply */
     } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
       if (state->filters_edit_len > 0) {
-        state->filters_edit_buffer[--state->filters_edit_len] = '\0';
+        state->filters_edit_len =
+            utf8_prev(state->filters_edit_buffer, state->filters_edit_len);
+        state->filters_edit_buffer[state->filters_edit_len] = '\0';
       }
     } else if (render_event_is_ctrl(event, 'K')) {
       /* Ctrl+K - copy filter value to clipboard */
@@ -689,7 +680,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         size_t space_left =
             sizeof(state->filters_edit_buffer) - 1 - state->filters_edit_len;
         if (paste_len > space_left)
-          paste_len = space_left;
+          paste_len = utf8_truncate(paste_text, space_left);
         if (paste_len > 0) {
           memcpy(state->filters_edit_buffer + state->filters_edit_len,
                  paste_text, paste_len);
@@ -698,10 +689,11 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
         }
       }
       free(paste_text);
-    } else if (render_event_is_char(event) && key_char >= 32 &&
-               key_char < 127) {
-      /* Printable character */
-      if (state->filters_edit_len < sizeof(state->filters_edit_buffer) - 1) {
+    } else if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
+      /* Printable character; a lead byte needs room for its whole
+       * character */
+      if (state->filters_edit_len + utf8_seq_len((unsigned char)key_char) <
+          sizeof(state->filters_edit_buffer)) {
         state->filters_edit_buffer[state->filters_edit_len++] = (char)key_char;
         state->filters_edit_buffer[state->filters_edit_len] = '\0';
       }
@@ -1048,7 +1040,8 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
              f->filters[state->filters_cursor_row].op == FILTER_OP_BETWEEN)) &&
            render_event_is_char(event)) {
     int key_char = render_event_get_char(event);
-    if (key_char >= 32 && key_char < 127) {
+    /* Any text key except a stray UTF-8 continuation byte */
+    if (utf8_is_text_key(key_char) && !(key_char >= 0x80 && key_char < 0xC0)) {
       size_t filter_idx = state->filters_cursor_row;
       ColumnFilter *cf = &f->filters[filter_idx];
       bool is_raw = (cf->column_index == FILTER_COL_RAW);

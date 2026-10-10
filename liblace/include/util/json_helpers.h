@@ -195,11 +195,4 @@ static inline cJSON *json_get_array(cJSON *obj, const char *key) {
  * Caller owns the returned cJSON object and must call cJSON_Delete(). */
 cJSON *json_load_from_file(const char *path, size_t max_size, char **error);
 
-/* Save JSON to a file.
- * json: The cJSON object to serialize
- * path: File path to write to
- * secure: If true, creates file with 0600 permissions (owner read/write only)
- * Returns: true on success, false on failure (error set) */
-bool json_save_to_file(cJSON *json, const char *path, bool secure, char **error);
-
 #endif /* LACE_JSON_HELPERS_H */

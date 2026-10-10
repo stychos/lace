@@ -259,90 +259,6 @@ char *query_extract_table_name(const char *sql, LaceDriver driver) {
   return table;
 }
 
-/* Check if query has LIMIT or OFFSET clause (case-insensitive, outside strings)
- */
-bool query_has_limit_offset(const char *sql) {
-  if (!sql)
-    return false;
-
-  bool in_string = false;
-  char quote_char = 0;
-  const char *p = sql;
-
-  while (*p) {
-    if (in_string) {
-      if (*p == quote_char && (p == sql || *(p - 1) != '\\')) {
-        in_string = false;
-      }
-    } else {
-      if (*p == '\'' || *p == '"') {
-        in_string = true;
-        quote_char = *p;
-      } else if (isspace((unsigned char)*p) || p == sql) {
-        /* Check for LIMIT or OFFSET keyword */
-        const char *check = (p == sql) ? p : p + 1;
-        if (strncasecmp(check, "LIMIT", 5) == 0 &&
-            (check[5] == '\0' || isspace((unsigned char)check[5]) ||
-             isdigit((unsigned char)check[5]))) {
-          return true;
-        }
-        if (strncasecmp(check, "OFFSET", 6) == 0 &&
-            (check[6] == '\0' || isspace((unsigned char)check[6]) ||
-             isdigit((unsigned char)check[6]))) {
-          return true;
-        }
-      }
-    }
-    p++;
-  }
-  return false;
-}
-
-/* Count total rows for a SELECT query using COUNT wrapper */
-int64_t query_count_rows(TuiState *state, const char *base_sql) {
-  if (!state || !state->conn || !base_sql)
-    return -1;
-
-  /* Wrap the base query in COUNT(*) */
-  char *count_sql =
-      str_printf("SELECT COUNT(*) FROM (%s) AS _count_wrapper", base_sql);
-  if (!count_sql)
-    return -1;
-
-  char *err = NULL;
-  ResultSet *result = db_query(state->conn, count_sql, &err);
-  free(count_sql);
-
-  if (!result || result->num_rows == 0 || result->num_columns == 0 ||
-      !result->rows) {
-    free(err);
-    if (result)
-      db_result_free(result);
-    return -1;
-  }
-
-  /* Get count value from first row, first column */
-  int64_t count = -1;
-  if (result->rows[0].num_cells > 0 && result->rows[0].cells) {
-    DbValue *val = &result->rows[0].cells[0];
-    if (val->type == DB_TYPE_INT) {
-      count = val->int_val;
-    } else if (val->type == DB_TYPE_FLOAT) {
-      count = (int64_t)val->float_val;
-    } else if (val->type == DB_TYPE_TEXT && val->text.data) {
-      errno = 0;
-      char *endptr;
-      long long parsed = strtoll(val->text.data, &endptr, 10);
-      if (errno == 0 && endptr != val->text.data) {
-        count = parsed;
-      }
-    }
-  }
-
-  db_result_free(result);
-  free(err);
-  return count;
-}
 
 /* Execute a SQL query and store results */
 /* True if the most recent query_execute() was cancelled by the user.
@@ -362,6 +278,163 @@ void query_execute(TuiState *state, const char *sql) {
   Tab *tab = TUI_TAB(state);
   if (!g_last_execute_cancelled && tab && !tab->query_error && state->conn) {
     app_record_history(state->app, state->conn, sql, history_detect_type(sql));
+  }
+}
+
+/* SQL for one page of a paginated query tab */
+char *query_page_sql(const Tab *tab, size_t limit, size_t offset) {
+  /* The newline keeps a trailing "-- comment" from swallowing the clause */
+  if (tab->query_page_wrap) {
+    return str_printf("SELECT * FROM (\n%s\n) AS lace_page LIMIT %zu OFFSET %zu",
+                      tab->query_base_sql, limit, offset);
+  }
+  return str_printf("%s\nLIMIT %zu OFFSET %zu", tab->query_base_sql, limit,
+                    offset);
+}
+
+/* Run a row query on a worker, behind the processing dialog (spinner, Esc
+ * cancels). Returns the rows, or NULL with *err set / *cancelled true. */
+ResultSet *query_run_modal(TuiState *state, const char *sql,
+                                  const char *message, char **err,
+                                  bool *cancelled) {
+  *err = NULL;
+  *cancelled = false;
+  AsyncOperation op;
+  async_init(&op);
+  op.op_type = ASYNC_OP_QUERY;
+  op.conn = state->conn;
+  op.sql = str_dup(sql);
+  ResultSet *rs = NULL;
+  if (op.sql && async_start(&op)) {
+    bool completed = tui_show_processing_dialog(state, &op, message);
+    if (completed && op.state == ASYNC_STATE_COMPLETED) {
+      rs = (ResultSet *)op.result;
+      op.result = NULL;
+    } else if (op.state == ASYNC_STATE_ERROR) {
+      *err = op.error ? str_dup(op.error) : str_dup("Query failed");
+    } else if (op.state == ASYNC_STATE_CANCELLED) {
+      *cancelled = true;
+    }
+  }
+  async_free(&op);
+  return rs;
+}
+
+/* Count the rows of the tab's query in the background. Best effort: the
+ * first foreground statement on the connection cancels it (the daemon runs
+ * one statement per connection), and paging finds the end anyway. */
+static void query_count_start(TuiState *state, Tab *tab) {
+  query_count_stop(tab);
+  /* Never inside an open transaction: a statement cancelled there (the
+   * count is preempted by the next foreground one) would abort it on
+   * PostgreSQL */
+  if (!state->conn || state->conn->background_op || state->conn->in_transaction) {
+    return;
+  }
+  AsyncOperation *op = safe_calloc(1, sizeof(AsyncOperation));
+  async_init(op);
+  op->op_type = ASYNC_OP_QUERY;
+  op->conn = state->conn;
+  op->sql = str_printf("SELECT COUNT(*) FROM (\n%s\n) AS lace_count",
+                       tab->query_base_sql);
+  if (!op->sql || !async_start(op)) {
+    async_free(op);
+    free(op);
+    return;
+  }
+  tab->query_count_op = op;
+  state->conn->background_op = op;
+}
+
+void query_poll_count(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_QUERY || !tab->query_count_op) {
+    return;
+  }
+  AsyncOperation *op = (AsyncOperation *)tab->query_count_op;
+  AsyncState st = async_poll(op);
+  if (st == ASYNC_STATE_RUNNING) {
+    return;
+  }
+  if (st == ASYNC_STATE_COMPLETED && op->result && !tab->query_total_known) {
+    ResultSet *r = (ResultSet *)op->result;
+    if (r->num_rows > 0 && r->rows && r->rows[0].num_cells > 0 &&
+        r->rows[0].cells[0].type == DB_TYPE_INT && r->rows[0].cells[0].int_val >= 0) {
+      tab->query_total_rows = (size_t)r->rows[0].cells[0].int_val;
+      tab->query_total_known = true;
+      tui_set_status(state, "%zu rows", tab->query_total_rows);
+    }
+  }
+  query_count_stop(tab); /* Frees op and its result */
+}
+
+/* True on a PostgreSQL connection with a transaction open, where a failed
+ * or cancelled statement aborts the whole transaction */
+static bool pg_in_transaction(const DbConnection *conn) {
+  return conn && conn->driver_type == LACE_DRIVER_POSTGRES &&
+         conn->in_transaction;
+}
+
+ResultSet *query_run_derived(TuiState *state, const char *sql,
+                             const char *message, char **err,
+                             bool *cancelled) {
+  DbConnection *pc = state->conn;
+  bool savepoint = false;
+  if (pg_in_transaction(pc)) {
+    *cancelled = false;
+    if (pc->transaction_failed) {
+      *err = str_dup("The transaction has failed: only ROLLBACK works");
+      return NULL;
+    }
+    if (db_exec(pc, "SAVEPOINT lace_page", err) < 0) {
+      return NULL;
+    }
+    savepoint = true;
+  }
+  ResultSet *rs = query_run_modal(state, sql, message, err, cancelled);
+  if (savepoint) {
+    /* db_exec also records the transaction state: live again after a
+     * rollback to the savepoint */
+    char *sp_err = NULL;
+    db_exec(pc,
+            rs ? "RELEASE SAVEPOINT lace_page"
+               : "ROLLBACK TO SAVEPOINT lace_page",
+            &sp_err);
+    free(sp_err);
+  }
+  return rs;
+}
+
+bool query_ensure_total(TuiState *state, Tab *tab) {
+  if (!tab || !tab->query_paginated || tab->query_total_known) {
+    return tab && tab->query_total_known;
+  }
+  query_count_stop(tab); /* The modal count replaces the background one */
+  char *sql = str_printf("SELECT COUNT(*) FROM (\n%s\n) AS lace_count",
+                         tab->query_base_sql);
+  char *err = NULL;
+  bool cancelled = false;
+  ResultSet *r = query_run_derived(state, sql, "Counting rows...", &err, &cancelled);
+  free(sql);
+  if (r && r->num_rows > 0 && r->rows && r->rows[0].num_cells > 0 &&
+      r->rows[0].cells[0].type == DB_TYPE_INT && r->rows[0].cells[0].int_val >= 0) {
+    tab->query_total_rows = (size_t)r->rows[0].cells[0].int_val;
+    tab->query_total_known = true;
+  } else if (err && !cancelled) {
+    tui_set_error(state, "Count failed: %s", err);
+  }
+  free(err);
+  db_result_free(r);
+  return tab->query_total_known;
+}
+
+/* "1000+ rows" until the total is known */
+static void query_status_loaded(TuiState *state, Tab *tab) {
+  size_t end = tab->query_loaded_offset + tab->query_loaded_count;
+  if (tab->query_total_known) {
+    tui_set_status(state, "Loaded %zu/%zu rows", end, tab->query_total_rows);
+  } else {
+    tui_set_status(state, "Loaded %zu+ rows (counting...)", end);
   }
 }
 
@@ -391,8 +464,11 @@ static void query_execute_impl(TuiState *state, const char *sql) {
   tab->query_source_table = NULL;
   db_schema_free(tab->query_source_schema);
   tab->query_source_schema = NULL;
+  query_count_stop(tab);
   free(tab->query_base_sql);
   tab->query_base_sql = NULL;
+  tab->query_page_wrap = false;
+  tab->query_total_known = false;
   tab->query_total_rows = 0;
   tab->query_loaded_offset = 0;
   tab->query_loaded_count = 0;
@@ -419,79 +495,79 @@ static void query_execute_impl(TuiState *state, const char *sql) {
 
   /* Statements that return rows (incl. WITH ... SELECT, VALUES, a SELECT
    * after a comment) go through db_query; the rest through db_exec. */
-  bool is_readonly = str_sql_returns_rows(p);
-  /* Only plain SELECTs are wrapped for pagination/COUNT(*) */
-  bool is_select = is_readonly && strncasecmp(p, "SELECT", 6) == 0;
-
+  (void)p;
   char *err = NULL;
 
-  if (is_readonly) {
-    /* Check if pagination should be applied (SELECT only, no existing LIMIT) */
-    bool should_paginate = is_select && !query_has_limit_offset(sql);
+  /* Every statement goes to the daemon the same way; what it produced
+   * (rows, or a row count) decides how it is shown. Only reads that can
+   * take LIMIT are paged. */
+  {
+    /* Page every statement that can take a LIMIT, so only a window of rows
+     * is held (PRAGMA/SHOW/EXPLAIN cannot, and are small). A statement with
+     * its own top-level LIMIT is wrapped as a subquery; otherwise LIMIT is
+     * appended, which keeps its ORDER BY (MySQL/MariaDB ignore ORDER BY in a
+     * derived table without LIMIT). */
+    QuerySqlShape shape;
+    query_sql_shape(sql, db_conn_driver_name(state->conn), &shape);
+    /* Only reads are paged: "WITH ... INSERT/UPDATE/DELETE" or
+     * "SELECT ... INTO" run once, as written (paging them cut them off at
+     * the first page) */
+    bool pageable = query_sql_pageable(&shape);
+    bool cancelled = false;
 
-    if (should_paginate) {
-      /* Store base SQL for pagination */
-      tab->query_base_sql = str_dup(sql);
+    /* A PostgreSQL transaction that already failed runs the statement as
+     * written, which reports the real error (query_run_derived guards the
+     * paged attempt in a live one) */
+    if (pg_in_transaction(state->conn) && state->conn->transaction_failed) {
+      pageable = false;
+    }
 
-      /* Get total row count */
-      int64_t total = query_count_rows(state, sql);
-      if (total >= 0) {
-        tab->query_total_rows = (size_t)total;
-      } else {
-        /* Fallback: can't count, disable pagination */
-        tab->query_total_rows = 0;
-      }
-
-      /* Execute with LIMIT/OFFSET for first page using async operation */
-      char *paginated_sql = str_printf("%s LIMIT %d OFFSET 0", sql, PAGE_SIZE);
-      if (paginated_sql) {
-        AsyncOperation op;
-        async_init(&op);
-        op.op_type = ASYNC_OP_QUERY;
-        op.conn = state->conn;
-        op.sql = paginated_sql; /* ownership transferred */
-
-        if (async_start(&op)) {
-          bool completed =
-              tui_show_processing_dialog(state, &op, "Executing query...");
-          if (completed && op.state == ASYNC_STATE_COMPLETED) {
-            tab->query_results = (ResultSet *)op.result;
-            if (tab->query_results) {
-              tab->query_paginated = true;
-              tab->query_loaded_offset = 0;
-              tab->query_loaded_count = tab->query_results->num_rows;
-            }
-          } else if (op.state == ASYNC_STATE_ERROR) {
-            err = op.error ? str_dup(op.error) : str_dup("Query failed");
-          } else if (op.state == ASYNC_STATE_CANCELLED) {
-            g_last_execute_cancelled = true;
-            tui_set_status(state, "Query cancelled");
-          }
+    if (pageable && shape.end > 0) {
+      tab->query_base_sql = str_ndup(sql, shape.end);
+      tab->query_page_wrap = shape.top_level_limit;
+      char *page_sql = query_page_sql(tab, PAGE_SIZE, 0);
+      tab->query_results =
+          query_run_derived(state, page_sql, "Executing query...", &err, &cancelled);
+      free(page_sql);
+      if (tab->query_results) {
+        tab->query_paginated = true;
+        tab->query_loaded_offset = 0;
+        tab->query_loaded_count = tab->query_results->num_rows;
+        if (tab->query_results->num_rows < PAGE_SIZE) {
+          /* A short first page is everything */
+          tab->query_total_rows = tab->query_results->num_rows;
+          tab->query_total_known = true;
         }
-        op.sql = NULL; /* Prevent double free */
-        async_free(&op);
-        free(paginated_sql);
+      } else if (err && !cancelled) {
+        /* The paged form may not parse for this dialect/statement: run it
+         * as written (the whole result, up to the daemon's limit) */
+        free(err);
+        err = NULL;
+        free(tab->query_base_sql);
+        tab->query_base_sql = NULL;
+        tab->query_page_wrap = false;
       }
-    } else {
-      /* Execute as-is (has LIMIT/OFFSET or not a SELECT) using async */
-      AsyncOperation op;
-      async_init(&op);
-      op.op_type = ASYNC_OP_QUERY;
-      op.conn = state->conn;
-      op.sql = str_dup(sql);
-      if (async_start(&op)) {
-        bool completed =
-            tui_show_processing_dialog(state, &op, "Executing query...");
-        if (completed && op.state == ASYNC_STATE_COMPLETED) {
-          tab->query_results = (ResultSet *)op.result;
-        } else if (op.state == ASYNC_STATE_ERROR) {
-          err = op.error ? str_dup(op.error) : str_dup("Query failed");
-        } else if (op.state == ASYNC_STATE_CANCELLED) {
-            g_last_execute_cancelled = true;
-          tui_set_status(state, "Query cancelled");
-        }
-      }
-      async_free(&op);
+    }
+    if (!tab->query_results && !err && !cancelled) {
+      tab->query_results =
+          query_run_modal(state, sql, "Executing query...", &err, &cancelled);
+    }
+    if (cancelled) {
+      g_last_execute_cancelled = true;
+      tui_set_status(state, "Query cancelled");
+    }
+
+    if (!err && tab->query_results && tab->query_results->num_columns == 0) {
+      /* No result set: a write, DDL, ... (a statement with RETURNING has
+       * columns and shows its rows) */
+      tab->query_affected = tab->query_results->rows_affected;
+      tab->query_exec_success = true;
+      db_result_free(tab->query_results);
+      tab->query_results = NULL;
+      tab->query_paginated = false;
+      free(tab->query_base_sql);
+      tab->query_base_sql = NULL;
+      tui_set_status(state, "%lld rows affected", (long long)tab->query_affected);
     }
 
     if (err) {
@@ -510,40 +586,19 @@ static void query_execute_impl(TuiState *state, const char *sql) {
             state->conn, tab->query_source_table, &schema_err);
         free(schema_err); /* Ignore schema errors */
       }
-      if (tab->query_paginated && tab->query_total_rows > 0) {
-        tui_set_status(state, "Loaded %zu/%zu rows", tab->query_loaded_count,
-                       tab->query_total_rows);
+      if (tab->query_paginated) {
+        if (!tab->query_total_known) {
+          query_count_start(state, tab);
+        }
+        query_status_loaded(state, tab);
       } else {
-        tui_set_status(state, "%zu rows returned",
+        tui_set_status(state, tab->query_results->truncated
+                                  ? "%zu rows returned (truncated: result too large)"
+                                  : "%zu rows returned",
                        tab->query_results->num_rows);
       }
       /* History is recorded automatically by database layer */
     }
-  } else {
-    /* Execute non-SELECT query using async operation */
-    AsyncOperation op;
-    async_init(&op);
-    op.op_type = ASYNC_OP_EXEC;
-    op.conn = state->conn;
-    op.sql = str_dup(sql);
-
-    if (op.sql && async_start(&op)) {
-      bool completed =
-          tui_show_processing_dialog(state, &op, "Executing statement...");
-      if (completed && op.state == ASYNC_STATE_COMPLETED) {
-        tab->query_affected = op.count;
-        tab->query_exec_success = true;
-        tui_set_status(state, "%lld rows affected", (long long)op.count);
-        /* History is recorded automatically by database layer */
-      } else if (op.state == ASYNC_STATE_ERROR) {
-        err = op.error ? str_dup(op.error) : str_dup("Statement failed");
-        tab->query_error = err;
-      } else if (op.state == ASYNC_STATE_CANCELLED) {
-            g_last_execute_cancelled = true;
-        tui_set_status(state, "Statement cancelled");
-      }
-    }
-    async_free(&op);
   }
 
   /* Focus results pane after execution (only if there are results) */
@@ -567,7 +622,7 @@ void query_calculate_result_widths(Tab *tab) {
   /* Start with column name widths */
   for (size_t c = 0; c < num_cols; c++) {
     const char *name = tab->query_results->columns[c].name;
-    int w = name ? (int)strlen(name) : 4;
+    int w = name ? utf8_width(name, strlen(name)) : 4;
     if (w < MIN_COL_WIDTH)
       w = MIN_COL_WIDTH;
     tab->query_result_col_widths[c] = w;
@@ -579,7 +634,7 @@ void query_calculate_result_widths(Tab *tab) {
     for (size_t c = 0; c < num_cols && c < row->num_cells; c++) {
       char *str = db_value_to_string(&row->cells[c]);
       if (str) {
-        int w = (int)strlen(str);
+        int w = utf8_width(str, strlen(str));
         if (w > tab->query_result_col_widths[c]) {
           tab->query_result_col_widths[c] = w;
         }
@@ -599,129 +654,95 @@ void query_calculate_result_widths(Tab *tab) {
 /* Load more rows at end of current query results */
 bool query_load_more_rows(TuiState *state, Tab *tab) {
   if (!state || !state->conn || !tab || !tab->query_paginated ||
-      !tab->query_base_sql)
-    return false;
-  if (!tab->query_results)
+      !tab->query_base_sql || !tab->query_results)
     return false;
 
   size_t new_offset = tab->query_loaded_offset + tab->query_loaded_count;
-
-  /* Check if there are more rows to load */
-  if (tab->query_total_rows > 0 && new_offset >= tab->query_total_rows)
+  if (tab->query_total_known && new_offset >= tab->query_total_rows)
     return false;
 
-  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu",
-                                   tab->query_base_sql, PAGE_SIZE, new_offset);
-  if (!paginated_sql)
-    return false;
-
+  char *page_sql = query_page_sql(tab, PAGE_SIZE, new_offset);
   char *err = NULL;
-  ResultSet *more = db_query(state->conn, paginated_sql, &err);
-  free(paginated_sql);
+  bool cancelled = false;
+  ResultSet *more =
+      query_run_derived(state, page_sql, "Loading rows...", &err, &cancelled);
+  free(page_sql);
 
-  if (!more || more->num_rows == 0) {
-    if (more)
-      db_result_free(more);
-    free(err);
-    return false;
+  if (!more || more->num_rows < PAGE_SIZE) {
+    if (more || !err) {
+      /* A short page is the end: the total is known now */
+      tab->query_total_rows = new_offset + (more ? more->num_rows : 0);
+      tab->query_total_known = true;
+    } else if (!cancelled) {
+      tui_set_error(state, "Load failed: %s", err);
+    }
   }
-
-  /* Extend existing rows array */
-  size_t old_count = tab->query_results->num_rows;
-  size_t new_count = old_count + more->num_rows;
-
-  /* Check for overflow and enforce maximum row limit (1M rows) */
-  if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row) ||
-      new_count > 1000000) {
+  free(err);
+  if (!more || more->num_rows == 0) {
     db_result_free(more);
     return false;
   }
 
-  tab->query_results->rows = safe_reallocarray(tab->query_results->rows, new_count, sizeof(Row));
-
-  /* Copy new rows */
+  size_t old_count = tab->query_results->num_rows;
+  size_t new_count = old_count + more->num_rows;
+  tab->query_results->rows =
+      safe_reallocarray(tab->query_results->rows, new_count, sizeof(Row));
   for (size_t i = 0; i < more->num_rows; i++) {
     tab->query_results->rows[old_count + i] = more->rows[i];
-    /* Clear source so free doesn't deallocate the cells we moved */
-    more->rows[i].cells = NULL;
+    more->rows[i].cells = NULL; /* Moved */
     more->rows[i].num_cells = 0;
   }
-
   tab->query_results->num_rows = new_count;
   tab->query_loaded_count = new_count;
-
   db_result_free(more);
 
   /* Trim old data to keep memory bounded */
   query_trim_loaded_data(state, tab);
-
-  tui_set_status(state, "Loaded %zu/%zu rows", tab->query_loaded_count,
-                 tab->query_total_rows);
+  query_status_loaded(state, tab);
   return true;
 }
 
 /* Load previous rows (prepend to current query results) */
 bool query_load_prev_rows(TuiState *state, Tab *tab) {
   if (!state || !state->conn || !tab || !tab->query_paginated ||
-      !tab->query_base_sql)
-    return false;
-  if (!tab->query_results)
+      !tab->query_base_sql || !tab->query_results)
     return false;
   if (tab->query_loaded_offset == 0)
     return false; /* Already at beginning */
 
-  /* Calculate how many rows to load before current offset */
-  size_t load_count = PAGE_SIZE;
-  size_t new_offset = 0;
-  if (tab->query_loaded_offset > load_count) {
-    new_offset = tab->query_loaded_offset - load_count;
-  } else {
-    load_count = tab->query_loaded_offset;
-    new_offset = 0;
-  }
+  /* Exactly the rows before the window */
+  size_t load_count = tab->query_loaded_offset > PAGE_SIZE
+                          ? PAGE_SIZE
+                          : tab->query_loaded_offset;
+  size_t new_offset = tab->query_loaded_offset - load_count;
 
-  char *paginated_sql = str_printf("%s LIMIT %zu OFFSET %zu",
-                                   tab->query_base_sql, load_count, new_offset);
-  if (!paginated_sql)
-    return false;
-
+  char *page_sql = query_page_sql(tab, load_count, new_offset);
   char *err = NULL;
-  ResultSet *more = db_query(state->conn, paginated_sql, &err);
-  free(paginated_sql);
-
+  bool cancelled = false;
+  ResultSet *more =
+      query_run_derived(state, page_sql, "Loading rows...", &err, &cancelled);
+  free(page_sql);
   if (!more || more->num_rows == 0) {
-    if (more)
-      db_result_free(more);
+    if (err && !cancelled) {
+      tui_set_error(state, "Load failed: %s", err);
+    }
     free(err);
-    return false;
-  }
-
-  /* Prepend rows to existing data */
-  size_t old_count = tab->query_results->num_rows;
-  size_t new_count = old_count + more->num_rows;
-
-  /* Check for overflow */
-  if (new_count < old_count || new_count > SIZE_MAX / sizeof(Row)) {
     db_result_free(more);
     return false;
   }
+  free(err);
 
+  size_t old_count = tab->query_results->num_rows;
+  size_t new_count = old_count + more->num_rows;
   Row *new_rows = safe_reallocarray(NULL, new_count, sizeof(Row));
-
-  /* Copy new rows first (prepend) */
   for (size_t i = 0; i < more->num_rows; i++) {
     new_rows[i] = more->rows[i];
-    /* Clear source so free doesn't deallocate the cells we moved */
-    more->rows[i].cells = NULL;
+    more->rows[i].cells = NULL; /* Moved */
     more->rows[i].num_cells = 0;
   }
-
-  /* Then copy old rows */
   for (size_t i = 0; i < old_count; i++) {
     new_rows[more->num_rows + i] = tab->query_results->rows[i];
   }
-
-  /* Free old array (but not the cells which we moved) */
   free(tab->query_results->rows);
   tab->query_results->rows = new_rows;
   tab->query_results->num_rows = new_count;
@@ -729,18 +750,12 @@ bool query_load_prev_rows(TuiState *state, Tab *tab) {
   /* Adjust cursor position (it's now offset by the prepended rows) */
   tab->query_result_row += more->num_rows;
   tab->query_result_scroll_row += more->num_rows;
-
-  /* Update tracking */
   tab->query_loaded_offset = new_offset;
   tab->query_loaded_count = new_count;
-
   db_result_free(more);
 
-  /* Trim old data to keep memory bounded */
   query_trim_loaded_data(state, tab);
-
-  tui_set_status(state, "Loaded %zu/%zu rows", tab->query_loaded_count,
-                 tab->query_total_rows);
+  query_status_loaded(state, tab);
   return true;
 }
 
@@ -855,7 +870,7 @@ void query_check_load_more(TuiState *state, Tab *tab) {
   if (rows_from_end < LOAD_THRESHOLD) {
     /* Check if there are more rows to load at end */
     size_t loaded_end = tab->query_loaded_offset + tab->query_loaded_count;
-    if (tab->query_total_rows > 0 && loaded_end < tab->query_total_rows) {
+    if (!tab->query_total_known || loaded_end < tab->query_total_rows) {
       query_load_more_rows(state, tab);
     }
   }

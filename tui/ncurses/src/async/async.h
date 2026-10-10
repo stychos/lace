@@ -22,6 +22,7 @@ typedef enum {
   ASYNC_OP_GET_SCHEMA,
   ASYNC_OP_QUERY_PAGE,
   ASYNC_OP_QUERY_PAGE_WHERE,
+  ASYNC_OP_QUERY_KEYSET,     /* Keyset (cursor-based) pagination query */
   ASYNC_OP_COUNT_ROWS,
   ASYNC_OP_COUNT_ROWS_WHERE,
   ASYNC_OP_QUERY,
@@ -55,6 +56,13 @@ typedef struct {
   bool desc;
   bool use_approximate;
 
+  /* Keyset pagination parameters (for ASYNC_OP_QUERY_KEYSET) */
+  LaceKeysetState *keyset;    /* Keyset state for cursor-based pagination */
+  bool keyset_forward;        /* true = forward, false = backward */
+
+  /* Row reversal flag (for backward keyset queries using pre-built WHERE) */
+  bool reverse_rows;          /* true = reverse result rows after query */
+
   /* Output results (set by worker thread) */
   void *result;        /* ResultSet*, TableSchema*, DbConnection*, char** */
   char *error;         /* Error message if failed */
@@ -82,6 +90,13 @@ AsyncState async_poll(AsyncOperation *op);
 
 /* Request cancellation of an async operation */
 void async_cancel(AsyncOperation *op);
+
+/* Cancel and block until the worker has finished with op (op stays
+ * allocated; its result, if any, is still the caller's to free). */
+void async_cancel_and_wait(AsyncOperation *op);
+
+/* True on an AsyncOperation worker thread */
+bool async_in_worker(void);
 
 /* Wait for operation to complete (with timeout in ms, 0 = just check) */
 bool async_wait(AsyncOperation *op, int timeout_ms);

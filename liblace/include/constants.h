@@ -22,6 +22,11 @@
 /* Maximum rows for a result set (1M rows) - prevents unbounded memory growth */
 #define MAX_RESULT_ROWS (1024 * 1024)
 
+/* Cell data (bytes) a single result may hold in the daemon before it is
+ * truncated: the result is still turned into JSON and sent, so this bounds
+ * the daemon's memory for one query */
+#define MAX_RESULT_BYTES (256u * 1024u * 1024u)
+
 /* Connection string maximum length */
 #define MAX_CONNSTR_LEN 4096
 
@@ -38,6 +43,13 @@
 /* ==========================================================================
  * Pagination
  * ========================================================================== */
+
+/* Pagination strategy selection */
+typedef enum {
+  LACE_PAGINATION_OFFSET = 0,  /* Traditional LIMIT/OFFSET (default) */
+  LACE_PAGINATION_KEYSET = 1,  /* Cursor-based, fallback to offset if no PK */
+  LACE_PAGINATION_SMART = 2    /* Cursor-based only when suitable index exists */
+} LacePaginationStrategy;
 
 /* Page size for data loading */
 #define PAGE_SIZE 1000
@@ -121,6 +133,19 @@
 /* Default ports */
 #define DEFAULT_PORT_POSTGRES 5432
 #define DEFAULT_PORT_MYSQL 3306
+
+/* ==========================================================================
+ * History
+ * ========================================================================== */
+
+/* ==========================================================================
+ * Daemon
+ * ========================================================================== */
+
+/* Daemon idle timeout (seconds, 0=disabled) */
+#define CONFIG_IDLE_TIMEOUT_MIN 0
+#define CONFIG_IDLE_TIMEOUT_MAX 86400
+#define CONFIG_IDLE_TIMEOUT_DEFAULT 0
 
 /* ==========================================================================
  * History

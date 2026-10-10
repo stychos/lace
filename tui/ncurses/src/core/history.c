@@ -219,30 +219,15 @@ bool history_save(const QueryHistory *history, char **error) {
     return false;
   }
 
-  FILE *f = fopen(path, "w");
-  if (!f) {
-    free(content);
-    err_setf(error, "Failed to open %s for writing: %s", path,
-              strerror(errno));
+  bool ok = platform_write_file_private(path, content, strlen(content));
+  int e = errno;
+  str_secure_free(content); /* Query text may contain passwords */
+  if (!ok) {
+    err_setf(error, "Failed to write %s: %s", path, strerror(e));
     free(path);
     return false;
   }
-
-  /* Set file permissions to 0600 (owner read/write only) */
-#ifndef LACE_OS_WINDOWS
-  chmod(path, 0600);
-#endif
-
-  size_t len = strlen(content);
-  size_t written = fwrite(content, 1, len, f);
-  fclose(f);
-  free(content);
   free(path);
-
-  if (written != len) {
-    err_setf(error, "Failed to write all data");
-    return false;
-  }
 
   return true;
 }

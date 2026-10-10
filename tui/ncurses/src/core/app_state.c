@@ -102,6 +102,26 @@ void tab_init(Tab *tab) {
   filters_init(&tab->filters);
 }
 
+void query_count_stop(Tab *tab) {
+  if (!tab || !tab->query_count_op) {
+    return;
+  }
+  AsyncOperation *op = (AsyncOperation *)tab->query_count_op;
+  if (op->conn && op->conn->background_op == op) {
+    op->conn->background_op = NULL;
+  }
+  async_cancel_and_wait(op);
+  lace_mutex_lock(&op->mutex);
+  if (op->result) {
+    db_result_free((ResultSet *)op->result);
+    op->result = NULL;
+  }
+  lace_mutex_unlock(&op->mutex);
+  async_free(op);
+  free(op);
+  tab->query_count_op = NULL;
+}
+
 void tab_free_data(Tab *tab) {
   if (!tab)
     return;
@@ -133,6 +153,8 @@ void tab_free_data(Tab *tab) {
     tab->bg_load_op = NULL;
   }
 
+  query_count_stop(tab);
+
   /* Free table data */
   FREE_NULL(tab->table_name);
   FREE_NULL(tab->table_error);
@@ -143,6 +165,12 @@ void tab_free_data(Tab *tab) {
   FREE_NULL(tab->col_widths);
   tab->num_col_widths = 0;
   filters_free(&tab->filters);
+
+  /* Free keyset state */
+  if (tab->keyset) {
+    lace_keyset_free(tab->keyset);
+    tab->keyset = NULL;
+  }
 
   /* Free query data */
   FREE_NULL(tab->query_text);

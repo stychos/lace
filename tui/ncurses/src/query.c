@@ -128,26 +128,27 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset) {
     return false;
 
   /* Clamp offset */
-  if (offset >= tab->query_total_rows) {
+  if (tab->query_total_known && offset >= tab->query_total_rows) {
     offset = tab->query_total_rows > PAGE_SIZE
                  ? tab->query_total_rows - PAGE_SIZE
                  : 0;
   }
 
-  char *paginated_sql = str_printf("%s LIMIT %d OFFSET %zu",
-                                   tab->query_base_sql, PAGE_SIZE, offset);
-  if (!paginated_sql)
-    return false;
-
+  char *page_sql = query_page_sql(tab, PAGE_SIZE, offset);
   char *err = NULL;
-  ResultSet *data = db_query(state->conn, paginated_sql, &err);
-  free(paginated_sql);
+  bool cancelled = false;
+  ResultSet *data =
+      query_run_derived(state, page_sql, "Loading rows...", &err, &cancelled);
+  free(page_sql);
 
   if (!data) {
-    tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
+    if (!cancelled) {
+      tui_set_error(state, "Query failed: %s", err ? err : "Unknown error");
+    }
     free(err);
     return false;
   }
+  free(err);
 
   /* Free old results */
   if (tab->query_results) {
@@ -184,7 +185,8 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset) {
     }
   }
 
-  tui_set_status(state, "Loaded %zu/%zu rows", tab->query_loaded_count,
+  tab_clear_selections(tab); /* Selections are row positions */
+  tui_set_status(state, "Loaded %zu/%zu rows", offset + tab->query_loaded_count,
                  tab->query_total_rows);
   return true;
 }
@@ -287,16 +289,23 @@ void tui_draw_query(TuiState *state) {
     }
 
     int x = 4;
-    for (size_t i = 0; i < li->len && x < win_cols - 1; i++) {
-      char c = tab->query_text[li->start + i];
+    const char *ltext = tab->query_text + li->start;
+    for (size_t i = 0; i < li->len && x < win_cols - 1;) {
+      size_t next = utf8_next(ltext, li->len, i);
+      unsigned char c = (unsigned char)ltext[i];
       if (c == '\t') {
         /* Tab as spaces */
         for (int t = 0; t < 4 && x < win_cols - 1; t++) {
           mvwaddch(state->main_win, y, x++, ' ');
         }
-      } else if (c >= 32 && c < 127) {
-        mvwaddch(state->main_win, y, x++, c);
+      } else if (c >= 32 && c != 127) {
+        int w = utf8_width(ltext + i, next - i);
+        if (x + w > win_cols - 1)
+          break;
+        mvwaddnstr(state->main_win, y, x, ltext + i, (int)(next - i));
+        x += w;
       }
+      i = next;
     }
 
     if (is_dimmed) {
@@ -306,18 +315,17 @@ void tui_draw_query(TuiState *state) {
     /* Draw cursor if on this line and editor focused */
     if (focus_editor && line_idx == cursor_line) {
       /* Tabs are drawn 4 columns wide */
-      int cursor_x = 4;
-      for (size_t i = 0; i < cursor_col && i < li->len; i++)
-        cursor_x += tab->query_text[li->start + i] == '\t' ? 4 : 1;
+      const char *ltext = tab->query_text + li->start;
+      size_t ccol = cursor_col < li->len ? cursor_col : li->len;
+      int cursor_x = 4 + (int)query_display_width(ltext, ccol);
       if (cursor_x < win_cols) {
-        char cursor_char = ' ';
-        if (cursor_col < li->len) {
-          cursor_char = tab->query_text[li->start + cursor_col];
-          if (cursor_char < 32 || cursor_char >= 127)
-            cursor_char = ' ';
-        }
         wattron(state->main_win, A_REVERSE);
-        mvwaddch(state->main_win, y, cursor_x, cursor_char);
+        if (ccol < li->len && (unsigned char)ltext[ccol] >= 32 &&
+            ltext[ccol] != 127)
+          mvwaddnstr(state->main_win, y, cursor_x, ltext + ccol,
+                     (int)(utf8_next(ltext, li->len, ccol) - ccol));
+        else
+          mvwaddch(state->main_win, y, cursor_x, ' ');
         wattroff(state->main_win, A_REVERSE);
       }
     }
@@ -834,8 +842,29 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     /* G or z - go to last row */
     if (hotkey_matches(cfg, event, HOTKEY_LAST_ROW)) {
-      if (tab->query_results->num_rows > 0) {
+      /* Jump to the real last row of a paginated result */
+      if (tab->query_paginated && query_ensure_total(state, tab) &&
+          tab->query_total_rows > 0 &&
+          tab->query_loaded_offset + tab->query_loaded_count <
+              tab->query_total_rows) {
+        query_load_rows_at(state, tab, tab->query_total_rows);
+      }
+      if (tab->query_results && tab->query_results->num_rows > 0) {
         tab->query_result_row = tab->query_results->num_rows - 1;
+        /* Scroll so the last row is on screen */
+        int rows, cols;
+        getmaxyx(state->main_win, rows, cols);
+        (void)cols;
+        int editor_height = (rows - 1) * 3 / 10;
+        if (editor_height < 3)
+          editor_height = 3;
+        int visible = rows - editor_height - 4;
+        if (visible < 1)
+          visible = 1;
+        tab->query_result_scroll_row =
+            tab->query_result_row >= (size_t)visible
+                ? tab->query_result_row - (size_t)visible + 1
+                : 0;
       }
       query_check_load_more(state, tab);
       return true;
@@ -894,6 +923,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       size_t qlen = strlen(q);
       while (qlen > 0 && isspace((unsigned char)q[qlen - 1]))
         qlen--;
+
+      /* A fragment holding only comments is not a statement (MySQL rejects
+       * it as "Query was empty") */
+      QuerySqlShape frag;
+      query_sql_shape(q, db_conn_driver_name(state->conn), &frag);
+      if (frag.end == 0) {
+        qlen = 0;
+      }
 
       if (qlen > 0) {
         char *query = safe_malloc(qlen + 1);
@@ -977,6 +1014,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
       while (qlen > 0 && isspace((unsigned char)q[qlen - 1]))
         qlen--;
 
+      /* A fragment holding only comments is not a statement (MySQL rejects
+       * it as "Query was empty") */
+      QuerySqlShape frag;
+      query_sql_shape(q, db_conn_driver_name(state->conn), &frag);
+      if (frag.end == 0) {
+        qlen = 0;
+      }
+
       if (qlen > 0) {
         char *query = safe_malloc(qlen + 1);
         memcpy(query, q, qlen);
@@ -1032,10 +1077,11 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
+    size_t dcol = query_cursor_display_col(tab);
 
     if (line > 0) {
       tab->query_cursor =
-          query_line_col_to_cursor(tab, line - 1, col, lines, num_lines);
+          query_line_col_to_cursor(tab, line - 1, dcol, lines, num_lines);
     }
 
     free(lines);
@@ -1050,10 +1096,11 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
+    size_t dcol = query_cursor_display_col(tab);
 
     if (line < num_lines - 1) {
       tab->query_cursor =
-          query_line_col_to_cursor(tab, line + 1, col, lines, num_lines);
+          query_line_col_to_cursor(tab, line + 1, dcol, lines, num_lines);
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* On last line - move focus to results panel */
       ui->query_focus_results = true;
@@ -1067,7 +1114,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   /* Left arrow */
   if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (tab->query_cursor > 0) {
-      tab->query_cursor--;
+      tab->query_cursor = utf8_prev(tab->query_text, tab->query_cursor);
     } else if (state->sidebar_visible) {
       /* At top-left position - move focus to sidebar */
       state->sidebar_focused = true;
@@ -1080,7 +1127,8 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   /* Right arrow */
   if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (tab->query_cursor < tab->query_len) {
-      tab->query_cursor++;
+      tab->query_cursor =
+          utf8_next(tab->query_text, tab->query_len, tab->query_cursor);
     } else if (tab->query_results && tab->query_results->num_rows > 0) {
       /* At end of text - move focus to results panel */
       ui->query_focus_results = true;
@@ -1130,13 +1178,14 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
+    size_t dcol = query_cursor_display_col(tab);
 
     if (line > 10) {
       tab->query_cursor =
-          query_line_col_to_cursor(tab, line - 10, col, lines, num_lines);
+          query_line_col_to_cursor(tab, line - 10, dcol, lines, num_lines);
     } else {
       tab->query_cursor =
-          query_line_col_to_cursor(tab, 0, col, lines, num_lines);
+          query_line_col_to_cursor(tab, 0, dcol, lines, num_lines);
     }
 
     free(lines);
@@ -1151,9 +1200,10 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
 
     size_t line, col;
     query_cursor_to_line_col(tab, &line, &col);
+    size_t dcol = query_cursor_display_col(tab);
 
     tab->query_cursor =
-        query_line_col_to_cursor(tab, line + 10, col, lines, num_lines);
+        query_line_col_to_cursor(tab, line + 10, dcol, lines, num_lines);
 
     free(lines);
     return true;
@@ -1337,7 +1387,7 @@ bool tui_handle_query_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Printable character - insert */
-  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
     query_insert_char(tab, (char)key_char);
     return true;
   }

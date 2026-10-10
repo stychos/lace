@@ -35,10 +35,13 @@ typedef enum {
   FIELD_PREFETCH_PAGES,
   FIELD_MAX_RESULT_ROWS,
   FIELD_DELETE_CONFIRM,
+  FIELD_PAGINATION_STRATEGY,
   FIELD_HISTORY_MODE,
   FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
   FIELD_CLOSE_CONN_LAST_TAB,
+  FIELD_DAEMON_SPAWN_MODE,
+  FIELD_DAEMON_IDLE_TIMEOUT,
   FIELD_RESTORE_SESSION,
   FIELD_QUIT_CONFIRM,
   FIELD_COUNT
@@ -232,6 +235,36 @@ static const char *history_mode_name(int mode) {
   }
 }
 
+/* Get daemon spawn mode name */
+static const char *spawn_mode_name(int mode) {
+  switch (mode) {
+  case SPAWN_MODE_UNIX:
+    return "Unix socket";
+  case SPAWN_MODE_STDIO:
+    return "Stdio pipes";
+  case SPAWN_MODE_TCP:
+    return "TCP socket";
+  case SPAWN_MODE_NONE:
+    return "Connect only";
+  default:
+    return "Unknown";
+  }
+}
+
+/* Get pagination strategy name */
+static const char *pagination_strategy_name(int mode) {
+  switch (mode) {
+  case 0:  /* LACE_PAGINATION_OFFSET */
+    return "Offset (default)";
+  case 1:  /* LACE_PAGINATION_KEYSET */
+    return "Keyset (auto-fallback)";
+  case 2:  /* LACE_PAGINATION_SMART */
+    return "Keyset (smart)";
+  default:
+    return "Unknown";
+  }
+}
+
 /* ============================================================================
  * General Tab Drawing
  * ============================================================================
@@ -298,6 +331,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                 ds->config->general.delete_confirmation,
                 ds->selected_field == FIELD_DELETE_CONFIRM, focused);
 
+  draw_option(win, y++, start_x + 2, "Pagination strategy",
+              pagination_strategy_name(ds->config->general.pagination_strategy),
+              ds->selected_field == FIELD_PAGINATION_STRATEGY, focused);
+
   y++;
 
   /* Section: Query History */
@@ -334,6 +371,19 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_checkbox(win, y++, start_x + 2, "Close connection when last tab closes",
                 ds->config->general.close_conn_on_last_tab,
                 ds->selected_field == FIELD_CLOSE_CONN_LAST_TAB, focused);
+
+  draw_option(win, y++, start_x + 2, "Daemon spawn mode",
+              spawn_mode_name(ds->config->general.daemon_spawn_mode),
+              ds->selected_field == FIELD_DAEMON_SPAWN_MODE, focused);
+
+  draw_number_field(win, y++, start_x + 2, "Daemon idle timeout (s)",
+                    ds->config->general.daemon_idle_timeout,
+                    ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT, focused,
+                    ds->editing_number, &ds->num_input, &cursor_x_temp);
+  if (ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT && ds->editing_number) {
+    *cursor_y = y - 1;
+    *cursor_x = cursor_x_temp;
+  }
 
   y++;
 
@@ -872,6 +922,8 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
         ds->config->general.max_result_rows = value;
       } else if (ds->selected_field == FIELD_HISTORY_MAX_SIZE) {
         ds->config->general.history_max_size = value;
+      } else if (ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT) {
+        ds->config->general.daemon_idle_timeout = value;
       }
 
       ds->editing_number = false;
@@ -938,6 +990,11 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->config->general.delete_confirmation =
           !ds->config->general.delete_confirmation;
       break;
+    case FIELD_PAGINATION_STRATEGY:
+      /* Cycle through pagination strategies: Offset -> Keyset -> Smart -> Offset */
+      ds->config->general.pagination_strategy =
+          (ds->config->general.pagination_strategy + 1) % 3;
+      break;
     case FIELD_HISTORY_MODE:
       /* Cycle through history modes: Off -> Session -> Persistent -> Off */
       ds->config->general.history_mode =
@@ -955,6 +1012,16 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_CLOSE_CONN_LAST_TAB:
       ds->config->general.close_conn_on_last_tab =
           !ds->config->general.close_conn_on_last_tab;
+      break;
+    case FIELD_DAEMON_SPAWN_MODE:
+      /* Cycle through spawn modes: Unix -> Stdio -> TCP -> None -> Unix */
+      ds->config->general.daemon_spawn_mode =
+          (ds->config->general.daemon_spawn_mode + 1) % 4;
+      break;
+    case FIELD_DAEMON_IDLE_TIMEOUT:
+      number_input_init(&ds->num_input, ds->config->general.daemon_idle_timeout,
+                        CONFIG_IDLE_TIMEOUT_MIN, CONFIG_IDLE_TIMEOUT_MAX);
+      ds->editing_number = true;
       break;
     default:
       break;
@@ -1221,6 +1288,8 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
           ds.config->general.max_result_rows = value;
         } else if (ds.selected_field == FIELD_HISTORY_MAX_SIZE) {
           ds.config->general.history_max_size = value;
+        } else if (ds.selected_field == FIELD_DAEMON_IDLE_TIMEOUT) {
+          ds.config->general.daemon_idle_timeout = value;
         }
         ds.editing_number = false;
       }

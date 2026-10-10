@@ -7,6 +7,7 @@
  */
 
 #include "json.h"
+#include <math.h>
 #include <util/mem.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,32 +44,55 @@ cJSON *laced_json_from_value(const DbValue *val) {
     return cJSON_CreateNumber((double)val->int_val);
 
   case DB_TYPE_FLOAT:
+    /* JSON has no NaN/Infinity (cJSON would emit null, i.e. NULL) */
+    if (isnan(val->float_val) || isinf(val->float_val)) {
+      cJSON *obj = cJSON_CreateObject();
+      cJSON_AddStringToObject(obj, "$float",
+                              isnan(val->float_val) ? "nan"
+                              : val->float_val > 0  ? "inf"
+                                                    : "-inf");
+      return obj;
+    }
     return cJSON_CreateNumber(val->float_val);
+
+  case DB_TYPE_DECIMAL: {
+    /* Exact numeric: as its digits, never through a double */
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "$num", val->text.data ? val->text.data : "0");
+    return obj;
+  }
 
   case DB_TYPE_TEXT:
   case DB_TYPE_DATE:
   case DB_TYPE_TIMESTAMP:
+    if (val->omitted) {
+      /* Too large to load: a label the client shows but must not write */
+      cJSON *obj = cJSON_CreateObject();
+      cJSON_AddStringToObject(obj, "$omitted", val->text.data ? val->text.data : "");
+      cJSON_AddNumberToObject(obj, "bytes", (double)val->omitted);
+      return obj;
+    }
     if (val->text.data) {
       return cJSON_CreateString(val->text.data);
     }
     return cJSON_CreateNull();
 
-  case DB_TYPE_BLOB:
-    /* Encode blob as hex string */
-    if (val->blob.data && val->blob.len > 0) {
-      size_t hex_len = val->blob.len * 2 + 1;
-      char *hex = safe_malloc(hex_len);
-      if (!hex) {
-        return cJSON_CreateNull();
-      }
-      for (size_t i = 0; i < val->blob.len; i++) {
-        snprintf(hex + i * 2, 3, "%02x", val->blob.data[i]);
-      }
-      cJSON *result = cJSON_CreateString(hex);
-      free(hex);
-      return result;
+  case DB_TYPE_BLOB: {
+    /* Bytes as {"$blob":"<hex>"}: a bare hex string was taken for text, so
+     * BLOB keys never matched and edits wrote the hex as text */
+    size_t n = val->blob.data ? val->blob.len : 0;
+    char *hex = safe_malloc(n * 2 + 1);
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+      hex[2 * i] = digits[val->blob.data[i] >> 4];
+      hex[2 * i + 1] = digits[val->blob.data[i] & 15];
     }
-    return cJSON_CreateNull();
+    hex[2 * n] = '\0';
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(obj, "$blob", hex);
+    free(hex);
+    return obj;
+  }
 
   case DB_TYPE_BOOL:
     return cJSON_CreateBool(val->bool_val);
@@ -189,6 +213,9 @@ cJSON *laced_json_from_result(const ResultSet *rs) {
   /* Add metadata */
   cJSON_AddNumberToObject(result, "num_rows", (double)rs->num_rows);
   cJSON_AddNumberToObject(result, "total_rows", (double)rs->total_rows);
+  if (rs->truncated) {
+    cJSON_AddBoolToObject(result, "truncated", true);
+  }
   if (rs->rows_affected >= 0) {
     cJSON_AddNumberToObject(result, "rows_affected", (double)rs->rows_affected);
   }

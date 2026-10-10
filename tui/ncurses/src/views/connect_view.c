@@ -96,8 +96,21 @@ static void input_init(InputField *input, int width) {
 
 static void input_draw(WINDOW *win, InputField *input, int y, int x,
                        bool focused, int *cursor_y, int *cursor_x) {
+  /* Scroll is a byte offset: keep it on a character boundary and the
+   * cursor within the field (by display width) */
+  if (input->cursor > input->len)
+    input->cursor = input->len;
+  if (input->scroll > input->cursor)
+    input->scroll = input->cursor;
+  while (input->scroll > 0 &&
+         ((unsigned char)input->buffer[input->scroll] & 0xC0) == 0x80)
+    input->scroll--;
+  int room = input->width > 3 ? input->width - 3 : 1;
+  while (input->scroll < input->cursor &&
+         utf8_width(input->buffer + input->scroll,
+                    input->cursor - input->scroll) > room)
+    input->scroll = utf8_next(input->buffer, input->len, input->scroll);
   size_t visible_start = input->scroll;
-  size_t visible_len = (size_t)input->width;
 
   /* Clear the input area */
   if (focused) {
@@ -106,10 +119,8 @@ static void input_draw(WINDOW *win, InputField *input, int y, int x,
   mvwhline(win, y, x, ' ', input->width);
 
   /* Draw text */
-  size_t draw_len =
-      (visible_start <= input->len) ? input->len - visible_start : 0;
-  if (draw_len > visible_len)
-    draw_len = visible_len;
+  size_t draw_len = utf8_fit(input->buffer + visible_start,
+                             input->len - visible_start, input->width, NULL);
 
   if (draw_len > 0) {
     mvwaddnstr(win, y, x, input->buffer + visible_start, (int)draw_len);
@@ -125,7 +136,8 @@ static void input_draw(WINDOW *win, InputField *input, int y, int x,
   wattroff(win, A_DIM);
 
   *cursor_y = y;
-  *cursor_x = x + (int)(input->cursor - input->scroll);
+  *cursor_x = x + utf8_width(input->buffer + input->scroll,
+                             input->cursor - input->scroll);
 }
 
 static void input_handle_key(InputField *input, const UiEvent *event) {
@@ -136,7 +148,7 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
 
   if (render_event_is_special(event, UI_KEY_LEFT)) {
     if (input->cursor > 0) {
-      input->cursor--;
+      input->cursor = utf8_prev(input->buffer, input->cursor);
       if (input->cursor < input->scroll)
         input->scroll = input->cursor;
     }
@@ -145,7 +157,7 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
 
   if (render_event_is_special(event, UI_KEY_RIGHT)) {
     if (input->cursor < input->len) {
-      input->cursor++;
+      input->cursor = utf8_next(input->buffer, input->len, input->cursor);
       if (input->cursor >= input->scroll + (size_t)input->width - 2) {
         input->scroll = input->cursor - (size_t)input->width + 3;
       }
@@ -173,10 +185,11 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
 
   if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (input->cursor > 0 && input->cursor <= input->len) {
-      memmove(input->buffer + input->cursor - 1, input->buffer + input->cursor,
+      size_t prev = utf8_prev(input->buffer, input->cursor);
+      memmove(input->buffer + prev, input->buffer + input->cursor,
               input->len - input->cursor + 1);
-      input->cursor--;
-      input->len--;
+      input->len -= input->cursor - prev;
+      input->cursor = prev;
       if (input->cursor < input->scroll)
         input->scroll = input->cursor;
     }
@@ -186,9 +199,10 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
   if (render_event_is_special(event, UI_KEY_DELETE) ||
       render_event_is_ctrl(event, 'D')) {
     if (input->cursor < input->len) {
-      memmove(input->buffer + input->cursor, input->buffer + input->cursor + 1,
-              input->len - input->cursor);
-      input->len--;
+      size_t next = utf8_next(input->buffer, input->len, input->cursor);
+      memmove(input->buffer + input->cursor, input->buffer + next,
+              input->len - next + 1);
+      input->len -= next - input->cursor;
     }
     return;
   }
@@ -208,8 +222,9 @@ static void input_handle_key(InputField *input, const UiEvent *event) {
   }
 
   /* Printable character */
-  if (render_event_is_char(event) && key_char >= 32 && key_char < 127 &&
-      input->len < INPUT_BUFFER_LEN - 1 && input->cursor <= input->len) {
+  if (render_event_is_char(event) && utf8_is_text_key(key_char) &&
+      input->len + utf8_seq_len((unsigned char)key_char) < INPUT_BUFFER_LEN &&
+      input->cursor <= input->len) {
     memmove(input->buffer + input->cursor + 1, input->buffer + input->cursor,
             input->len - input->cursor + 1);
     input->buffer[input->cursor] = (char)key_char;
@@ -712,6 +727,10 @@ static void draw_url_panel(WINDOW *win, DialogState *ds, int start_y,
   mvwprintw(win, y++, start_x + 2, "sqlite:///path/to/db.sqlite");
   mvwprintw(win, y++, start_x + 2, "postgres://user:pass@host/db");
   mvwprintw(win, y++, start_x + 2, "mysql://user@host:3306/db");
+  y++;
+  mvwprintw(win, y++, start_x, "SSH tunnel:");
+  mvwprintw(win, y++, start_x + 2, "postgres+ssh://sshhost/user:pass@localhost/db");
+  mvwprintw(win, y++, start_x + 2, "mysql+ssh://user@sshhost/dbuser@localhost/db");
   wattroff(win, A_DIM);
 }
 
@@ -797,11 +816,11 @@ static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
     msg_max_len = 10;
   if (ds->error_msg && ds->error_msg[0]) {
     wattron(win, COLOR_PAIR(COLOR_ERROR));
-    mvwprintw(win, msg_y, 2, "%.*s", msg_max_len, ds->error_msg);
+    tui_print_clip(win, msg_y, 2, msg_max_len, ds->error_msg);
     wattroff(win, COLOR_PAIR(COLOR_ERROR));
   } else if (ds->success_msg && ds->success_msg[0]) {
     wattron(win, COLOR_PAIR(COLOR_NUMBER));
-    mvwprintw(win, msg_y, 2, "%.*s", msg_max_len, ds->success_msg);
+    tui_print_clip(win, msg_y, 2, msg_max_len, ds->success_msg);
     wattroff(win, COLOR_PAIR(COLOR_NUMBER));
   }
 
@@ -897,7 +916,7 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
       wattroff(dlg, A_REVERSE);
 
     if (focus == 0) {
-      wmove(dlg, 3, 2 + (int)cursor);
+      wmove(dlg, 3, 2 + utf8_width(buf, cursor));
       curs_set(1);
     } else {
       curs_set(0);
@@ -931,24 +950,23 @@ static char *show_input_dialog(WINDOW *parent, const char *title,
       /* Input field handling */
       if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
         if (cursor > 0 && cursor <= len) {
-          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
-          cursor--;
-          len--;
+          size_t prev = utf8_prev(buf, cursor);
+          memmove(buf + prev, buf + cursor, len - cursor + 1);
+          len -= cursor - prev;
+          cursor = prev;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0)
-          cursor--;
+        cursor = utf8_prev(buf, cursor);
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len)
-          cursor++;
+        cursor = utf8_next(buf, len, cursor);
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
         cursor = len;
       } else {
         int key_char = render_event_get_char(&event);
-        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
-            len < sizeof(buf) - 1) {
+        if (render_event_is_char(&event) && utf8_is_text_key(key_char) &&
+            len + utf8_seq_len((unsigned char)key_char) < sizeof(buf)) {
           memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
           buf[cursor] = (char)key_char;
           cursor++;
@@ -1106,7 +1124,8 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
       wattron(dlg, COLOR_PAIR(COLOR_SELECTED));
     mvwhline(dlg, 3, 2, ' ', dlg_width - 4);
     /* Show asterisks instead of actual password */
-    for (size_t i = 0; i < len && (int)i < dlg_width - 5; i++) {
+    size_t nchars = utf8_count(buf, len);
+    for (size_t i = 0; i < nchars && (int)i < dlg_width - 5; i++) {
       mvwaddch(dlg, 3, 2 + (int)i, '*');
     }
     if (focus == 0)
@@ -1132,7 +1151,7 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
       wattroff(dlg, A_REVERSE);
 
     if (focus == 0) {
-      wmove(dlg, 3, 2 + (int)cursor);
+      wmove(dlg, 3, 2 + (int)utf8_count(buf, cursor));
       curs_set(1);
     } else {
       curs_set(0);
@@ -1164,24 +1183,23 @@ static char *show_password_dialog(WINDOW *parent, const char *title,
       /* Input field handling */
       if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
         if (cursor > 0 && cursor <= len) {
-          memmove(buf + cursor - 1, buf + cursor, len - cursor + 1);
-          cursor--;
-          len--;
+          size_t prev = utf8_prev(buf, cursor);
+          memmove(buf + prev, buf + cursor, len - cursor + 1);
+          len -= cursor - prev;
+          cursor = prev;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (cursor > 0)
-          cursor--;
+        cursor = utf8_prev(buf, cursor);
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (cursor < len)
-          cursor++;
+        cursor = utf8_next(buf, len, cursor);
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
         cursor = len;
       } else {
         int key_char = render_event_get_char(&event);
-        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
-            len < sizeof(buf) - 1) {
+        if (render_event_is_char(&event) && utf8_is_text_key(key_char) &&
+            len + utf8_seq_len((unsigned char)key_char) < sizeof(buf)) {
           memmove(buf + cursor + 1, buf + cursor, len - cursor + 1);
           buf[cursor] = (char)key_char;
           cursor++;
@@ -1405,7 +1423,7 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
 
     /* Position cursor */
     if (focus == 0) {
-      wmove(dlg, 3, 2 + (int)name_cursor);
+      wmove(dlg, 3, 2 + utf8_width(name_buf, name_cursor));
       curs_set(1);
     } else {
       curs_set(0);
@@ -1454,25 +1472,24 @@ static bool show_save_dialog(WINDOW *parent, ConnectionManager *mgr,
       /* Name input handling */
       if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
         if (name_cursor > 0 && name_cursor <= name_len) {
-          memmove(name_buf + name_cursor - 1, name_buf + name_cursor,
-                  name_len - name_cursor + 1);
-          name_cursor--;
-          name_len--;
+          size_t prev = utf8_prev(name_buf, name_cursor);
+          memmove(name_buf + prev, name_buf + name_cursor, name_len - name_cursor + 1);
+          name_len -= name_cursor - prev;
+          name_cursor = prev;
         }
       } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-        if (name_cursor > 0)
-          name_cursor--;
+        name_cursor = utf8_prev(name_buf, name_cursor);
       } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-        if (name_cursor < name_len)
-          name_cursor++;
+        name_cursor = utf8_next(name_buf, name_len, name_cursor);
       } else if (render_event_is_special(&event, UI_KEY_HOME)) {
         name_cursor = 0;
       } else if (render_event_is_special(&event, UI_KEY_END)) {
         name_cursor = name_len;
       } else {
         int key_char = render_event_get_char(&event);
-        if (render_event_is_char(&event) && key_char >= 32 && key_char < 127 &&
-            name_len < sizeof(name_buf) - 1) {
+        if (render_event_is_char(&event) && utf8_is_text_key(key_char) &&
+            name_len + utf8_seq_len((unsigned char)key_char) <
+                sizeof(name_buf)) {
           memmove(name_buf + name_cursor + 1, name_buf + name_cursor,
                   name_len - name_cursor + 1);
           name_buf[name_cursor] = (char)key_char;
@@ -1642,10 +1659,10 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
       wattron(dlg, COLOR_PAIR(COLOR_SELECTED));                                \
     mvwhline(dlg, y, label_w + 2, ' ', field_w);                               \
     if (is_password) {                                                         \
-      for (size_t _i = 0; _i < strlen(buf); _i++)                              \
+      for (size_t _i = 0; _i < utf8_count(buf, strlen(buf)); _i++)            \
         mvwaddch(dlg, y, label_w + 2 + (int)_i, '*');                          \
     } else {                                                                   \
-      mvwaddnstr(dlg, y, label_w + 2, buf, field_w - 1);                       \
+      tui_print_clip(dlg, y, label_w + 2, field_w - 1, buf);                   \
     }                                                                          \
     if (focus == fld)                                                          \
       wattroff(dlg, COLOR_PAIR(COLOR_SELECTED));                               \
@@ -1731,7 +1748,10 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
         break;
       }
       if (field) {
-        wmove(dlg, field_y, label_w + 2 + (int)cursors[focus]);
+        int cx = focus == FLD_PASSWORD
+                     ? (int)utf8_count(field, cursors[focus])
+                     : utf8_width(field, cursors[focus]);
+        wmove(dlg, field_y, label_w + 2 + cx);
         curs_set(1);
       }
     } else {
@@ -1879,15 +1899,14 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
 
         if (render_event_is_special(&event, UI_KEY_BACKSPACE)) {
           if (cursor > 0 && cursor <= len) {
-            memmove(field + cursor - 1, field + cursor, len - cursor + 1);
-            cursors[focus]--;
+            size_t prev = utf8_prev(field, cursor);
+            memmove(field + prev, field + cursor, len - cursor + 1);
+            cursors[focus] = prev;
           }
         } else if (render_event_is_special(&event, UI_KEY_LEFT)) {
-          if (cursor > 0)
-            cursors[focus]--;
+          cursors[focus] = utf8_prev(field, cursor);
         } else if (render_event_is_special(&event, UI_KEY_RIGHT)) {
-          if (cursor < len)
-            cursors[focus]++;
+          cursors[focus] = utf8_next(field, len, cursor);
         } else if (render_event_is_special(&event, UI_KEY_HOME)) {
           cursors[focus] = 0;
         } else if (render_event_is_special(&event, UI_KEY_END)) {
@@ -1896,11 +1915,12 @@ static bool show_connection_form(WINDOW *parent, ConnectionManager *mgr,
           int key_char = render_event_get_char(&event);
           /* For port field, only allow digits */
           bool valid =
-              render_event_is_char(&event) && key_char >= 32 && key_char < 127;
+              render_event_is_char(&event) && utf8_is_text_key(key_char);
           if (focus == FLD_PORT && (key_char < '0' || key_char > '9')) {
             valid = false;
           }
-          if (valid && len < max_len) {
+          if (valid &&
+              len + utf8_seq_len((unsigned char)key_char) <= max_len) {
             memmove(field + cursor + 1, field + cursor, len - cursor + 1);
             field[cursor] = (char)key_char;
             cursors[focus]++;
@@ -1949,7 +1969,11 @@ static bool is_auth_error(const char *err) {
   return false;
 }
 
-static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
+/* Connect (or just test). On success returns the connection string and, when
+ * it came from a saved connection, sets *saved_id to a copy of its id so the
+ * session can restore it later (NULL for a typed URL). */
+static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode,
+                         char **saved_id) {
   char *connstr = NULL;
   char *err = NULL;
   SavedConnection *saved_conn = NULL;
@@ -2004,16 +2028,9 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
         free(err);
         err = NULL;
 
-        connstr = connstr_build(
-            saved_conn->driver,
-            (saved_conn->user && saved_conn->user[0]) ? saved_conn->user : NULL,
-            password,
-            (saved_conn->host && saved_conn->host[0]) ? saved_conn->host : NULL,
-            saved_conn->port,
-            (saved_conn->database && saved_conn->database[0])
-                ? saved_conn->database
-                : NULL,
-            NULL, NULL, 0);
+        /* Same builder as the first attempt, so an SSH tunnel is kept (a
+         * plain rebuild connected straight to the database host) */
+        connstr = lace_saved_conn_build_connstr(saved_conn, password, NULL);
 
         str_secure_free(password);
 
@@ -2043,6 +2060,9 @@ static char *try_connect(DialogState *ds, bool test_only, ConnectMode *mode) {
   if (mode) {
     *mode = ds->has_existing_tabs ? CONNECT_MODE_NEW_TAB
                                   : CONNECT_MODE_NEW_WORKSPACE;
+  }
+  if (saved_id) {
+    *saved_id = saved_conn && saved_conn->id ? str_dup(saved_conn->id) : NULL;
   }
 
   return connstr;
@@ -2426,7 +2446,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
     switch (ds->selected_button) {
     case BTN_CONNECT: {
       ConnectMode mode = CONNECT_MODE_NEW_TAB;
-      char *connstr = try_connect(ds, false, &mode);
+      char *connstr = try_connect(ds, false, &mode, &result->saved_conn_id);
       if (connstr) {
         result->connstr = connstr;
         result->mode = CONNECT_MODE_NEW_TAB;
@@ -2437,7 +2457,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
 
     case BTN_NEW_WS: {
       ConnectMode mode = CONNECT_MODE_NEW_WORKSPACE;
-      char *connstr = try_connect(ds, false, &mode);
+      char *connstr = try_connect(ds, false, &mode, &result->saved_conn_id);
       if (connstr) {
         result->connstr = connstr;
         result->mode = CONNECT_MODE_NEW_WORKSPACE;
@@ -2447,7 +2467,7 @@ static bool handle_button_input(DialogState *ds, const UiEvent *event,
     }
 
     case BTN_TEST:
-      try_connect(ds, true, NULL);
+      try_connect(ds, true, NULL, NULL);
       break;
 
     case BTN_SAVE: {
@@ -2630,7 +2650,7 @@ ConnectResult connect_view_show(TuiState *state) {
 
     /* Test connection hotkey */
     if (ds.config && hotkey_matches(ds.config, &event, HOTKEY_CONN_TEST)) {
-      try_connect(&ds, true, NULL);
+      try_connect(&ds, true, NULL, NULL);
       continue;
     }
 
@@ -2710,10 +2730,10 @@ ConnectResult connect_view_show(TuiState *state) {
           } else {
             /* Connect to selected item */
             ConnectMode mode;
-            char *connstr = try_connect(&ds, false, &mode);
+            char *connstr =
+                try_connect(&ds, false, &mode, &result.saved_conn_id);
             if (connstr) {
               result.connstr = connstr;
-              result.saved_conn_id = str_dup(item->connection.id);
               result.mode = mode;
               running = false;
             }
@@ -2728,7 +2748,7 @@ ConnectResult connect_view_show(TuiState *state) {
       if (render_event_is_special(&event, UI_KEY_ENTER)) {
         if (ds.url_input.len > 0) {
           ConnectMode mode;
-          char *connstr = try_connect(&ds, false, &mode);
+          char *connstr = try_connect(&ds, false, &mode, &result.saved_conn_id);
           if (connstr) {
             result.connstr = connstr;
             result.mode = mode;

@@ -9,9 +9,11 @@
 #include "db_common.h"
 #include "util/mem.h"
 #include "db.h"
+#include <ctype.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 char *db_common_escape_identifier(const char *name, DbQuoteStyle style) {
   if (!name)
@@ -466,3 +468,22 @@ void db_common_free_pg_array(char **array, size_t count) {
   free(array);
 }
 
+bool db_common_sql_starts_with_word(const char *sql, const char *word) {
+  const char *p = sql;
+  for (;;) {
+    while (*p && isspace((unsigned char)*p))
+      p++;
+    if (p[0] == '-' && p[1] == '-') {
+      while (*p && *p != '\n')
+        p++;
+    } else if (p[0] == '/' && p[1] == '*') {
+      const char *e = strstr(p + 2, "*/");
+      p = e ? e + 2 : p + strlen(p);
+    } else {
+      break;
+    }
+  }
+  size_t n = strlen(word);
+  return strncasecmp(p, word, n) == 0 && !isalnum((unsigned char)p[n]) &&
+         p[n] != '_';
+}

@@ -115,7 +115,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
     const char *name = data->columns[col].name;
 
     /* Draw column name at full width */
-    mvwprintw(win, y, x, "%-*.*s", width, width, name ? name : "");
+    tui_print_fit(win, y, x, width, name ? name : "");
 
     if (col == params->cursor_col && params->is_focused) {
       wattroff(win, A_REVERSE);
@@ -156,7 +156,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           char sort_info[24];
           snprintf(sort_info, sizeof(sort_info), "%s %s, %d", arrow, dir_text,
                    (int)(i + 1));
-          mvwprintw(win, y, x, "%-*.*s", width, width, sort_info);
+          tui_print_fit(win, y, x, width, sort_info);
           found = true;
           break;
         }
@@ -234,38 +234,10 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 
       if (is_editing_cell) {
         /* Draw edit field with distinctive background */
-        wattron(win, COLOR_PAIR(COLOR_EDIT));
-        mvwhline(win, y, x, ' ', width);
-
-        /* Draw the edit buffer */
-        const char *buf = params->edit_buffer ? params->edit_buffer : "";
-        size_t buf_len = strlen(buf);
-
-        /* Calculate scroll for long text */
-        size_t scroll = 0;
-        if (params->edit_pos >= (size_t)(width - 1)) {
-          scroll = params->edit_pos - width + 2;
-        }
-
-        /* Draw visible portion of text */
-        size_t draw_len = buf_len > scroll ? buf_len - scroll : 0;
-        if (draw_len > (size_t)width)
-          draw_len = width;
-        if (draw_len > 0) {
-          mvwaddnstr(win, y, x, buf + scroll, (int)draw_len);
-        }
-
-        wattroff(win, COLOR_PAIR(COLOR_EDIT));
-
-        /* Draw cursor character with reverse video for visibility */
-        int cursor_x = x + (int)(params->edit_pos - scroll);
-        if (cursor_x >= x && cursor_x < x + width) {
-          char cursor_char =
-              (params->edit_pos < buf_len) ? buf[params->edit_pos] : ' ';
-          wattron(win, A_REVERSE | A_BOLD);
-          mvwaddch(win, y, cursor_x, cursor_char);
-          wattroff(win, A_REVERSE | A_BOLD);
-
+        int cursor_x =
+            tui_draw_edit_field(win, y, x, width, params->edit_buffer,
+                                params->edit_pos, COLOR_PAIR(COLOR_EDIT));
+        if (cursor_x >= 0) {
           /* Store cursor screen position for later use */
           if (state) {
             state->edit_cursor_y = y;
@@ -293,7 +265,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
           char *str = db_value_to_string(val);
           if (str) {
             char *safe = tui_sanitize_for_display(str);
-            mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+            tui_print_fit(win, y, x, width, safe ? safe : str);
             free(safe);
             free(str);
           }
@@ -329,7 +301,7 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
             } else if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
               wattron(win, COLOR_PAIR(COLOR_NUMBER));
             }
-            mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+            tui_print_fit(win, y, x, width, safe ? safe : str);
             if (is_pk_col && is_marked_row && is_cursor_row) {
               /* White text for PK on cursor row - no color attr needed */
             } else if (is_pk_col && is_marked_row) {
@@ -443,46 +415,29 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
   Tab *tab = TUI_TAB(state);
   TableSchema *schema = tab ? tab->schema : NULL;
   bool is_edited = state->new_row_edited && state->new_row_edited[col];
-  bool is_auto_increment = schema && col < schema->num_columns &&
-                           schema->columns[col].auto_increment;
+  const ColumnDef *cdef =
+      schema && col < schema->num_columns ? &schema->columns[col] : NULL;
+  /* Placeholders the database fills in: auto-increment, generated, or a
+   * required column with no default (left for the database to reject) */
+  const char *auto_label = NULL;
+  if (cdef && cdef->generated)
+    auto_label = "GENERATED";
+  else if (cdef && cdef->auto_increment)
+    auto_label = "AI";
+  else if (cdef && !cdef->nullable &&
+           !(cdef->default_val && cdef->default_val[0]))
+    auto_label = "required";
+  bool is_auto_increment = auto_label != NULL;
   bool is_placeholder = state->new_row_placeholders[col] && !is_edited;
 
   if (is_editing) {
     /* Draw edit field with distinctive background */
-    wattron(win, COLOR_PAIR(COLOR_EDIT));
-    mvwhline(win, y, x, ' ', width);
-
-    const char *buf =
-        state->new_row_edit_buffer ? state->new_row_edit_buffer : "";
-    size_t buf_len = strlen(buf);
-
-    /* Calculate scroll for long text */
-    size_t scroll = 0;
-    if (state->new_row_edit_pos >= (size_t)(width - 1)) {
-      scroll = state->new_row_edit_pos - width + 2;
-    }
-
-    /* Draw visible portion of text */
-    size_t draw_len = buf_len > scroll ? buf_len - scroll : 0;
-    if (draw_len > (size_t)width)
-      draw_len = width;
-    if (draw_len > 0) {
-      mvwaddnstr(win, y, x, buf + scroll, (int)draw_len);
-    }
-
-    wattroff(win, COLOR_PAIR(COLOR_EDIT));
-
-    /* Draw cursor */
-    int cursor_x = x + (int)(state->new_row_edit_pos - scroll);
-    if (cursor_x >= x && cursor_x < x + width) {
-      char cursor_char = (state->new_row_edit_pos < buf_len)
-                             ? buf[state->new_row_edit_pos]
-                             : ' ';
-      wattron(win, A_REVERSE | A_BOLD);
-      mvwaddch(win, y, cursor_x, cursor_char);
-      wattroff(win, A_REVERSE | A_BOLD);
+    int cursor_x = tui_draw_edit_field(win, y, x, width,
+                                       state->new_row_edit_buffer,
+                                       state->new_row_edit_pos,
+                                       COLOR_PAIR(COLOR_EDIT));
+    if (cursor_x >= 0)
       wmove(win, y, cursor_x);
-    }
   } else if (is_selected) {
     wattron(win, COLOR_PAIR(COLOR_SELECTED));
     mvwhline(win, y, x, ' ', width);
@@ -490,14 +445,14 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
     if (is_placeholder && is_auto_increment) {
       /* Auto-increment placeholder - show in dim */
       wattron(win, A_DIM);
-      mvwprintw(win, y, x, "%-*.*s", width, width, "AI");
+      tui_print_fit(win, y, x, width, auto_label);
       wattroff(win, A_DIM);
     } else if (is_placeholder) {
       /* Default value placeholder - show in dim */
       wattron(win, A_DIM);
       const DbValue *val = &state->new_row_values[col];
       char *str = db_value_to_string(val);
-      mvwprintw(win, y, x, "%-*.*s", width, width, str ? str : "");
+      tui_print_fit(win, y, x, width, str ? str : "");
       free(str);
       wattroff(win, A_DIM);
     } else {
@@ -508,7 +463,7 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
         char *str = db_value_to_string(val);
         if (str) {
           char *safe = tui_sanitize_for_display(str);
-          mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+          tui_print_fit(win, y, x, width, safe ? safe : str);
           free(safe);
           free(str);
         }
@@ -520,14 +475,14 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
     if (is_placeholder && is_auto_increment) {
       /* Auto-increment placeholder - gray/dim */
       wattron(win, A_DIM);
-      mvwprintw(win, y, x, "%-*.*s", width, width, "AI");
+      tui_print_fit(win, y, x, width, auto_label);
       wattroff(win, A_DIM);
     } else if (is_placeholder) {
       /* Default value placeholder - gray/dim */
       wattron(win, A_DIM);
       const DbValue *val = &state->new_row_values[col];
       char *str = db_value_to_string(val);
-      mvwprintw(win, y, x, "%-*.*s", width, width, str ? str : "");
+      tui_print_fit(win, y, x, width, str ? str : "");
       free(str);
       wattroff(win, A_DIM);
     } else {
@@ -540,7 +495,7 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
         char *str = db_value_to_string(val);
         if (str) {
           char *safe = tui_sanitize_for_display(str);
-          mvwprintw(win, y, x, "%-*.*s", width, width, safe ? safe : str);
+          tui_print_fit(win, y, x, width, safe ? safe : str);
           free(safe);
           free(str);
         }
@@ -778,8 +733,7 @@ void tui_draw_connection_tab(TuiState *state) {
   int connstr_x = (win_cols - (int)strlen(connstr)) / 2;
   if (connstr_x < 2)
     connstr_x = 2;
-  mvwprintw(state->main_win, center_y + 2, connstr_x, "%.*s", max_connstr_len,
-            connstr);
+  tui_print_clip(state->main_win, center_y + 2, connstr_x, max_connstr_len, connstr);
   wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
 
   free(masked_connstr);
@@ -804,6 +758,27 @@ void tui_draw_connection_tab(TuiState *state) {
   wattroff(state->main_win, A_DIM);
 
   wrefresh(state->main_win);
+}
+
+
+/* Row position at the right of the status bar, prefixed with the
+ * connection's transaction state so an open (or lost) transaction is never
+ * invisible */
+static void draw_status_position(TuiState *state, int right_pos, const char *pos) {
+  const char *tx = "";
+  if (state->conn && state->conn->transaction_lost) {
+    tx = "[TX LOST] ";
+  } else if (state->conn && state->conn->in_transaction &&
+             state->conn->transaction_failed) {
+    tx = "[TX FAILED] ";
+  } else if (state->conn && state->conn->in_transaction) {
+    tx = "[TX] ";
+  }
+  char text[160];
+  snprintf(text, sizeof(text), "%s%s", tx, pos);
+  int len = (int)strlen(text);
+  int x = right_pos - len;
+  mvwprintw(state->status_win, 0, x < 0 ? 0 : x, "%s", text);
 }
 
 /* ============================================================================
@@ -983,18 +958,23 @@ void tui_draw_status(TuiState *state) {
   if (query_results_active) {
     /* Query results row position */
     char pos[64];
-    if (tab->query_paginated && tab->query_total_rows > 0) {
-      /* Paginated: show actual row number in total dataset */
+    if (tab->query_paginated) {
+      /* Paginated: show actual row number in total dataset ("N+" while the
+       * total is still being counted) */
       size_t actual_row = tab->query_loaded_offset + tab->query_result_row + 1;
-      snprintf(pos, sizeof(pos), "Row %zu/%zu", actual_row,
-               tab->query_total_rows);
+      if (tab->query_total_known) {
+        snprintf(pos, sizeof(pos), "Row %zu/%zu", actual_row,
+                 tab->query_total_rows);
+      } else {
+        snprintf(pos, sizeof(pos), "Row %zu/%zu+", actual_row,
+                 tab->query_loaded_offset + tab->query_loaded_count);
+      }
     } else {
       /* Non-paginated */
       snprintf(pos, sizeof(pos), "Row %zu/%zu", tab->query_result_row + 1,
                tab->query_results->num_rows);
     }
-    int pos_len = (int)strlen(pos);
-    mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
+    draw_status_position(state, right_pos, pos);
   } else if (tab && tab->data && widget) {
     char pos[96];
     size_t actual_row = tab->loaded_offset + tab->cursor_row + 1;
@@ -1010,8 +990,10 @@ void tui_draw_status(TuiState *state) {
       snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
                total);
     }
-    int pos_len = (int)strlen(pos);
-    mvwprintw(state->status_win, 0, right_pos - pos_len, "%s", pos);
+    draw_status_position(state, right_pos, pos);
+  } else if (state->conn &&
+             (state->conn->in_transaction || state->conn->transaction_lost)) {
+    draw_status_position(state, right_pos, "");
   }
 
   if (state->status_is_error) {
@@ -1475,9 +1457,16 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
         int x_pos = 1; /* Data starts at x=1 */
         size_t target_col = scroll_col;
 
+        /* Use widget col_widths if available (same as drawing code) */
+        int *col_widths = click_vm->col_widths;
+        size_t num_col_widths = click_vm->num_col_widths;
+
         for (size_t col = scroll_col; col < num_cols; col++) {
-          int width = tui_get_column_width(state, col);
-          if (rel_x >= x_pos && rel_x < x_pos + width) {
+          int width = (col_widths && col < num_col_widths)
+                          ? col_widths[col]
+                          : DEFAULT_COL_WIDTH;
+          /* Include separator in clickable area for preceding column */
+          if (rel_x >= x_pos && rel_x <= x_pos + width) {
             target_col = col;
             break;
           }

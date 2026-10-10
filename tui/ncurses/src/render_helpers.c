@@ -214,10 +214,11 @@ bool render_event_is_char(const UiEvent *event) {
   if (!event || event->type != UI_EVENT_KEY)
     return false;
 
-  /* Printable ASCII characters (32-126) */
+  /* Printable ASCII (32-126), or one byte of a UTF-8 character: ncurses
+   * delivers multi-byte characters a byte at a time (0x80-0xFF) */
   if (!event->key.is_special && event->key.mods == UI_MOD_NONE) {
     int ch = event->key.key;
-    return ch >= 32 && ch <= 126;
+    return (ch >= 32 && ch <= 126) || (ch >= 0x80 && ch <= 0xFF);
   }
   return false;
 }

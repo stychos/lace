@@ -30,6 +30,14 @@ typedef struct {
   char *password; /* Password (if save_password is true) */
   int port;       /* Port number (0 for default) */
   bool save_password;
+
+  /* SSH tunnel fields */
+  bool ssh;            /* true if connection uses SSH tunnel */
+  char *ssh_host;      /* SSH server hostname */
+  char *ssh_user;      /* SSH username (NULL = use ~/.ssh/config) */
+  char *ssh_password;  /* SSH password (NULL = key auth) */
+  int ssh_port;        /* SSH port (0 = default 22) */
+  bool save_ssh_password;
 } LaceSavedConnection;
 
 /* ==========================================================================
@@ -55,9 +63,17 @@ LaceSavedConnection *lace_saved_conn_copy(const LaceSavedConnection *conn);
  * ========================================================================== */
 
 /* Build a connection URL from saved connection
- * Format: driver://[user[:password]@][host[:port]/]database
- * Returns allocated string, caller must free */
+ * Format: driver://[user[:password]@][host[:port]/]database, or the
+ * driver+ssh:// form when the connection uses an SSH tunnel.
+ * Saved passwords are included only when their save flag is set.
+ * Returns allocated string (may hold passwords: str_secure_free it) */
 char *lace_saved_conn_to_connstr(const LaceSavedConnection *conn);
+
+/* Same, with passwords supplied by the caller (e.g. typed into a prompt).
+ * NULL keeps the saved password (if saved); the SSH tunnel is kept. */
+char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
+                                    const char *db_password,
+                                    const char *ssh_password);
 
 /* ==========================================================================
  * Utilities

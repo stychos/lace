@@ -188,8 +188,13 @@ typedef struct {
   char *query_source_table;
   TableSchema *query_source_schema;
 
-  /* Query results pagination */
+  /* Query results pagination. query_base_sql has no trailing ';'/comment;
+   * pages are base + LIMIT/OFFSET, or a subquery wrap of it when the
+   * statement has its own top-level LIMIT (query_page_wrap). */
   char *query_base_sql;
+  bool query_page_wrap;
+  bool query_total_known;   /* query_total_rows is exact (count or end seen) */
+  void *query_count_op;     /* Background COUNT(*) (AsyncOperation*) or NULL */
   size_t query_total_rows;
   size_t query_loaded_offset;
   size_t query_loaded_count;
@@ -210,6 +215,9 @@ typedef struct {
   void *bg_load_op;             /* AsyncOperation* - current background load */
   bool bg_load_forward;         /* Direction: true=forward, false=backward */
   size_t bg_load_target_offset; /* Target offset being loaded */
+
+  /* Keyset pagination state (NULL if using offset pagination) */
+  LaceKeysetState *keyset;      /* Keyset state for cursor-based pagination */
 
   /* Row selection (for bulk operations) */
   size_t *selected_rows;    /* Array of selected global row indices */
@@ -305,6 +313,9 @@ Workspace *app_switch_workspace(AppState *app, size_t index);
 
 /* Tab management */
 void tab_init(Tab *tab);
+
+/* Stop and free a query tab's background row count, if any */
+void query_count_stop(Tab *tab);
 void tab_free_data(Tab *tab);
 Tab *workspace_current_tab(Workspace *ws);
 Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,

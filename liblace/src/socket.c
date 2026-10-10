@@ -48,67 +48,111 @@ static void socket_no_sigpipe(int fd) {
  */
 char *lace_get_default_socket_path(void) {
   char path[512];
-  struct stat st;
 
+  /* One canonical location per user. The client never searches shared
+   * places such as /tmp: another local user could plant a socket there and
+   * collect the connection strings (passwords) sent to it. */
 #ifdef __APPLE__
-  /* Check for macOS sandbox environment */
-  const char *sandbox_container = getenv("APP_SANDBOX_CONTAINER_ID");
   const char *home = getenv("HOME");
-
-  if (sandbox_container && home) {
-    /* Sandboxed app - use Caches directory in container */
+  if (home && home[0]) {
     snprintf(path, sizeof(path), "%s/Library/Caches/laced.sock", home);
-    if (stat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
-      return str_dup(path);
-    }
-    /* Return this path even if socket doesn't exist (for spawn) */
     return str_dup(path);
-  }
-
-  /* Non-sandboxed macOS - check Caches directory first */
-  if (home) {
-    snprintf(path, sizeof(path), "%s/Library/Caches/laced.sock", home);
-    if (stat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
-      return str_dup(path);
-    }
   }
 #endif
 
-  /* Option 1: /run/laced.sock (system-wide daemon, typically root) */
-  if (stat("/run/laced.sock", &st) == 0 && S_ISSOCK(st.st_mode)) {
+  /* A system daemon run by root */
+  if (geteuid() == 0) {
     return str_dup("/run/laced.sock");
   }
 
-  /* Option 2: $XDG_RUNTIME_DIR/laced.sock (Linux user session) */
-  const char *xdg_runtime = getenv("XDG_RUNTIME_DIR");
-  if (xdg_runtime) {
-    snprintf(path, sizeof(path), "%s/laced.sock", xdg_runtime);
-    if (stat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
-      return str_dup(path);
-    }
-  }
-
-  /* Option 3: /tmp/laced-{uid}.sock (universal fallback) */
-  snprintf(path, sizeof(path), "/tmp/laced-%d.sock", (int)getuid());
-  if (stat(path, &st) == 0 && S_ISSOCK(st.st_mode)) {
+  /* The user's private runtime directory, if it really is private */
+  const char *xdg = getenv("XDG_RUNTIME_DIR");
+  struct stat st;
+  if (xdg && xdg[0] && stat(xdg, &st) == 0 && S_ISDIR(st.st_mode) &&
+      st.st_uid == geteuid() && (st.st_mode & 077) == 0) {
+    snprintf(path, sizeof(path), "%s/laced.sock", xdg);
     return str_dup(path);
   }
 
-  /* No existing socket found - return default path for spawn mode */
-#ifdef __APPLE__
-  const char *home_env = getenv("HOME");
-  if (home_env) {
-    snprintf(path, sizeof(path), "%s/Library/Caches/laced.sock", home_env);
+  /* A 0700 directory in the user's home (the daemon creates it) */
+  const char *home_dir = getenv("HOME");
+  if (home_dir && home_dir[0]) {
+    snprintf(path, sizeof(path), "%s/.cache/lace/laced.sock", home_dir);
     return str_dup(path);
   }
-#endif
 
-  if (xdg_runtime) {
-    snprintf(path, sizeof(path), "%s/laced.sock", xdg_runtime);
-  } else {
-    snprintf(path, sizeof(path), "/tmp/laced-%d.sock", (int)getuid());
-  }
+  /* Last resort: a private per-user directory under /tmp (the daemon
+   * creates it 0700; the client verifies who owns the socket) */
+  snprintf(path, sizeof(path), "/tmp/lace-%d/laced.sock", (int)geteuid());
   return str_dup(path);
+}
+
+char *lace_default_token_path(int port) {
+  char *sock = lace_get_default_socket_path();
+  if (!sock) {
+    return NULL;
+  }
+  char *slash = strrchr(sock, '/');
+  if (slash) {
+    *slash = '\0';
+  }
+  char *path = str_printf("%s/laced-%d.token", slash ? sock : ".",
+                          port > 0 ? port : LACE_DEFAULT_PORT);
+  free(sock);
+  return path;
+}
+
+char *lace_read_token_file(const char *path) {
+  if (!path) {
+    return NULL;
+  }
+  /* Only a token file that is ours and private counts */
+  int fd = open(path, O_RDONLY | O_NOFOLLOW);
+  if (fd < 0) {
+    return NULL;
+  }
+  struct stat st;
+  char buf[129];
+  ssize_t n = -1;
+  if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+      (st.st_mode & 077) == 0) {
+    n = read(fd, buf, sizeof(buf) - 1);
+  }
+  close(fd);
+  if (n <= 0) {
+    return NULL;
+  }
+  buf[n] = '\0';
+  buf[strcspn(buf, "\r\n")] = '\0';
+  return buf[0] ? str_dup(buf) : NULL;
+}
+
+bool lace_socket_owned_by_me(const char *path) {
+  struct stat st;
+  return path && lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) &&
+         st.st_uid == geteuid();
+}
+
+bool lace_peer_is_me(int fd) {
+  uid_t peer = (uid_t)-1;
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__)
+  gid_t gid;
+  if (getpeereid(fd, &peer, &gid) != 0) {
+    return false;
+  }
+#elif defined(SO_PEERCRED)
+  struct ucred cred;
+  socklen_t len = sizeof(cred);
+  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
+    return false;
+  }
+  peer = cred.uid;
+#else
+  (void)fd;
+  return true; /* No way to ask: rely on the socket's ownership check */
+#endif
+  return peer == geteuid();
 }
 
 /* ==========================================================================
@@ -193,6 +237,18 @@ int lace_connect_unix(const char *path, int timeout_ms) {
     return -1;
   }
 
+  /* The default path is found automatically, so make sure it is ours: the
+   * socket must belong to this user, and so must the daemon behind it.
+   * An explicitly configured path (e.g. a shared socket for a group) is
+   * trusted as configured. */
+  char *default_path = lace_get_default_socket_path();
+  bool verify = default_path && strcmp(default_path, path) == 0;
+  free(default_path);
+  if (verify && !lace_socket_owned_by_me(path)) {
+    errno = EPERM;
+    return -1;
+  }
+
   int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     return -1;
@@ -239,6 +295,12 @@ int lace_connect_unix(const char *path, int timeout_ms) {
   /* Restore blocking mode */
   if (flags >= 0) {
     fcntl(fd, F_SETFL, flags);
+  }
+
+  if (verify && !lace_peer_is_me(fd)) {
+    close(fd);
+    errno = EPERM;
+    return -1;
   }
 
   return fd;

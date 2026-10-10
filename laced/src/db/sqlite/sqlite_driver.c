@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* SQLite connection data */
 typedef struct {
@@ -34,6 +35,7 @@ static char **sqlite_list_tables(DbConnection *conn, size_t *count, char **err);
 static TableSchema *sqlite_get_table_schema(DbConnection *conn,
                                             const char *table, char **err);
 static ResultSet *sqlite_query(DbConnection *conn, const char *sql, char **err);
+static int sqlite_transaction_state(DbConnection *conn);
 static int64_t sqlite_exec(DbConnection *conn, const char *sql, char **err);
 static ResultSet *sqlite_query_page(DbConnection *conn, const char *table,
                                     size_t offset, size_t limit,
@@ -71,6 +73,7 @@ DbDriver sqlite_driver = {
     .list_databases = NULL,
     .list_tables = sqlite_list_tables,
     .get_table_schema = sqlite_get_table_schema,
+    .transaction_state = sqlite_transaction_state,
     .query = sqlite_query,
     .exec = sqlite_exec,
     .query_page = sqlite_query_page,
@@ -181,8 +184,11 @@ static DbValue sqlite_get_value(sqlite3_stmt *stmt, int col) {
     const void *blob = sqlite3_column_blob(stmt, col);
     int raw_len = sqlite3_column_bytes(stmt, col);
     if (!blob || raw_len <= 0) {
-      val.type = DB_TYPE_NULL;
-      val.is_null = true;
+      /* A zero-length blob (SQLite returns no pointer for it): empty, not
+       * NULL */
+      val.type = DB_TYPE_BLOB;
+      val.blob.data = NULL;
+      val.blob.len = 0;
     } else {
       size_t len = (size_t)raw_len;
       if (len > MAX_FIELD_SIZE) {
@@ -223,9 +229,22 @@ static DbConnection *sqlite_connect(const char *connstr, char **err) {
     return NULL;
   }
 
-  /* Open the database */
+  /* Open the database. A missing file is an error, not a new empty database
+   * (a typo or a path relative to the wrong directory used to create one
+   * silently); ?create=1 asks for creation explicitly. */
+  const char *create = connstr_get_option(cs, "create");
+  bool may_create = create && (str_eq(create, "1") || str_eq(create, "true"));
+  int flags = SQLITE_OPEN_READWRITE | (may_create ? SQLITE_OPEN_CREATE : 0);
   sqlite3 *db = NULL;
-  int rc = sqlite3_open(cs->database, &db);
+  int rc = sqlite3_open_v2(cs->database, &db, flags, NULL);
+  if (rc == SQLITE_CANTOPEN && !may_create && access(cs->database, F_OK) != 0) {
+    err_setf(err, "Database file not found: %s (add ?create=1 to create it)",
+             cs->database);
+    if (db)
+      sqlite3_close(db);
+    connstr_free(cs);
+    return NULL;
+  }
   if (rc != SQLITE_OK) {
     err_setf(err, "Failed to open database: %s",
              db ? sqlite3_errmsg(db) : "unknown error");
@@ -580,18 +599,12 @@ static TableSchema *sqlite_get_table_schema(DbConnection *conn,
   return schema;
 }
 
-static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
-                               char **err) {
-  DB_REQUIRE_PARAMS_CONN(sql, conn, SqliteData, data, db, err, NULL);
-
-  sqlite3_stmt *stmt = NULL;
-  int rc = sqlite3_prepare_v2(data->db, sql, -1, &stmt, NULL);
-  if (rc != SQLITE_OK) {
-    if (err)
-      *err = str_printf("Query failed: %s", sqlite3_errmsg(data->db));
-    return NULL;
-  }
-
+/* Run one prepared statement (finalized here): its rows if it has columns,
+ * else an empty result carrying its row-change count */
+static ResultSet *sqlite_run_one(DbConnection *conn, SqliteData *data,
+                                 sqlite3_stmt *stmt, char **err) {
+  int rc;
+  int changes_before = sqlite3_total_changes(data->db);
   ResultSet *rs = db_result_alloc_empty();
   if (!rs) {
     sqlite3_finalize(stmt);
@@ -624,9 +637,11 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
 
   size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
                                               : (size_t)MAX_RESULT_ROWS;
+  size_t bytes = 0;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     /* Limit result set size to prevent unbounded memory growth */
-    if (rs->num_rows >= max_rows) {
+    if (rs->num_rows >= max_rows || bytes >= MAX_RESULT_BYTES) {
+      rs->truncated = true;
       break;
     }
     if (rs->num_rows >= row_cap) {
@@ -641,20 +656,76 @@ static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
 
     for (int i = 0; i < num_cols; i++) {
       row->cells[i] = sqlite_get_value(stmt, i);
+      bytes += (size_t)sqlite3_column_bytes(stmt, i) + 16;
     }
 
     rs->num_rows++;
   }
 
-  sqlite3_finalize(stmt);
-
   if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
     if (err)
       *err = str_printf("Query execution failed: %s", sqlite3_errmsg(data->db));
+    sqlite3_finalize(stmt);
     db_result_free(rs);
     return NULL;
   }
+  sqlite3_finalize(stmt);
 
+  if (num_cols == 0) {
+    /* total_changes: sqlite3_changes() keeps reporting the previous DML
+     * statement's count for statements that change nothing (DDL etc.) */
+    rs->rows_affected = sqlite3_total_changes(data->db) - changes_before;
+  }
+  return rs;
+}
+
+/* Run every statement in sql (the old code ran only the first and silently
+ * ignored the rest). Like the other drivers: the result of the last
+ * statement that produced rows (SELECT, ... RETURNING), else the row count
+ * of the last statement. */
+static ResultSet *sqlite_query(DbConnection *conn, const char *sql,
+                               char **err) {
+  DB_REQUIRE_PARAMS_CONN(sql, conn, SqliteData, data, db, err, NULL);
+
+  ResultSet *rows = NULL;
+  int64_t last_affected = 0;
+  const char *tail = sql;
+  while (tail && *tail) {
+    sqlite3_stmt *stmt = NULL;
+    const char *next = NULL;
+    int rc = sqlite3_prepare_v2(data->db, tail, -1, &stmt, &next);
+    if (rc != SQLITE_OK) {
+      if (err)
+        *err = str_printf("Query failed: %s", sqlite3_errmsg(data->db));
+      db_result_free(rows);
+      return NULL;
+    }
+    if (!stmt) {
+      break; /* Only whitespace or comments left */
+    }
+    ResultSet *rs = sqlite_run_one(conn, data, stmt, err);
+    if (!rs) {
+      db_result_free(rows);
+      return NULL;
+    }
+    if (rs->num_columns > 0) {
+      db_result_free(rows);
+      rows = rs;
+    } else {
+      last_affected = rs->rows_affected;
+      db_result_free(rs);
+    }
+    if (next == tail) {
+      break;
+    }
+    tail = next;
+  }
+
+  if (rows) {
+    return rows;
+  }
+  ResultSet *rs = db_result_alloc_empty();
+  rs->rows_affected = last_affected;
   return rs;
 }
 
@@ -954,4 +1025,9 @@ static int64_t sqlite_estimate_row_count(DbConnection *conn, const char *table,
   /* sqlite_stat1 not available or no data - return -1 to indicate fallback
    * needed */
   return -1;
+}
+
+static int sqlite_transaction_state(DbConnection *conn) {
+  SqliteData *data = conn ? conn->driver_data : NULL;
+  return data && data->db && !sqlite3_get_autocommit(data->db) ? 1 : 0;
 }

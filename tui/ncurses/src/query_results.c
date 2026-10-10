@@ -9,6 +9,7 @@
 #include "query_internal.h"
 #include "../../liblace/include/util/mem.h"
 #include "views/editor_view.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,21 +38,22 @@ void query_result_start_edit(TuiState *state, Tab *tab) {
     return;
 
   DbValue *val = &row->cells[tab->query_result_col];
-
-  /* Convert value to string */
-  char *content = NULL;
-  if (val->is_null) {
-    content = str_dup("");
-  } else {
-    content = db_value_to_string(val);
-    if (!content)
-      content = str_dup("");
+  if (val->omitted) {
+    tui_set_error(state, "This value is too large to load (%zu bytes): it "
+                         "can't be edited here", val->omitted);
+    return;
   }
+
+  /* The exact text (all of a BLOB's bytes, full float precision) */
+  char *content = lace_value_to_edit_text(val);
+  if (!content)
+    content = str_dup("");
 
   /* Check if content is truncated (exceeds column width) */
   int col_width = query_get_col_width(tab, tab->query_result_col);
   size_t content_len = content ? strlen(content) : 0;
-  bool is_truncated = content_len > (size_t)col_width;
+  bool is_truncated =
+      content && utf8_width(content, content_len) > col_width;
 
   /* Also check if content has newlines (always use modal for multi-line) */
   bool has_newlines = content && strchr(content, '\n') != NULL;
@@ -103,16 +105,16 @@ void query_result_start_modal_edit(TuiState *state, Tab *tab) {
     return;
 
   DbValue *val = &row->cells[tab->query_result_col];
-
-  /* Convert value to string */
-  char *content = NULL;
-  if (val->is_null) {
-    content = str_dup("");
-  } else {
-    content = db_value_to_string(val);
-    if (!content)
-      content = str_dup("");
+  if (val->omitted) {
+    tui_set_error(state, "This value is too large to load (%zu bytes): it "
+                         "can't be edited here", val->omitted);
+    return;
   }
+
+  /* The exact text (all of a BLOB's bytes, full float precision) */
+  char *content = lace_value_to_edit_text(val);
+  if (!content)
+    content = str_dup("");
 
   /* Always use modal editor */
   const char *col_name =
@@ -203,8 +205,13 @@ size_t query_find_pk_columns(Tab *tab, size_t *pk_indices, size_t max_pks) {
   return count;
 }
 
+/* Why the last query_pk_info_build() refused a row whose key columns are
+ * present (NULL if it did not, or there was simply no usable key) */
+static const char *g_pk_problem = NULL;
+
 /* Build PK info from query result row. Returns false on error. */
 bool query_pk_info_build(QueryPkInfo *pk, Tab *tab, size_t row_idx) {
+  g_pk_problem = NULL;
   if (!pk || !tab || !tab->query_results ||
       row_idx >= tab->query_results->num_rows)
     return false;
@@ -218,6 +225,17 @@ bool query_pk_info_build(QueryPkInfo *pk, Tab *tab, size_t row_idx) {
   for (size_t i = 0; i < num_pk; i++) {
     if (pk_indices[i] >= tab->query_results->num_columns ||
         pk_indices[i] >= row->num_cells) {
+      return false;
+    }
+    /* A NULL key part matches nothing with "=" and every NULL row with
+     * "IS NULL"; NaN/Inf have no exact literal on most databases */
+    const DbValue *v = &row->cells[pk_indices[i]];
+    if (v->is_null || v->type == DB_TYPE_NULL) {
+      g_pk_problem = "its primary key contains NULL";
+      return false;
+    }
+    if (v->type == DB_TYPE_FLOAT && !isfinite(v->float_val)) {
+      g_pk_problem = "its primary key is NaN or infinite";
       return false;
     }
   }
@@ -338,12 +356,25 @@ void query_result_confirm_edit(TuiState *state, Tab *tab) {
     return;
   }
 
-  /* Create new value from edit buffer */
+  /* The new value, from the edited text and what the cell held: nothing is
+   * written for an unchanged value, and an empty text is '' (not NULL) */
   DbValue new_val;
-  if (ui->query_result_edit_buf == NULL) {
-    new_val = db_value_null();
-  } else {
-    new_val = db_value_text(ui->query_result_edit_buf);
+  bool unchanged = false;
+  char *conv_err = NULL;
+  if (!tui_edit_new_value(&row->cells[tab->query_result_col],
+                          tab->query_results->columns[tab->query_result_col].type,
+                          ui->query_result_edit_buf, &new_val, &unchanged,
+                          &conv_err)) {
+    tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
+    free(conv_err);
+    query_result_cancel_edit(state, tab);
+    return;
+  }
+  if (unchanged) {
+    tui_set_status(state, "No change");
+    db_value_free(&new_val);
+    query_result_cancel_edit(state, tab);
+    return;
   }
 
   /* Try to update database if we have table name and primary keys */
@@ -353,7 +384,16 @@ void query_result_confirm_edit(TuiState *state, Tab *tab) {
 
   if (state->conn && tab->query_source_table) {
     QueryPkInfo pk = {0};
-    if (query_pk_info_build(&pk, tab, tab->query_result_row)) {
+    bool have_pk = query_pk_info_build(&pk, tab, tab->query_result_row);
+    if (!have_pk && g_pk_problem) {
+      /* An editable result whose row cannot be addressed: say so instead of
+       * quietly keeping the edit on screen only */
+      tui_set_error(state, "Not updated: %s", g_pk_problem);
+      db_value_free(&new_val);
+      query_result_cancel_edit(state, tab);
+      return;
+    }
+    if (have_pk) {
       can_update_db = true;
 
       char *why = NULL;
@@ -573,7 +613,7 @@ static bool query_result_delete_single_row(TuiState *state, Tab *tab,
 
   QueryPkInfo pk = {0};
   if (!query_pk_info_build(&pk, tab, local_row)) {
-    *err = str_dup("No primary key found");
+    *err = str_dup(g_pk_problem ? g_pk_problem : "No primary key found");
     return false;
   }
 
@@ -639,8 +679,8 @@ void query_result_delete_row(TuiState *state, Tab *tab) {
 
       QueryPkInfo pk = {0};
       if (!query_pk_info_build(&pk, tab, local_row)) {
-        tui_set_error(state, "Cannot delete: row %zu has no primary key",
-                      global_row + 1);
+        tui_set_error(state, "Cannot delete row %zu: %s", global_row + 1,
+                      g_pk_problem ? g_pk_problem : "it has no primary key");
         return;
       }
       query_pk_info_free(&pk);
@@ -728,7 +768,8 @@ void query_result_delete_row(TuiState *state, Tab *tab) {
   /* Single row delete (no selections) */
   QueryPkInfo pk = {0};
   if (!query_pk_info_build(&pk, tab, tab->query_result_row)) {
-    tui_set_error(state, "Cannot delete: no primary key found");
+    tui_set_error(state, "Cannot delete: %s",
+                  g_pk_problem ? g_pk_problem : "no primary key found");
     return;
   }
 
@@ -762,8 +803,7 @@ void query_result_delete_row(TuiState *state, Tab *tab) {
       char *str = db_value_to_string(val);
       if (str) {
         char *safe = tui_sanitize_for_display(str);
-        mvwprintw(state->main_win, row_y, x, "%-*.*s", col_width, col_width,
-                  safe ? safe : str);
+        tui_print_fit(state->main_win, row_y, x, col_width, safe ? safe : str);
         free(safe);
         free(str);
       }
@@ -854,17 +894,16 @@ bool query_result_handle_edit_input(TuiState *state, Tab *tab,
 
   /* Left arrow */
   if (render_event_is_special(event, UI_KEY_LEFT)) {
-    if (ui->query_result_edit_pos > 0) {
-      ui->query_result_edit_pos--;
-    }
+    ui->query_result_edit_pos =
+        utf8_prev(ui->query_result_edit_buf, ui->query_result_edit_pos);
     return true;
   }
 
   /* Right arrow */
   if (render_event_is_special(event, UI_KEY_RIGHT)) {
-    if (ui->query_result_edit_pos < len) {
-      ui->query_result_edit_pos++;
-    }
+    if (ui->query_result_edit_buf)
+      ui->query_result_edit_pos = utf8_next(ui->query_result_edit_buf, len,
+                                            ui->query_result_edit_pos);
     return true;
   }
 
@@ -883,10 +922,12 @@ bool query_result_handle_edit_input(TuiState *state, Tab *tab,
   /* Backspace */
   if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (ui->query_result_edit_pos > 0 && ui->query_result_edit_buf) {
-      memmove(ui->query_result_edit_buf + ui->query_result_edit_pos - 1,
+      size_t prev =
+          utf8_prev(ui->query_result_edit_buf, ui->query_result_edit_pos);
+      memmove(ui->query_result_edit_buf + prev,
               ui->query_result_edit_buf + ui->query_result_edit_pos,
               len - ui->query_result_edit_pos + 1);
-      ui->query_result_edit_pos--;
+      ui->query_result_edit_pos = prev;
     }
     return true;
   }
@@ -894,9 +935,10 @@ bool query_result_handle_edit_input(TuiState *state, Tab *tab,
   /* Delete */
   if (render_event_is_special(event, UI_KEY_DELETE)) {
     if (ui->query_result_edit_pos < len && ui->query_result_edit_buf) {
+      size_t next = utf8_next(ui->query_result_edit_buf, len,
+                              ui->query_result_edit_pos);
       memmove(ui->query_result_edit_buf + ui->query_result_edit_pos,
-              ui->query_result_edit_buf + ui->query_result_edit_pos + 1,
-              len - ui->query_result_edit_pos);
+              ui->query_result_edit_buf + next, len - next + 1);
     }
     return true;
   }
@@ -920,7 +962,7 @@ bool query_result_handle_edit_input(TuiState *state, Tab *tab,
   }
 
   /* Printable character - insert */
-  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
     size_t new_len = len + 2;
     ui->query_result_edit_buf = safe_realloc(ui->query_result_edit_buf, new_len);
     if (len == 0) {

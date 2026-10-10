@@ -127,6 +127,12 @@ void db_init(void) {
   db_register_driver(&mysql_driver);
   db_register_driver(&mariadb_driver);
 
+  for (size_t i = 0; i < g_num_drivers; i++) {
+    if (g_drivers[i] && g_drivers[i]->library_init) {
+      g_drivers[i]->library_init();
+    }
+  }
+
   g_initialized = true;
 }
 

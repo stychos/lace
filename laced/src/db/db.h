@@ -78,6 +78,20 @@ typedef struct DbDriver {
   int64_t (*estimate_row_count)(DbConnection *conn, const char *table,
                                 char **err);
 
+  /* Optional: is a transaction open on this connection right now (after
+   * the last statement)? 0 = no, 1 = yes, 2 = yes but failed (PostgreSQL
+   * "in error": only ROLLBACK can end it) */
+  int (*transaction_state)(DbConnection *conn);
+
+  /* Optional: the network path under the connection is gone (its SSH
+   * tunnel was restarted). Reopen before the next statement, or, if a
+   * transaction was open, refuse statements until ROLLBACK. */
+  void (*connection_lost)(DbConnection *conn);
+
+  /* Library init (optional; called once from db_init on the main thread,
+   * before any worker exists: connects run on worker threads) */
+  void (*library_init)(void);
+
   /* Library cleanup (called once at program exit) */
   void (*library_cleanup)(void);
 

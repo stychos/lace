@@ -483,6 +483,8 @@ void tui_query_start_result_edit(TuiState *state);
 void tui_query_confirm_result_edit(TuiState *state);
 void tui_query_scroll_results(TuiState *state, int delta);
 bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset);
+bool query_ensure_total(TuiState *state, Tab *tab);
+void query_poll_count(TuiState *state);
 
 /* ============================================================================
  * Filters UI

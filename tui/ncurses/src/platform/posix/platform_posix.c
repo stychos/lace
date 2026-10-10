@@ -165,6 +165,62 @@ bool platform_dir_exists(const char *path) {
   return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+bool platform_write_file_private(const char *path, const char *data,
+                                 size_t len) {
+  if (!path || (!data && len > 0)) {
+    errno = EINVAL;
+    return false;
+  }
+  /* Write next to the real file, so rename stays on one filesystem and a
+   * symlinked config keeps its link */
+  char *real = realpath(path, NULL);
+  const char *target = real ? real : path;
+  size_t tlen = strlen(target) + 16;
+  char *tmp = malloc(tlen);
+  if (!tmp) {
+    free(real);
+    errno = ENOMEM;
+    return false;
+  }
+  snprintf(tmp, tlen, "%s.tmpXXXXXX", target);
+  int fd = mkstemp(tmp); /* Created 0600 */
+  if (fd < 0) {
+    int e = errno;
+    free(tmp);
+    free(real);
+    errno = e;
+    return false;
+  }
+  fchmod(fd, 0600);
+  bool ok = true;
+  for (size_t off = 0; ok && off < len;) {
+    ssize_t n = write(fd, data + off, len - off);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      ok = false;
+    else
+      off += (size_t)n;
+  }
+  if (ok && fsync(fd) != 0)
+    ok = false;
+  int e = errno;
+  if (close(fd) != 0 && ok) {
+    ok = false;
+    e = errno;
+  }
+  if (ok && rename(tmp, target) != 0) {
+    ok = false;
+    e = errno;
+  }
+  if (!ok)
+    unlink(tmp);
+  free(tmp);
+  free(real);
+  errno = ok ? 0 : e;
+  return ok;
+}
+
 bool platform_mkdir(const char *path) {
   if (!path || path[0] == '\0') {
     return false;

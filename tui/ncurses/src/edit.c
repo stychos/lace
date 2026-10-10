@@ -13,6 +13,7 @@
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,63 +52,151 @@ size_t tui_find_pk_columns(TuiState *state, size_t *pk_indices,
   return count;
 }
 
-/* Build PK info from result set row. Returns false on error. */
-static bool pk_info_build(PkInfo *pk, ResultSet *data, size_t row_idx,
-                          TableSchema *schema) {
+/* Why the key of a row cannot address it safely (NULL if it can): a NULL
+ * part matches no row with "=" and every NULL row with "IS NULL" (SQLite
+ * allows several NULLs in a non-INTEGER primary key); NaN/Inf have no exact
+ * literal on most databases. */
+static const char *pk_value_problem(const DbValue *v) {
+  if (v->is_null || v->type == DB_TYPE_NULL) {
+    return "its primary key contains NULL";
+  }
+  if (v->type == DB_TYPE_FLOAT && !isfinite(v->float_val)) {
+    return "its primary key is NaN or infinite";
+  }
+  return NULL;
+}
+
+/* Build PK info from result set row. Returns false on error; *why (if
+ * given) is then a static reason. Key columns are found by NAME in the
+ * result: schema positions differ from result positions when the table has
+ * generated or hidden columns. */
+static bool pk_info_build_why(PkInfo *pk, ResultSet *data, size_t row_idx,
+                              TableSchema *schema, const char **why) {
+  if (why)
+    *why = "no primary key found";
   if (!pk || !data || !schema || row_idx >= data->num_rows)
     return false;
-
-  /* Validate data structure */
   if (!data->rows || !data->columns)
     return false;
-
-  /* Count total PK columns first */
-  size_t total_pk = 0;
-  for (size_t i = 0; i < schema->num_columns; i++) {
-    if (schema->columns[i].primary_key) {
-      total_pk++;
-    }
-  }
-
-  if (total_pk == 0)
-    return false;
-
-  /* Check for tables with too many PK columns (extremely rare) */
-  if (total_pk > MAX_PK_COLUMNS)
-    return false;
-
-  /* Find PK column indices */
-  size_t pk_indices[MAX_PK_COLUMNS];
-  size_t num_pk = 0;
-  for (size_t i = 0; i < schema->num_columns && num_pk < MAX_PK_COLUMNS; i++) {
-    if (schema->columns[i].primary_key) {
-      pk_indices[num_pk++] = i;
-    }
-  }
-
-  /* Verify indices are within bounds */
   Row *row = &data->rows[row_idx];
   if (!row->cells)
     return false;
 
-  for (size_t i = 0; i < num_pk; i++) {
-    if (pk_indices[i] >= data->num_columns || pk_indices[i] >= row->num_cells) {
+  size_t pk_indices[MAX_PK_COLUMNS];
+  size_t num_pk = 0;
+  for (size_t i = 0; i < schema->num_columns; i++) {
+    if (!schema->columns[i].primary_key)
+      continue;
+    if (num_pk >= MAX_PK_COLUMNS)
+      return false;
+    const char *name = schema->columns[i].name;
+    size_t found = SIZE_MAX;
+    for (size_t j = 0; name && j < data->num_columns && j < row->num_cells; j++) {
+      if (data->columns[j].name && strcmp(data->columns[j].name, name) == 0) {
+        found = j;
+        break;
+      }
+    }
+    if (found == SIZE_MAX) {
+      if (why)
+        *why = "a primary key column is not in the loaded data";
       return false;
     }
+    const char *problem = pk_value_problem(&row->cells[found]);
+    if (problem) {
+      if (why)
+        *why = problem;
+      return false;
+    }
+    pk_indices[num_pk++] = found;
   }
+  if (num_pk == 0)
+    return false;
 
-  /* Allocate arrays */
   pk->col_names = safe_malloc(sizeof(char *) * num_pk);
   pk->values = safe_malloc(sizeof(DbValue) * num_pk);
-
-  /* Fill arrays */
   for (size_t i = 0; i < num_pk; i++) {
     pk->col_names[i] = data->columns[pk_indices[i]].name;
     pk->values[i] = db_value_copy(&row->cells[pk_indices[i]]);
   }
   pk->count = num_pk;
-
+  if (why)
+    *why = NULL;
   return true;
+}
+
+/* Re-read the row by its key before changing it: it must exist exactly
+ * once, and the edited column (col_idx), or for a delete (SIZE_MAX) every
+ * loaded column, must still hold the loaded value. *why is allocated on
+ * failure. */
+static bool table_row_verified(DbConnection *conn, const char *table,
+                               const PkInfo *pk, ResultSet *data,
+                               size_t row_idx, size_t col_idx, char **why) {
+  const char *col = NULL;
+  const DbValue *expected = NULL;
+  if (col_idx != SIZE_MAX && col_idx < data->num_columns &&
+      col_idx < data->rows[row_idx].num_cells) {
+    col = data->columns[col_idx].name;
+    expected = &data->rows[row_idx].cells[col_idx];
+  }
+  if (col) {
+    return db_verify_row(conn, table, (const char **)pk->col_names, pk->values,
+                         pk->count, &col, expected, 1, why);
+  }
+  /* Whole row (delete): every loaded column must still match, so a row
+   * changed elsewhere since it was loaded is not deleted unseen. Values too
+   * large to load are skipped. */
+  const Row *row = &data->rows[row_idx];
+  size_t n = 0;
+  const char **cols = safe_calloc(data->num_columns + 1, sizeof(char *));
+  DbValue *vals = safe_calloc(data->num_columns + 1, sizeof(DbValue));
+  for (size_t c = 0; c < data->num_columns && c < row->num_cells; c++) {
+    if (row->cells[c].omitted || !data->columns[c].name)
+      continue;
+    cols[n] = data->columns[c].name;
+    vals[n] = row->cells[c]; /* Shallow: borrowed */
+    n++;
+  }
+  bool ok = n > 0 ? db_verify_row(conn, table, (const char **)pk->col_names,
+                                  pk->values, pk->count, cols, vals, n, why)
+                  : db_verify_row(conn, table, (const char **)pk->col_names,
+                                  pk->values, pk->count,
+                                  (const char **)pk->col_names, pk->values,
+                                  pk->count, why);
+  free(cols);
+  free(vals);
+  return ok;
+}
+
+bool tui_edit_new_value(const DbValue *orig, LaceValueType col_type,
+                        const char *buffer, DbValue *out, bool *unchanged,
+                        char **err) {
+  *unchanged = false;
+  memset(out, 0, sizeof(*out));
+  bool orig_null = !orig || orig->is_null;
+  if (!buffer) {
+    /* Explicit NULL (Ctrl+N, the editor's NULL action) */
+    *unchanged = orig_null;
+    *out = db_value_null();
+    return true;
+  }
+  if (orig_null && buffer[0] == '\0') {
+    *unchanged = true; /* Opened a NULL cell and left it empty */
+    return true;
+  }
+  if (!orig_null) {
+    char *before = lace_value_to_edit_text(orig);
+    bool same = before && strcmp(before, buffer) == 0;
+    free(before);
+    if (same) {
+      *unchanged = true; /* Nothing to write (and nothing to round) */
+      return true;
+    }
+  }
+  /* Same kind of value as the cell held: hex is bytes for a BLOB, digits
+   * stay exact for a DECIMAL; an empty text is the empty string, not NULL */
+  LaceValueType like = orig_null ? col_type : orig->type;
+  return lace_value_from_edit_text(buffer, like, out, err);
 }
 
 /* Free PK info resources */
@@ -149,21 +238,22 @@ void tui_start_edit(TuiState *state) {
   const DbValue *val = table_vm_cell(vm, cursor_row, cursor_col);
   if (!val)
     return;
-
-  /* Convert value to string */
-  char *content = NULL;
-  if (val->is_null) {
-    content = str_dup("");
-  } else {
-    content = db_value_to_string(val);
-    if (!content)
-      content = str_dup("");
+  if (val->omitted) {
+    tui_set_error(state, "This value is too large to load (%zu bytes): it "
+                         "can't be edited here", val->omitted);
+    return;
   }
+
+  /* The exact text (all of a BLOB's bytes, full float precision) */
+  char *content = lace_value_to_edit_text(val);
+  if (!content)
+    content = str_dup("");
 
   /* Check if content is truncated (exceeds column width) */
   int col_width = tui_get_column_width(state, cursor_col);
   size_t content_len = content ? strlen(content) : 0;
-  bool is_truncated = content_len > (size_t)col_width;
+  bool is_truncated =
+      content && utf8_width(content, content_len) > col_width;
 
   /* Also check if content has newlines (always use modal for multi-line) */
   bool has_newlines = content && strchr(content, '\n') != NULL;
@@ -226,16 +316,16 @@ void tui_start_modal_edit(TuiState *state) {
   const DbValue *val = table_vm_cell(vm, cursor_row, cursor_col);
   if (!val)
     return;
-
-  /* Convert value to string */
-  char *content = NULL;
-  if (val->is_null) {
-    content = str_dup("");
-  } else {
-    content = db_value_to_string(val);
-    if (!content)
-      content = str_dup("");
+  if (val->omitted) {
+    tui_set_error(state, "This value is too large to load (%zu bytes): it "
+                         "can't be edited here", val->omitted);
+    return;
   }
+
+  /* The exact text (all of a BLOB's bytes, full float precision) */
+  char *content = lace_value_to_edit_text(val);
+  if (!content)
+    content = str_dup("");
 
   /* Always use modal editor */
   const char *col_name = table_vm_column_name(vm, cursor_col);
@@ -305,8 +395,9 @@ void tui_confirm_edit(TuiState *state) {
   Tab *tab = TUI_TAB(state);
   ResultSet *data = tab ? tab->data : NULL;
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, cursor_row, (TableSchema *)schema)) {
-    tui_set_error(state, "Cannot update: no primary key found");
+  const char *pk_why = NULL;
+  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
+    tui_set_error(state, "Cannot update this row: %s", pk_why);
     tui_cancel_edit(state);
     return;
   }
@@ -319,16 +410,47 @@ void tui_confirm_edit(TuiState *state) {
     return;
   }
 
-  /* Create new value from edit buffer */
+  /* The new value, from the edited text and what the cell held */
   DbValue new_val;
-  if (state->edit_buffer == NULL || state->edit_buffer[0] == '\0') {
-    new_val = db_value_null();
-  } else {
-    new_val = db_value_text(state->edit_buffer);
+  bool unchanged = false;
+  char *conv_err = NULL;
+  const DbValue *orig = (data && cursor_row < data->num_rows &&
+                         data->rows[cursor_row].cells &&
+                         cursor_col < data->rows[cursor_row].num_cells)
+                            ? &data->rows[cursor_row].cells[cursor_col]
+                            : NULL;
+  LaceValueType col_type =
+      (data && cursor_col < data->num_columns) ? data->columns[cursor_col].type
+                                               : LACE_TYPE_TEXT;
+  if (!tui_edit_new_value(orig, col_type, state->edit_buffer, &new_val,
+                          &unchanged, &conv_err)) {
+    tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
+    free(conv_err);
+    pk_info_free(&pk);
+    tui_cancel_edit(state);
+    return;
+  }
+  if (unchanged) {
+    tui_set_status(state, "No change");
+    db_value_free(&new_val);
+    pk_info_free(&pk);
+    tui_cancel_edit(state);
+    return;
   }
 
   /* Attempt to update */
   char *err = NULL;
+  char *verify_why = NULL;
+  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
+                          &verify_why)) {
+    tui_set_error(state, "Not updated: %s",
+                  verify_why ? verify_why : "row check failed");
+    free(verify_why);
+    pk_info_free(&pk);
+    db_value_free(&new_val);
+    tui_cancel_edit(state);
+    return;
+  }
   bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
                                 col_name, &new_val, &err);
 
@@ -389,8 +511,9 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
   Tab *tab = TUI_TAB(state);
   ResultSet *data = tab ? tab->data : NULL;
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, cursor_row, (TableSchema *)schema)) {
-    tui_set_error(state, "Cannot update: no primary key found");
+  const char *pk_why = NULL;
+  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
+    tui_set_error(state, "Cannot update this row: %s", pk_why);
     return;
   }
 
@@ -404,6 +527,16 @@ void tui_set_cell_direct(TuiState *state, bool set_null) {
 
   /* Attempt to update */
   char *err = NULL;
+  char *verify_why = NULL;
+  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
+                          &verify_why)) {
+    tui_set_error(state, "Not updated: %s",
+                  verify_why ? verify_why : "row check failed");
+    free(verify_why);
+    pk_info_free(&pk);
+    db_value_free(&new_val);
+    return;
+  }
   bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
                                 col_name, &new_val, &err);
 
@@ -602,8 +735,9 @@ void tui_cell_paste(TuiState *state) {
   Tab *tab = TUI_TAB(state);
   ResultSet *data = tab ? tab->data : NULL;
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, cursor_row, (TableSchema *)schema)) {
-    tui_set_error(state, "Cannot update: no primary key found");
+  const char *pk_why = NULL;
+  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
+    tui_set_error(state, "Cannot update this row: %s", pk_why);
     free(paste_text);
     return;
   }
@@ -616,16 +750,57 @@ void tui_cell_paste(TuiState *state) {
   }
 
   /* Create new value from clipboard content */
-  DbValue new_val;
   if (paste_text[0] == '\0') {
-    new_val = db_value_null();
-  } else {
-    new_val = db_value_text(paste_text);
+    /* Nothing to paste: not a request to set NULL */
+    pk_info_free(&pk);
+    free(paste_text);
+    tui_set_status(state, "Clipboard is empty");
+    return;
   }
+  DbValue new_val;
+  bool unchanged = false;
+  char *conv_err = NULL;
+  const DbValue *orig = (data && cursor_row < data->num_rows &&
+                         data->rows[cursor_row].cells &&
+                         cursor_col < data->rows[cursor_row].num_cells)
+                            ? &data->rows[cursor_row].cells[cursor_col]
+                            : NULL;
+  LaceValueType col_type =
+      (data && cursor_col < data->num_columns) ? data->columns[cursor_col].type
+                                               : LACE_TYPE_TEXT;
+  if (orig && orig->omitted) {
+    pk_info_free(&pk);
+    free(paste_text);
+    tui_set_error(state, "This value is too large to load: it can't be edited here");
+    return;
+  }
+  bool conv_ok = tui_edit_new_value(orig, col_type, paste_text, &new_val,
+                                    &unchanged, &conv_err);
   free(paste_text);
+  if (!conv_ok || unchanged) {
+    if (!conv_ok) {
+      tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
+    } else {
+      tui_set_status(state, "No change");
+    }
+    free(conv_err);
+    db_value_free(&new_val);
+    pk_info_free(&pk);
+    return;
+  }
 
   /* Attempt to update */
   char *err = NULL;
+  char *verify_why = NULL;
+  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
+                          &verify_why)) {
+    tui_set_error(state, "Not updated: %s",
+                  verify_why ? verify_why : "row check failed");
+    free(verify_why);
+    pk_info_free(&pk);
+    db_value_free(&new_val);
+    return;
+  }
   bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
                                 col_name, &new_val, &err);
 
@@ -673,9 +848,22 @@ static bool delete_single_row(TuiState *state, size_t local_row, char **err) {
   Tab *tab = TUI_TAB(state);
   ResultSet *data = tab ? tab->data : NULL;
   PkInfo pk = {0};
-  if (!pk_info_build(&pk, data, local_row, (TableSchema *)schema)) {
+  const char *pk_why = NULL;
+  if (!pk_info_build_why(&pk, data, local_row, (TableSchema *)schema, &pk_why)) {
     if (err)
-      *err = str_dup("No primary key found");
+      *err = str_dup(pk_why ? pk_why : "No primary key found");
+    return false;
+  }
+
+  /* The key must still match exactly this one row, unchanged */
+  char *verify_why = NULL;
+  if (!table_row_verified(conn, table, &pk, data, local_row, SIZE_MAX,
+                          &verify_why)) {
+    if (err)
+      *err = verify_why ? verify_why : str_dup("row check failed");
+    else
+      free(verify_why);
+    pk_info_free(&pk);
     return false;
   }
 
@@ -889,17 +1077,14 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
 
   /* Left arrow - move cursor left */
   if (render_event_is_special(event, UI_KEY_LEFT)) {
-    if (state->edit_pos > 0) {
-      state->edit_pos--;
-    }
+    state->edit_pos = utf8_prev(state->edit_buffer, state->edit_pos);
     return true;
   }
 
   /* Right arrow - move cursor right */
   if (render_event_is_special(event, UI_KEY_RIGHT)) {
-    if (state->edit_pos < len) {
-      state->edit_pos++;
-    }
+    if (state->edit_buffer)
+      state->edit_pos = utf8_next(state->edit_buffer, len, state->edit_pos);
     return true;
   }
 
@@ -920,9 +1105,10 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   /* Backspace - delete character before cursor */
   if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (state->edit_pos > 0 && state->edit_pos <= len && state->edit_buffer) {
-      memmove(state->edit_buffer + state->edit_pos - 1,
-              state->edit_buffer + state->edit_pos, len - state->edit_pos + 1);
-      state->edit_pos--;
+      size_t prev = utf8_prev(state->edit_buffer, state->edit_pos);
+      memmove(state->edit_buffer + prev, state->edit_buffer + state->edit_pos,
+              len - state->edit_pos + 1);
+      state->edit_pos = prev;
     }
     return true;
   }
@@ -930,8 +1116,9 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   /* Delete - delete character at cursor */
   if (render_event_is_special(event, UI_KEY_DELETE)) {
     if (state->edit_pos < len && state->edit_buffer) {
-      memmove(state->edit_buffer + state->edit_pos,
-              state->edit_buffer + state->edit_pos + 1, len - state->edit_pos);
+      size_t next = utf8_next(state->edit_buffer, len, state->edit_pos);
+      memmove(state->edit_buffer + state->edit_pos, state->edit_buffer + next,
+              len - next + 1);
     }
     return true;
   }
@@ -994,7 +1181,7 @@ bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   }
 
   /* Printable character - insert at cursor */
-  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
     /* Check for overflow */
     if (len > SIZE_MAX - 2) {
       /* Buffer too large - ignore keystroke */
@@ -1068,6 +1255,38 @@ static void add_row_ensure_col_visible(TuiState *state) {
   }
 }
 
+/* A NOT NULL column with no default and no generated value: the user must
+ * supply it, and an explicitly confirmed empty value means '' */
+static bool add_row_col_required(const ColumnDef *col) {
+  return !col->auto_increment && !col->generated && !col->nullable &&
+         !(col->default_val && col->default_val[0]);
+}
+
+/* Initial state of a new-row cell. A placeholder is not part of the INSERT,
+ * so the database applies its own default: auto-increment, generated,
+ * columns with a default, and required columns without one (so a missing
+ * value is reported by the database instead of being stored as ''). */
+static void add_row_init_cell(TuiState *state, const TableSchema *schema,
+                              size_t i) {
+  const ColumnDef *col = &schema->columns[i];
+  db_value_free(&state->new_row_values[i]);
+  state->new_row_auto_increment[i] = col->auto_increment || col->generated;
+  state->new_row_edited[i] = false;
+  if (col->auto_increment || col->generated) {
+    state->new_row_values[i] = db_value_null();
+    state->new_row_placeholders[i] = true;
+  } else if (col->default_val && col->default_val[0]) {
+    state->new_row_values[i] = db_value_text(col->default_val);
+    state->new_row_placeholders[i] = true;
+  } else if (col->nullable) {
+    state->new_row_values[i] = db_value_null();
+    state->new_row_placeholders[i] = false;
+  } else {
+    state->new_row_values[i] = db_value_text("");
+    state->new_row_placeholders[i] = true;
+  }
+}
+
 /* Start add-row mode - create a temporary row for editing */
 bool tui_start_add_row(TuiState *state) {
   if (!state || state->adding_row || state->editing)
@@ -1096,29 +1315,7 @@ bool tui_start_add_row(TuiState *state) {
 
   /* Initialize each column value */
   for (size_t i = 0; i < num_cols; i++) {
-    const ColumnDef *col = &schema->columns[i];
-
-    /* Track auto_increment status */
-    state->new_row_auto_increment[i] = col->auto_increment;
-
-    if (col->auto_increment) {
-      /* Auto-increment: show placeholder, will be skipped on INSERT */
-      state->new_row_values[i] = db_value_null();
-      state->new_row_placeholders[i] = true;
-    } else if (col->default_val && col->default_val[0]) {
-      /* Has default: show default value as placeholder */
-      state->new_row_values[i] = db_value_text(col->default_val);
-      state->new_row_placeholders[i] = true;
-    } else if (col->nullable) {
-      /* Nullable: initialize as NULL */
-      state->new_row_values[i] = db_value_null();
-      state->new_row_placeholders[i] = false;
-    } else {
-      /* Required: initialize as empty string */
-      state->new_row_values[i] = db_value_text("");
-      state->new_row_placeholders[i] = false;
-    }
-    state->new_row_edited[i] = false;
+    add_row_init_cell(state, schema, i);
   }
 
   state->new_row_num_cols = num_cols;
@@ -1294,18 +1491,22 @@ void tui_add_row_confirm_cell(TuiState *state) {
   if (col >= state->new_row_num_cols)
     return;
 
-  /* Update the value */
-  db_value_free(&state->new_row_values[col]);
-
-  if (!state->new_row_edit_buffer || state->new_row_edit_buffer[0] == '\0') {
-    state->new_row_values[col] = db_value_null();
+  /* Cleared: back to the column's initial state (its default, or NULL);
+   * an explicit NULL is Ctrl+N. A required column stores '' instead. */
+  VmTable *vm = tui_vm_table(state);
+  const TableSchema *schema = vm ? table_vm_get_schema(vm) : NULL;
+  if ((!state->new_row_edit_buffer || state->new_row_edit_buffer[0] == '\0') &&
+      schema && col < schema->num_columns &&
+      !add_row_col_required(&schema->columns[col])) {
+    add_row_init_cell(state, schema, col);
   } else {
-    state->new_row_values[col] = db_value_text(state->new_row_edit_buffer);
+    db_value_free(&state->new_row_values[col]);
+    state->new_row_values[col] = db_value_text(
+        state->new_row_edit_buffer ? state->new_row_edit_buffer : "");
+    /* Mark as edited (no longer placeholder) */
+    state->new_row_edited[col] = true;
+    state->new_row_placeholders[col] = false;
   }
-
-  /* Mark as edited (no longer placeholder) */
-  state->new_row_edited[col] = true;
-  state->new_row_placeholders[col] = false;
 
   /* Clean up edit state */
   free(state->new_row_edit_buffer);
@@ -1367,17 +1568,16 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
 
     /* Left arrow - move cursor left */
     if (render_event_is_special(event, UI_KEY_LEFT)) {
-      if (state->new_row_edit_pos > 0) {
-        state->new_row_edit_pos--;
-      }
+      state->new_row_edit_pos =
+          utf8_prev(state->new_row_edit_buffer, state->new_row_edit_pos);
       return true;
     }
 
     /* Right arrow - move cursor right */
     if (render_event_is_special(event, UI_KEY_RIGHT)) {
-      if (state->new_row_edit_pos < len) {
-        state->new_row_edit_pos++;
-      }
+      if (state->new_row_edit_buffer)
+        state->new_row_edit_pos = utf8_next(state->new_row_edit_buffer, len,
+                                            state->new_row_edit_pos);
       return true;
     }
 
@@ -1396,11 +1596,13 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
     /* Backspace - delete character before cursor */
     if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
       if (state->new_row_edit_pos > 0 && state->new_row_edit_buffer) {
-        memmove(state->new_row_edit_buffer + state->new_row_edit_pos - 1,
+        size_t prev =
+            utf8_prev(state->new_row_edit_buffer, state->new_row_edit_pos);
+        memmove(state->new_row_edit_buffer + prev,
                 state->new_row_edit_buffer + state->new_row_edit_pos,
                 len - state->new_row_edit_pos + 1);
-        state->new_row_edit_pos--;
-        state->new_row_edit_len--;
+        state->new_row_edit_len -= state->new_row_edit_pos - prev;
+        state->new_row_edit_pos = prev;
       }
       return true;
     }
@@ -1408,16 +1610,17 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
     /* Delete - delete character at cursor */
     if (render_event_is_special(event, UI_KEY_DELETE)) {
       if (state->new_row_edit_pos < len && state->new_row_edit_buffer) {
+        size_t next = utf8_next(state->new_row_edit_buffer, len,
+                                state->new_row_edit_pos);
         memmove(state->new_row_edit_buffer + state->new_row_edit_pos,
-                state->new_row_edit_buffer + state->new_row_edit_pos + 1,
-                len - state->new_row_edit_pos);
-        state->new_row_edit_len--;
+                state->new_row_edit_buffer + next, len - next + 1);
+        state->new_row_edit_len -= next - state->new_row_edit_pos;
       }
       return true;
     }
 
     /* Printable character - insert at cursor */
-    if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+    if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
       if (len > SIZE_MAX - 2)
         return true;
       size_t new_len = len + 2;
@@ -1534,7 +1737,15 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
     free(title);
     free(content);
 
-    if (result.saved) {
+    const TableSchema *schema = vm ? table_vm_get_schema(vm) : NULL;
+    if (result.saved && !result.set_null &&
+        (!result.content || !result.content[0]) && schema &&
+        col < schema->num_columns &&
+        !add_row_col_required(&schema->columns[col])) {
+      /* Cleared: back to the column's initial state, as inline editing */
+      add_row_init_cell(state, schema, col);
+      free(result.content);
+    } else if (result.saved) {
       db_value_free(&state->new_row_values[col]);
       if (result.set_null) {
         state->new_row_values[col] = db_value_null();
@@ -1562,7 +1773,7 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
 
   /* Printable character - start editing and insert */
   int key_char = render_event_get_char(event);
-  if (render_event_is_char(event) && key_char >= 32 && key_char < 127) {
+  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
     tui_add_row_start_cell_edit(state, state->new_row_cursor_col);
     /* Insert the typed character */
     if (state->new_row_edit_buffer) {

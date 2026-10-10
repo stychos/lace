@@ -23,6 +23,8 @@ const char *db_value_type_name(DbValueType type) {
     return "FLOAT";
   case DB_TYPE_TEXT:
     return "TEXT";
+  case DB_TYPE_DECIMAL:
+    return "DECIMAL";
   case DB_TYPE_BLOB:
     return "BLOB";
   case DB_TYPE_BOOL:
@@ -145,6 +147,7 @@ DbValue db_value_oversized_placeholder(const char *type_label, size_t size) {
            type_label ? type_label : "DATA", size);
 
   v.text.data = str_dup(placeholder);
+  v.omitted = size;
   if (v.text.data) {
     v.text.len = strlen(v.text.data);
   } else {
@@ -170,6 +173,7 @@ DbValue db_value_copy(const DbValue *src) {
   }
 
   switch (src->type) {
+  case DB_TYPE_DECIMAL:
   case DB_TYPE_TEXT:
   case DB_TYPE_DATE:
   case DB_TYPE_TIMESTAMP:
@@ -216,6 +220,7 @@ void db_value_free(DbValue *val) {
     return;
 
   switch (val->type) {
+  case DB_TYPE_DECIMAL:
   case DB_TYPE_TEXT:
   case DB_TYPE_DATE:
   case DB_TYPE_TIMESTAMP:
@@ -341,6 +346,7 @@ char *db_value_to_string(const DbValue *val) {
   case DB_TYPE_FLOAT:
     return str_printf("%g", val->float_val);
 
+  case DB_TYPE_DECIMAL:
   case DB_TYPE_TEXT:
     return val->text.data ? str_dup(val->text.data) : str_dup("");
 
@@ -448,6 +454,7 @@ int64_t db_value_to_int(const DbValue *val) {
     return (int64_t)val->float_val;
   case DB_TYPE_BOOL:
     return val->bool_val ? 1 : 0;
+  case DB_TYPE_DECIMAL:
   case DB_TYPE_TEXT: {
     int64_t result = 0;
     if (val->text.data) {
@@ -471,6 +478,7 @@ double db_value_to_float(const DbValue *val) {
     return (double)val->int_val;
   case DB_TYPE_BOOL:
     return val->bool_val ? 1.0 : 0.0;
+  case DB_TYPE_DECIMAL:
   case DB_TYPE_TEXT: {
     double result = 0.0;
     if (val->text.data) {

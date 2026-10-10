@@ -14,11 +14,13 @@
 #include <ctype.h>
 #include <errno.h>
 #include <mysql.h>
+#include <errmsg.h> /* CR_SERVER_GONE_ERROR, CR_SERVER_LOST */
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Maximum iterations for consuming pending results (prevents infinite loops) */
 #define MAX_RESULT_CONSUME_ITERATIONS 1000
@@ -28,6 +30,9 @@ typedef struct {
   MYSQL *mysql;
   char *database;
   bool is_mariadb; /* Connection scheme was mariadb:// */
+  time_t last_used; /* For the liveness check before a statement */
+  bool broken;      /* The connection was lost: reopen before the next use */
+  bool tx_lost;     /* ... with a transaction open: refuse until ROLLBACK */
 } MySqlData;
 
 /*
@@ -154,6 +159,9 @@ static void *mysql_driver_prepare_cancel(DbConnection *conn);
 static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
                                       char **err);
 static void mysql_driver_free_cancel_handle(void *cancel_handle);
+static void mysql_driver_library_init(void);
+static int mysql_driver_transaction_state(DbConnection *conn);
+static void mysql_driver_connection_lost(DbConnection *conn);
 static void mysql_driver_cancel_handle_finished(void *cancel_handle);
 static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
                                                const char *table, char **err);
@@ -187,6 +195,9 @@ DbDriver mysql_driver = {
     .free_cancel_handle = mysql_driver_free_cancel_handle,
     .cancel_handle_finished = mysql_driver_cancel_handle_finished,
     .estimate_row_count = mysql_driver_estimate_row_count,
+    .transaction_state = mysql_driver_transaction_state,
+    .connection_lost = mysql_driver_connection_lost,
+    .library_init = mysql_driver_library_init,
     .library_cleanup = mysql_driver_library_cleanup,
 };
 
@@ -218,6 +229,9 @@ DbDriver mariadb_driver = {
     .free_cancel_handle = mysql_driver_free_cancel_handle,
     .cancel_handle_finished = mysql_driver_cancel_handle_finished,
     .estimate_row_count = mysql_driver_estimate_row_count,
+    .transaction_state = mysql_driver_transaction_state,
+    .connection_lost = mysql_driver_connection_lost,
+    .library_init = mysql_driver_library_init,
     .library_cleanup = mysql_driver_library_cleanup,
 };
 
@@ -243,9 +257,18 @@ static DbValueType mysql_type_to_db_type(enum enum_field_types type,
 
   case MYSQL_TYPE_FLOAT:
   case MYSQL_TYPE_DOUBLE:
+    return DB_TYPE_FLOAT;
+
   case MYSQL_TYPE_DECIMAL:
   case MYSQL_TYPE_NEWDECIMAL:
-    return DB_TYPE_FLOAT;
+    return DB_TYPE_DECIMAL; /* Exact: a double would round it */
+
+  case MYSQL_TYPE_STRING:
+  case MYSQL_TYPE_VAR_STRING:
+  case MYSQL_TYPE_VARCHAR:
+    /* BINARY/VARBINARY carry the binary charset: bytes, not text (as text
+     * they were cut at the first NUL and compared as strings) */
+    return (charsetnr == MYSQL_BINARY_CHARSET) ? DB_TYPE_BLOB : DB_TYPE_TEXT;
 
   case MYSQL_TYPE_BLOB:
   case MYSQL_TYPE_TINY_BLOB:
@@ -329,10 +352,18 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
   }
 
   case DB_TYPE_BLOB:
-    val.blob.data = safe_malloc((size_t)lengths[col]);
+    val.blob.data = safe_malloc((size_t)lengths[col] ? (size_t)lengths[col] : 1);
     val.type = DB_TYPE_BLOB;
     val.blob.len = (size_t)lengths[col];
     memcpy(val.blob.data, row[col], (size_t)lengths[col]);
+    break;
+
+  case DB_TYPE_DECIMAL:
+    val.text.data = safe_malloc((size_t)lengths[col] + 1);
+    val.type = DB_TYPE_DECIMAL;
+    val.text.len = (size_t)lengths[col];
+    memcpy(val.text.data, row[col], (size_t)lengths[col]);
+    val.text.data[(size_t)lengths[col]] = '\0';
     break;
 
   default:
@@ -352,9 +383,6 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
  * side connections without reconnect, reads and writes too). */
 static MYSQL *mysql_open(const ConnString *cs, unsigned int timeout_sec,
                          bool reconnect, char **err) {
-  /* Initialize MySQL library (safe to call multiple times) */
-  mysql_library_init(0, NULL, NULL);
-
   MYSQL *mysql = mysql_init(NULL);
   if (!mysql) {
     err_set(err, "Failed to initialize MySQL connection");
@@ -373,7 +401,12 @@ static MYSQL *mysql_open(const ConnString *cs, unsigned int timeout_sec,
     mysql_options(mysql, MYSQL_OPT_WRITE_TIMEOUT, &timeout_sec);
   }
 
-  my_bool reconnect_opt = reconnect ? 1 : 0;
+  /* Never reconnect behind our back: a silent reconnect drops the open
+   * transaction, temp tables and session settings, and the next COMMIT
+   * "succeeds" as a no-op. mysql_driver_query reconnects only when no
+   * transaction was open. */
+  (void)reconnect;
+  my_bool reconnect_opt = 0;
   if (mysql_options(mysql, MYSQL_OPT_RECONNECT, &reconnect_opt) != 0) {
     mysql_close(mysql);
     err_set(err, "Failed to set reconnect option");
@@ -392,8 +425,11 @@ static MYSQL *mysql_open(const ConnString *cs, unsigned int timeout_sec,
   const char *user = cs->user ? cs->user : "root";
   const char *database = cs->database ? cs->database : "mysql";
 
+  /* CLIENT_FOUND_ROWS: affected rows count matched rows, so an UPDATE that
+   * sets a value it already had still reports 1 (lets callers tell "row
+   * not found" from "nothing changed") */
   if (!mysql_real_connect(mysql, host, user, cs->password, database, port,
-                          NULL, 0)) {
+                          NULL, CLIENT_FOUND_ROWS)) {
     err_setf(err, "Connection failed: %s", mysql_error(mysql));
     mysql_close(mysql);
     return NULL;
@@ -483,14 +519,14 @@ static const char *mysql_driver_get_error(DbConnection *conn) {
 
 static int64_t mysql_driver_exec(DbConnection *conn, const char *sql,
                                  char **err) {
-  DB_REQUIRE_PARAMS_CONN(sql, conn, MySqlData, data, mysql, err, -1);
-
-  if (mysql_query(data->mysql, sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
+  /* Through the query path, which reads every result the statement makes */
+  ResultSet *rs = mysql_driver_query(conn, sql, err);
+  if (!rs) {
     return -1;
   }
-
-  return (int64_t)mysql_affected_rows(data->mysql);
+  int64_t n = rs->num_columns > 0 ? (int64_t)rs->num_rows : rs->rows_affected;
+  db_result_free(rs);
+  return n;
 }
 
 static bool mysql_driver_update_cell(DbConnection *conn, const char *table,
@@ -1048,33 +1084,10 @@ static TableSchema *mysql_driver_get_table_schema(DbConnection *conn,
   return schema;
 }
 
-static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
-                                     char **err) {
-  DB_REQUIRE_PARAMS_CONN(sql, conn, MySqlData, data, mysql, err, NULL);
-
-  if (mysql_query(data->mysql, sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
-    return NULL;
-  }
-
-  MYSQL_RES *result = mysql_store_result(data->mysql);
-  if (!result) {
-    /* Check if this was an INSERT/UPDATE/DELETE (no result expected) */
-    if (mysql_field_count(data->mysql) == 0) {
-      /* Return empty result set for non-SELECT */
-      ResultSet *rs = db_result_alloc_empty();
-      return rs;
-    }
-    err_set(err, mysql_error(data->mysql));
-    return NULL;
-  }
-
+/* Collect the rows of the current (streamed) result set; frees result */
+static ResultSet *mysql_collect_rows(DbConnection *conn, MySqlData *data,
+                                    MYSQL_RES *result, char **err) {
   ResultSet *rs = db_result_alloc_empty();
-  if (!rs) {
-    mysql_free_result(result);
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
 
   /* Get column info */
   unsigned int num_fields = mysql_num_fields(result);
@@ -1097,23 +1110,25 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
     rs->columns[i].primary_key = (fields[i].flags & PRI_KEY_FLAG) != 0;
   }
 
-  /* Get rows */
-  size_t num_rows = mysql_num_rows(result);
-  /* Limit result set size to prevent unbounded memory growth */
+  /* Get rows (count unknown while streaming) */
   size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
                                               : (size_t)MAX_RESULT_ROWS;
-  if (num_rows > max_rows) {
-    num_rows = max_rows;
-  }
-  if (num_rows > 0) {
-    rs->rows = safe_calloc(num_rows, sizeof(Row));
-  }
+  size_t bytes = 0;
 
   MYSQL_ROW row;
-  size_t allocated_rows = num_rows;
+  size_t allocated_rows = 0;
   while ((row = mysql_fetch_row(result))) {
-    /* Stop if we've reached the maximum result set size */
-    if (rs->num_rows >= max_rows) {
+    /* Stop at the row or size limit, and stop the server too: freeing a
+     * streamed result otherwise reads every remaining row */
+    if (rs->num_rows >= max_rows || bytes >= MAX_RESULT_BYTES) {
+      rs->truncated = true;
+      void *kill = mysql_driver_prepare_cancel(conn);
+      if (kill) {
+        char *kerr = NULL;
+        mysql_driver_cancel_query(conn, kill, &kerr);
+        free(kerr);
+        mysql_driver_free_cancel_handle(kill);
+      }
       break;
     }
     /* Check if we need to expand the rows array */
@@ -1142,12 +1157,163 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
 
     for (unsigned int i = 0; i < num_fields; i++) {
       r->cells[i] = mysql_get_value(row, lengths, i, &fields[i]);
+      bytes += lengths[i] + 16;
     }
 
     rs->num_rows++;
   }
 
+  /* A NULL row is the end, or a failure mid-stream (not after our kill) */
+  if (!rs->truncated && mysql_errno(data->mysql) != 0) {
+    err_set(err, mysql_error(data->mysql));
+    mysql_free_result(result);
+    db_result_free(rs);
+    return NULL;
+  }
+
   mysql_free_result(result);
+  return rs;
+}
+
+#define MYSQL_TX_LOST_MSG                                                      \
+  "Connection to the MySQL server was lost; the open transaction was rolled " \
+  "back by the server. Run ROLLBACK to acknowledge, then redo the work."
+
+static bool mysql_reopen(DbConnection *conn, MySqlData *data, char **err) {
+  ConnString *cs = connstr_parse(conn->connstr, err);
+  if (!cs) {
+    return false;
+  }
+  MYSQL *fresh = mysql_open(cs, 10, true, err);
+  connstr_free(cs);
+  if (!fresh) {
+    return false;
+  }
+  mysql_close(data->mysql);
+  data->mysql = fresh;
+  data->broken = false;
+  return true;
+}
+
+/* After a failed statement: was the connection itself lost? Then the next
+ * statement reconnects, unless a transaction was open: its work is gone,
+ * and further statements are refused until the client acknowledges with
+ * ROLLBACK (carrying on would run them in autocommit on a new connection,
+ * and COMMIT would "succeed" with nothing in it). */
+static void mysql_note_failure(MySqlData *data, bool had_tx) {
+  unsigned int e = mysql_errno(data->mysql);
+  if (e == CR_SERVER_GONE_ERROR || e == CR_SERVER_LOST) {
+    data->broken = true;
+    if (had_tx)
+      data->tx_lost = true;
+  }
+}
+
+/* Before a statement: make sure there is a live connection to run it on.
+ * A connection idle for a while is pinged first (wait_timeout, server
+ * restart); a lost one is reopened only when no transaction was open. */
+static bool mysql_ensure_alive(DbConnection *conn, MySqlData *data,
+                               const char *sql, bool *answered, char **err) {
+  *answered = false;
+  time_t now = time(NULL);
+  bool idle = data->last_used != 0 && now - data->last_used > 30;
+  data->last_used = now;
+  if (data->tx_lost) {
+    if (!db_common_sql_starts_with_word(sql, "ROLLBACK")) {
+      err_set(err, MYSQL_TX_LOST_MSG);
+      return false;
+    }
+    /* Acknowledged: nothing is left to roll back */
+    data->tx_lost = false;
+    *answered = true;
+    return mysql_reopen(conn, data, err);
+  }
+  if (!data->broken && (!idle || mysql_ping(data->mysql) == 0)) {
+    return true;
+  }
+  if (!data->broken &&
+      (data->mysql->server_status & SERVER_STATUS_IN_TRANS)) {
+    data->broken = true;
+    data->tx_lost = true;
+    err_set(err, MYSQL_TX_LOST_MSG);
+    return false;
+  }
+  return mysql_reopen(conn, data, err);
+}
+
+/* Run sql and read every result it produces (CALL, multi-result statements):
+ * leaving one unread breaks the connection with "Commands out of sync".
+ * The last result that has rows (SELECT, CALL's SELECT, ... RETURNING),
+ * else the affected-row count of the last statement (rows_affected). */
+static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
+                                     char **err) {
+  DB_REQUIRE_PARAMS_CONN(sql, conn, MySqlData, data, mysql, err, NULL);
+
+  bool answered = false;
+  if (!mysql_ensure_alive(conn, data, sql, &answered, err)) {
+    return NULL;
+  }
+  if (answered) {
+    return db_result_alloc_empty();
+  }
+  bool had_tx = (data->mysql->server_status & SERVER_STATUS_IN_TRANS) != 0;
+  if (mysql_query(data->mysql, sql) != 0) {
+    err_set(err, mysql_error(data->mysql));
+    mysql_note_failure(data, had_tx);
+    if (data->tx_lost)
+      err_set(err, MYSQL_TX_LOST_MSG);
+    return NULL;
+  }
+
+  ResultSet *rows = NULL;
+  int64_t last_affected = 0;
+  bool limited = false;
+  char *error = NULL;
+  for (;;) {
+    if (mysql_field_count(data->mysql) > 0) {
+      /* Stream the rows (use_result), so the limits bound what is held */
+      MYSQL_RES *result = mysql_use_result(data->mysql);
+      if (!result) {
+        if (!limited && !error) {
+          error = str_dup(mysql_error(data->mysql));
+        }
+      } else if (limited || error) {
+        mysql_free_result(result); /* Drain */
+      } else {
+        char *cerr = NULL;
+        ResultSet *rs = mysql_collect_rows(conn, data, result, &cerr);
+        if (!rs) {
+          error = cerr ? cerr : str_dup("Failed to read result");
+        } else {
+          db_result_free(rows);
+          rows = rs;
+          limited = rs->truncated;
+        }
+      }
+    } else if (!limited && !error) {
+      last_affected = (int64_t)mysql_affected_rows(data->mysql);
+    }
+    int more = mysql_next_result(data->mysql);
+    if (more != 0) {
+      if (more > 0 && !limited && !error) {
+        error = str_dup(mysql_error(data->mysql));
+      }
+      break;
+    }
+  }
+
+  if (error) {
+    db_result_free(rows);
+    mysql_note_failure(data, had_tx);
+    err_set(err, data->tx_lost ? MYSQL_TX_LOST_MSG : error);
+    free(error);
+    return NULL;
+  }
+  if (rows) {
+    return rows;
+  }
+  ResultSet *rs = db_result_alloc_empty();
+  rs->rows_affected = last_affected;
   return rs;
 }
 
@@ -1196,6 +1362,10 @@ static void mysql_driver_library_cleanup(void) {
   cleaned_up = true;
   mysql_library_end();
 }
+
+/* mysql_library_init is not thread-safe: run it once before worker threads
+ * start (connects run on workers) */
+static void mysql_driver_library_init(void) { mysql_library_init(0, NULL, NULL); }
 
 /* Cancel handle: the server thread running the query, plus what is needed to
  * reach the server on a separate connection. KILL QUERY cannot go over the
@@ -1331,4 +1501,23 @@ static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
 
   mysql_free_result(result);
   return count;
+}
+
+static void mysql_driver_connection_lost(DbConnection *conn) {
+  MySqlData *data = conn ? conn->driver_data : NULL;
+  if (!data || !data->mysql)
+    return;
+  if (!data->broken && (data->mysql->server_status & SERVER_STATUS_IN_TRANS))
+    data->tx_lost = true;
+  data->broken = true;
+}
+
+static int mysql_driver_transaction_state(DbConnection *conn) {
+  MySqlData *data = conn ? conn->driver_data : NULL;
+  if (data && data->tx_lost)
+    return 1; /* Until ROLLBACK acknowledges the loss */
+  return data && data->mysql && !data->broken &&
+                 (data->mysql->server_status & SERVER_STATUS_IN_TRANS)
+             ? 1
+             : 0;
 }

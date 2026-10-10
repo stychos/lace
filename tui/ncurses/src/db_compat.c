@@ -7,6 +7,7 @@
  */
 
 #include "db_compat.h"
+#include "async/async.h"
 #include "../../liblace/include/config/history.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
@@ -30,10 +31,30 @@ static pthread_mutex_t g_refresh_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Reconnect if the daemon was replaced, then declare this thread's
  * generation so liblace refuses to send a stale conn_id to a different
  * daemon. Returns true if conn_id changed. */
+void db_conn_preempt_background(DbConnection *conn, const void *except) {
+  if (!conn || !conn->background_op || conn->background_op == except ||
+      async_in_worker()) {
+    return;
+  }
+  AsyncOperation *bg = (AsyncOperation *)conn->background_op;
+  conn->background_op = NULL; /* Its owner frees it when it polls */
+  async_cancel_and_wait(bg);
+}
+
 static bool conn_refresh(DbConnection *conn) {
+  db_conn_preempt_background(conn, NULL);
   bool changed = false;
   pthread_mutex_lock(&g_refresh_lock);
   uint64_t gen = lace_client_generation(conn->client);
+  if (gen != conn->generation && conn->in_transaction) {
+    /* The daemon (and with it this connection) was replaced while a
+     * transaction was open: its work is gone. Carrying on would run the
+     * rest of it in autocommit on a new connection, and COMMIT would
+     * "succeed" with nothing in it. */
+    conn->transaction_lost = true;
+    conn->in_transaction = false;
+    conn->transaction_failed = false;
+  }
   if (gen != conn->generation && conn->connstr) {
     int new_id = -1;
     if (lace_connect(conn->client, conn->connstr, NULL, &new_id) == LACE_OK) {
@@ -49,9 +70,73 @@ static bool conn_refresh(DbConnection *conn) {
   return changed;
 }
 
+/* True for ROLLBACK / ABORT (ending a transaction without keeping it) */
+static bool sql_is_rollback(const char *sql) {
+  while (sql && (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r'))
+    sql++;
+  return sql && (strncasecmp(sql, "ROLLBACK", 8) == 0 ||
+                 strncasecmp(sql, "ABORT", 5) == 0);
+}
+
+#define TX_LOST_MSG                                                            \
+  "The connection was reset while a transaction was open: everything since "  \
+  "BEGIN was rolled back. Run ROLLBACK to acknowledge, then redo the work."
+
+/* Refuse work on a connection whose transaction was lost until the user
+ * acknowledges it with ROLLBACK (which is then answered here: there is
+ * nothing left to roll back). Returns false to stop the call; *acked is
+ * set when sql was that ROLLBACK. */
+static bool conn_guard(DbConnection *conn, const char *sql, char **err,
+                       bool *acked) {
+  if (acked)
+    *acked = false;
+  if (!conn->transaction_lost)
+    return true;
+  if (sql && sql_is_rollback(sql)) {
+    conn->transaction_lost = false;
+    if (acked)
+      *acked = true;
+    return false;
+  }
+  if (err)
+    *err = str_dup(TX_LOST_MSG);
+  return false;
+}
+
+/* Record the transaction state the last reply reported (result: its
+ * fallback when the reply did not say) */
+static void conn_note_tx(DbConnection *conn, const LaceResult *result) {
+  int tx = lace_last_transaction_state();
+  if (tx < 0 && result)
+    tx = result->in_transaction ? 1 : 0;
+  if (tx < 0)
+    return;
+  conn->in_transaction = tx != 0;
+  conn->transaction_failed = tx == 2;
+}
+
+/* Error text for a failed call. A call that failed because the daemon was
+ * replaced in the middle of a transaction reports the lost transaction
+ * (and marks it, see conn_refresh) rather than a generic reconnect. */
+static char *conn_error(DbConnection *conn) {
+  if (conn->in_transaction &&
+      lace_client_generation(conn->client) != conn->generation) {
+    conn_refresh(conn);
+    if (conn->transaction_lost)
+      return str_dup(TX_LOST_MSG);
+  }
+  /* A failed statement can still open or end a transaction (a failed
+   * COMMIT rolls back; a failure inside BEGIN leaves it open) */
+  conn_note_tx(conn, NULL);
+  return str_dup(lace_client_error(conn->client));
+}
+
 /* After a failed read-only call: retry once if the link dropped or the
  * daemon was replaced. Writes are never retried (they may have applied). */
 static bool conn_should_retry(DbConnection *conn, int rc) {
+  if (conn->in_transaction) {
+    return false; /* A retry would run outside the open transaction */
+  }
   if (rc == LACE_ERR_CONNECTION_LOST || rc == LACE_ERR_PIPE_ERROR) {
     conn_refresh(conn);
     return true;
@@ -196,6 +281,30 @@ void db_disconnect(DbConnection *conn) {
 }
 
 /* List tables in connection */
+/* Reads the TUI makes on its own (pages, counts, schema, row checks) run
+ * under a savepoint inside a PostgreSQL transaction: a failure, or Esc
+ * cancelling a slow page, would otherwise abort the user's transaction.
+ * End it after the error text was taken (it is per-thread). */
+static bool read_savepoint_begin(DbConnection *conn) {
+  if (conn->driver_type != LACE_DRIVER_POSTGRES || !conn->in_transaction ||
+      conn->transaction_failed) {
+    return false;
+  }
+  return lace_exec(conn->client, conn->conn_id, "SAVEPOINT lace_read",
+                   NULL) == LACE_OK;
+}
+
+static void read_savepoint_end(DbConnection *conn, bool active, bool ok) {
+  if (active &&
+      lace_exec(conn->client, conn->conn_id,
+                ok ? "RELEASE SAVEPOINT lace_read"
+                   : "ROLLBACK TO SAVEPOINT lace_read",
+                NULL) == LACE_OK) {
+    /* The failed read marked the transaction failed; it is live again */
+    conn_note_tx(conn, NULL);
+  }
+}
+
 char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
   if (!conn || !count) {
     if (err) *err = str_dup("Invalid arguments");
@@ -204,15 +313,20 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
 
   char **tables = NULL;
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return NULL;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_list_tables(conn->client, conn->conn_id, &tables, count);
   if (rc != LACE_OK && conn_should_retry(conn, rc)) {
     rc = lace_list_tables(conn->client, conn->conn_id, &tables, count);
   }
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return NULL;
   }
-
+  read_savepoint_end(conn, sp, true);
   return tables;
 }
 
@@ -230,15 +344,20 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **e
 
   LaceSchema *schema = NULL;
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return NULL;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_get_schema(conn->client, conn->conn_id, table, &schema);
   if (rc != LACE_OK && conn_should_retry(conn, rc)) {
     rc = lace_get_schema(conn->client, conn->conn_id, table, &schema);
   }
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return NULL;
   }
-
+  read_savepoint_end(conn, sp, true);
   return schema;
 }
 
@@ -251,13 +370,20 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
 
   LaceResult *result = NULL;
   conn_refresh(conn);
+  bool acked = false;
+  if (!conn_guard(conn, sql, err, &acked)) {
+    return acked ? (ResultSet *)safe_calloc(1, sizeof(ResultSet)) : NULL;
+  }
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   if (rc != LACE_OK && sql_is_read_only(sql) && conn_should_retry(conn, rc)) {
     rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   }
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return NULL;
+  }
+  if (result) {
+    conn_note_tx(conn, result);
   }
 
   return result;
@@ -272,10 +398,17 @@ int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
 
   LaceResult *result = NULL;
   conn_refresh(conn);
+  bool acked = false;
+  if (!conn_guard(conn, sql, err, &acked)) {
+    return acked ? 0 : -1;
+  }
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return -1;
+  }
+  if (result) {
+    conn_note_tx(conn, result);
   }
 
   int64_t affected = result ? result->rows_affected : 0;
@@ -295,6 +428,10 @@ ResultSet *db_query_table(DbConnection *conn, const char *table,
 
   LaceResult *result = NULL;
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return NULL;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_query(conn->client, conn->conn_id, table,
                       filters, num_filters, sorts, num_sorts,
                       offset, limit, &result);
@@ -304,10 +441,11 @@ ResultSet *db_query_table(DbConnection *conn, const char *table,
                         offset, limit, &result);
   }
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return NULL;
   }
-
+  read_savepoint_end(conn, sp, true);
   return result;
 }
 
@@ -337,7 +475,10 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
     if (err) *err = str_dup("Out of memory");
     return NULL;
   }
+  conn_refresh(conn);
+  bool sp = !conn->transaction_lost && read_savepoint_begin(conn);
   ResultSet *rs = db_query(conn, sql, err);
+  read_savepoint_end(conn, sp, rs != NULL);
   free(sql);
   return rs;
 }
@@ -352,6 +493,10 @@ bool db_count_rows(DbConnection *conn, const char *table,
   }
 
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_count(conn->client, conn->conn_id, table,
                       filters, num_filters, count, approximate);
   if (rc != LACE_OK && conn_should_retry(conn, rc)) {
@@ -359,10 +504,11 @@ bool db_count_rows(DbConnection *conn, const char *table,
                         filters, num_filters, count, approximate);
   }
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return false;
   }
-
+  read_savepoint_end(conn, sp, true);
   return true;
 }
 
@@ -388,15 +534,22 @@ bool db_count_rows_where(DbConnection *conn, const char *table,
 
   LaceResult *result = NULL;
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    free(sql);
+    return false;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   if (rc != LACE_OK && sql_is_read_only(sql) && conn_should_retry(conn, rc)) {
     rc = lace_exec(conn->client, conn->conn_id, sql, &result);
   }
   free(sql);
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return false;
   }
+  read_savepoint_end(conn, sp, true);
 
   *count = 0;
   if (result && result->num_rows > 0 && result->rows &&
@@ -452,12 +605,15 @@ bool db_update_cell(DbConnection *conn, const char *table,
   }
 
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
   int rc = lace_update(conn->client, conn->conn_id, table,
                        pk, num_pk, column, value);
   free_pk_array(pk, num_pk);
 
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return false;
   }
 
@@ -483,11 +639,14 @@ bool db_delete_row(DbConnection *conn, const char *table,
   }
 
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
   int rc = lace_delete(conn->client, conn->conn_id, table, pk, num_pk);
   free_pk_array(pk, num_pk);
 
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return false;
   }
 
@@ -513,12 +672,15 @@ bool db_insert_row(DbConnection *conn, const char *table,
   }
 
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
   int rc = lace_insert(conn->client, conn->conn_id, table,
                        col_names, values, num_columns, NULL, NULL);
   free(col_names);
 
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return false;
   }
 
@@ -544,13 +706,20 @@ ResultSet *db_select_by_pk(DbConnection *conn, const char *table,
   }
   LaceResult *result = NULL;
   conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    free_pk_array(pk, num_pk);
+    return NULL;
+  }
+  bool sp = read_savepoint_begin(conn);
   int rc = lace_select_by_pk(conn->client, conn->conn_id, table, pk, num_pk,
                              columns, num_columns, &result);
   free_pk_array(pk, num_pk);
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
     return NULL;
   }
+  read_savepoint_end(conn, sp, true);
   return result;
 }
 
@@ -563,9 +732,55 @@ bool db_cancel_query(DbConnection *conn, char **err) {
 
   int rc = lace_cancel_query(conn->client, conn->conn_id);
   if (rc != LACE_OK) {
-    if (err) *err = str_dup(lace_client_error(conn->client));
+    if (err) *err = conn_error(conn);
     return false;
   }
 
   return true;
 }
+
+bool db_verify_row(DbConnection *conn, const char *table, const char **pk_cols,
+                   const DbValue *pk_vals, size_t num_pk, const char **cols,
+                   const DbValue *expected, size_t n, char **why) {
+  *why = NULL;
+  char *err = NULL;
+  ResultSet *db = db_select_by_pk(conn, table, pk_cols, pk_vals, num_pk, cols,
+                                  n, &err);
+  if (!db) {
+    *why = err ? err : str_dup("cannot re-read the row");
+    return false;
+  }
+  free(err);
+  bool ok = false;
+  if (db->num_rows != 1 || !db->rows) {
+    *why = str_dup(db->num_rows == 0
+                       ? "the row no longer exists (or its key changed)"
+                       : "its key matches more than one row");
+  } else {
+    ok = true;
+    for (size_t i = 0; i < n && ok; i++) {
+      if (i >= db->rows[0].num_cells) {
+        ok = false;
+        *why = str_dup("cannot re-read the row");
+        break;
+      }
+      const DbValue *a = &expected[i];
+      const DbValue *b = &db->rows[0].cells[i];
+      char *sa = a->is_null ? NULL : lace_value_to_edit_text(a);
+      char *sb = b->is_null ? NULL : lace_value_to_edit_text(b);
+      bool same = a->is_null == b->is_null &&
+                  (a->is_null || (sa && sb && strcmp(sa, sb) == 0));
+      free(sa);
+      free(sb);
+      if (!same) {
+        ok = false;
+        *why = str_printf("column '%s' changed in the database since it was "
+                          "loaded (refresh to see the current value)",
+                          cols[i]);
+      }
+    }
+  }
+  db_result_free(db);
+  return ok;
+}
+

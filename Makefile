@@ -1,7 +1,7 @@
 # Lace - Database Viewer and Manager
 # Top-level Makefile
 
-.PHONY: all laced liblace ncurses clean distclean install help
+.PHONY: all laced liblace ncurses gtk clean distclean install help
 
 # Default target
 all: laced liblace ncurses
@@ -18,11 +18,17 @@ liblace:
 ncurses: liblace
 	$(MAKE) -C tui/ncurses
 
+# Build the GTK4 frontend (depends on liblace)
+gtk: liblace
+	@if [ -d gui/gtk ]; then $(MAKE) -C gui/gtk; \
+	else echo "GTK frontend not present (gui/gtk does not exist yet)"; exit 1; fi
+
 # Clean all build artifacts
 clean:
 	$(MAKE) -C laced clean
 	$(MAKE) -C liblace clean
 	$(MAKE) -C tui/ncurses clean
+	-$(MAKE) -C gui/gtk clean 2>/dev/null || true
 
 # Full clean
 distclean: clean
@@ -54,6 +60,7 @@ help:
 	@echo "  laced     Build the daemon"
 	@echo "  liblace   Build the client library"
 	@echo "  ncurses   Build the ncurses frontend"
+	@echo "  gtk       Build the GTK4 frontend"
 	@echo "  clean     Remove build artifacts"
 	@echo "  distclean Remove all artifacts"
 	@echo "  install   Install to PREFIX (default: /usr/local)"

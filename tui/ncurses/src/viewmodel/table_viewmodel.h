@@ -6,7 +6,6 @@
  * - Data binding (ResultSet, schema)
  * - Cursor and scroll position
  * - Multi-row selection
- * - Inline cell editing
  * - Multi-column sorting
  * - Pagination state
  *
@@ -33,8 +32,7 @@
 #define VM_CHANGE_SCROLL    (1u << 1)
 #define VM_CHANGE_SELECTION (1u << 2)
 #define VM_CHANGE_DATA      (1u << 3)
-#define VM_CHANGE_EDIT      (1u << 4)
-#define VM_CHANGE_EDITING   (1u << 4)  /* Alias for VM_CHANGE_EDIT */
+/* (1u << 4) was VM_CHANGE_EDIT: inline editing lives in edit.c */
 #define VM_CHANGE_VISIBLE   (1u << 5)
 #define VM_CHANGE_FOCUS     (1u << 6)
 #define VM_CHANGE_ALL       0xFFu
@@ -125,22 +123,6 @@ typedef struct TableSelection {
 } TableSelection;
 
 /* ============================================================================
- * Edit State
- * ============================================================================
- */
-
-typedef struct TableEditState {
-  bool active;       /* Currently editing */
-  size_t row;        /* Row being edited */
-  size_t col;        /* Column being edited */
-  char *buffer;      /* Edit buffer */
-  size_t buffer_len; /* Buffer content length */
-  size_t buffer_cap; /* Buffer capacity */
-  size_t cursor_pos; /* Cursor position in edit buffer */
-  char *original;    /* Original value (for cancel) */
-} TableEditState;
-
-/* ============================================================================
  * TableViewModel Callbacks
  * ============================================================================
  */
@@ -148,10 +130,6 @@ typedef struct TableEditState {
 typedef struct TableViewModelCallbacks {
   /* Called when async load completes */
   void (*on_load_complete)(TableViewModel *vm, bool success, void *ctx);
-
-  /* Called when edit completes (success/error) */
-  void (*on_edit_complete)(TableViewModel *vm, bool success, const char *error,
-                           void *ctx);
 
   /* Called when table selection changes */
   void (*on_table_select)(TableViewModel *vm, const char *table_name, void *ctx);
@@ -191,9 +169,6 @@ struct TableViewModel {
   /* Selection state */
   TableSelection selection;
 
-  /* Edit state */
-  TableEditState edit;
-
 
   /* UI hints for visible range (for lazy loading) */
   size_t visible_first_row;
@@ -214,7 +189,7 @@ TableViewModel *table_vm_create(AppState *app, Tab *tab);
 void table_vm_destroy(TableViewModel *vm);
 
 /* Rebind viewmodel to a different tab (e.g., on tab switch).
- * Clears selection and edit state. Preserves scroll if same table. */
+ * Clears selection. Preserves scroll if same table. */
 void table_vm_bind(TableViewModel *vm, Tab *tab);
 
 /* Set table-specific callbacks */
@@ -311,36 +286,6 @@ void table_vm_clear_selection(TableViewModel *vm);
 /* Get selected rows */
 size_t table_vm_selection_count(const TableViewModel *vm);
 const size_t *table_vm_selected_rows(const TableViewModel *vm);
-
-/* ============================================================================
- * Editing
- * ============================================================================
- */
-
-/* Start editing */
-bool table_vm_start_edit(TableViewModel *vm, size_t row, size_t col);
-bool table_vm_start_edit_at_cursor(TableViewModel *vm);
-
-/* Edit operations */
-void table_vm_edit_insert_char(TableViewModel *vm, char ch);
-void table_vm_edit_insert_text(TableViewModel *vm, const char *text);
-void table_vm_edit_delete_char(TableViewModel *vm);
-void table_vm_edit_backspace(TableViewModel *vm);
-void table_vm_edit_clear(TableViewModel *vm);
-void table_vm_edit_set_cursor(TableViewModel *vm, size_t pos);
-void table_vm_edit_move_cursor(TableViewModel *vm, int delta);
-void table_vm_edit_home(TableViewModel *vm);
-void table_vm_edit_end(TableViewModel *vm);
-
-/* Get edit state */
-bool table_vm_is_editing(const TableViewModel *vm);
-const char *table_vm_edit_buffer(const TableViewModel *vm);
-size_t table_vm_edit_cursor(const TableViewModel *vm);
-void table_vm_get_edit_cell(const TableViewModel *vm, size_t *row, size_t *col);
-
-/* Commit or cancel edit */
-bool table_vm_commit_edit(TableViewModel *vm);
-void table_vm_cancel_edit(TableViewModel *vm);
 
 /* ============================================================================
  * Sorting

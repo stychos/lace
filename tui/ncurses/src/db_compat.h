@@ -22,6 +22,7 @@ typedef LaceValueType DbValueType;
 #define DB_TYPE_INT       LACE_TYPE_INT
 #define DB_TYPE_FLOAT     LACE_TYPE_FLOAT
 #define DB_TYPE_TEXT      LACE_TYPE_TEXT
+#define DB_TYPE_DECIMAL   LACE_TYPE_DECIMAL
 #define DB_TYPE_BLOB      LACE_TYPE_BLOB
 #define DB_TYPE_BOOL      LACE_TYPE_BOOL
 #define DB_TYPE_DATE      LACE_TYPE_DATE
@@ -74,12 +75,36 @@ typedef struct DbConnection {
   char *last_error;         /* Last error message */
   uint64_t generation;      /* lace_client_generation() when conn_id was issued */
 
+  /* A best-effort background statement (the query tab's row count) using
+   * this connection. The daemon runs one statement per connection, so any
+   * foreground call from the main thread cancels it first. */
+  void *background_op;
+
+  /* Transaction state as the daemon reported it after the last statement.
+   * transaction_lost: the connection was replaced while one was open;
+   * further work is refused until the user runs ROLLBACK. */
+  bool in_transaction;
+  bool transaction_failed; /* Open but failed: only ROLLBACK works (PG) */
+  bool transaction_lost;
+
   /* Called on the calling thread after a successful data change made
    * through db_update_cell/db_delete_row/db_insert_row (type is a
    * LaceHistoryType). Set by the app layer to record query history. */
   void (*on_sql)(void *ctx, struct DbConnection *conn, const char *sql, int type);
   void *on_sql_ctx;
 } DbConnection;
+
+/* Cancel (and wait for) the connection's background statement unless it is
+ * `except`. Call before any foreground statement on the connection, from the
+ * main thread (no-op on worker threads). */
+void db_conn_preempt_background(DbConnection *conn, const void *except);
+
+/* Before changing a row by its key: the key must match exactly one row, and
+ * cols must still hold the expected (loaded) values. On failure *why says
+ * what is wrong (caller frees). */
+bool db_verify_row(DbConnection *conn, const char *table, const char **pk_cols,
+                   const DbValue *pk_vals, size_t num_pk, const char **cols,
+                   const DbValue *expected, size_t n, char **why);
 
 /* Connection status (compatibility) */
 typedef enum {

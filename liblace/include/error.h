@@ -48,6 +48,7 @@
 #define LACE_ERR_TABLE_NOT_FOUND    -32020  /* Table does not exist */
 #define LACE_ERR_COLUMN_NOT_FOUND   -32021  /* Column does not exist */
 #define LACE_ERR_ROW_NOT_FOUND      -32022  /* Row not found (for update/delete) */
+#define LACE_ERR_MULTIPLE_ROWS      -32025  /* Key matched several rows */
 #define LACE_ERR_CONSTRAINT_VIOLATION -32023 /* Constraint violation */
 #define LACE_ERR_TYPE_MISMATCH      -32024  /* Data type mismatch */
 

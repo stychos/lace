@@ -13,8 +13,25 @@
 #include <string.h>
 
 /* Worker thread function */
+/* Set on worker threads: db_compat must not preempt the background
+ * statement from the very thread that runs it */
+static _Thread_local bool t_in_worker = false;
+
+bool async_in_worker(void) { return t_in_worker; }
+
+void async_cancel_and_wait(AsyncOperation *op) {
+  if (!op) {
+    return;
+  }
+  async_cancel(op);
+  while (async_poll(op) == ASYNC_STATE_RUNNING) {
+    async_wait(op, 50);
+  }
+}
+
 static void *async_worker_thread(void *arg) {
   AsyncOperation *op = (AsyncOperation *)arg;
+  t_in_worker = true;
 
   /* state is already RUNNING (set by async_start before the thread exists) */
 
@@ -45,6 +62,20 @@ static void *async_worker_thread(void *arg) {
         db_query_page_where(op->conn, op->table_name, op->offset, op->limit,
                             op->where_clause, op->order_by, op->desc, &err);
     break;
+
+  case ASYNC_OP_QUERY_KEYSET: {
+    /* Keyset (cursor-based) pagination */
+    LaceResult *result = NULL;
+    int rc = lace_query_keyset(op->conn->client, op->conn->conn_id,
+                                op->table_name, op->keyset, op->keyset_forward,
+                                op->where_clause, op->limit, &result);
+    if (rc == LACE_OK) {
+      op->result = result;
+    } else {
+      err = str_dup(lace_client_error(op->conn->client));
+    }
+    break;
+  }
 
   case ASYNC_OP_COUNT_ROWS: {
     size_t count = 0;
@@ -92,6 +123,7 @@ static void *async_worker_thread(void *arg) {
       case ASYNC_OP_QUERY:
       case ASYNC_OP_QUERY_PAGE:
       case ASYNC_OP_QUERY_PAGE_WHERE:
+      case ASYNC_OP_QUERY_KEYSET:
         db_result_free(op->result);
         break;
       case ASYNC_OP_GET_SCHEMA:
@@ -136,6 +168,12 @@ void async_init(AsyncOperation *op) {
 }
 
 bool async_start(AsyncOperation *op) {
+  /* The daemon runs one statement per connection: a foreground operation
+   * first stops a best-effort background one (the query tab's row count) */
+  if (op && op->conn) {
+    db_conn_preempt_background(op->conn, op);
+  }
+
   if (!op)
     return false;
 
