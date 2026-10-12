@@ -12,11 +12,14 @@
 #ifndef LACE_JSON_HELPERS_H
 #define LACE_JSON_HELPERS_H
 
+#include "../lace_export.h"
 #include "str.h"  /* Same directory */
 #include <cjson/cJSON.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+LACE_BEGIN_DECLS
 
 /* ============================================================================
  * Safe JSON value getters
@@ -166,7 +169,7 @@ static inline cJSON *json_get_array(cJSON *obj, const char *key) {
  */
 
 /* Get integer from JSON and assign to field if within range.
- * Usage: JSON_GET_INT_RANGE(json, "page_size", config->page_size, 10, 1000); */
+ * Usage: JSON_GET_INT_RANGE(json, "history_max_size", config->history_max_size, 10, 1000); */
 #define JSON_GET_INT_RANGE(obj, key, field, min_val, max_val)                  \
   do {                                                                         \
     int _v = json_get_int((obj), (key), (field));                              \
@@ -194,5 +197,7 @@ static inline cJSON *json_get_array(cJSON *obj, const char *key) {
  * max_size: Maximum file size in bytes (0 = default 1MB limit)
  * Caller owns the returned cJSON object and must call cJSON_Delete(). */
 cJSON *json_load_from_file(const char *path, size_t max_size, char **error);
+
+LACE_END_DECLS
 
 #endif /* LACE_JSON_HELPERS_H */

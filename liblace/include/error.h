@@ -9,6 +9,9 @@
 #ifndef LIBLACE_ERROR_H
 #define LIBLACE_ERROR_H
 
+#include "lace_export.h"
+LACE_BEGIN_DECLS
+
 /* ==========================================================================
  * Return Codes
  * ========================================================================== */
@@ -37,6 +40,7 @@
 #define LACE_ERR_CONNECTION_LOST    -32004  /* Lost connection to database */
 #define LACE_ERR_CONNECTION_CLOSED  -32005  /* Connection already closed */
 #define LACE_ERR_INVALID_CONN_ID    -32006  /* Invalid connection ID */
+#define LACE_ERR_CONNECTION_BUSY    -32007  /* Another query is running on it */
 
 /* Query errors */
 #define LACE_ERR_QUERY_FAILED       -32010  /* Query execution failed */
@@ -66,6 +70,7 @@
 #define LACE_ERR_OUT_OF_MEMORY      -32050  /* Memory allocation failed */
 #define LACE_ERR_TOO_MANY_CONNS     -32051  /* Too many connections */
 #define LACE_ERR_RESULT_TOO_LARGE   -32052  /* Result set too large */
+#define LACE_ERR_DAEMON_BUSY        -32053  /* Too many requests in progress */
 
 /* ==========================================================================
  * Error Handling Functions
@@ -90,5 +95,7 @@ static inline int lace_is_recoverable(int code) {
          code == LACE_ERR_QUERY_TIMEOUT ||
          code == LACE_ERR_DEADLOCK;
 }
+
+LACE_END_DECLS
 
 #endif /* LIBLACE_ERROR_H */

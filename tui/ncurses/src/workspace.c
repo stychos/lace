@@ -14,29 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Save current TUI state to tab */
-void tab_save(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  if (!tab)
-    return;
-
-  /* UI state to UITabState (source of truth) */
-  UITabState *ui = TUI_TAB_UI(state);
-
-  /* Sync table viewmodel state to Tab before saving */
-  if (state->vm_table && tab->type == TAB_TYPE_TABLE) {
-    table_vm_sync_to_tab(state->vm_table);
-  }
-
-  /* Sync per-tab UI state to UITabState (sidebar is global, not saved) */
-  if (ui) {
-    ui->filters_visible = state->filters_visible;
-    ui->filters_focused = state->filters_focused;
-  }
-}
-
 /* Restore TUI state from tab */
 void tab_restore(TuiState *state) {
+  /* Add-row mode belongs to the tab being left (its arrays follow that
+   * tab's schema); switching by mouse bypasses the add-row keys */
+  if (state && state->adding_row) {
+    tui_cancel_add_row(state);
+  }
   Tab *tab = TUI_TAB(state);
   if (!tab)
     return;
@@ -46,20 +30,12 @@ void tab_restore(TuiState *state) {
   bool header_was_visible = state->header_visible;
   bool status_was_visible = state->status_visible;
 
+  /* The new tab may use a different connection */
+  tui_bind_connection(state);
+
   /* Rebind VmTable to new Tab so cursor/scroll reads work correctly */
   if (state->vm_table) {
     table_vm_bind(state->vm_table, tab);
-  }
-
-  /* Per-tab UI state from UITabState (filters visibility is per-tab) */
-  UITabState *ui = TUI_TAB_UI(state);
-  if (ui) {
-    state->filters_visible = ui->filters_visible;
-    state->filters_focused = ui->filters_focused;
-  } else {
-    /* No UITabState - use defaults */
-    state->filters_visible = false;
-    state->filters_focused = false;
   }
 
   /* Reset editing state when switching tabs */
@@ -68,11 +44,6 @@ void tab_restore(TuiState *state) {
   state->filters_cursor_col = 0;
   state->filters_scroll = 0;
   state->sidebar_filter_active = false;
-
-  /* Sync table viewmodel from Tab */
-  if (tab->type == TAB_TYPE_TABLE && state->vm_table) {
-    table_vm_sync_from_tab(state->vm_table);
-  }
 
   /* Layout visibility from app */
   if (state->app) {
@@ -94,25 +65,6 @@ void tab_restore(TuiState *state) {
   }
 }
 
-/* Legacy wrapper for compatibility */
-void workspace_save(TuiState *state) { tab_save(state); }
-
-/* Legacy wrapper for compatibility */
-void workspace_restore(TuiState *state) { tab_restore(state); }
-
-/* Sync focus and panel state from TuiState to UITabState.
- * Call this when input handlers modify focus state so it persists across tab
- * switches. */
-void tab_sync_focus(TuiState *state) {
-  UITabState *ui = TUI_TAB_UI(state);
-  if (!ui)
-    return;
-
-  /* Sync per-tab UI state to UITabState (sidebar is global, not saved) */
-  ui->filters_visible = state->filters_visible;
-  ui->filters_focused = state->filters_focused;
-}
-
 /* Switch to a different tab */
 void tab_switch(TuiState *state, size_t index) {
   Workspace *ws = TUI_WORKSPACE(state);
@@ -123,9 +75,6 @@ void tab_switch(TuiState *state, size_t index) {
 
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
-
-  /* Save current tab state */
-  tab_save(state);
 
   /* Switch to new tab */
   workspace_switch_tab(ws, index);
@@ -139,14 +88,9 @@ void tab_switch(TuiState *state, size_t index) {
   state->status_is_error = false;
 }
 
-/* Legacy wrapper */
-void workspace_switch(TuiState *state, size_t index) {
-  tab_switch(state, index);
-}
-
 /* Create a new table tab */
 bool tab_create(TuiState *state, size_t table_index) {
-  if (!state || !state->app || table_index >= state->num_tables)
+  if (!state || !state->app || table_index >= TUI_NUM_TABLES(state))
     return false;
 
   Workspace *ws = TUI_WORKSPACE(state);
@@ -164,14 +108,8 @@ bool tab_create(TuiState *state, size_t table_index) {
     connection_index = current_tab->connection_index;
   }
 
-  /* Save current tab first */
-  if (ws->num_tabs > 0) {
-    tab_save(state);
-  }
-
   /* Create new tab with connection reference */
-  Tab *tab = workspace_create_table_tab(ws, connection_index, table_index,
-                                        state->tables[table_index]);
+  Tab *tab = workspace_create_table_tab(ws, connection_index, TUI_TABLES(state)[table_index]);
   if (!tab) {
     tui_set_error(state, "Failed to create tab");
     return false;
@@ -194,8 +132,8 @@ bool tab_create(TuiState *state, size_t table_index) {
 
   /* Reset TUI state for new tab - all panels start unfocused */
   state->sidebar_focused = false;
-  state->filters_visible = false;
-  state->filters_focused = false;
+  tui_set_filters_visible(state, false);
+  tui_set_filters_focused(state, false);
   state->filters_was_focused = false;
   state->filters_editing = false;
   state->filters_cursor_row = 0;
@@ -205,7 +143,7 @@ bool tab_create(TuiState *state, size_t table_index) {
   /* Tab cursor/scroll/data is initialized by tui_load_table_data */
 
   /* Load the table data (updates Tab directly) */
-  if (!tui_load_table_data(state, state->tables[table_index])) {
+  if (!tui_load_table_data(state, TUI_TABLES(state)[table_index])) {
     /* Failed - remove the tab */
     workspace_close_tab(ws, ws->current_tab);
 
@@ -216,14 +154,19 @@ bool tab_create(TuiState *state, size_t table_index) {
     return false;
   }
 
-  /* Tab stores table_index - no cache sync needed */
 
   return true;
 }
 
-/* Legacy wrapper */
-bool workspace_create(TuiState *state, size_t table_index) {
-  return tab_create(state, table_index);
+/* Longest tab label shown, in columns (longer names are clipped) */
+#define TAB_LABEL_MAX_COLS 30
+
+int tui_tab_width(const Tab *tab) {
+  const char *name = tab->table_name ? tab->table_name : "?";
+  int cols = utf8_width(name, strlen(name));
+  if (cols > TAB_LABEL_MAX_COLS)
+    cols = TAB_LABEL_MAX_COLS;
+  return cols + 4; /* " name " plus the separator column */
 }
 
 /* Draw tab bar */
@@ -248,20 +191,19 @@ void tui_draw_tabs(TuiState *state) {
       continue;
 
     const char *name = tab->table_name ? tab->table_name : "?";
-    int tab_width = (int)strlen(name) + 4; /* " name  " with padding */
+    int tab_width = tui_tab_width(tab); /* Same widths as the mouse hit test */
 
     if (x + tab_width > state->term_cols)
       break;
 
-    if (i == ws->current_tab) {
-      /* Current tab - highlighted */
-      wattron(state->tab_win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
-      mvwprintw(state->tab_win, 0, x, " %s ", name);
-      wattroff(state->tab_win, COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
-    } else {
-      /* Inactive tab */
-      mvwprintw(state->tab_win, 0, x, " %s ", name);
-    }
+    /* " name " in display columns, clipped to the label width */
+    attr_t attr = i == ws->current_tab ? COLOR_PAIR(COLOR_SELECTED) | A_BOLD
+                                       : A_NORMAL;
+    wattron(state->tab_win, attr);
+    mvwaddch(state->tab_win, 0, x, ' ');
+    tui_print_fit(state->tab_win, 0, x + 1, tab_width - 3, name);
+    waddch(state->tab_win, ' ');
+    wattroff(state->tab_win, attr);
 
     x += tab_width;
 
@@ -314,18 +256,21 @@ void tab_close(TuiState *state) {
 
   /* If closing a CONNECTION tab, check if other tabs use this connection */
   if (closing_type == TAB_TYPE_CONNECTION) {
-    /* Count other tabs using this connection */
-    size_t other_tabs_same_conn = 0;
-    for (size_t i = 0; i < ws->num_tabs; i++) {
-      if (i == tab_idx)
-        continue;
-      if (ws->tabs[i].connection_index == conn_idx) {
-        other_tabs_same_conn++;
-      }
-    }
-
     /* Close the tab first */
     workspace_close_tab(ws, tab_idx);
+
+    /* Count the tabs still using this connection in every workspace:
+     * app_close_connection closes all of them, including tabs (and their
+     * query text) in workspaces the user is not looking at. */
+    size_t other_tabs_same_conn = 0;
+    for (size_t w = 0; w < state->app->num_workspaces; w++) {
+      Workspace *other = &state->app->workspaces[w];
+      for (size_t i = 0; i < other->num_tabs; i++) {
+        if (other->tabs[i].connection_index == conn_idx) {
+          other_tabs_same_conn++;
+        }
+      }
+    }
 
     /* Shift UITabState entries (with bounds checking) */
     if (old_num_tabs > 0 && state->tab_ui &&
@@ -341,19 +286,14 @@ void tab_close(TuiState *state) {
       /* Other tabs still use this connection - just restore the next tab */
       if (ws->num_tabs > 0) {
         tab_restore(state);
+      } else {
+        workspace_close(state);
       }
       return;
     }
 
     /* No other tabs use this connection - close it */
-    /*
-     * Clear TuiState pointers BEFORE calling app_close_connection.
-     * These point to the same memory as Connection->conn/tables,
-     * which will be freed by app_close_connection. Don't free here!
-     */
-    state->conn = NULL;
-    state->tables = NULL;
-    state->num_tables = 0;
+    state->sidebar_tables_key = NULL;
 
     /* Close the connection in app state - this frees everything */
     app_close_connection(state->app, conn_idx);
@@ -435,8 +375,8 @@ void tab_close(TuiState *state) {
         tui_recreate_windows(state);
 
         /* Reset filters state */
-        state->filters_visible = false;
-        state->filters_focused = false;
+        tui_set_filters_visible(state, false);
+        tui_set_filters_focused(state, false);
         state->filters_was_focused = false;
         state->filters_editing = false;
         state->filters_cursor_row = 0;
@@ -502,8 +442,8 @@ void workspace_close(TuiState *state) {
   state->sidebar_filter[0] = '\0';
   state->sidebar_filter_len = 0;
   state->sidebar_filter_active = false;
-  state->filters_visible = false;
-  state->filters_focused = false;
+  tui_set_filters_visible(state, false);
+  tui_set_filters_focused(state, false);
   state->filters_was_focused = false;
   state->filters_editing = false;
   state->filters_cursor_row = 0;

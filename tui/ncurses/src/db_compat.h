@@ -9,6 +9,8 @@
 #ifndef LACE_DB_COMPAT_H
 #define LACE_DB_COMPAT_H
 
+#include <stdatomic.h>
+
 #include "../../liblace/include/lace.h"
 
 /* ==========================================================================
@@ -21,12 +23,6 @@ typedef LaceValueType DbValueType;
 #define DB_TYPE_NULL      LACE_TYPE_NULL
 #define DB_TYPE_INT       LACE_TYPE_INT
 #define DB_TYPE_FLOAT     LACE_TYPE_FLOAT
-#define DB_TYPE_TEXT      LACE_TYPE_TEXT
-#define DB_TYPE_DECIMAL   LACE_TYPE_DECIMAL
-#define DB_TYPE_BLOB      LACE_TYPE_BLOB
-#define DB_TYPE_BOOL      LACE_TYPE_BOOL
-#define DB_TYPE_DATE      LACE_TYPE_DATE
-#define DB_TYPE_TIMESTAMP LACE_TYPE_TIMESTAMP
 
 /* Value struct */
 typedef LaceValue DbValue;
@@ -62,8 +58,11 @@ typedef struct DbDriver {
 } DbDriver;
 
 /* Minimal DbConnection wrapper for compatibility */
+/* conn_id, generation and the transaction flags are written by worker
+ * threads (a reconnect, the reply of a statement) and read by the main
+ * thread (status bar, guards, cancel): they are atomics. */
 typedef struct DbConnection {
-  int conn_id;              /* liblace connection ID */
+  _Atomic int conn_id;      /* liblace connection ID */
   lace_client_t *client;    /* Back-reference to client */
   char *connstr;            /* Connection string (for display) */
   char *database;           /* Database name */
@@ -73,7 +72,7 @@ typedef struct DbConnection {
   LaceDriver driver_type;   /* Driver type enum */
   const DbDriver *driver;   /* Driver stub (for conn->driver->name) */
   char *last_error;         /* Last error message */
-  uint64_t generation;      /* lace_client_generation() when conn_id was issued */
+  _Atomic uint64_t generation; /* lace_client_generation() when issued */
 
   /* A best-effort background statement (the query tab's row count) using
    * this connection. The daemon runs one statement per connection, so any
@@ -83,9 +82,9 @@ typedef struct DbConnection {
   /* Transaction state as the daemon reported it after the last statement.
    * transaction_lost: the connection was replaced while one was open;
    * further work is refused until the user runs ROLLBACK. */
-  bool in_transaction;
-  bool transaction_failed; /* Open but failed: only ROLLBACK works (PG) */
-  bool transaction_lost;
+  _Atomic bool in_transaction;
+  _Atomic bool transaction_failed; /* Open but failed: only ROLLBACK works */
+  _Atomic bool transaction_lost;
 
   /* Called on the calling thread after a successful data change made
    * through db_update_cell/db_delete_row/db_insert_row (type is a
@@ -106,14 +105,6 @@ bool db_verify_row(DbConnection *conn, const char *table, const char **pk_cols,
                    const DbValue *pk_vals, size_t num_pk, const char **cols,
                    const DbValue *expected, size_t n, char **why);
 
-/* Connection status (compatibility) */
-typedef enum {
-  CONN_STATUS_DISCONNECTED,
-  CONN_STATUS_CONNECTING,
-  CONN_STATUS_CONNECTED,
-  CONN_STATUS_ERROR
-} ConnStatus;
-
 /* Create a DbConnection wrapper from liblace connection info */
 DbConnection *db_conn_wrap(lace_client_t *client, int conn_id, const char *connstr);
 
@@ -122,6 +113,11 @@ void db_conn_free(DbConnection *conn);
 
 /* Get driver name from connection */
 const char *db_conn_driver_name(DbConnection *conn);
+
+/* Index of the schema column called name, SIZE_MAX if none. Result columns
+ * and schema columns are matched by name, never by position: they differ
+ * when the table has hidden or generated columns, or a query picks some. */
+size_t db_schema_column_index(const TableSchema *schema, const char *name);
 
 /* ==========================================================================
  * Database operation wrappers
@@ -137,9 +133,6 @@ void db_disconnect(DbConnection *conn);
 /* List tables in connection */
 char **db_list_tables(DbConnection *conn, size_t *count, char **err);
 
-/* Free table list */
-void db_free_tables(char **tables, size_t count);
-
 /* Get table schema */
 TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **err);
 
@@ -149,13 +142,7 @@ ResultSet *db_query(DbConnection *conn, const char *sql, char **err);
 /* Execute non-SELECT statement */
 int64_t db_exec(DbConnection *conn, const char *sql, char **err);
 
-/* Query table with pagination and optional filters/sorts */
-ResultSet *db_query_table(DbConnection *conn, const char *table,
-                          const LaceFilter *filters, size_t num_filters,
-                          const LaceSort *sorts, size_t num_sorts,
-                          size_t offset, size_t limit, char **err);
-
-/* Query page (simple pagination without filters - uses db_query_table internally) */
+/* Query page (simple pagination without filters) */
 ResultSet *db_query_page(DbConnection *conn, const char *table,
                          size_t offset, size_t limit,
                          const char *order_clause, bool order_desc, char **err);
@@ -167,10 +154,9 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
                                const char *order_clause, bool order_desc,
                                char **err);
 
-/* Count rows in table (with optional filters) */
-bool db_count_rows(DbConnection *conn, const char *table,
-                   const LaceFilter *filters, size_t num_filters,
-                   size_t *count, bool *approximate, char **err);
+/* Count rows in table (*approximate in: estimate allowed; out: is estimate) */
+bool db_count_rows(DbConnection *conn, const char *table, size_t *count,
+                   bool *approximate, char **err);
 
 /* Count rows with WHERE clause (raw SQL) */
 bool db_count_rows_where(DbConnection *conn, const char *table,
@@ -201,21 +187,13 @@ ResultSet *db_select_by_pk(DbConnection *conn, const char *table,
 /* Cancel a running query on a connection */
 bool db_cancel_query(DbConnection *conn, char **err);
 
-/* Get driver stub from connection (for conn->driver->name) */
-const DbDriver *db_get_driver(DbConnection *conn);
-
 /* ==========================================================================
  * Function aliases
  * ========================================================================== */
 
 /* Value creation */
 #define db_value_null()           lace_value_null()
-#define db_value_int(v)           lace_value_int(v)
-#define db_value_float(v)         lace_value_float(v)
 #define db_value_text(s)          lace_value_text(s)
-#define db_value_text_len(s, l)   lace_value_text_len(s, l)
-#define db_value_blob(d, l)       lace_value_blob(d, l)
-#define db_value_bool(v)          lace_value_bool(v)
 #define db_value_copy(v)          lace_value_copy(v)
 
 /* Value conversion */
@@ -223,7 +201,6 @@ const DbDriver *db_get_driver(DbConnection *conn);
 
 /* Memory management */
 #define db_value_free(v)          lace_value_free(v)
-#define db_row_free(r)            lace_row_free(r)
 #define db_result_free(r)         lace_result_free(r)
 #define db_schema_free(s)         lace_schema_free(s)
 

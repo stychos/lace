@@ -9,10 +9,13 @@
 #ifndef LACE_STR_H
 #define LACE_STR_H
 
+#include "../lace_export.h"
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+LACE_BEGIN_DECLS
 
 /* String duplication (memory-safe, never returns NULL)
  * - NULL input is treated as empty string
@@ -38,20 +41,6 @@ char *str_url_decode(const char *s);
 /* SQL identifier escaping */
 char *str_escape_identifier_dquote(const char *s);   /* PostgreSQL/SQLite */
 char *str_escape_identifier_backtick(const char *s); /* MySQL/MariaDB */
-
-/* SQL WHERE clause builder for composite primary keys.
- * Builds clauses like: "col1" = ? AND "col2" = ? (for SQLite/MySQL)
- *                  or: "col1" = $1 AND "col2" = $2 (for PostgreSQL)
- * Parameters:
- *   pk_cols      - Array of column names
- *   num_pk_cols  - Number of columns
- *   use_dollar   - true for $N placeholders (PostgreSQL), false for ? (SQLite/MySQL)
- *   start_idx    - Starting index for $N placeholders (typically 1 or 2)
- *   use_backtick - true for backtick escaping (MySQL), false for double quotes
- * Returns: Heap-allocated WHERE clause string, or NULL on failure.
- *          Caller must free(). */
-char *str_build_pk_where(const char **pk_cols, size_t num_pk_cols, bool use_dollar,
-                         size_t start_idx, bool use_backtick);
 
 /* Conversion */
 bool str_to_int(const char *s, int *out);
@@ -200,5 +189,7 @@ static inline bool capacity_grow(size_t *new_cap, size_t current,
   *new_cap = cap;
   return true;
 }
+
+LACE_END_DECLS
 
 #endif /* LACE_STR_H */

@@ -16,13 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
-#include <termios.h>
 #include <unistd.h>
 
 #ifdef LACE_OS_MACOS
-#include <mach-o/dyld.h>
 #include <sys/syslimits.h>
 #endif
 
@@ -30,22 +27,10 @@
 #include <linux/limits.h>
 #endif
 
-#ifdef LACE_OS_FREEBSD
-#include <sys/sysctl.h>
-#include <sys/types.h>
-#endif
-
 /* Static buffers for path functions */
 static char s_home_dir[PATH_MAX];
 static char s_config_dir[PATH_MAX];
 static char s_data_dir[PATH_MAX];
-static char s_temp_dir[PATH_MAX];
-static char s_cwd[PATH_MAX];
-static char s_exe_dir[PATH_MAX];
-
-/* Original terminal settings for raw mode restoration */
-static struct termios s_orig_termios;
-static bool s_raw_mode_enabled = false;
 
 const char *platform_get_home_dir(void) {
   if (s_home_dir[0] != '\0') {
@@ -129,26 +114,6 @@ const char *platform_get_data_dir(void) {
   return s_data_dir;
 }
 
-const char *platform_get_temp_dir(void) {
-  if (s_temp_dir[0] != '\0') {
-    return s_temp_dir;
-  }
-
-  const char *tmp = getenv("TMPDIR");
-  if (!tmp) {
-    tmp = getenv("TMP");
-  }
-  if (!tmp) {
-    tmp = getenv("TEMP");
-  }
-  if (!tmp) {
-    tmp = "/tmp";
-  }
-
-  snprintf(s_temp_dir, sizeof(s_temp_dir), "%s", tmp);
-  return s_temp_dir;
-}
-
 bool platform_file_exists(const char *path) {
   if (!path) {
     return false;
@@ -163,6 +128,64 @@ bool platform_dir_exists(const char *path) {
   }
   struct stat st;
   return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+char *platform_read_file(const char *path, size_t max_bytes) {
+  if (!path) {
+    errno = EINVAL;
+    return NULL;
+  }
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return NULL;
+  struct stat st;
+  if (fstat(fileno(f), &st) == 0 && st.st_size > 0 &&
+      (unsigned long long)st.st_size > max_bytes) {
+    fclose(f);
+    errno = EFBIG;
+    return NULL;
+  }
+  /* Read to EOF rather than trusting the size: a short read is not the end */
+  size_t cap = st.st_size > 0 ? (size_t)st.st_size + 1 : 4096;
+  char *buf = malloc(cap);
+  size_t len = 0;
+  while (buf) {
+    if (len + 1 >= cap) {
+      if (cap > max_bytes) {
+        memset(buf, 0, cap);
+        free(buf);
+        buf = NULL;
+        errno = EFBIG;
+        break;
+      }
+      /* Copy and wipe rather than realloc: no stray copy of a password */
+      char *grown = malloc(cap * 2);
+      if (grown)
+        memcpy(grown, buf, len);
+      memset(buf, 0, cap);
+      free(buf);
+      buf = grown;
+      cap *= 2;
+      if (!buf)
+        break;
+    }
+    size_t n = fread(buf + len, 1, cap - len - 1, f);
+    len += n;
+    if (n == 0) {
+      if (ferror(f)) {
+        int saved = errno ? errno : EIO;
+        memset(buf, 0, cap);
+        free(buf);
+        buf = NULL;
+        errno = saved;
+      }
+      break;
+    }
+  }
+  fclose(f);
+  if (buf)
+    buf[len] = '\0';
+  return buf;
 }
 
 bool platform_write_file_private(const char *path, const char *data,
@@ -250,128 +273,6 @@ bool platform_mkdir(const char *path) {
   /* Create final directory */
   if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
     return false;
-  }
-
-  return true;
-}
-
-const char *platform_getenv(const char *name) { return getenv(name); }
-
-bool platform_setenv(const char *name, const char *value) {
-  if (!name) {
-    return false;
-  }
-  if (value) {
-    return setenv(name, value, 1) == 0;
-  } else {
-    return unsetenv(name) == 0;
-  }
-}
-
-const char *platform_getcwd(void) {
-  if (getcwd(s_cwd, sizeof(s_cwd)) != NULL) {
-    return s_cwd;
-  }
-  return NULL;
-}
-
-const char *platform_get_exe_dir(void) {
-  if (s_exe_dir[0] != '\0') {
-    return s_exe_dir;
-  }
-
-  char path[PATH_MAX];
-
-#ifdef LACE_OS_MACOS
-  uint32_t size = sizeof(path);
-  if (_NSGetExecutablePath(path, &size) == 0) {
-    char *resolved = realpath(path, NULL);
-    if (resolved) {
-      /* Get directory part */
-      char *last_sep = strrchr(resolved, '/');
-      if (last_sep) {
-        size_t len = (size_t)(last_sep - resolved);
-        if (len < sizeof(s_exe_dir)) {
-          memcpy(s_exe_dir, resolved, len);
-          s_exe_dir[len] = '\0';
-        }
-      }
-      free(resolved);
-    }
-  }
-#elif defined(LACE_OS_LINUX)
-  ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-  if (len > 0) {
-    path[len] = '\0';
-    char *last_sep = strrchr(path, '/');
-    if (last_sep) {
-      size_t dir_len = (size_t)(last_sep - path);
-      if (dir_len < sizeof(s_exe_dir)) {
-        memcpy(s_exe_dir, path, dir_len);
-        s_exe_dir[dir_len] = '\0';
-      }
-    }
-  }
-#elif defined(LACE_OS_FREEBSD)
-  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
-  size_t size = sizeof(path);
-  if (sysctl(mib, 4, path, &size, NULL, 0) == 0) {
-    char *last_sep = strrchr(path, '/');
-    if (last_sep) {
-      size_t len = (size_t)(last_sep - path);
-      if (len < sizeof(s_exe_dir)) {
-        memcpy(s_exe_dir, path, len);
-        s_exe_dir[len] = '\0';
-      }
-    }
-  }
-#endif
-
-  return s_exe_dir[0] ? s_exe_dir : NULL;
-}
-
-bool platform_is_tty(void) { return isatty(STDOUT_FILENO) != 0; }
-
-bool platform_get_terminal_size(int *width, int *height) {
-  struct winsize ws;
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-    if (width) {
-      *width = ws.ws_col;
-    }
-    if (height) {
-      *height = ws.ws_row;
-    }
-    return true;
-  }
-  return false;
-}
-
-bool platform_set_raw_mode(bool enable) {
-  if (enable && !s_raw_mode_enabled) {
-    /* Save original settings */
-    if (tcgetattr(STDIN_FILENO, &s_orig_termios) != 0) {
-      return false;
-    }
-
-    struct termios raw = s_orig_termios;
-    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_cflag |= CS8;
-    raw.c_oflag &= ~OPOST;
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
-
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0) {
-      return false;
-    }
-
-    s_raw_mode_enabled = true;
-    return true;
-  } else if (!enable && s_raw_mode_enabled) {
-    /* Restore original settings */
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &s_orig_termios);
-    s_raw_mode_enabled = false;
-    return true;
   }
 
   return true;

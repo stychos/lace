@@ -14,6 +14,7 @@
 #include "render_helpers.h"
 #include "tui_internal.h"
 #include "../../liblace/include/util/str.h"
+#include "views/list_picker.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -302,59 +303,9 @@ void tui_show_history_dialog(TuiState *state) {
     UiEvent event;
     render_translate_key(ch, &event);
 
-    /* Navigation keys (not configurable, vim-style) */
-    if (ch == 'k' || ch == KEY_UP) {
-      if (selected > 0) {
-        selected--;
-        if (selected < scroll_offset) {
-          scroll_offset = selected;
-        }
-      }
-    } else if (ch == 'j' || ch == KEY_DOWN) {
-      if (num_entries > 0 && selected < num_entries - 1) {
-        selected++;
-        if (selected >= scroll_offset + visible_rows) {
-          scroll_offset = selected - visible_rows + 1;
-        }
-      }
-    } else if (ch == KEY_PPAGE) {
-      if (num_entries > 0) {
-        size_t page_size = visible_rows > 1 ? visible_rows - 1 : 1;
-        if (selected >= page_size) {
-          selected -= page_size;
-        } else {
-          selected = 0;
-        }
-        if (selected < scroll_offset) {
-          scroll_offset = selected;
-        }
-      }
-    } else if (ch == KEY_NPAGE) {
-      if (num_entries > 0) {
-        size_t page_size = visible_rows > 1 ? visible_rows - 1 : 1;
-        selected += page_size;
-        if (selected >= num_entries) {
-          selected = num_entries - 1;
-        }
-        if (selected >= scroll_offset + visible_rows) {
-          scroll_offset = selected - visible_rows + 1;
-        }
-      }
-    } else if (ch == 'g' || ch == KEY_HOME) {
-      if (num_entries > 0) {
-        selected = 0;
-        scroll_offset = 0;
-      }
-    } else if (ch == 'G' || ch == KEY_END) {
-      if (num_entries > 0) {
-        selected = num_entries - 1;
-        if (num_entries > visible_rows) {
-          scroll_offset = num_entries - visible_rows;
-        }
-      }
-    }
-    /* Configurable hotkeys */
-    else if (hotkey_matches(state->app->config, &event, HOTKEY_HISTORY_COPY)) {
+    /* The dialog's own hotkeys first, then list navigation with the
+     * user's movement keys */
+    if (hotkey_matches(state->app->config, &event, HOTKEY_HISTORY_COPY)) {
       /* Copy selected entry to clipboard */
       if (num_entries > 0) {
         size_t entry_idx = num_entries - 1 - selected;
@@ -392,12 +343,7 @@ void tui_show_history_dialog(TuiState *state) {
                               HOTKEY_HISTORY_CLEAR)) {
       /* Clear all history (with confirmation) */
       if (num_entries > 0) {
-        /* Simple confirmation - show message on same dialog */
-        mvwprintw(dialog, height / 2, (width - 30) / 2,
-                  "Clear all history? (y/n)");
-        wrefresh(dialog);
-        int confirm = wgetch(dialog);
-        if (confirm == 'y' || confirm == 'Y') {
+        if (tui_show_confirm_dialog(state, "Clear all history?")) {
           history_clear(history);
           running = false;
           tui_set_status(state, "History cleared");
@@ -406,6 +352,9 @@ void tui_show_history_dialog(TuiState *state) {
     } else if (hotkey_matches(state->app->config, &event,
                               HOTKEY_HISTORY_CLOSE)) {
       running = false;
+    } else {
+      tui_list_nav_key(state->app->config, &event, num_entries, visible_rows,
+                       &selected, &scroll_offset);
     }
   }
 

@@ -108,7 +108,7 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
   int max_name_len = SIDEBAR_WIDTH - 4;
   if (max_name_len < 1)
     max_name_len = 1;
-  int name_len = (int)strlen(name);
+  int name_len = utf8_width(name, strlen(name)); /* In columns */
 
   /* Only animate if name is truncated */
   if (name_len <= max_name_len) {
@@ -147,6 +147,86 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
 }
 
 /* Handle sidebar input when focused */
+/* Open table actual_idx (index into the connection's tables) from the
+ * sidebar, for both Enter and a mouse click: switch to its tab from a query
+ * tab, turn a connection tab into a table tab, or replace the current tab's
+ * table. Filters and sort refer to columns by index, so they are cleared when
+ * the table changes. */
+void sidebar_open_table(TuiState *state, size_t actual_idx) {
+  if (!TUI_TABLES(state) || actual_idx >= TUI_NUM_TABLES(state))
+    return;
+
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!ws || ws->num_tabs == 0) {
+    /* No tabs yet - create first one */
+    tab_create(state, actual_idx);
+  } else {
+    Tab *tab = TUI_TAB(state);
+    if (tab && tab->type == TAB_TYPE_QUERY) {
+      /* Query tab active - check if table tab already exists for same
+       * connection */
+      bool found = false;
+      size_t current_conn = tab->connection_index;
+      for (size_t i = 0; i < ws->num_tabs; i++) {
+        Tab *t = &ws->tabs[i];
+        if (t->type == TAB_TYPE_TABLE && t->table_name &&
+            str_eq(t->table_name, TUI_TABLES(state)[actual_idx]) &&
+            t->connection_index == current_conn) {
+          /* Found existing tab for same table and connection - switch to it
+           */
+          tab_switch(state, i);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        /* No existing tab - create new one */
+        tab_create(state, actual_idx);
+      }
+    } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
+      /* Connection tab active - convert to table tab */
+      char **tables = TUI_TABLES(state);
+      free(tab->table_name);
+      tab->table_name = tables ? str_dup(tables[actual_idx]) : NULL;
+      tab->type = TAB_TYPE_TABLE;
+
+      /* Load table - tui_load_table_data handles Tab data */
+      if (tables)
+        tui_load_table_data(state, tables[actual_idx]);
+    } else if (tab && !(tab->table_name &&
+                        str_eq(tab->table_name, TUI_TABLES(state)[actual_idx]))) {
+      /* Replace current tab's table */
+      char **tables = TUI_TABLES(state);
+      /* Copy new name first to avoid use-after-free if aliased */
+      char *new_name = tables ? str_dup(tables[actual_idx]) : NULL;
+
+      /* Free old data - NULL out pointers first to avoid dangling refs */
+      ResultSet *old_data = tab->data;
+      TableSchema *old_schema = tab->schema;
+      tab->data = NULL;
+      tab->schema = NULL;
+      tab_data_replaced(tab);
+      db_result_free(old_data);
+      db_schema_free(old_schema);
+      free(tab->col_widths);
+      tab->col_widths = NULL;
+      free(tab->table_name);
+
+      /* Update tab */
+      tab->table_name = new_name;
+
+      /* Clear filters and sort when switching to a different table:
+       * both refer to columns of the old table by index */
+      filters_clear(&tab->filters);
+      tab->num_sort_entries = 0;
+
+      /* Load new table - tui_load_table_data handles Tab data */
+      if (tables)
+        tui_load_table_data(state, tables[actual_idx]);
+    }
+  }
+}
+
 bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
   if (!state->sidebar_focused || !event || event->type != UI_EVENT_KEY)
     return false;
@@ -211,8 +291,6 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
         state->sidebar_scroll = 0;
       }
     }
-    /* Sync focus state to Tab so it persists across tab switches */
-    tab_sync_focus(state);
     return true;
   }
 
@@ -251,76 +329,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       size_t actual_idx =
           tui_get_filtered_table_index(state, state->sidebar_highlight);
 
-      Workspace *ws = TUI_WORKSPACE(state);
-      if (!ws || ws->num_tabs == 0) {
-        /* No tabs yet - create first one */
-        tab_create(state, actual_idx);
-      } else {
-        Tab *tab = TUI_TAB(state);
-        if (tab && tab->type == TAB_TYPE_QUERY) {
-          /* Query tab active - check if table tab already exists for same
-           * connection */
-          bool found = false;
-          size_t current_conn = tab->connection_index;
-          for (size_t i = 0; i < ws->num_tabs; i++) {
-            Tab *t = &ws->tabs[i];
-            if (t->type == TAB_TYPE_TABLE && t->table_index == actual_idx &&
-                t->connection_index == current_conn) {
-              /* Found existing tab for same table and connection - switch to it
-               */
-              tab_switch(state, i);
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            /* No existing tab - create new one */
-            tab_create(state, actual_idx);
-          }
-        } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
-          /* Connection tab active - convert to table tab */
-          char **tables = TUI_TABLES(state);
-          free(tab->table_name);
-          tab->table_name = tables ? str_dup(tables[actual_idx]) : NULL;
-          tab->type = TAB_TYPE_TABLE;
-          tab->table_index = actual_idx;
-
-          /* Load table - tui_load_table_data handles Tab data */
-          if (tables)
-            tui_load_table_data(state, tables[actual_idx]);
-        } else if (tab && actual_idx != tab->table_index) {
-          /* Replace current tab's table */
-          char **tables = TUI_TABLES(state);
-          /* Copy new name first to avoid use-after-free if aliased */
-          char *new_name = tables ? str_dup(tables[actual_idx]) : NULL;
-
-          /* Free old data - NULL out pointers first to avoid dangling refs */
-          ResultSet *old_data = tab->data;
-          TableSchema *old_schema = tab->schema;
-          tab->data = NULL;
-          tab->schema = NULL;
-          tab_data_replaced(tab);
-          db_result_free(old_data);
-          db_schema_free(old_schema);
-          free(tab->col_widths);
-          tab->col_widths = NULL;
-          free(tab->table_name);
-
-          /* Update tab */
-          tab->table_index = actual_idx;
-          tab->table_name = new_name;
-
-          /* Clear filters and sort when switching to a different table:
-           * both refer to columns of the old table by index */
-          filters_clear(&tab->filters);
-          tab->num_sort_entries = 0;
-
-          /* Load new table - tui_load_table_data handles Tab data */
-          if (tables)
-            tui_load_table_data(state, tables[actual_idx]);
-          /* Note: tui_load_table_data rebinds FiltersWidget with new schema */
-        }
-      }
+      sidebar_open_table(state, actual_idx);
       /* Save position before leaving sidebar */
       state->sidebar_last_position = tui_sidebar_highlight(state);
       tui_set_sidebar_focused(state, false);
@@ -425,8 +434,6 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
     return false;
   }
 
-  /* Sync focus state to Tab so it persists across tab switches */
-  tab_sync_focus(state);
   return true;
 }
 
@@ -531,7 +538,7 @@ void tui_draw_sidebar(TuiState *state) {
 
   /* Draw filtered tables */
   size_t filtered_idx = 0;
-  size_t current_table_idx = current_tab ? current_tab->table_index : SIZE_MAX;
+  size_t current_table_idx = app_tab_table_position(state->app, current_tab);
   for (size_t i = 0; i < num_tables && y < win_height - 1; i++) {
     const char *name = tables[i];
     if (!name)
@@ -556,32 +563,35 @@ void tui_draw_sidebar(TuiState *state) {
       wattron(state->sidebar_win, A_REVERSE);
     }
 
-    /* Truncate name if too long */
-    char display_name[SIDEBAR_WIDTH];
-    int name_len = (int)strlen(name);
+    /* Truncate name if too long (by display columns, never mid-character) */
+    size_t name_bytes = strlen(name);
+    int name_len = utf8_width(name, name_bytes);
+    char *display_name = NULL;
     if (name_len > max_name_len) {
       if (is_highlighted && state->sidebar_focused &&
           !state->sidebar_filter_active) {
-        /* Apply scroll animation for highlighted item */
+        /* Apply scroll animation for highlighted item (scroll is columns) */
         size_t name_scroll = state->sidebar_name_scroll;
         if (name_scroll > (size_t)(name_len - max_name_len)) {
           name_scroll = (size_t)(name_len - max_name_len);
         }
-        snprintf(display_name, sizeof(display_name), "%.*s", max_name_len,
-                 name + name_scroll);
+        display_name =
+            str_dup(name + utf8_offset_at_col(name, name_bytes, (int)name_scroll));
       } else {
-        snprintf(display_name, sizeof(display_name), "%.*s..", max_name_len - 2,
-                 name);
+        int cols = 0;
+        size_t keep = utf8_fit(name, name_bytes, max_name_len - 2, &cols);
+        display_name = str_printf("%.*s..", (int)keep, name);
       }
     } else {
-      snprintf(display_name, sizeof(display_name), "%s", name);
+      display_name = str_dup(name);
     }
 
     if (is_current) {
       wattron(state->sidebar_win, A_BOLD);
     }
 
-    mvwprintw(state->sidebar_win, y, 2, "%-*s", max_name_len, display_name);
+    tui_print_fit(state->sidebar_win, y, 2, max_name_len, display_name);
+    free(display_name);
 
     if (is_current) {
       wattroff(state->sidebar_win, A_BOLD);

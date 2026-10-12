@@ -34,7 +34,7 @@ typedef struct {
   size_t max_file_size;   /* Max log file size before rotation (0 = no limit) */
   int max_rotated_files;  /* Number of rotated files to keep */
   bool use_stderr;        /* Log to stderr instead of file */
-  char *log_path;         /* Path to log file (NULL = default) */
+  const char *log_path;   /* Path to log file (NULL = default; copied) */
 } LogConfig;
 
 /* Default configuration values */

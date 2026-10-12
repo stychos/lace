@@ -9,8 +9,11 @@
 #ifndef LACE_CONNSTR_H
 #define LACE_CONNSTR_H
 
+#include "../lace_export.h"
 #include <stdbool.h>
 #include <stddef.h>
+
+LACE_BEGIN_DECLS
 
 /* Parsed connection string */
 typedef struct {
@@ -61,6 +64,10 @@ void connstr_free(ConnString *cs);
 /* Get an option value by key, returns NULL if not found */
 const char *connstr_get_option(const ConnString *cs, const char *key);
 
+/* A file path for a sqlite:// URL: '%', '?' and '#' percent-encoded ('/'
+ * kept), so the parser gets the path back exactly. Allocated. */
+char *connstr_encode_path(const char *path);
+
 /* Get an option value with default */
 const char *connstr_get_option_default(const ConnString *cs, const char *key,
                                        const char *default_val);
@@ -104,5 +111,7 @@ char *connstr_from_path(const char *path, char **err);
  * Returns allocated string or NULL on error. Caller must free().
  */
 char *connstr_mask_password(const char *connstr);
+
+LACE_END_DECLS
 
 #endif /* LACE_CONNSTR_H */

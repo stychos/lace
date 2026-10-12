@@ -12,15 +12,12 @@
 #include "../../include/util/mem.h"
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 char *str_dup(const char *s) {
   if (!s)
@@ -36,11 +33,17 @@ char *str_dup(const char *s) {
 char *str_ndup(const char *s, size_t n) {
   if (!s)
     s = "";
-  char *result = strndup(s, n);
+  /* Not strndup: Windows has none */
+  size_t len = 0;
+  while (len < n && s[len])
+    len++;
+  char *result = malloc(len + 1);
   if (!result) {
     fprintf(stderr, "Fatal: out of memory in str_ndup\n");
     abort();
   }
+  memcpy(result, s, len);
+  result[len] = '\0';
   return result;
 }
 
@@ -117,32 +120,38 @@ char *str_url_encode(const char *s) {
   return sb_to_string(sb);
 }
 
+/* Percent-decoding for URL parts (RFC 3986): "%XX" with two hex digits
+ * is that byte, everything else is itself. '+' is a literal plus (it means
+ * a space only in form data), and %00 stays as written: a NUL would cut
+ * the value short. */
+static int hex_digit(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
 char *str_url_decode(const char *s) {
   if (!s)
     return NULL;
 
-  size_t len = strlen(s);
-  char *result = safe_malloc(len + 1);
-
+  char *result = safe_malloc(strlen(s) + 1);
   char *dst = result;
   for (const char *p = s; *p; p++) {
-    if (*p == '%' && p[1] && p[2]) {
-      char hex[3] = {p[1], p[2], '\0'};
-      char *endptr;
-      long val = strtol(hex, &endptr, 16);
-      if (*endptr == '\0' && val >= 0 && val <= 255) {
-        *dst++ = (unsigned char)val;
+    if (*p == '%') {
+      int hi = hex_digit(p[1]), lo = hi >= 0 ? hex_digit(p[2]) : -1;
+      if (hi >= 0 && lo >= 0 && (hi || lo)) {
+        *dst++ = (char)(hi * 16 + lo);
         p += 2;
         continue;
       }
-    } else if (*p == '+') {
-      *dst++ = ' ';
-      continue;
     }
     *dst++ = *p;
   }
   *dst = '\0';
-
   return result;
 }
 
@@ -223,7 +232,7 @@ StringBuilder *sb_new(size_t initial_cap) {
   StringBuilder *sb = safe_malloc(sizeof(StringBuilder));
 
   if (initial_cap == 0)
-    initial_cap = SB_INITIAL_CAP;
+    initial_cap = LACE_SB_INITIAL_CAP;
 
   sb->data = safe_malloc(initial_cap);
   sb->data[0] = '\0';
@@ -250,12 +259,12 @@ static bool sb_grow(StringBuilder *sb, size_t min_cap) {
   size_t new_cap = sb->cap;
   while (new_cap < min_cap) {
     /* Check for overflow before multiplying */
-    if (new_cap > SIZE_MAX / SB_GROWTH_FACTOR) {
+    if (new_cap > SIZE_MAX / LACE_SB_GROWTH_FACTOR) {
       /* Would overflow, try exact allocation */
       new_cap = min_cap;
       break;
     }
-    new_cap *= SB_GROWTH_FACTOR;
+    new_cap *= LACE_SB_GROWTH_FACTOR;
   }
 
   sb->data = safe_realloc(sb->data, new_cap);
@@ -475,48 +484,6 @@ char *str_escape_identifier_backtick(const char *s) {
   sb_append_char(sb, '`');
 
   return sb_finish(sb); /* Returns NULL on any failure */
-}
-
-char *str_build_pk_where(const char **pk_cols, size_t num_pk_cols, bool use_dollar,
-                         size_t start_idx, bool use_backtick) {
-  if (!pk_cols || num_pk_cols == 0)
-    return NULL;
-
-  StringBuilder *sb = sb_new(64);
-  if (!sb)
-    return NULL;
-
-  for (size_t i = 0; i < num_pk_cols; i++) {
-    if (!pk_cols[i]) {
-      sb_free(sb);
-      return NULL;
-    }
-
-    /* Escape column name */
-    char *escaped = use_backtick ? str_escape_identifier_backtick(pk_cols[i])
-                                 : str_escape_identifier_dquote(pk_cols[i]);
-    if (!escaped) {
-      sb_free(sb);
-      return NULL;
-    }
-
-    /* Add AND separator after first column */
-    if (i > 0) {
-      sb_append(sb, " AND ");
-    }
-
-    /* Add "column = placeholder" */
-    sb_append(sb, escaped);
-    if (use_dollar) {
-      sb_printf(sb, " = $%zu", start_idx + i);
-    } else {
-      sb_append(sb, " = ?");
-    }
-
-    free(escaped);
-  }
-
-  return sb_finish(sb);
 }
 
 /* ============================================================================

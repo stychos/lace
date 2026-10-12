@@ -13,160 +13,15 @@
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
 #include "views/editor_view.h"
+#include "views/text_input.h"
+#include "row_key.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* MAX_PK_COLUMNS is defined in db_types.h */
 
 /* Note: History recording is now handled automatically by the database layer
  * via the history callback set up in app_add_connection(). */
-
-/* Primary key info for database operations */
-typedef struct {
-  const char **col_names; /* Array of PK column names (not owned) */
-  DbValue *values;        /* Array of PK values (owned, must be freed) */
-  size_t count;           /* Number of PK columns */
-} PkInfo;
-
-/* Find all primary key column indices using VmTable */
-size_t tui_find_pk_columns(TuiState *state, size_t *pk_indices,
-                           size_t max_pks) {
-  if (!pk_indices || max_pks == 0)
-    return 0;
-
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
-    return 0;
-
-  const TableSchema *schema = table_vm_get_schema(vm);
-  if (!schema)
-    return 0;
-
-  size_t count = 0;
-  for (size_t i = 0; i < schema->num_columns && count < max_pks; i++) {
-    if (schema->columns[i].primary_key) {
-      pk_indices[count++] = i;
-    }
-  }
-  return count;
-}
-
-/* Why the key of a row cannot address it safely (NULL if it can): a NULL
- * part matches no row with "=" and every NULL row with "IS NULL" (SQLite
- * allows several NULLs in a non-INTEGER primary key); NaN/Inf have no exact
- * literal on most databases. */
-static const char *pk_value_problem(const DbValue *v) {
-  if (v->is_null || v->type == DB_TYPE_NULL) {
-    return "its primary key contains NULL";
-  }
-  if (v->type == DB_TYPE_FLOAT && !isfinite(v->float_val)) {
-    return "its primary key is NaN or infinite";
-  }
-  return NULL;
-}
-
-/* Build PK info from result set row. Returns false on error; *why (if
- * given) is then a static reason. Key columns are found by NAME in the
- * result: schema positions differ from result positions when the table has
- * generated or hidden columns. */
-static bool pk_info_build_why(PkInfo *pk, ResultSet *data, size_t row_idx,
-                              TableSchema *schema, const char **why) {
-  if (why)
-    *why = "no primary key found";
-  if (!pk || !data || !schema || row_idx >= data->num_rows)
-    return false;
-  if (!data->rows || !data->columns)
-    return false;
-  Row *row = &data->rows[row_idx];
-  if (!row->cells)
-    return false;
-
-  size_t pk_indices[MAX_PK_COLUMNS];
-  size_t num_pk = 0;
-  for (size_t i = 0; i < schema->num_columns; i++) {
-    if (!schema->columns[i].primary_key)
-      continue;
-    if (num_pk >= MAX_PK_COLUMNS)
-      return false;
-    const char *name = schema->columns[i].name;
-    size_t found = SIZE_MAX;
-    for (size_t j = 0; name && j < data->num_columns && j < row->num_cells; j++) {
-      if (data->columns[j].name && strcmp(data->columns[j].name, name) == 0) {
-        found = j;
-        break;
-      }
-    }
-    if (found == SIZE_MAX) {
-      if (why)
-        *why = "a primary key column is not in the loaded data";
-      return false;
-    }
-    const char *problem = pk_value_problem(&row->cells[found]);
-    if (problem) {
-      if (why)
-        *why = problem;
-      return false;
-    }
-    pk_indices[num_pk++] = found;
-  }
-  if (num_pk == 0)
-    return false;
-
-  pk->col_names = safe_malloc(sizeof(char *) * num_pk);
-  pk->values = safe_malloc(sizeof(DbValue) * num_pk);
-  for (size_t i = 0; i < num_pk; i++) {
-    pk->col_names[i] = data->columns[pk_indices[i]].name;
-    pk->values[i] = db_value_copy(&row->cells[pk_indices[i]]);
-  }
-  pk->count = num_pk;
-  if (why)
-    *why = NULL;
-  return true;
-}
-
-/* Re-read the row by its key before changing it: it must exist exactly
- * once, and the edited column (col_idx), or for a delete (SIZE_MAX) every
- * loaded column, must still hold the loaded value. *why is allocated on
- * failure. */
-static bool table_row_verified(DbConnection *conn, const char *table,
-                               const PkInfo *pk, ResultSet *data,
-                               size_t row_idx, size_t col_idx, char **why) {
-  const char *col = NULL;
-  const DbValue *expected = NULL;
-  if (col_idx != SIZE_MAX && col_idx < data->num_columns &&
-      col_idx < data->rows[row_idx].num_cells) {
-    col = data->columns[col_idx].name;
-    expected = &data->rows[row_idx].cells[col_idx];
-  }
-  if (col) {
-    return db_verify_row(conn, table, (const char **)pk->col_names, pk->values,
-                         pk->count, &col, expected, 1, why);
-  }
-  /* Whole row (delete): every loaded column must still match, so a row
-   * changed elsewhere since it was loaded is not deleted unseen. Values too
-   * large to load are skipped. */
-  const Row *row = &data->rows[row_idx];
-  size_t n = 0;
-  const char **cols = safe_calloc(data->num_columns + 1, sizeof(char *));
-  DbValue *vals = safe_calloc(data->num_columns + 1, sizeof(DbValue));
-  for (size_t c = 0; c < data->num_columns && c < row->num_cells; c++) {
-    if (row->cells[c].omitted || !data->columns[c].name)
-      continue;
-    cols[n] = data->columns[c].name;
-    vals[n] = row->cells[c]; /* Shallow: borrowed */
-    n++;
-  }
-  bool ok = n > 0 ? db_verify_row(conn, table, (const char **)pk->col_names,
-                                  pk->values, pk->count, cols, vals, n, why)
-                  : db_verify_row(conn, table, (const char **)pk->col_names,
-                                  pk->values, pk->count,
-                                  (const char **)pk->col_names, pk->values,
-                                  pk->count, why);
-  free(cols);
-  free(vals);
-  return ok;
-}
 
 bool tui_edit_new_value(const DbValue *orig, LaceValueType col_type,
                         const char *buffer, DbValue *out, bool *unchanged,
@@ -199,20 +54,231 @@ bool tui_edit_new_value(const DbValue *orig, LaceValueType col_type,
   return lace_value_from_edit_text(buffer, like, out, err);
 }
 
-/* Free PK info resources */
-static void pk_info_free(PkInfo *pk) {
-  if (!pk)
-    return;
-  free(pk->col_names);
-  if (pk->values) {
-    for (size_t i = 0; i < pk->count; i++) {
-      db_value_free(&pk->values[i]);
-    }
-    free(pk->values);
+/* ==========================================================================
+ * Writing cells and deleting rows: one path for table tabs and query results
+ * ========================================================================== */
+
+bool tui_edit_target_table(TuiState *state, EditTarget *t) {
+  memset(t, 0, sizeof(*t));
+  VmTable *vm = tui_vm_table(state);
+  Tab *tab = TUI_TAB(state);
+  if (!vm || !tab)
+    return false;
+  t->conn = table_vm_connection(vm);
+  t->table = table_vm_table_name(vm);
+  t->schema = table_vm_get_schema(vm);
+  t->data = tab->data;
+  t->tab = tab;
+  return t->conn && t->table && t->schema && t->data;
+}
+
+void tui_edit_target_query(TuiState *state, Tab *tab, EditTarget *t) {
+  memset(t, 0, sizeof(*t));
+  t->conn = TUI_CONN(state);
+  t->table = tab->query_source_table;
+  t->schema = tab->query_source_schema;
+  t->data = tab->query_results;
+  t->tab = tab;
+  t->query_result = true;
+}
+
+static DbValue *target_cell(const EditTarget *t, size_t row, size_t col) {
+  ResultSet *d = t->data;
+  if (!d || !d->rows || row >= d->num_rows || col >= d->num_columns ||
+      !d->rows[row].cells || col >= d->rows[row].num_cells)
+    return NULL;
+  return &d->rows[row].cells[col];
+}
+
+/* The row's key; query results need every key column exactly once */
+static RowKeyStatus target_row_key(const EditTarget *t, size_t row,
+                                   RowKey *key, const char **why) {
+  if (!t->conn || !t->table || !t->schema) {
+    memset(key, 0, sizeof(*key));
+    *why = "the source table is not known";
+    return ROW_KEY_NONE;
   }
-  pk->col_names = NULL;
-  pk->values = NULL;
-  pk->count = 0;
+  return row_key_build(key, t->data, row, t->schema, t->query_result, why);
+}
+
+/* Re-read the row as the UPDATE or DELETE will address it: the edited cell
+ * (col), or every loaded column of the table (SIZE_MAX). Query results are
+ * always checked whole: an aliased or computed column, or a same-shaped
+ * other table, must not be written through. */
+static bool target_row_verified(const EditTarget *t, size_t row, size_t col,
+                                const RowKey *key, char **why) {
+  if (t->query_result)
+    col = SIZE_MAX;
+  return row_key_verify(t->conn, t->table, key, t->data, row, col, t->schema,
+                        why);
+}
+
+/* Is column col of t->data part of the table tab's page order (a sort
+ * column or a primary-key column)? Editing one moves its row in the order. */
+static bool orders_by_column(const EditTarget *t, size_t col) {
+  const char *name = t->data->columns[col].name;
+  if (!name || !t->schema)
+    return false;
+  for (size_t k = 0; k < t->schema->num_columns; k++) {
+    const ColumnDef *c = &t->schema->columns[k];
+    if (!c->name || strcmp(c->name, name) != 0)
+      continue;
+    if (c->primary_key)
+      return true;
+    for (size_t i = 0; i < t->tab->num_sort_entries; i++) {
+      if (t->tab->sort_entries[i].column == k)
+        return true;
+    }
+  }
+  return false;
+}
+
+bool tui_edit_write_cell(TuiState *state, const EditTarget *t, size_t row,
+                         size_t col, const char *text, const char *done_msg) {
+  DbValue *cell = target_cell(t, row, col);
+  if (!cell)
+    return false;
+
+  /* The new value, from the text and what the cell held: nothing is
+   * written for an unchanged value, and an empty text is '' (not NULL) */
+  DbValue new_val;
+  bool unchanged = false;
+  char *conv_err = NULL;
+  if (!tui_edit_new_value(cell, t->data->columns[col].type, text, &new_val,
+                          &unchanged, &conv_err)) {
+    tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
+    free(conv_err);
+    return false;
+  }
+  if (unchanged) {
+    tui_set_status(state, "No change");
+    db_value_free(&new_val);
+    return false;
+  }
+
+  RowKey pk = {0};
+  const char *pk_why = NULL;
+  RowKeyStatus key_status = target_row_key(t, row, &pk, &pk_why);
+  if (key_status == ROW_KEY_BAD ||
+      (key_status == ROW_KEY_NONE && !t->query_result)) {
+    /* A row that cannot be addressed: say so instead of quietly keeping
+     * the edit on screen only */
+    tui_set_error(state, "Not updated: %s", pk_why);
+    db_value_free(&new_val);
+    return false;
+  }
+
+  if (key_status == ROW_KEY_OK) {
+    char *why = NULL;
+    if (!target_row_verified(t, row, col, &pk, &why)) {
+      tui_set_error(state, "Not updated: %s", why ? why : "row check failed");
+      free(why);
+      row_key_free(&pk);
+      db_value_free(&new_val);
+      return false;
+    }
+    char *err = NULL;
+    bool ok = db_update_cell(t->conn, t->table, pk.col_names, pk.values,
+                             pk.count, t->data->columns[col].name, &new_val,
+                             &err);
+    row_key_free(&pk);
+    if (!ok) {
+      tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
+      free(err);
+      db_value_free(&new_val);
+      return false;
+    }
+  }
+
+  db_value_free(cell);
+  *cell = new_val;
+  if (!t->query_result && orders_by_column(t, col))
+    t->tab->keyset_edge_stale = true;
+
+  if (key_status == ROW_KEY_OK) {
+    tui_set_status(state, "%s", done_msg);
+    app_mark_table_tabs_dirty(state->app, t->tab->connection_index, t->table,
+                              t->tab);
+  } else if (!t->conn) {
+    tui_set_status(state, "Cell updated (not connected)");
+  } else if (!t->table) {
+    tui_set_status(state, "Cell updated (local only - complex query)");
+  } else {
+    tui_set_status(state, "Cell updated (local only - %s)", pk_why);
+  }
+  return true;
+}
+
+void tui_edit_paste_cell(TuiState *state, const EditTarget *t, size_t row,
+                         size_t col) {
+  const DbValue *cell = target_cell(t, row, col);
+  if (!cell)
+    return;
+  if (cell->omitted) {
+    tui_set_error(state, "This value is too large to load: it can't be edited here");
+    return;
+  }
+  char *text = tui_clipboard_read(state);
+  if (!text || !text[0]) {
+    /* Nothing to paste: not a request to set NULL */
+    free(text);
+    tui_set_error(state, "Clipboard is empty");
+    return;
+  }
+  tui_edit_write_cell(state, t, row, col, text, "Cell updated from clipboard");
+  free(text);
+}
+
+bool tui_edit_delete_row(const EditTarget *t, size_t row, char **err) {
+  *err = NULL;
+  RowKey pk = {0};
+  const char *pk_why = NULL;
+  if (target_row_key(t, row, &pk, &pk_why) != ROW_KEY_OK) {
+    *err = str_dup(pk_why ? pk_why : "no primary key found");
+    return false;
+  }
+  /* The key must still match exactly this one row, unchanged */
+  char *why = NULL;
+  if (!target_row_verified(t, row, SIZE_MAX, &pk, &why)) {
+    *err = why ? why : str_dup("row check failed");
+    row_key_free(&pk);
+    return false;
+  }
+  bool ok = db_delete_row(t->conn, t->table, pk.col_names, pk.values, pk.count,
+                          err);
+  row_key_free(&pk);
+  return ok;
+}
+
+bool tui_edit_confirm_delete(TuiState *state, size_t count) {
+  bool ask = !state->app || !state->app->config ||
+             state->app->config->general.delete_confirmation;
+  if (!ask)
+    return true;
+  char msg[64];
+  if (count == 1)
+    snprintf(msg, sizeof(msg), "Delete this row?");
+  else
+    snprintf(msg, sizeof(msg), "Delete %zu selected rows?", count);
+  if (!tui_show_confirm_dialog(state, msg)) {
+    tui_set_status(state, "Delete cancelled");
+    return false;
+  }
+  return true;
+}
+
+static int cmp_desc(const void *a, const void *b) {
+  size_t x = *(const size_t *)a, y = *(const size_t *)b;
+  return x < y ? 1 : x > y ? -1 : 0;
+}
+
+size_t *tui_edit_selection_desc(const Tab *tab) {
+  size_t *rows = safe_calloc(tab->num_selected ? tab->num_selected : 1,
+                             sizeof(size_t));
+  if (tab->num_selected)
+    memcpy(rows, tab->selected_rows, tab->num_selected * sizeof(size_t));
+  qsort(rows, tab->num_selected, sizeof(size_t), cmp_desc);
+  return rows;
 }
 
 /* Start inline editing */
@@ -260,7 +326,7 @@ void tui_start_edit(TuiState *state) {
 
   if (is_truncated || has_newlines) {
     /* Use modal editor for truncated or multi-line content */
-    const char *col_name = table_vm_column_name(vm, cursor_col);
+    const char *col_name = table_vm_result_column_name(vm, cursor_col);
     char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
 
     EditorResult result =
@@ -328,7 +394,7 @@ void tui_start_modal_edit(TuiState *state) {
     content = str_dup("");
 
   /* Always use modal editor */
-  const char *col_name = table_vm_column_name(vm, cursor_col);
+  const char *col_name = table_vm_result_column_name(vm, cursor_col);
   char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
 
   EditorResult result =
@@ -367,297 +433,25 @@ void tui_cancel_edit(TuiState *state) {
 
 /* Confirm edit and update database */
 void tui_confirm_edit(TuiState *state) {
-  if (!state || !state->editing) {
-    tui_cancel_edit(state);
-    return;
+  EditTarget t;
+  if (state && state->editing && tui_edit_target_table(state, &t)) {
+    size_t row, col;
+    table_vm_get_cursor(state->vm_table, &row, &col);
+    tui_edit_write_cell(state, &t, row, col, state->edit_buffer,
+                        "Cell updated");
   }
-
-  VmTable *vm = tui_vm_table(state);
-  if (!vm) {
-    tui_cancel_edit(state);
-    return;
-  }
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema) {
-    tui_cancel_edit(state);
-    return;
-  }
-
-  /* Get cursor position from viewmodel */
-  size_t cursor_row, cursor_col;
-  table_vm_get_cursor(vm, &cursor_row, &cursor_col);
-
-  /* Build primary key info - use Tab as authoritative data source */
-  Tab *tab = TUI_TAB(state);
-  ResultSet *data = tab ? tab->data : NULL;
-  PkInfo pk = {0};
-  const char *pk_why = NULL;
-  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
-    tui_set_error(state, "Cannot update this row: %s", pk_why);
-    tui_cancel_edit(state);
-    return;
-  }
-
-  /* Get column name from viewmodel */
-  const char *col_name = table_vm_column_name(vm, cursor_col);
-  if (!col_name) {
-    pk_info_free(&pk);
-    tui_cancel_edit(state);
-    return;
-  }
-
-  /* The new value, from the edited text and what the cell held */
-  DbValue new_val;
-  bool unchanged = false;
-  char *conv_err = NULL;
-  const DbValue *orig = (data && cursor_row < data->num_rows &&
-                         data->rows[cursor_row].cells &&
-                         cursor_col < data->rows[cursor_row].num_cells)
-                            ? &data->rows[cursor_row].cells[cursor_col]
-                            : NULL;
-  LaceValueType col_type =
-      (data && cursor_col < data->num_columns) ? data->columns[cursor_col].type
-                                               : LACE_TYPE_TEXT;
-  if (!tui_edit_new_value(orig, col_type, state->edit_buffer, &new_val,
-                          &unchanged, &conv_err)) {
-    tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
-    free(conv_err);
-    pk_info_free(&pk);
-    tui_cancel_edit(state);
-    return;
-  }
-  if (unchanged) {
-    tui_set_status(state, "No change");
-    db_value_free(&new_val);
-    pk_info_free(&pk);
-    tui_cancel_edit(state);
-    return;
-  }
-
-  /* Attempt to update */
-  char *err = NULL;
-  char *verify_why = NULL;
-  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
-                          &verify_why)) {
-    tui_set_error(state, "Not updated: %s",
-                  verify_why ? verify_why : "row check failed");
-    free(verify_why);
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    tui_cancel_edit(state);
-    return;
-  }
-  bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
-                                col_name, &new_val, &err);
-
-  if (success) {
-    /* History is recorded automatically by database layer */
-    pk_info_free(&pk);
-
-    /* Update the local data in Tab (authoritative source) */
-    if (data && cursor_row < data->num_rows &&
-        data->rows && data->rows[cursor_row].cells &&
-        cursor_col < data->rows[cursor_row].num_cells) {
-      DbValue *cell = &data->rows[cursor_row].cells[cursor_col];
-      db_value_free(cell);
-      *cell = new_val;
-    } else {
-      db_value_free(&new_val);
-    }
-    tui_set_status(state, "Cell updated");
-
-    /* Mark other tabs with the same table as needing refresh */
-    if (tab) {
-      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
-    }
-  } else {
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
-    free(err);
-  }
-
   tui_cancel_edit(state);
 }
 
 /* Set cell value directly (NULL or empty string) */
 void tui_set_cell_direct(TuiState *state, bool set_null) {
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
+  EditTarget t;
+  if (!tui_edit_target_table(state, &t))
     return;
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema)
-    return;
-
-  /* Get cursor position from viewmodel */
-  size_t cursor_row, cursor_col;
-  table_vm_get_cursor(vm, &cursor_row, &cursor_col);
-
-  /* Validate bounds */
-  size_t num_rows = table_vm_row_count(vm);
-  size_t num_cols = table_vm_col_count(vm);
-  if (cursor_row >= num_rows || cursor_col >= num_cols)
-    return;
-
-  /* Build primary key info - use Tab as authoritative data source */
-  Tab *tab = TUI_TAB(state);
-  ResultSet *data = tab ? tab->data : NULL;
-  PkInfo pk = {0};
-  const char *pk_why = NULL;
-  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
-    tui_set_error(state, "Cannot update this row: %s", pk_why);
-    return;
-  }
-
-  const char *col_name = table_vm_column_name(vm, cursor_col);
-  if (!col_name) {
-    pk_info_free(&pk);
-    return;
-  }
-
-  DbValue new_val = set_null ? db_value_null() : db_value_text("");
-
-  /* Attempt to update */
-  char *err = NULL;
-  char *verify_why = NULL;
-  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
-                          &verify_why)) {
-    tui_set_error(state, "Not updated: %s",
-                  verify_why ? verify_why : "row check failed");
-    free(verify_why);
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    return;
-  }
-  bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
-                                col_name, &new_val, &err);
-
-  if (success) {
-    /* History is recorded automatically by database layer */
-    pk_info_free(&pk);
-
-    /* Update the local data in Tab (authoritative source) */
-    if (data && cursor_row < data->num_rows &&
-        data->rows && data->rows[cursor_row].cells &&
-        cursor_col < data->rows[cursor_row].num_cells) {
-      DbValue *cell = &data->rows[cursor_row].cells[cursor_col];
-      db_value_free(cell);
-      *cell = new_val;
-    } else {
-      db_value_free(&new_val);
-    }
-    tui_set_status(state, set_null ? "Cell set to NULL" : "Cell set to empty");
-
-    /* Mark other tabs with the same table as needing refresh */
-    if (tab) {
-      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
-    }
-  } else {
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
-    free(err);
-  }
-}
-
-/* Copy text to clipboard using pbcopy on macOS, wl-copy/xclip on Linux.
- * Always saves to internal buffer as fallback for pasting within the app. */
-bool tui_clipboard_copy(TuiState *state, const char *text) {
-  if (!text)
-    return false;
-
-  /* Always save to internal buffer for in-app pasting */
-  if (state) {
-    free(state->clipboard_buffer);
-    state->clipboard_buffer = str_dup(text);
-  }
-
-  /* Try external clipboard (redirect stderr to avoid error messages) */
-#ifdef __APPLE__
-  FILE *p = popen("pbcopy 2>/dev/null", "w");
-#else
-  /* Use wl-copy on Wayland, xclip on X11 */
-  const char *cmd = getenv("WAYLAND_DISPLAY")
-                        ? "wl-copy 2>/dev/null"
-                        : "xclip -selection clipboard 2>/dev/null";
-  FILE *p = popen(cmd, "w");
-#endif
-  if (!p) {
-    /* External clipboard failed, but internal buffer is set */
-    return state && state->clipboard_buffer;
-  }
-
-  size_t len = strlen(text);
-  size_t written = fwrite(text, 1, len, p);
-  int status = pclose(p);
-
-  /* Success if external worked OR we have internal buffer */
-  return (written == len && status == 0) || (state && state->clipboard_buffer);
-}
-
-/* Read text from clipboard. Returns malloc'd string or NULL. */
-char *tui_clipboard_read(TuiState *state) {
-  char *paste_text = NULL;
-  bool os_clipboard_accessible = false;
-
-  /* Try to read from system clipboard first */
-#ifdef __APPLE__
-  FILE *p = popen("pbpaste", "r");
-#else
-  const char *cmd = getenv("WAYLAND_DISPLAY")
-                        ? "wl-paste -n 2>/dev/null"
-                        : "xclip -selection clipboard -o 2>/dev/null";
-  FILE *p = popen(cmd, "r");
-#endif
-  if (p) {
-    /* Read clipboard content with size limit to prevent OOM */
-#define MAX_CLIPBOARD_SIZE (16 * 1024 * 1024) /* 16MB limit */
-    size_t capacity = 4096;
-    size_t len = 0;
-    paste_text = safe_malloc(capacity);
-    int c;
-    bool size_exceeded = false;
-    while ((c = fgetc(p)) != EOF) {
-      if (len + 1 >= capacity) {
-        if (capacity > SIZE_MAX / 2 || capacity * 2 > MAX_CLIPBOARD_SIZE) {
-          size_exceeded = true;
-          break;
-        }
-        capacity *= 2;
-        paste_text = safe_realloc(paste_text, capacity);
-      }
-      paste_text[len++] = (char)c;
-    }
-    if (size_exceeded) {
-      free(paste_text);
-      paste_text = NULL;
-    } else {
-      paste_text[len] = '\0';
-    }
-#undef MAX_CLIPBOARD_SIZE
-    int status = pclose(p);
-    /* OS clipboard is accessible if command succeeded (status 0) */
-    os_clipboard_accessible = (status == 0);
-    if (!os_clipboard_accessible || (paste_text && paste_text[0] == '\0')) {
-      free(paste_text);
-      paste_text = NULL;
-    }
-  }
-
-  /* Only fall back to internal buffer if OS clipboard is inaccessible */
-  if (!os_clipboard_accessible && state && state->clipboard_buffer) {
-    paste_text = str_dup(state->clipboard_buffer);
-  }
-
-  return paste_text;
+  size_t row, col;
+  table_vm_get_cursor(state->vm_table, &row, &col);
+  tui_edit_write_cell(state, &t, row, col, set_null ? NULL : "",
+                      set_null ? "Cell set to NULL" : "Cell set to empty");
 }
 
 /* Copy current cell value to clipboard */
@@ -703,194 +497,21 @@ void tui_cell_copy(TuiState *state) {
 
 /* Paste clipboard content to current cell and update database */
 void tui_cell_paste(TuiState *state) {
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
+  EditTarget t;
+  if (!tui_edit_target_table(state, &t))
     return;
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema)
-    return;
-
-  /* Get cursor position from viewmodel */
-  size_t cursor_row, cursor_col;
-  table_vm_get_cursor(vm, &cursor_row, &cursor_col);
-
-  /* Validate bounds */
-  size_t num_rows = table_vm_row_count(vm);
-  size_t num_cols = table_vm_col_count(vm);
-  if (cursor_row >= num_rows || cursor_col >= num_cols)
-    return;
-
-  /* Read from clipboard */
-  char *paste_text = tui_clipboard_read(state);
-  if (!paste_text) {
-    tui_set_error(state, "Clipboard is empty");
-    return;
-  }
-
-  /* Build primary key info - use Tab as authoritative data source */
-  Tab *tab = TUI_TAB(state);
-  ResultSet *data = tab ? tab->data : NULL;
-  PkInfo pk = {0};
-  const char *pk_why = NULL;
-  if (!pk_info_build_why(&pk, data, cursor_row, (TableSchema *)schema, &pk_why)) {
-    tui_set_error(state, "Cannot update this row: %s", pk_why);
-    free(paste_text);
-    return;
-  }
-
-  const char *col_name = table_vm_column_name(vm, cursor_col);
-  if (!col_name) {
-    pk_info_free(&pk);
-    free(paste_text);
-    return;
-  }
-
-  /* Create new value from clipboard content */
-  if (paste_text[0] == '\0') {
-    /* Nothing to paste: not a request to set NULL */
-    pk_info_free(&pk);
-    free(paste_text);
-    tui_set_status(state, "Clipboard is empty");
-    return;
-  }
-  DbValue new_val;
-  bool unchanged = false;
-  char *conv_err = NULL;
-  const DbValue *orig = (data && cursor_row < data->num_rows &&
-                         data->rows[cursor_row].cells &&
-                         cursor_col < data->rows[cursor_row].num_cells)
-                            ? &data->rows[cursor_row].cells[cursor_col]
-                            : NULL;
-  LaceValueType col_type =
-      (data && cursor_col < data->num_columns) ? data->columns[cursor_col].type
-                                               : LACE_TYPE_TEXT;
-  if (orig && orig->omitted) {
-    pk_info_free(&pk);
-    free(paste_text);
-    tui_set_error(state, "This value is too large to load: it can't be edited here");
-    return;
-  }
-  bool conv_ok = tui_edit_new_value(orig, col_type, paste_text, &new_val,
-                                    &unchanged, &conv_err);
-  free(paste_text);
-  if (!conv_ok || unchanged) {
-    if (!conv_ok) {
-      tui_set_error(state, "Not updated: %s", conv_err ? conv_err : "invalid value");
-    } else {
-      tui_set_status(state, "No change");
-    }
-    free(conv_err);
-    db_value_free(&new_val);
-    pk_info_free(&pk);
-    return;
-  }
-
-  /* Attempt to update */
-  char *err = NULL;
-  char *verify_why = NULL;
-  if (!table_row_verified(conn, table, &pk, data, cursor_row, cursor_col,
-                          &verify_why)) {
-    tui_set_error(state, "Not updated: %s",
-                  verify_why ? verify_why : "row check failed");
-    free(verify_why);
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    return;
-  }
-  bool success = db_update_cell(conn, table, pk.col_names, pk.values, pk.count,
-                                col_name, &new_val, &err);
-
-  if (success) {
-    pk_info_free(&pk);
-
-    /* Update the local data in Tab (authoritative source) */
-    if (data && cursor_row < data->num_rows &&
-        data->rows && data->rows[cursor_row].cells &&
-        cursor_col < data->rows[cursor_row].num_cells) {
-      DbValue *cell = &data->rows[cursor_row].cells[cursor_col];
-      db_value_free(cell);
-      *cell = new_val;
-    } else {
-      db_value_free(&new_val);
-    }
-    tui_set_status(state, "Cell updated from clipboard");
-
-    /* Mark other tabs with the same table as needing refresh */
-    if (tab) {
-      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
-    }
-  } else {
-    pk_info_free(&pk);
-    db_value_free(&new_val);
-    tui_set_error(state, "Paste failed: %s", err ? err : "unknown error");
-    free(err);
-  }
-}
-
-/* Delete a single row by its local index in current data */
-static bool delete_single_row(TuiState *state, size_t local_row, char **err) {
-  VmTable *vm = state->vm_table;
-  if (!vm)
-    return false;
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema)
-    return false;
-
-  /* Use Tab as authoritative data source */
-  Tab *tab = TUI_TAB(state);
-  ResultSet *data = tab ? tab->data : NULL;
-  PkInfo pk = {0};
-  const char *pk_why = NULL;
-  if (!pk_info_build_why(&pk, data, local_row, (TableSchema *)schema, &pk_why)) {
-    if (err)
-      *err = str_dup(pk_why ? pk_why : "No primary key found");
-    return false;
-  }
-
-  /* The key must still match exactly this one row, unchanged */
-  char *verify_why = NULL;
-  if (!table_row_verified(conn, table, &pk, data, local_row, SIZE_MAX,
-                          &verify_why)) {
-    if (err)
-      *err = verify_why ? verify_why : str_dup("row check failed");
-    else
-      free(verify_why);
-    pk_info_free(&pk);
-    return false;
-  }
-
-  bool success =
-      db_delete_row(conn, table, pk.col_names, pk.values, pk.count, err);
-
-  /* History is recorded automatically by database layer */
-  pk_info_free(&pk);
-  return success;
+  size_t row, col;
+  table_vm_get_cursor(state->vm_table, &row, &col);
+  tui_edit_paste_cell(state, &t, row, col);
 }
 
 /* Delete current row or selected rows */
 void tui_delete_row(TuiState *state) {
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
+  EditTarget t;
+  if (!tui_edit_target_table(state, &t))
     return;
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema)
-    return;
-
-  Tab *tab = TUI_TAB(state);
-  if (!tab)
-    return;
+  VmTable *vm = state->vm_table;
+  Tab *tab = t.tab;
 
   /* Get cursor and scroll positions from viewmodel */
   size_t cursor_row, cursor_col;
@@ -902,28 +523,11 @@ void tui_delete_row(TuiState *state) {
   if (cursor_row >= num_rows)
     return;
 
-  /* Check if we have selected rows for bulk delete */
+  /* Selected rows: a bulk delete */
   size_t num_selected = tab->num_selected;
   bool bulk_delete = (num_selected > 0);
-  size_t rows_to_delete = bulk_delete ? num_selected : 1;
-
-  /* Check if confirmation is required */
-  bool need_confirmation = state->app && state->app->config &&
-                           state->app->config->general.delete_confirmation;
-
-  /* Show confirmation if needed */
-  if (need_confirmation) {
-    char msg[64];
-    if (rows_to_delete == 1) {
-      snprintf(msg, sizeof(msg), "Delete this row?");
-    } else {
-      snprintf(msg, sizeof(msg), "Delete %zu selected rows?", rows_to_delete);
-    }
-    if (!tui_show_confirm_dialog(state, msg)) {
-      tui_set_status(state, "Delete cancelled");
-      return;
-    }
-  }
+  if (!tui_edit_confirm_delete(state, bulk_delete ? num_selected : 1))
+    return;
 
   size_t loaded_offset = table_vm_loaded_offset(vm);
   size_t total_rows = table_vm_total_rows(vm);
@@ -931,70 +535,38 @@ void tui_delete_row(TuiState *state) {
   size_t failed_count = 0;
 
   if (bulk_delete) {
-    /* Delete selected rows - iterate in reverse to avoid index shifting issues
-     */
-    /* First, collect global indices and sort in descending order */
-    /* Check for overflow before allocation */
-    if (num_selected > SIZE_MAX / sizeof(size_t)) {
-      tui_set_error(state, "Too many rows selected");
-      return;
-    }
-    size_t *to_delete = safe_malloc(num_selected * sizeof(size_t));
-    memcpy(to_delete, tab->selected_rows, num_selected * sizeof(size_t));
-
-    /* Sort descending so we delete from highest index first */
-    for (size_t i = 0; i < num_selected - 1; i++) {
-      for (size_t j = i + 1; j < num_selected; j++) {
-        if (to_delete[j] > to_delete[i]) {
-          size_t tmp = to_delete[i];
-          to_delete[i] = to_delete[j];
-          to_delete[j] = tmp;
-        }
-      }
-    }
-
-    /* Delete each selected row */
+    /* Highest first; the window is reloaded afterwards */
+    size_t *to_delete = tui_edit_selection_desc(tab);
     for (size_t i = 0; i < num_selected; i++) {
       size_t global_row = to_delete[i];
-
-      /* Check if this row is in the currently loaded data */
-      /* Overflow-safe check: global_row >= loaded_offset + num_rows
-       * becomes: global_row - loaded_offset >= num_rows (since global_row >= loaded_offset) */
+      /* A row outside the loaded window cannot be checked: skip it */
       if (global_row < loaded_offset ||
           (global_row - loaded_offset) >= num_rows) {
-        /* Row not loaded - would need to load it first, skip for now */
         failed_count++;
         continue;
       }
-
-      size_t local_row = global_row - loaded_offset;
       char *err = NULL;
-      if (delete_single_row(state, local_row, &err)) {
+      if (tui_edit_delete_row(&t, global_row - loaded_offset, &err)) {
         deleted_count++;
         if (total_rows > 0)
           total_rows--;
       } else {
         failed_count++;
-        free(err);
       }
+      free(err);
     }
-
     free(to_delete);
-
-    /* Clear selections after bulk delete */
     tab_clear_selections(tab);
   } else {
-    /* Delete single row at cursor */
     char *err = NULL;
-    if (delete_single_row(state, cursor_row, &err)) {
-      deleted_count = 1;
-      if (total_rows > 0)
-        total_rows--;
-    } else {
+    if (!tui_edit_delete_row(&t, cursor_row, &err)) {
       tui_set_error(state, "Delete failed: %s", err ? err : "unknown error");
       free(err);
       return;
     }
+    deleted_count = 1;
+    if (total_rows > 0)
+      total_rows--;
   }
 
   /* Show result message */
@@ -1025,7 +597,7 @@ void tui_delete_row(TuiState *state) {
         abs_row = total_rows - 1;
     }
 
-    size_t target_offset = (abs_row / PAGE_SIZE) * PAGE_SIZE;
+    size_t target_offset = (abs_row / TUI_PAGE_SIZE) * TUI_PAGE_SIZE;
     tui_load_rows_at(state, target_offset);
 
     /* Re-read state after reload */
@@ -1054,739 +626,93 @@ void tui_delete_row(TuiState *state) {
 }
 
 /* Handle edit mode input */
+bool tui_edit_buffer_key(char **buf, size_t *pos, const UiEvent *event) {
+  bool was_null = *buf == NULL;
+  TextInput in;
+  text_input_adopt(&in, was_null ? str_dup("") : *buf, *pos);
+  bool handled = text_input_handle_key(&in, event);
+  char *text = text_input_release(&in, pos);
+  if (was_null && text[0] == '\0') {
+    free(text); /* Still NULL: nothing was typed */
+    text = NULL;
+    *pos = 0;
+  }
+  *buf = text;
+  return handled;
+}
+
+void tui_edit_buffer_insert(char **buf, size_t *pos, const char *text) {
+  if (!text || !text[0])
+    return;
+  TextInput in;
+  text_input_adopt(&in, *buf ? *buf : str_dup(""), *pos);
+  text_input_insert(&in, text);
+  *buf = text_input_release(&in, pos);
+}
+
+CellEditAction tui_cell_edit_key(TuiState *state, char **buf, size_t *pos,
+                                 const UiEvent *event) {
+  const Config *cfg = state->app ? state->app->config : NULL;
+
+  if (render_event_is_special(event, UI_KEY_ESCAPE))
+    return CELL_EDIT_CANCEL;
+  if (render_event_is_special(event, UI_KEY_ENTER))
+    return CELL_EDIT_CONFIRM;
+
+  /* Ctrl+K - copy the text to the clipboard */
+  if (render_event_is_ctrl(event, 'K')) {
+    if (*buf && (*buf)[0]) {
+      tui_clipboard_copy(state, *buf);
+      tui_set_status(state, "Copied to clipboard");
+    }
+    return CELL_EDIT_CONTINUE;
+  }
+
+  /* Ctrl+U - paste from the clipboard at the cursor */
+  if (render_event_is_ctrl(event, 'U')) {
+    char *paste_text = tui_clipboard_read(state);
+    tui_edit_buffer_insert(buf, pos, paste_text);
+    free(paste_text);
+    return CELL_EDIT_CONTINUE;
+  }
+
+  /* Set to NULL / to an empty string, and confirm */
+  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDITOR_NULL)) {
+    free(*buf);
+    *buf = NULL;
+    *pos = 0;
+    return CELL_EDIT_SET_NULL;
+  }
+  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDITOR_EMPTY)) {
+    free(*buf);
+    *buf = str_dup("");
+    *pos = 0;
+    return CELL_EDIT_SET_EMPTY;
+  }
+
+  /* Cursor movement, deletion and text; other keys are swallowed */
+  tui_edit_buffer_key(buf, pos, event);
+  return CELL_EDIT_CONTINUE;
+}
+
 bool tui_handle_edit_input(TuiState *state, const UiEvent *event) {
   if (!state->editing)
     return false;
   if (!event || event->type != UI_EVENT_KEY)
     return false;
 
-  size_t len = state->edit_buffer ? strlen(state->edit_buffer) : 0;
-  int key_char = render_event_get_char(event);
-
-  /* Escape - cancel */
-  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
+  switch (tui_cell_edit_key(state, &state->edit_buffer, &state->edit_pos,
+                            event)) {
+  case CELL_EDIT_CANCEL:
     tui_cancel_edit(state);
-    return true;
-  }
-
-  /* Enter - confirm */
-  if (render_event_is_special(event, UI_KEY_ENTER)) {
+    break;
+  case CELL_EDIT_CONFIRM:
+  case CELL_EDIT_SET_NULL:
+  case CELL_EDIT_SET_EMPTY:
     tui_confirm_edit(state);
-    return true;
+    break;
+  case CELL_EDIT_CONTINUE:
+    break;
   }
-
-  /* Left arrow - move cursor left */
-  if (render_event_is_special(event, UI_KEY_LEFT)) {
-    state->edit_pos = utf8_prev(state->edit_buffer, state->edit_pos);
-    return true;
-  }
-
-  /* Right arrow - move cursor right */
-  if (render_event_is_special(event, UI_KEY_RIGHT)) {
-    if (state->edit_buffer)
-      state->edit_pos = utf8_next(state->edit_buffer, len, state->edit_pos);
-    return true;
-  }
-
-  /* Home or Ctrl+A - go to start */
-  if (render_event_is_special(event, UI_KEY_HOME) ||
-      render_event_is_ctrl(event, 'A')) {
-    state->edit_pos = 0;
-    return true;
-  }
-
-  /* End or Ctrl+E - go to end */
-  if (render_event_is_special(event, UI_KEY_END) ||
-      render_event_is_ctrl(event, 'E')) {
-    state->edit_pos = len;
-    return true;
-  }
-
-  /* Backspace - delete character before cursor */
-  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
-    if (state->edit_pos > 0 && state->edit_pos <= len && state->edit_buffer) {
-      size_t prev = utf8_prev(state->edit_buffer, state->edit_pos);
-      memmove(state->edit_buffer + prev, state->edit_buffer + state->edit_pos,
-              len - state->edit_pos + 1);
-      state->edit_pos = prev;
-    }
-    return true;
-  }
-
-  /* Delete - delete character at cursor */
-  if (render_event_is_special(event, UI_KEY_DELETE)) {
-    if (state->edit_pos < len && state->edit_buffer) {
-      size_t next = utf8_next(state->edit_buffer, len, state->edit_pos);
-      memmove(state->edit_buffer + state->edit_pos, state->edit_buffer + next,
-              len - next + 1);
-    }
-    return true;
-  }
-
-  /* Ctrl+K - copy edit buffer to clipboard */
-  if (render_event_is_ctrl(event, 'K')) {
-    if (state->edit_buffer && state->edit_buffer[0]) {
-      tui_clipboard_copy(state, state->edit_buffer);
-      tui_set_status(state, "Copied to clipboard");
-    }
-    return true;
-  }
-
-  /* Ctrl+U - paste from clipboard */
-  if (render_event_is_ctrl(event, 'U')) {
-    char *paste_text = tui_clipboard_read(state);
-    if (paste_text && paste_text[0]) {
-      /* For single-line fields, strip newlines */
-      for (char *p = paste_text; *p; p++) {
-        if (*p == '\n' || *p == '\r')
-          *p = ' ';
-      }
-      size_t paste_len = strlen(paste_text);
-      /* Check for overflow before calculating new length */
-      if (paste_len > SIZE_MAX - len - 1) {
-        free(paste_text);
-        return true;
-      }
-      size_t new_len = len + paste_len + 1;
-      state->edit_buffer = safe_realloc(state->edit_buffer, new_len);
-      /* Insert paste text at cursor position */
-      memmove(state->edit_buffer + state->edit_pos + paste_len,
-              state->edit_buffer + state->edit_pos,
-              len - state->edit_pos + 1);
-      memcpy(state->edit_buffer + state->edit_pos, paste_text, paste_len);
-      state->edit_pos += paste_len;
-    }
-    free(paste_text);
-    return true;
-  }
-
-  /* Set to NULL - uses configurable hotkey */
-  if (state->app && state->app->config &&
-      hotkey_matches(state->app->config, event, HOTKEY_EDITOR_NULL)) {
-    free(state->edit_buffer);
-    state->edit_buffer = NULL;
-    state->edit_pos = 0;
-    tui_confirm_edit(state);
-    return true;
-  }
-
-  /* Set to empty string - uses configurable hotkey */
-  if (state->app && state->app->config &&
-      hotkey_matches(state->app->config, event, HOTKEY_EDITOR_EMPTY)) {
-    free(state->edit_buffer);
-    state->edit_buffer = str_dup("");
-    state->edit_pos = 0;
-    tui_confirm_edit(state);
-    return true;
-  }
-
-  /* Printable character - insert at cursor */
-  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
-    /* Check for overflow */
-    if (len > SIZE_MAX - 2) {
-      /* Buffer too large - ignore keystroke */
-      return true;
-    }
-    size_t new_len = len + 2;
-    state->edit_buffer = safe_realloc(state->edit_buffer, new_len);
-    if (len == 0) {
-      /* Buffer was NULL or empty - initialize it */
-      state->edit_buffer[0] = (char)key_char;
-      state->edit_buffer[1] = '\0';
-      state->edit_pos = 1;
-    } else {
-      memmove(state->edit_buffer + state->edit_pos + 1,
-              state->edit_buffer + state->edit_pos, len - state->edit_pos + 1);
-      state->edit_buffer[state->edit_pos] = (char)key_char;
-      state->edit_pos++;
-    }
-    return true;
-  }
-
-  /* Consume all other keys when editing */
-  return true;
-}
-
-/* ===== Add Row Mode ===== */
-
-/* Helper to ensure cursor column is visible in add-row mode */
-static void add_row_ensure_col_visible(TuiState *state) {
-  if (!state || !state->main_win || !state->adding_row)
-    return;
-
-  Tab *tab = TUI_TAB(state);
-  if (!tab)
-    return;
-
-  /* Get layout info */
-  LayoutInfo layout = tui_get_layout_info(state);
-
-  size_t cursor_col = state->new_row_cursor_col;
-  size_t scroll_col = tab->scroll_col;
-  size_t num_cols = state->new_row_num_cols;
-
-  /* Find visible range */
-  size_t first_visible = scroll_col;
-  size_t last_visible = scroll_col;
-  int x = 1;
-  for (size_t col = scroll_col; col < num_cols; col++) {
-    int width = tui_get_column_width(state, col);
-    if (x + width + 3 > layout.win_cols)
-      break;
-    x += width + 1;
-    last_visible = col;
-  }
-
-  if (cursor_col < first_visible) {
-    tab->scroll_col = cursor_col;
-  } else if (cursor_col > last_visible) {
-    /* Scroll right to show cursor */
-    tab->scroll_col = cursor_col;
-    x = 1;
-    while (tab->scroll_col > 0) {
-      int width = tui_get_column_width(state, tab->scroll_col);
-      if (x + width + 3 > layout.win_cols)
-        break;
-      x += width + 1;
-      if (tab->scroll_col == cursor_col)
-        break;
-      tab->scroll_col--;
-    }
-  }
-}
-
-/* A NOT NULL column with no default and no generated value: the user must
- * supply it, and an explicitly confirmed empty value means '' */
-static bool add_row_col_required(const ColumnDef *col) {
-  return !col->auto_increment && !col->generated && !col->nullable &&
-         !(col->default_val && col->default_val[0]);
-}
-
-/* Initial state of a new-row cell. A placeholder is not part of the INSERT,
- * so the database applies its own default: auto-increment, generated,
- * columns with a default, and required columns without one (so a missing
- * value is reported by the database instead of being stored as ''). */
-static void add_row_init_cell(TuiState *state, const TableSchema *schema,
-                              size_t i) {
-  const ColumnDef *col = &schema->columns[i];
-  db_value_free(&state->new_row_values[i]);
-  state->new_row_auto_increment[i] = col->auto_increment || col->generated;
-  state->new_row_edited[i] = false;
-  if (col->auto_increment || col->generated) {
-    state->new_row_values[i] = db_value_null();
-    state->new_row_placeholders[i] = true;
-  } else if (col->default_val && col->default_val[0]) {
-    state->new_row_values[i] = db_value_text(col->default_val);
-    state->new_row_placeholders[i] = true;
-  } else if (col->nullable) {
-    state->new_row_values[i] = db_value_null();
-    state->new_row_placeholders[i] = false;
-  } else {
-    state->new_row_values[i] = db_value_text("");
-    state->new_row_placeholders[i] = true;
-  }
-}
-
-/* Start add-row mode - create a temporary row for editing */
-bool tui_start_add_row(TuiState *state) {
-  if (!state || state->adding_row || state->editing)
-    return false;
-
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
-    return false;
-
-  const TableSchema *schema = table_vm_get_schema(vm);
-  if (!schema || schema->num_columns == 0)
-    return false;
-
-  size_t num_cols = schema->num_columns;
-
-  /* Check for overflow before allocations */
-  if (num_cols > SIZE_MAX / sizeof(DbValue)) {
-    return false;
-  }
-
-  /* Allocate arrays for new row data */
-  state->new_row_values = safe_calloc(num_cols, sizeof(DbValue));
-  state->new_row_placeholders = safe_calloc(num_cols, sizeof(bool));
-  state->new_row_auto_increment = safe_calloc(num_cols, sizeof(bool));
-  state->new_row_edited = safe_calloc(num_cols, sizeof(bool));
-
-  /* Initialize each column value */
-  for (size_t i = 0; i < num_cols; i++) {
-    add_row_init_cell(state, schema, i);
-  }
-
-  state->new_row_num_cols = num_cols;
-  state->new_row_cursor_col = 0;
-  state->new_row_edit_buffer = NULL;
-  state->new_row_edit_len = 0;
-  state->new_row_edit_pos = 0;
-  state->new_row_cell_editing = false;
-  state->adding_row = true;
-
-  tui_set_status(state,
-                 "Adding row - Enter to edit, Esc to cancel, F2 to save");
-  return true;
-}
-
-/* Cancel add-row mode and clean up */
-void tui_cancel_add_row(TuiState *state) {
-  if (!state)
-    return;
-
-  if (state->new_row_values) {
-    for (size_t i = 0; i < state->new_row_num_cols; i++) {
-      db_value_free(&state->new_row_values[i]);
-    }
-    free(state->new_row_values);
-  }
-  free(state->new_row_placeholders);
-  free(state->new_row_auto_increment);
-  free(state->new_row_edited);
-  free(state->new_row_edit_buffer);
-
-  state->new_row_values = NULL;
-  state->new_row_placeholders = NULL;
-  state->new_row_auto_increment = NULL;
-  state->new_row_edited = NULL;
-  state->new_row_edit_buffer = NULL;
-  state->new_row_num_cols = 0;
-  state->new_row_cursor_col = 0;
-  state->new_row_edit_len = 0;
-  state->new_row_edit_pos = 0;
-  state->new_row_cell_editing = false;
-  state->adding_row = false;
-
-  curs_set(0); /* Hide cursor */
-  tui_set_status(state, "Add row cancelled");
-}
-
-/* Persist the new row to the database */
-bool tui_confirm_add_row(TuiState *state) {
-  if (!state || !state->adding_row)
-    return false;
-
-  VmTable *vm = tui_vm_table(state);
-  if (!vm)
-    return false;
-
-  DbConnection *conn = table_vm_connection(vm);
-  const char *table = table_vm_table_name(vm);
-  const TableSchema *schema = table_vm_get_schema(vm);
-
-  if (!conn || !table || !schema) {
-    tui_set_error(state, "Cannot add row: invalid table state");
-    return false;
-  }
-
-  /* Insert only the columns the user set. A column still showing its
-   * placeholder (auto-increment, or a default the database fills in) is left
-   * out so the database applies the real default instead of its text. */
-  size_t n = state->new_row_num_cols;
-  ColumnDef *ins_cols = safe_calloc(n ? n : 1, sizeof(ColumnDef));
-  DbValue *ins_vals = safe_calloc(n ? n : 1, sizeof(DbValue));
-  size_t num_ins = 0;
-  for (size_t i = 0; i < n && i < schema->num_columns; i++) {
-    if (state->new_row_placeholders[i] && !state->new_row_edited[i])
-      continue;
-    ins_cols[num_ins] = schema->columns[i]; /* Shallow: borrowed strings */
-    ins_vals[num_ins] = state->new_row_values[i];
-    num_ins++;
-  }
-
-  char *err = NULL;
-  bool success =
-      db_insert_row(conn, table, ins_cols, ins_vals, num_ins, &err);
-  free(ins_cols);
-  free(ins_vals);
-
-  if (success) {
-    /* Clean up add-row state */
-    if (state->new_row_values) {
-      for (size_t i = 0; i < state->new_row_num_cols; i++) {
-        db_value_free(&state->new_row_values[i]);
-      }
-      free(state->new_row_values);
-    }
-    free(state->new_row_placeholders);
-    free(state->new_row_auto_increment);
-    free(state->new_row_edited);
-    free(state->new_row_edit_buffer);
-
-    state->new_row_values = NULL;
-    state->new_row_placeholders = NULL;
-    state->new_row_auto_increment = NULL;
-    state->new_row_edited = NULL;
-    state->new_row_edit_buffer = NULL;
-    state->new_row_num_cols = 0;
-    state->new_row_cursor_col = 0;
-    state->new_row_edit_len = 0;
-    state->new_row_edit_pos = 0;
-    state->new_row_cell_editing = false;
-    state->adding_row = false;
-
-    curs_set(0);
-    tui_set_status(state, "Row added");
-
-    /* Mark other tabs with the same table as needing refresh */
-    Tab *tab = TUI_TAB(state);
-    if (tab) {
-      app_mark_table_tabs_dirty(state->app, tab->connection_index, table, tab);
-    }
-
-    /* Reload table data to show the new row */
-    tab->total_rows++;
-    tui_load_rows_at(state, tab->loaded_offset);
-
-    return true;
-  } else {
-    tui_set_error(state, "Insert failed: %s", err ? err : "unknown error");
-    free(err);
-    return false;
-  }
-}
-
-/* Start editing a cell in the new row */
-void tui_add_row_start_cell_edit(TuiState *state, size_t col) {
-  if (!state || !state->adding_row || col >= state->new_row_num_cols)
-    return;
-  if (!state->new_row_values || !state->new_row_placeholders ||
-      !state->new_row_edited)
-    return;
-
-  state->new_row_cursor_col = col;
-
-  /* Get current value as string */
-  const DbValue *val = &state->new_row_values[col];
-  char *content = NULL;
-
-  if (state->new_row_placeholders[col] && !state->new_row_edited[col]) {
-    /* Placeholder - start with empty buffer */
-    content = str_dup("");
-  } else if (val->is_null) {
-    content = str_dup("");
-  } else {
-    content = db_value_to_string(val);
-    if (!content)
-      content = str_dup("");
-  }
-
-  free(state->new_row_edit_buffer);
-  state->new_row_edit_buffer = content;
-  state->new_row_edit_len = content ? strlen(content) : 0;
-  state->new_row_edit_pos = state->new_row_edit_len;
-  state->new_row_cell_editing = true;
-
-  curs_set(1); /* Show cursor */
-}
-
-/* Confirm cell edit in new row */
-void tui_add_row_confirm_cell(TuiState *state) {
-  if (!state || !state->adding_row || !state->new_row_cell_editing)
-    return;
-
-  size_t col = state->new_row_cursor_col;
-  if (col >= state->new_row_num_cols)
-    return;
-
-  /* Cleared: back to the column's initial state (its default, or NULL);
-   * an explicit NULL is Ctrl+N. A required column stores '' instead. */
-  VmTable *vm = tui_vm_table(state);
-  const TableSchema *schema = vm ? table_vm_get_schema(vm) : NULL;
-  if ((!state->new_row_edit_buffer || state->new_row_edit_buffer[0] == '\0') &&
-      schema && col < schema->num_columns &&
-      !add_row_col_required(&schema->columns[col])) {
-    add_row_init_cell(state, schema, col);
-  } else {
-    db_value_free(&state->new_row_values[col]);
-    state->new_row_values[col] = db_value_text(
-        state->new_row_edit_buffer ? state->new_row_edit_buffer : "");
-    /* Mark as edited (no longer placeholder) */
-    state->new_row_edited[col] = true;
-    state->new_row_placeholders[col] = false;
-  }
-
-  /* Clean up edit state */
-  free(state->new_row_edit_buffer);
-  state->new_row_edit_buffer = NULL;
-  state->new_row_edit_len = 0;
-  state->new_row_edit_pos = 0;
-  state->new_row_cell_editing = false;
-
-  curs_set(0);
-}
-
-/* Cancel cell edit in new row */
-void tui_add_row_cancel_cell(TuiState *state) {
-  if (!state || !state->adding_row)
-    return;
-
-  free(state->new_row_edit_buffer);
-  state->new_row_edit_buffer = NULL;
-  state->new_row_edit_len = 0;
-  state->new_row_edit_pos = 0;
-  state->new_row_cell_editing = false;
-
-  curs_set(0);
-}
-
-/* Handle input in add-row mode */
-bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
-  if (!state || !state->adding_row || !event)
-    return false;
-
-  Config *cfg = state->app ? state->app->config : NULL;
-  size_t num_cols = state->new_row_num_cols;
-
-  /* If editing a cell, handle cell-level input first */
-  if (state->new_row_cell_editing) {
-    size_t len = state->new_row_edit_len;
-    int key_char = render_event_get_char(event);
-
-    /* Escape - cancel cell edit */
-    if (render_event_is_special(event, UI_KEY_ESCAPE)) {
-      tui_add_row_cancel_cell(state);
-      return true;
-    }
-
-    /* Enter - confirm cell edit */
-    if (render_event_is_special(event, UI_KEY_ENTER)) {
-      tui_add_row_confirm_cell(state);
-      return true;
-    }
-
-    /* Tab - confirm and move to next column */
-    if (render_event_is_special(event, UI_KEY_TAB)) {
-      tui_add_row_confirm_cell(state);
-      if (state->new_row_cursor_col < num_cols - 1) {
-        state->new_row_cursor_col++;
-      }
-      return true;
-    }
-
-    /* Left arrow - move cursor left */
-    if (render_event_is_special(event, UI_KEY_LEFT)) {
-      state->new_row_edit_pos =
-          utf8_prev(state->new_row_edit_buffer, state->new_row_edit_pos);
-      return true;
-    }
-
-    /* Right arrow - move cursor right */
-    if (render_event_is_special(event, UI_KEY_RIGHT)) {
-      if (state->new_row_edit_buffer)
-        state->new_row_edit_pos = utf8_next(state->new_row_edit_buffer, len,
-                                            state->new_row_edit_pos);
-      return true;
-    }
-
-    /* Home - go to start */
-    if (render_event_is_special(event, UI_KEY_HOME)) {
-      state->new_row_edit_pos = 0;
-      return true;
-    }
-
-    /* End - go to end */
-    if (render_event_is_special(event, UI_KEY_END)) {
-      state->new_row_edit_pos = len;
-      return true;
-    }
-
-    /* Backspace - delete character before cursor */
-    if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
-      if (state->new_row_edit_pos > 0 && state->new_row_edit_buffer) {
-        size_t prev =
-            utf8_prev(state->new_row_edit_buffer, state->new_row_edit_pos);
-        memmove(state->new_row_edit_buffer + prev,
-                state->new_row_edit_buffer + state->new_row_edit_pos,
-                len - state->new_row_edit_pos + 1);
-        state->new_row_edit_len -= state->new_row_edit_pos - prev;
-        state->new_row_edit_pos = prev;
-      }
-      return true;
-    }
-
-    /* Delete - delete character at cursor */
-    if (render_event_is_special(event, UI_KEY_DELETE)) {
-      if (state->new_row_edit_pos < len && state->new_row_edit_buffer) {
-        size_t next = utf8_next(state->new_row_edit_buffer, len,
-                                state->new_row_edit_pos);
-        memmove(state->new_row_edit_buffer + state->new_row_edit_pos,
-                state->new_row_edit_buffer + next, len - next + 1);
-        state->new_row_edit_len -= next - state->new_row_edit_pos;
-      }
-      return true;
-    }
-
-    /* Printable character - insert at cursor */
-    if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
-      if (len > SIZE_MAX - 2)
-        return true;
-      size_t new_len = len + 2;
-      state->new_row_edit_buffer = safe_realloc(state->new_row_edit_buffer, new_len);
-      if (len == 0) {
-        state->new_row_edit_buffer[0] = (char)key_char;
-        state->new_row_edit_buffer[1] = '\0';
-        state->new_row_edit_pos = 1;
-      } else {
-        memmove(state->new_row_edit_buffer + state->new_row_edit_pos + 1,
-                state->new_row_edit_buffer + state->new_row_edit_pos,
-                len - state->new_row_edit_pos + 1);
-        state->new_row_edit_buffer[state->new_row_edit_pos] = (char)key_char;
-        state->new_row_edit_pos++;
-      }
-      state->new_row_edit_len++;
-      return true;
-    }
-
-    /* Consume all other keys when editing cell */
-    return true;
-  }
-
-  /* Not editing a cell - handle row-level navigation */
-
-  /* Escape - cancel add-row mode */
-  if (render_event_is_special(event, UI_KEY_ESCAPE)) {
-    tui_cancel_add_row(state);
-    return true;
-  }
-
-  /* F2 (HOTKEY_ROW_SAVE) - save the new row */
-  if (cfg && hotkey_matches(cfg, event, HOTKEY_ROW_SAVE)) {
-    tui_confirm_add_row(state);
-    return true;
-  }
-
-  /* Up/Down arrows - save and exit add-row mode */
-  if (render_event_is_special(event, UI_KEY_UP) ||
-      render_event_is_special(event, UI_KEY_DOWN)) {
-    tui_confirm_add_row(state);
-    return true;
-  }
-
-  /* Left arrow - move to previous column */
-  if (render_event_is_special(event, UI_KEY_LEFT)) {
-    if (state->new_row_cursor_col > 0) {
-      state->new_row_cursor_col--;
-      add_row_ensure_col_visible(state);
-    }
-    return true;
-  }
-
-  /* Right arrow - move to next column */
-  if (render_event_is_special(event, UI_KEY_RIGHT)) {
-    if (state->new_row_cursor_col < num_cols - 1) {
-      state->new_row_cursor_col++;
-      add_row_ensure_col_visible(state);
-    }
-    return true;
-  }
-
-  /* Tab - move to next column */
-  if (render_event_is_special(event, UI_KEY_TAB)) {
-    if (state->new_row_cursor_col < num_cols - 1) {
-      state->new_row_cursor_col++;
-      add_row_ensure_col_visible(state);
-    }
-    return true;
-  }
-
-  /* Home - go to first column */
-  if (render_event_is_special(event, UI_KEY_HOME)) {
-    state->new_row_cursor_col = 0;
-    add_row_ensure_col_visible(state);
-    return true;
-  }
-
-  /* End - go to last column */
-  if (render_event_is_special(event, UI_KEY_END)) {
-    state->new_row_cursor_col = num_cols - 1;
-    add_row_ensure_col_visible(state);
-    return true;
-  }
-
-  /* Enter - start editing current cell */
-  if (render_event_is_special(event, UI_KEY_ENTER)) {
-    tui_add_row_start_cell_edit(state, state->new_row_cursor_col);
-    return true;
-  }
-
-  /* e or F4 - open modal editor for current cell */
-  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDIT_MODAL)) {
-    size_t col = state->new_row_cursor_col;
-    const DbValue *val = &state->new_row_values[col];
-
-    char *content = NULL;
-    if (state->new_row_placeholders[col] && !state->new_row_edited[col]) {
-      content = str_dup("");
-    } else if (val->is_null) {
-      content = str_dup("");
-    } else {
-      content = db_value_to_string(val);
-      if (!content)
-        content = str_dup("");
-    }
-
-    VmTable *vm = state->vm_table;
-    const char *col_name = vm ? table_vm_column_name(vm, col) : "Cell";
-    char *title = str_printf("Edit: %s", col_name ? col_name : "Cell");
-
-    EditorResult result =
-        editor_view_show(state, title ? title : "Edit Cell", content, false);
-    free(title);
-    free(content);
-
-    const TableSchema *schema = vm ? table_vm_get_schema(vm) : NULL;
-    if (result.saved && !result.set_null &&
-        (!result.content || !result.content[0]) && schema &&
-        col < schema->num_columns &&
-        !add_row_col_required(&schema->columns[col])) {
-      /* Cleared: back to the column's initial state, as inline editing */
-      add_row_init_cell(state, schema, col);
-      free(result.content);
-    } else if (result.saved) {
-      db_value_free(&state->new_row_values[col]);
-      if (result.set_null) {
-        state->new_row_values[col] = db_value_null();
-      } else {
-        state->new_row_values[col] = db_value_text(result.content);
-      }
-      state->new_row_edited[col] = true;
-      state->new_row_placeholders[col] = false;
-      free(result.content);
-    } else {
-      free(result.content);
-    }
-    return true;
-  }
-
-  /* n - set cell to NULL */
-  if (cfg && hotkey_matches(cfg, event, HOTKEY_EDITOR_NULL)) {
-    size_t col = state->new_row_cursor_col;
-    db_value_free(&state->new_row_values[col]);
-    state->new_row_values[col] = db_value_null();
-    state->new_row_edited[col] = true;
-    state->new_row_placeholders[col] = false;
-    return true;
-  }
-
-  /* Printable character - start editing and insert */
-  int key_char = render_event_get_char(event);
-  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
-    tui_add_row_start_cell_edit(state, state->new_row_cursor_col);
-    /* Insert the typed character */
-    if (state->new_row_edit_buffer) {
-      size_t len = state->new_row_edit_len;
-      state->new_row_edit_buffer = safe_realloc(state->new_row_edit_buffer, len + 2);
-      state->new_row_edit_buffer[0] = (char)key_char;
-      state->new_row_edit_buffer[1] = '\0';
-      state->new_row_edit_len = 1;
-      state->new_row_edit_pos = 1;
-    }
-    return true;
-  }
-
-  /* Consume other keys to prevent leaking to table navigation */
-  return true;
+  return true; /* Consume all keys when editing */
 }

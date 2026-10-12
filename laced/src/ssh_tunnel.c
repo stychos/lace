@@ -10,12 +10,16 @@
  */
 
 #include "ssh_tunnel.h"
+#include "constants.h"
 #include "log.h"
+#include "server.h"
 #include <util/mem.h>
 #include <util/str.h>
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <time.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -25,13 +29,12 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
 
-/* Timeout waiting for tunnel readiness */
-#define TUNNEL_READY_TIMEOUT_MS 30000
 #define TUNNEL_POLL_INTERVAL_MS 50
 
 /* Max time to wait for graceful shutdown */
@@ -40,7 +43,11 @@ extern char **environ;
 
 struct SshTunnel {
   pid_t pid;         /* SSH child process PID (0 once it exited) */
-  int local_port;    /* Local forwarded port (kept across restarts) */
+  /* ssh forwards to a Unix socket in a private (0700) directory, never a
+   * TCP port: another local user could take a port (in the gap before ssh
+   * binds it, or after ssh died) and receive the database login */
+  char *socket_dir;  /* Created for this tunnel, removed with it */
+  char *socket_path; /* Kept across restarts */
   char *askpass_path; /* Temp askpass script (NULL if key auth) */
   char *pass_path;    /* Temp password file (NULL if key auth) */
   /* What ssh_tunnel_restart() needs to start ssh again */
@@ -57,105 +64,121 @@ static _Atomic bool g_abort = false;
 
 void ssh_tunnel_abort_pending(void) { g_abort = true; }
 
+const char *ssh_tunnel_host(const SshTunnel *tunnel) {
+  return tunnel ? tunnel->ssh_host : NULL;
+}
+
+const char *ssh_tunnel_socket_path(const SshTunnel *tunnel) {
+  return tunnel ? tunnel->socket_path : NULL;
+}
+
 /* ==========================================================================
  * Internal Helpers
  * ========================================================================== */
 
-/*
- * Find a free local port by binding to port 0 and reading the assignment.
- * Returns the port number, or -1 on failure.
- */
-static int find_free_port(void) {
-  int sock = socket(AF_INET, SOCK_STREAM, 0);
-  if (sock < 0)
-    return -1;
+#define TUNNEL_OWNER_FILE "owner"
+#define TUNNEL_PASS_FILE "pass"
+#define TUNNEL_ASKPASS_FILE "askpass"
 
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  addr.sin_port = 0;
-
-  if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    close(sock);
-    return -1;
+/* Remove a tunnel directory and what it holds (its own files and socket;
+ * it has no subdirectories) */
+static void remove_tunnel_dir(const char *dir) {
+  DIR *d = opendir(dir);
+  if (d) {
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+      if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0)
+        unlinkat(dirfd(d), e->d_name, 0);
+    }
+    closedir(d);
   }
+  rmdir(dir);
+}
 
-  socklen_t len = sizeof(addr);
-  if (getsockname(sock, (struct sockaddr *)&addr, &len) < 0) {
-    close(sock);
-    return -1;
+/* A new private (0700) directory for the tunnel's socket, next to the
+ * daemon's own socket; NULL on failure */
+static char *make_socket_dir(void) {
+  char *sock = laced_get_default_socket_path(); /* Creates its directory */
+  char *slash = sock ? strrchr(sock, '/') : NULL;
+  if (!slash) {
+    free(sock);
+    return NULL;
   }
+  *slash = '\0';
+  char *dir = str_printf("%s/lace-tun-XXXXXX", sock);
+  free(sock);
+  if (dir && !mkdtemp(dir)) {
+    free(dir);
+    return NULL;
+  }
+  /* Who made it: a daemon that crashed leaves the directory behind, and
+   * the next daemon removes it only once this pid is gone */
+  char *owner = str_printf("%s/" TUNNEL_OWNER_FILE, dir);
+  int fd = open(owner, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  free(owner);
+  if (fd < 0) {
+    rmdir(dir);
+    free(dir);
+    return NULL;
+  }
+  char pid[24];
+  int n = snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+  bool ok = write(fd, pid, (size_t)n) == n;
+  close(fd);
+  if (!ok) {
+    remove_tunnel_dir(dir);
+    free(dir);
+    return NULL;
+  }
+  return dir;
+}
 
-  int port = ntohs(addr.sin_port);
-  close(sock);
-  return port;
+/* Write content to dir/name, a new file with the given mode; the path, or
+ * NULL on failure. dir is the tunnel's private directory. */
+static char *write_private_file(const char *dir, const char *name,
+                                const char *content, mode_t mode) {
+  char *path = str_printf("%s/%s", dir, name);
+  unlink(path); /* Left by a failed earlier start of this tunnel */
+  int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode);
+  if (fd < 0) {
+    str_secure_free(path);
+    return NULL;
+  }
+  size_t len = strlen(content);
+  bool ok = write(fd, content, len) == (ssize_t)len;
+  close(fd);
+  if (!ok) {
+    unlink(path);
+    str_secure_free(path);
+    return NULL;
+  }
+  return path;
 }
 
 /*
- * Create temporary files for SSH_ASKPASS password authentication.
- *
- * Creates two files:
- * 1. A password file containing the raw password
- * 2. An askpass script that cats the password file
- *
- * Both are created with restrictive permissions (0600/0700).
- * Returns true on success.
+ * SSH_ASKPASS password authentication: a password file and a script that
+ * prints it, both in the tunnel's private (0700) directory, so a daemon
+ * that dies during setup leaves them only where the next daemon's sweep
+ * removes them. They live until ssh has read the password.
  */
-static bool create_askpass_files(const char *password,
-                                 char **out_pass_path,
-                                 char **out_script_path) {
-  /* Create password file */
-  char pass_template[] = "/tmp/lace-sshpass-XXXXXX";
-  int pass_fd = mkstemp(pass_template);
-  if (pass_fd < 0)
-    return false;
-
-  fchmod(pass_fd, 0600);
-
-  size_t pass_len = strlen(password);
-  ssize_t written = write(pass_fd, password, pass_len);
-  if (written < 0 || (size_t)written != pass_len) {
-    close(pass_fd);
-    unlink(pass_template);
+static bool create_askpass_files(const char *dir, const char *password,
+                                 char **out_pass_path, char **out_script_path) {
+  char *line = str_printf("%s\n", password);
+  char *pass = write_private_file(dir, TUNNEL_PASS_FILE, line, 0600);
+  str_secure_free(line);
+  if (!pass) {
     return false;
   }
-  /* Write trailing newline */
-  write(pass_fd, "\n", 1);
-  close(pass_fd);
-
-  /* Create askpass script that cats the password file */
-  char script_template[] = "/tmp/lace-askpass-XXXXXX";
-  int script_fd = mkstemp(script_template);
-  if (script_fd < 0) {
-    unlink(pass_template);
+  char *script_content = str_printf("#!/bin/sh\ncat '%s'\n", pass);
+  char *script = write_private_file(dir, TUNNEL_ASKPASS_FILE, script_content, 0700);
+  free(script_content);
+  if (!script) {
+    unlink(pass);
+    str_secure_free(pass);
     return false;
   }
-
-  fchmod(script_fd, 0700);
-
-  /* Write script content -- cat the password file */
-  char script_content[512];
-  int script_len = snprintf(script_content, sizeof(script_content),
-                            "#!/bin/sh\ncat '%s'\n", pass_template);
-  if (script_len < 0 || (size_t)script_len >= sizeof(script_content)) {
-    close(script_fd);
-    unlink(pass_template);
-    unlink(script_template);
-    return false;
-  }
-
-  written = write(script_fd, script_content, (size_t)script_len);
-  close(script_fd);
-
-  if (written < 0 || written != script_len) {
-    unlink(pass_template);
-    unlink(script_template);
-    return false;
-  }
-
-  *out_pass_path = str_dup(pass_template);
-  *out_script_path = str_dup(script_template);
+  *out_pass_path = pass;
+  *out_script_path = script;
   return true;
 }
 
@@ -176,51 +199,31 @@ static void cleanup_askpass_files(SshTunnel *tunnel) {
 }
 
 /*
- * Wait for the SSH tunnel to become ready by polling the local port.
- *
- * Returns true when the port is accepting connections (SSH listener is up),
- * or false on timeout / SSH process death.
+ * Wait until ssh listens on the tunnel's socket. Only this user can create
+ * it (private directory), so whatever accepts there is our ssh. Returns 1
+ * when ready, 0 on timeout or abort, -1 if ssh exited (*status: its wait
+ * status; it is reaped, so its pid must not be used again).
  */
-static bool wait_for_tunnel_ready(pid_t pid, int local_port, int timeout_ms) {
-  int elapsed = 0;
-
-  while (elapsed < timeout_ms && !g_abort) {
-    /* Check if SSH process died early (auth failure, host unreachable, etc.) */
-    int status;
-    pid_t result = waitpid(pid, &status, WNOHANG);
-    if (result > 0) {
-      /* SSH process exited */
-      return false;
-    }
-
-    /* Try connecting to the local forwarded port */
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+static int wait_for_tunnel_ready(pid_t pid, const char *path, int timeout_ms,
+                                 int *status) {
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
+  for (int elapsed = 0; elapsed < timeout_ms && !g_abort;
+       elapsed += TUNNEL_POLL_INTERVAL_MS) {
+    if (waitpid(pid, status, WNOHANG) == pid)
+      return -1;
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock < 0)
-      return false;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons((uint16_t)local_port);
-
-    /* Set a short connect timeout */
-    struct timeval tv = {.tv_sec = 0, .tv_usec = TUNNEL_POLL_INTERVAL_MS * 1000};
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
+      return 0;
     int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
     close(sock);
-
-    if (ret == 0) {
-      /* Port is listening -- tunnel is ready */
-      return true;
-    }
-
+    if (ret == 0)
+      return 1;
     usleep(TUNNEL_POLL_INTERVAL_MS * 1000);
-    elapsed += TUNNEL_POLL_INTERVAL_MS;
   }
-
-  return false;
+  return 0;
 }
 
 /* ==========================================================================
@@ -229,6 +232,10 @@ static bool wait_for_tunnel_ready(pid_t pid, int local_port, int timeout_ms) {
 
 static void tunnel_free(SshTunnel *tunnel) {
   cleanup_askpass_files(tunnel);
+  if (tunnel->socket_dir)
+    remove_tunnel_dir(tunnel->socket_dir); /* Socket, owner file */
+  free(tunnel->socket_path);
+  free(tunnel->socket_dir);
   free(tunnel->ssh_host);
   free(tunnel->ssh_user);
   str_secure_free(tunnel->ssh_password);
@@ -236,29 +243,28 @@ static void tunnel_free(SshTunnel *tunnel) {
   free(tunnel);
 }
 
-/* Start ssh for tunnel->local_port and wait until it forwards */
+/* Start ssh for tunnel->socket_path and wait until it forwards */
 static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
-  int lport = tunnel->local_port;
 
   /* Set up password authentication if needed */
   if (tunnel->ssh_password && *tunnel->ssh_password) {
-    if (!create_askpass_files(tunnel->ssh_password, &tunnel->pass_path,
-                              &tunnel->askpass_path)) {
+    if (!create_askpass_files(tunnel->socket_dir, tunnel->ssh_password,
+                              &tunnel->pass_path, &tunnel->askpass_path)) {
       err_set(err, "Failed to create SSH askpass helper");
       return false;
     }
   }
 
-  /* Build ssh -L forward spec: "localport:remotehost:remoteport" */
-  char forward_spec[320];
-  snprintf(forward_spec, sizeof(forward_spec), "%d:%s:%d", lport,
+  /* ssh -L forward spec: "socketpath:remotehost:remoteport" */
+  char forward_spec[640];
+  snprintf(forward_spec, sizeof(forward_spec), "%s:%s:%d", tunnel->socket_path,
            tunnel->remote_host, tunnel->remote_port);
 
   char ssh_port_str[16];
   snprintf(ssh_port_str, sizeof(ssh_port_str), "%d",
            tunnel->ssh_port > 0 ? tunnel->ssh_port : CONNSTR_PORT_SSH);
 
-  LOG_INFO("Starting SSH tunnel: %s:%d -> %s -> %s:%d", "127.0.0.1", lport,
+  LOG_INFO("Starting SSH tunnel: %s -> %s -> %s:%d", tunnel->socket_path,
            tunnel->ssh_host, tunnel->remote_host, tunnel->remote_port);
 
   /* Environment for ssh, built before fork: the daemon is multithreaded,
@@ -289,7 +295,8 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
    * argv, built before fork. Keepalives make ssh exit when the server stops
    * answering (about 45 s), so a dead tunnel is noticed and restarted.
    */
-  const char *argv[24];
+  const char *ssh_config = getenv("LACED_SSH_CONFIG");
+  const char *argv[40]; /* At most 33 used: keep room when adding options */
   int argc = 0;
   argv[argc++] = "ssh";
   argv[argc++] = "-N";
@@ -297,6 +304,19 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
   argv[argc++] = forward_spec;
   argv[argc++] = "-o";
   argv[argc++] = "ExitOnForwardFailure=yes";
+  /* A socket left by an ssh that died is replaced on restart; only this
+   * user may connect to the new one */
+  argv[argc++] = "-o";
+  argv[argc++] = "StreamLocalBindUnlink=yes";
+  argv[argc++] = "-o";
+  argv[argc++] = "StreamLocalBindMask=0177";
+  /* This ssh must own the forward: a ControlMaster from the user's
+   * ssh_config would hand it to another process (liveness checks, restart
+   * and cleanup all go by this pid) */
+  argv[argc++] = "-o";
+  argv[argc++] = "ControlMaster=no";
+  argv[argc++] = "-o";
+  argv[argc++] = "ControlPath=none";
   argv[argc++] = "-o";
   argv[argc++] = "StrictHostKeyChecking=accept-new";
   argv[argc++] = "-o";
@@ -305,6 +325,12 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
   argv[argc++] = "ServerAliveCountMax=3";
   argv[argc++] = "-o";
   argv[argc++] = "ConnectTimeout=15";
+  /* $LACED_SSH_CONFIG: an ssh_config file used instead of ~/.ssh/config
+   * (ssh -F), e.g. for its own known_hosts; read before fork */
+  if (ssh_config && *ssh_config) {
+    argv[argc++] = "-F";
+    argv[argc++] = ssh_config;
+  }
   /* Only pass -p / -l if given: otherwise ~/.ssh/config decides */
   if (tunnel->ssh_port > 0) {
     argv[argc++] = "-p";
@@ -314,8 +340,10 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
     argv[argc++] = "-l";
     argv[argc++] = tunnel->ssh_user;
   }
+  argv[argc++] = "--"; /* The host is never an option, whatever it says */
   argv[argc++] = tunnel->ssh_host;
   argv[argc] = NULL;
+  _Static_assert(sizeof(argv) / sizeof(argv[0]) >= 33, "ssh argv too small");
 
   long max_fd = sysconf(_SC_OPEN_MAX); /* For the child's fd cleanup */
   if (max_fd < 0 || max_fd > 65536)
@@ -364,22 +392,26 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
   free(askpass_var);
   tunnel->pid = pid;
 
-  LOG_DEBUG("SSH tunnel process started: pid=%d, local_port=%d", pid, lport);
+  LOG_DEBUG("SSH tunnel process started: pid=%d, socket=%s", pid,
+            tunnel->socket_path);
 
-  if (!wait_for_tunnel_ready(pid, lport, TUNNEL_READY_TIMEOUT_MS)) {
-    int status;
-    pid_t w = waitpid(pid, &status, WNOHANG);
-    if (w > 0 && WIFEXITED(status)) {
+  int status = 0;
+  int ready = wait_for_tunnel_ready(pid, tunnel->socket_path,
+                                    LACED_TUNNEL_READY_TIMEOUT_MS, &status);
+  if (ready != 1) {
+    if (ready < 0 && WIFEXITED(status)) {
       int exit_code = WEXITSTATUS(status);
       if (exit_code == 127) {
         err_set(err, "SSH command not found. Is openssh-client installed?");
       } else if (exit_code == 255) {
-        err_set(err, "SSH connection failed (authentication, host error, or "
-                     "the local port is taken)");
+        err_set(err, "SSH connection failed (authentication or host error)");
       } else {
         err_setf(err, "SSH tunnel process exited with code %d", exit_code);
       }
+    } else if (ready < 0) {
+      err_set(err, "SSH tunnel process was killed");
     } else {
+      /* Still running: stop it (not reaped yet, so the pid is still ours) */
       err_set(err, g_abort ? "SSH tunnel setup stopped: the daemon is "
                              "shutting down"
                            : "SSH tunnel failed to become ready (timeout)");
@@ -393,12 +425,12 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
 
   /* Tunnel is ready -- clean up temp files (SSH has read the password) */
   cleanup_askpass_files(tunnel);
-  LOG_INFO("SSH tunnel ready: pid=%d, 127.0.0.1:%d -> %s:%d", pid, lport,
+  LOG_INFO("SSH tunnel ready: pid=%d, %s -> %s:%d", pid, tunnel->socket_path,
            tunnel->remote_host, tunnel->remote_port);
   return true;
 }
 
-SshTunnel *ssh_tunnel_create(const ConnString *cs, int *local_port, char **err) {
+SshTunnel *ssh_tunnel_create(const ConnString *cs, char **err) {
   if (!cs || !cs->ssh || !cs->ssh_host) {
     err_set(err, "Invalid SSH connection parameters");
     return NULL;
@@ -411,14 +443,32 @@ SshTunnel *ssh_tunnel_create(const ConnString *cs, int *local_port, char **err) 
     return NULL;
   }
 
-  int lport = find_free_port();
-  if (lport < 0) {
-    err_set(err, "Failed to allocate local port for SSH tunnel");
+  SshTunnel *tunnel = safe_calloc(1, sizeof(SshTunnel));
+  tunnel->socket_dir = make_socket_dir();
+  if (!tunnel->socket_dir) {
+    err_set(err, "Cannot create a private directory for the SSH tunnel");
+    tunnel_free(tunnel);
     return NULL;
   }
-
-  SshTunnel *tunnel = safe_calloc(1, sizeof(SshTunnel));
-  tunnel->local_port = lport;
+  /* PostgreSQL clients look for <dir>/.s.PGSQL.<port>; MySQL takes a path */
+  bool pg = cs->driver && (str_eq(cs->driver, "postgres") ||
+                           str_eq(cs->driver, "postgresql") ||
+                           str_eq(cs->driver, "pg"));
+  tunnel->socket_path =
+      pg ? str_printf("%s/.s.PGSQL.%d", tunnel->socket_dir, remote_port)
+         : str_printf("%s/db.sock", tunnel->socket_dir);
+  /* ssh and the drivers cannot use a longer path (truncating it would
+   * name another file); say so instead of a misleading ssh failure */
+  struct sockaddr_un probe;
+  if (strlen(tunnel->socket_path) >= sizeof(probe.sun_path)) {
+    err_setf(err, "The SSH tunnel's socket path is too long (%zu bytes; the "
+                  "limit is %zu): %s. Start laced with a shorter socket "
+                  "directory (e.g. XDG_RUNTIME_DIR)",
+             strlen(tunnel->socket_path), sizeof(probe.sun_path) - 1,
+             tunnel->socket_path);
+    tunnel_free(tunnel);
+    return NULL;
+  }
   tunnel->ssh_host = str_dup(cs->ssh_host);
   tunnel->ssh_user = cs->ssh_user ? str_dup(cs->ssh_user) : NULL;
   tunnel->ssh_password = cs->ssh_password ? str_dup(cs->ssh_password) : NULL;
@@ -435,7 +485,6 @@ SshTunnel *ssh_tunnel_create(const ConnString *cs, int *local_port, char **err) 
     tunnel_free(tunnel);
     return NULL;
   }
-  *local_port = lport;
   return tunnel;
 }
 
@@ -447,7 +496,7 @@ bool ssh_tunnel_restart(SshTunnel *tunnel, char **err) {
   if (ssh_tunnel_is_alive(tunnel)) {
     return true;
   }
-  LOG_WARN("SSH tunnel on port %d died; restarting", tunnel->local_port);
+  LOG_WARN("SSH tunnel at %s died; restarting", tunnel->socket_path);
   return tunnel_spawn(tunnel, err);
 }
 
@@ -456,8 +505,8 @@ void ssh_tunnel_destroy(SshTunnel *tunnel) {
     return;
 
   if (tunnel->pid > 0) {
-    LOG_DEBUG("Destroying SSH tunnel: pid=%d, port=%d",
-              tunnel->pid, tunnel->local_port);
+    LOG_DEBUG("Destroying SSH tunnel: pid=%d, socket=%s", tunnel->pid,
+              tunnel->socket_path);
 
     kill(tunnel->pid, SIGTERM);
 
@@ -495,4 +544,59 @@ bool ssh_tunnel_is_alive(SshTunnel *tunnel) {
     return false;
   }
   return true;
+}
+
+void ssh_tunnel_signal_exit(SshTunnel *tunnel) {
+  if (tunnel && tunnel->pid > 0)
+    kill(tunnel->pid, SIGTERM);
+}
+
+void ssh_tunnel_sweep_stale(void) {
+  char *sock = laced_get_default_socket_path();
+  char *slash = sock ? strrchr(sock, '/') : NULL;
+  if (!slash) {
+    free(sock);
+    return;
+  }
+  *slash = '\0';
+  DIR *d = opendir(sock);
+  if (!d) {
+    free(sock);
+    return;
+  }
+  time_t now = time(NULL);
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    char *path = str_printf("%s/%s", sock, e->d_name);
+    struct stat st;
+    if (strncmp(e->d_name, "lace-tun-", 9) == 0 && lstat(path, &st) == 0 &&
+        S_ISDIR(st.st_mode) && st.st_uid == geteuid()) {
+      /* Its daemon's pid: remove the directory once that process is gone
+       * (no owner file: not ours to judge; a reused pid: kept, safely) */
+      char *owner = str_printf("%s/" TUNNEL_OWNER_FILE, path);
+      FILE *f = fopen(owner, "r");
+      long pid = 0;
+      if (f) {
+        if (fscanf(f, "%ld", &pid) != 1)
+          pid = 0;
+        fclose(f);
+      }
+      free(owner);
+      if (pid > 0 && kill((pid_t)pid, 0) != 0 && errno == ESRCH) {
+        LOG_INFO("Removing %s: its daemon (pid %ld) is gone", path, pid);
+        remove_tunnel_dir(path);
+      }
+    } else if ((strncmp(e->d_name, "lace-sshpass-", 13) == 0 ||
+                strncmp(e->d_name, "lace-askpass-", 13) == 0) &&
+               lstat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+               st.st_uid == geteuid() && now - st.st_mtime > 600) {
+      /* Older daemons kept these beside the tunnel directories, for the
+       * at most 30 s of a tunnel's setup: ten minutes old means stale */
+      LOG_INFO("Removing stale %s", path);
+      unlink(path);
+    }
+    free(path);
+  }
+  closedir(d);
+  free(sock);
 }

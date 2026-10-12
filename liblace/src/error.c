@@ -39,6 +39,8 @@ const char *lace_error_message(int code) {
     return "Connection is closed";
   case LACE_ERR_INVALID_CONN_ID:
     return "Invalid connection ID";
+  case LACE_ERR_CONNECTION_BUSY:
+    return "Connection is busy with another query";
 
   /* Query errors */
   case LACE_ERR_QUERY_FAILED:
@@ -85,6 +87,8 @@ const char *lace_error_message(int code) {
     return "Too many connections";
   case LACE_ERR_RESULT_TOO_LARGE:
     return "Result set too large";
+  case LACE_ERR_DAEMON_BUSY:
+    return "The daemon is busy: too many requests in progress";
 
   default:
     return "Unknown error";

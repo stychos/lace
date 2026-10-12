@@ -9,6 +9,7 @@
 #ifndef LACED_HANDLER_H
 #define LACED_HANDLER_H
 
+#include "async.h"
 #include "session.h"
 #include <cjson/cJSON.h>
 #include <signal.h>
@@ -26,25 +27,21 @@ typedef struct {
   AsyncQuery *deferred_query; /* For deferred responses, pointer to async query */
 } LacedHandlerResult;
 
-/*
- * Dispatch a JSON-RPC method call to the appropriate handler.
- *
- * @param session       Session manager (connection pool)
- * @param async_queue   Async queue for background queries (may be NULL for sync-only)
- * @param method        Method name
- * @param params        Method parameters (may be NULL)
- * @param request_id    Request ID for async response tracking (may be NULL)
- * @param shutdown_flag Pointer to shutdown flag (set by "shutdown" method)
- * @param owner         Key of the requesting client; connections it opens
- *                      are reaped once no socket with this key remains
- * @return              Handler result (check .deferred for async operations)
- */
-LacedHandlerResult laced_handler_dispatch(LacedSession *session,
-                                          AsyncQueue *async_queue,
-                                          const char *method,
-                                          cJSON *params,
-                                          cJSON *request_id,
-                                          volatile sig_atomic_t *shutdown_flag,
-                                          const char *owner);
+/* One request, as the handlers see it. Dispatch runs on the daemon's main
+ * thread; a handler that starts a job copies what the job needs. */
+typedef struct {
+  LacedSession *session;               /* Connection pool */
+  AsyncQueue *queue;                   /* Worker queue for deferred replies */
+  cJSON *params;                       /* Method parameters (may be NULL) */
+  cJSON *id;                           /* Request id (NULL: a notification) */
+  AsyncRequester from;                 /* Requesting client; the connections
+                                          it opens are reaped once no socket
+                                          with its owner key remains */
+  volatile sig_atomic_t *shutdown_flag; /* Set by "shutdown" */
+} LacedRequest;
+
+/* Dispatch method to its handler (check .deferred for async operations) */
+LacedHandlerResult laced_handler_dispatch(const LacedRequest *rq,
+                                          const char *method);
 
 #endif /* LACED_HANDLER_H */

@@ -16,7 +16,7 @@
  *   if (err != LACE_OK) { handle error }
  *
  *   LaceResult *result;
- *   err = lace_query(client, conn_id, "users", NULL, 0, NULL, 0, 0, 100, &result);
+ *   err = lace_query(client, conn_id, "users", 0, 100, &result);
  *   if (err == LACE_OK) {
  *     // Use result...
  *     lace_result_free(result);
@@ -31,13 +31,12 @@
 #ifndef LIBLACE_H
 #define LIBLACE_H
 
+#include "lace_export.h"
 #include "types.h"
 #include "error.h"
 #include "keyset.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+LACE_BEGIN_DECLS
 
 /* ==========================================================================
  * Client Handle
@@ -52,9 +51,11 @@ typedef struct lace_client lace_client_t;
 
 /* Connection mode for client-daemon communication */
 typedef enum {
-  LACE_CONN_SPAWN,    /* Spawn dedicated daemon (default, current behavior) */
-  LACE_CONN_UNIX,     /* Connect to existing Unix socket */
-  LACE_CONN_TCP       /* Connect to existing TCP socket */
+  LACE_CONN_AUTO,     /* Attach to a running daemon, else start one in
+                         spawn_mode (the default) */
+  LACE_CONN_UNIX,     /* Connect to a Unix socket (spawn_if_missing: start a
+                         daemon when it is the default path and none answers) */
+  LACE_CONN_TCP       /* Connect to a TCP socket */
 } LaceConnMode;
 
 /* Preferred spawn mode when starting a new daemon */
@@ -62,19 +63,24 @@ typedef enum {
   LACE_SPAWN_UNIX,   /* Unix socket mode (default, multi-client) */
   LACE_SPAWN_STDIO,  /* Stdio pipes (single client, auto-exit on EOF) */
   LACE_SPAWN_TCP,    /* TCP socket mode (network, multi-client) */
-  LACE_SPAWN_NONE    /* Don't spawn, connect to existing daemon only */
+  LACE_SPAWN_DETECT  /* Use a running daemon (default Unix socket, then TCP
+                        port LACE_DEFAULT_PORT); with none, a private stdio
+                        daemon. Detects again whenever the daemon is lost */
 } LaceSpawnMode;
 
-/* Client configuration for extended creation */
+/* Client configuration; a zeroed struct means LACE_CONN_AUTO with a Unix
+ * socket daemon, as lace_client_create(NULL) */
 typedef struct {
   LaceConnMode mode;          /* Connection mode */
   const char *socket_path;    /* Unix socket path (NULL = auto-detect) */
   const char *host;           /* TCP host (NULL = localhost) */
   int port;                   /* TCP port (0 = default 7433) */
-  const char *daemon_path;    /* Path to laced for spawn mode */
+  const char *daemon_path;    /* laced to start (NULL: next to the
+                                 executable, else PATH); also used for a
+                                 respawn after a crash */
   bool spawn_if_missing;      /* Spawn daemon if socket not found */
   int connect_timeout_ms;     /* Connection timeout (0 = default 5000) */
-  LaceSpawnMode spawn_mode;   /* Preferred mode when spawning daemon */
+  LaceSpawnMode spawn_mode;   /* LACE_CONN_AUTO: how to start a daemon */
   int idle_timeout;           /* Daemon idle timeout in seconds (0=disabled) */
 } LaceClientConfig;
 
@@ -87,66 +93,25 @@ typedef struct {
  * ========================================================================== */
 
 /*
- * Create a new client and spawn the laced daemon.
- * Uses Unix socket mode by default.
+ * Create a client: attach to the running daemon on the default Unix socket,
+ * else start one there. Same as lace_client_create_with_config() with only
+ * daemon_path set.
  *
- * @param daemon_path  Path to laced executable, or NULL to search PATH
+ * @param daemon_path  Path to laced executable, or NULL to find it
  * @return             Client handle, never NULL; on failure lace_client_connected()
  *                     is false and lace_client_error() says why
  */
 lace_client_t *lace_client_create(const char *daemon_path);
 
 /*
- * Create a new client with specified spawn mode.
+ * Create a client with full configuration: attach-or-spawn in any spawn mode
+ * (LACE_CONN_AUTO), or a specific Unix or TCP endpoint.
  *
- * @param daemon_path  Path to laced executable, or NULL to search PATH
- * @param spawn_mode   LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
- * @return             Client handle, never NULL; on failure lace_client_connected()
- *                     is false and lace_client_error() says why
- */
-lace_client_t *lace_client_create_ex(const char *daemon_path, LaceSpawnMode spawn_mode);
-
-/*
- * Create a new client with specified spawn mode and idle timeout.
- *
- * @param daemon_path    Path to laced executable, or NULL to search PATH
- * @param spawn_mode     LACE_SPAWN_UNIX (multi-client) or LACE_SPAWN_STDIO (single-client)
- * @param idle_timeout   Daemon idle timeout in seconds (0=disabled); also
- *                       used if the daemon has to be respawned later
- * @return               Client handle, never NULL; on failure
- *                       lace_client_connected() is false and
- *                       lace_client_error() says why
- */
-lace_client_t *lace_client_create_ex2(const char *daemon_path,
-                                      LaceSpawnMode spawn_mode,
-                                      int idle_timeout);
-
-/*
- * Create a new client with extended configuration.
- * Allows connecting to existing daemon via socket instead of spawning.
- *
- * @param config  Client configuration (NULL for defaults, same as lace_client_create(NULL))
- * @return        Client handle, or NULL for an unknown mode; on failure
- *                lace_client_connected() is false and lace_client_error() says why
+ * @param config  Client configuration (NULL for defaults)
+ * @return        Client handle, never NULL; on failure lace_client_connected()
+ *                is false and lace_client_error() says why
  */
 lace_client_t *lace_client_create_with_config(const LaceClientConfig *config);
-
-/*
- * Connect to an existing daemon via Unix socket.
- *
- * @param socket_path  Path to Unix socket (NULL = auto-detect)
- * @return             Client handle, or NULL on failure
- */
-lace_client_t *lace_client_connect(const char *socket_path);
-
-/*
- * Connect to an existing daemon via TCP.
- *
- * @param host  Hostname or IP (NULL = localhost)
- * @param port  Port number (0 = default 7433)
- * @return      Client handle, or NULL on failure
- */
-lace_client_t *lace_client_connect_tcp(const char *host, int port);
 
 /*
  * Destroy client. A socket daemon is never shut down here (other frontends
@@ -166,12 +131,18 @@ void lace_client_destroy(lace_client_t *client);
 bool lace_client_connected(const lace_client_t *client);
 
 /*
- * Get the error message of the calling thread's last failed liblace call.
- * Errors are kept per thread, so concurrent callers sharing one client
- * never see (or free) each other's messages.
+ * Why the calling thread's last failing liblace call failed. Like errno:
+ * every call that returns an error code sets it (a validation failure
+ * included), successful calls leave it alone, so read it right after a
+ * failure. Kept per thread, not per client: concurrent callers never see
+ * (or free) each other's messages, and `client` only selects the "Invalid
+ * client" message when NULL.
+ *
+ * Codes: LACE_ERR_INVALID_PARAMS for a bad argument, LACE_ERR_CONNECTION_CLOSED
+ * when the client is not connected to a daemon, otherwise the daemon's code.
  *
  * @param client  Client handle
- * @return        Error message string (valid until this thread's next call)
+ * @return        Message (valid until this thread's next liblace call)
  */
 const char *lace_client_error(const lace_client_t *client);
 
@@ -231,16 +202,6 @@ int lace_connect(lace_client_t *client, const char *connstr, const char *passwor
 int lace_disconnect(lace_client_t *client, int conn_id);
 
 /*
- * Reconnect a database connection.
- *
- * @param client   Client handle
- * @param conn_id  Connection ID to reconnect
- * @param password New password (NULL to reuse previous)
- * @return         LACE_OK on success, error code on failure
- */
-int lace_reconnect(lace_client_t *client, int conn_id, const char *password);
-
-/*
  * List all active connections.
  *
  * @param client  Client handle
@@ -273,9 +234,53 @@ void lace_conn_info_array_free(LaceConnInfo *info, size_t count);
  * Caller frees. */
 char *lace_table_ref(const char *schema, const char *name);
 
+/* Quote one identifier (column, schema or table name) for the driver:
+ * "name" or `name`, an embedded quote doubled. Caller frees. */
+char *lace_quote_identifier(LaceDriver driver, const char *name);
+
 /* Quote a table reference as SQL for the driver: "schema"."table", "table"
  * or `table`. Caller frees; NULL on allocation failure. */
 char *lace_quote_table(LaceDriver driver, const char *ref);
+
+/* Encode text as a SQL string literal for the driver, quotes included
+ * ('it''s'; MySQL text containing a backslash becomes _utf8mb4 X'..', which
+ * is right in every sql_mode). NULL text gives NULL. Caller frees. */
+char *lace_sql_string_literal(LaceDriver driver, const char *text);
+
+/* True only for a statement that ends the whole transaction and nothing
+ * else: ROLLBACK or ABORT, optionally WORK/TRANSACTION, then at most a ';',
+ * whitespace and comments. Not ROLLBACK TO SAVEPOINT, ROLLBACK AND CHAIN,
+ * ROLLBACK PREPARED or "ROLLBACK; more". Used where a ROLLBACK acknowledges
+ * a lost transaction without being sent. */
+bool lace_sql_is_rollback(const char *sql);
+
+/* SQL lexing shared by the daemon and frontends. lace_sql_skip: the length
+ * of the string literal, quoted identifier, comment (*is_comment) or
+ * PostgreSQL $tag$ body starting at s, or 0 if s starts none. driver picks
+ * the dialect (backticks and backslash escapes on MySQL, [ident] on SQLite,
+ * $tag$ on PostgreSQL); any other value lexes the common subset. */
+size_t lace_sql_skip(const char *s, int driver, bool *is_comment);
+
+/* Length of the statement at p, up to (not including) its ';' or the end */
+size_t lace_sql_statement_length(const char *p, int driver);
+
+/* True if sql holds one statement: nothing but whitespace, comments and
+ * ';' after the first one */
+bool lace_sql_single_statement(const char *sql, int driver);
+
+/* Length of the identifier or keyword at s, or 0; walkers step over one
+ * whole so that a '$' inside it is not taken for a $tag$ */
+size_t lace_sql_word_length(const char *s, int driver);
+
+/* True if sql, as far as its text shows, only reads: its first word is
+ * SELECT, WITH, VALUES, TABLE, SHOW, EXPLAIN or DESCRIBE, no INTO appears,
+ * and no writing verb (INSERT/UPDATE/DELETE/MERGE/REPLACE/UPSERT) stands
+ * where a statement's verb can: at the start, after '(' (a data-modifying
+ * WITH) or ';', or anywhere after EXPLAIN. As a column name (SELECT merge
+ * FROM t), in FOR UPDATE or as a function it does not count. A function
+ * with side effects cannot be seen. Used to decide that stopping a
+ * statement early (row limits, paging) loses no write. */
+bool lace_sql_read_only(const char *sql, int driver);
 
 /*
  * List tables in a database.
@@ -311,34 +316,27 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table, LaceS
  * ========================================================================== */
 
 /*
- * Query table data with optional filters, sorting, and pagination.
+ * Query a page of table data (SELECT * ... LIMIT/OFFSET, no ordering).
+ * For filtered or sorted pages, build the SQL and use lace_exec().
  *
  * @param client       Client handle
  * @param conn_id      Connection ID
- * @param table        Table name
- * @param filters      Array of filters (NULL for none)
- * @param num_filters  Number of filters
- * @param sorts        Array of sort specifications (NULL for none)
- * @param num_sorts    Number of sort specifications
+ * @param table        Table reference
  * @param offset       Row offset for pagination
  * @param limit        Maximum rows to return (0 for default)
  * @param result       Output: result set (caller must free with lace_result_free)
  * @return             LACE_OK on success, error code on failure
  */
 int lace_query(lace_client_t *client, int conn_id, const char *table,
-               const LaceFilter *filters, size_t num_filters,
-               const LaceSort *sorts, size_t num_sorts,
-               size_t offset, size_t limit,
-               LaceResult **result);
+               size_t offset, size_t limit, LaceResult **result);
 
 /*
- * Count rows in a table with optional filters.
+ * Count rows in a table. For a filtered count, use lace_exec() with
+ * SELECT COUNT(*) ... WHERE.
  *
  * @param client       Client handle
  * @param conn_id      Connection ID
- * @param table        Table name
- * @param filters      Array of filters (NULL for none)
- * @param num_filters  Number of filters
+ * @param table        Table reference
  * @param count        Output: row count
  * @param approximate  In: if non-NULL and true, a catalog estimate may be
  *                     returned for large PostgreSQL/MySQL tables.
@@ -346,7 +344,6 @@ int lace_query(lace_client_t *client, int conn_id, const char *table,
  * @return             LACE_OK on success, error code on failure
  */
 int lace_count(lace_client_t *client, int conn_id, const char *table,
-               const LaceFilter *filters, size_t num_filters,
                size_t *count, bool *approximate);
 
 /*
@@ -420,13 +417,10 @@ int lace_delete(lace_client_t *client, int conn_id, const char *table,
  * @param columns      Array of column names
  * @param values       Array of values (parallel to columns)
  * @param num_columns  Number of columns; 0 inserts a row of column defaults
- * @param out_pk       Output: primary key of inserted row (caller must free, may be NULL)
- * @param out_num_pk   Output: number of primary key columns
  * @return             LACE_OK on success, error code on failure
  */
 int lace_insert(lace_client_t *client, int conn_id, const char *table,
-                const char **columns, const LaceValue *values, size_t num_columns,
-                LacePkValue **out_pk, size_t *out_num_pk);
+                const char **columns, const LaceValue *values, size_t num_columns);
 
 /*
  * Fetch the given columns of the row(s) a primary-key WHERE clause matches,
@@ -548,8 +542,6 @@ bool lace_peer_is_me(int fd);
  */
 bool lace_daemon_is_running(const char *socket_path);
 
-#ifdef __cplusplus
-}
-#endif
+LACE_END_DECLS
 
 #endif /* LIBLACE_H */

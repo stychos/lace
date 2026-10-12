@@ -26,8 +26,10 @@ struct TuiState;
 /* Serialized filter */
 typedef struct {
   char *column_name; /* Column name (resolved at restore) */
+  bool raw;          /* A RAW SQL condition (no column) */
   int op;            /* FilterOperator enum value */
   char *value;       /* Filter value */
+  char *value2;      /* BETWEEN upper bound */
 } SessionFilter;
 
 /* Serialized sort entry (uses column name, not index) */
@@ -87,7 +89,6 @@ typedef struct {
   bool header_visible;
   bool status_visible;
   bool sidebar_visible;
-  size_t page_size;
 
   /* Workspaces */
   SessionWorkspace *workspaces;

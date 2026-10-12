@@ -20,8 +20,10 @@
  * rows of that table, i.e. safe to edit through primary keys. Rejects
  * JOIN, set operations, subqueries, grouping, DISTINCT, aggregates and
  * multi-table FROM lists. Strings, quoted identifiers and comments are
- * skipped, so keywords inside them do not count. */
-static bool query_is_simple_select(const char *sql) {
+ * skipped, so keywords inside them do not count. On success *from_out points
+ * just past the top-level FROM keyword (NULL if there is none). */
+static bool query_is_simple_select(const char *sql, SqlDialect dialect,
+                                   const char **from_out) {
   static const char *const banned_words[] = {
       "JOIN", "UNION", "INTERSECT", "EXCEPT", "MINUS", "GROUP", "HAVING",
       "DISTINCT", "WINDOW", "OVER", "LATERAL", "WITH", NULL};
@@ -32,25 +34,13 @@ static bool query_is_simple_select(const char *sql) {
   bool first_word = true;
   bool in_from = false; /* between FROM and WHERE/ORDER/LIMIT/... */
   int depth = 0;
+  *from_out = NULL;
   while (*p) {
     char c = *p;
-    if (c == '\'' || c == '"' || c == '`') { /* string or quoted identifier */
-      char q = c;
-      p++;
-      while (*p && !(*p == q && p[1] != q)) {
-        p += (*p == q) ? 2 : 1;
-      }
-      if (*p) p++;
-      continue;
-    }
-    if (c == '-' && p[1] == '-') {
-      while (*p && *p != '\n') p++;
-      continue;
-    }
-    if (c == '/' && p[1] == '*') {
-      p += 2;
-      while (*p && !(p[0] == '*' && p[1] == '/')) p++;
-      if (*p) p += 2;
+    bool comment;
+    size_t skip = query_sql_skip(p, dialect, &comment);
+    if (skip) { /* string, quoted identifier or comment */
+      p += skip;
       continue;
     }
     if (c == '(') {
@@ -100,6 +90,8 @@ static bool query_is_simple_select(const char *sql) {
       if (depth == 0) {
         if (len == 4 && strncasecmp(w, "FROM", 4) == 0) {
           in_from = true;
+          if (!*from_out)
+            *from_out = p;
         } else if ((len == 5 && (strncasecmp(w, "WHERE", 5) == 0 ||
                                  strncasecmp(w, "ORDER", 5) == 0 ||
                                  strncasecmp(w, "LIMIT", 5) == 0)) ||
@@ -162,43 +154,9 @@ char *query_extract_table_name(const char *sql, LaceDriver driver) {
   /* Results of anything but a plain single-table SELECT are not editable:
    * a JOIN/UNION/subquery used to be treated as its first FROM table and
    * edits went to the wrong table or rows. */
-  if (!query_is_simple_select(sql))
-    return NULL;
-
-  const char *p = sql;
-  while (*p && isspace((unsigned char)*p))
-    p++;
-
-  /* Must start with SELECT */
-  if (strncasecmp(p, "SELECT", 6) != 0)
-    return NULL;
-
-  /* Find FROM keyword (case insensitive, skip strings) */
   const char *from_pos = NULL;
-  bool in_string = false;
-  char quote_char = 0;
-
-  for (const char *s = p; *s; s++) {
-    if (in_string) {
-      if (*s == quote_char && (s == p || *(s - 1) != '\\')) {
-        in_string = false;
-      }
-    } else {
-      if (*s == '\'' || *s == '"') {
-        in_string = true;
-        quote_char = *s;
-      } else if (isspace((unsigned char)*s) || *s == '(') {
-        /* Check for FROM keyword */
-        if (s[0] && strncasecmp(s + 1, "FROM", 4) == 0 &&
-            (isspace((unsigned char)s[5]) || s[5] == '`' || s[5] == '"')) {
-          from_pos = s + 5;
-          break;
-        }
-      }
-    }
-  }
-
-  if (!from_pos)
+  if (!query_is_simple_select(sql, query_sql_dialect_of(driver), &from_pos) ||
+      !from_pos)
     return NULL;
 
   /* Skip whitespace after FROM */
@@ -276,8 +234,8 @@ void query_execute(TuiState *state, const char *sql) {
 
   /* Record successful user statements in the connection's history */
   Tab *tab = TUI_TAB(state);
-  if (!g_last_execute_cancelled && tab && !tab->query_error && state->conn) {
-    app_record_history(state->app, state->conn, sql, history_detect_type(sql));
+  if (!g_last_execute_cancelled && tab && !tab->query_error && TUI_CONN(state)) {
+    app_record_history(state->app, TUI_CONN(state), sql, history_detect_type(sql));
   }
 }
 
@@ -302,7 +260,7 @@ ResultSet *query_run_modal(TuiState *state, const char *sql,
   AsyncOperation op;
   async_init(&op);
   op.op_type = ASYNC_OP_QUERY;
-  op.conn = state->conn;
+  op.conn = TUI_CONN(state);
   op.sql = str_dup(sql);
   ResultSet *rs = NULL;
   if (op.sql && async_start(&op)) {
@@ -328,13 +286,13 @@ static void query_count_start(TuiState *state, Tab *tab) {
   /* Never inside an open transaction: a statement cancelled there (the
    * count is preempted by the next foreground one) would abort it on
    * PostgreSQL */
-  if (!state->conn || state->conn->background_op || state->conn->in_transaction) {
+  if (!TUI_CONN(state) || TUI_CONN(state)->background_op || TUI_CONN(state)->in_transaction) {
     return;
   }
   AsyncOperation *op = safe_calloc(1, sizeof(AsyncOperation));
   async_init(op);
   op->op_type = ASYNC_OP_QUERY;
-  op->conn = state->conn;
+  op->conn = TUI_CONN(state);
   op->sql = str_printf("SELECT COUNT(*) FROM (\n%s\n) AS lace_count",
                        tab->query_base_sql);
   if (!op->sql || !async_start(op)) {
@@ -343,7 +301,7 @@ static void query_count_start(TuiState *state, Tab *tab) {
     return;
   }
   tab->query_count_op = op;
-  state->conn->background_op = op;
+  TUI_CONN(state)->background_op = op;
 }
 
 void query_poll_count(TuiState *state) {
@@ -378,7 +336,7 @@ static bool pg_in_transaction(const DbConnection *conn) {
 ResultSet *query_run_derived(TuiState *state, const char *sql,
                              const char *message, char **err,
                              bool *cancelled) {
-  DbConnection *pc = state->conn;
+  DbConnection *pc = TUI_CONN(state);
   bool savepoint = false;
   if (pg_in_transaction(pc)) {
     *cancelled = false;
@@ -429,7 +387,7 @@ bool query_ensure_total(TuiState *state, Tab *tab) {
 }
 
 /* "1000+ rows" until the total is known */
-static void query_status_loaded(TuiState *state, Tab *tab) {
+void query_status_loaded(TuiState *state, Tab *tab) {
   size_t end = tab->query_loaded_offset + tab->query_loaded_count;
   if (tab->query_total_known) {
     tui_set_status(state, "Loaded %zu/%zu rows", end, tab->query_total_rows);
@@ -483,7 +441,7 @@ static void query_execute_impl(TuiState *state, const char *sql) {
   tab->query_result_scroll_row = 0;
   tab->query_result_scroll_col = 0;
 
-  if (!state->conn) {
+  if (!TUI_CONN(state)) {
     tab->query_error = str_dup("Not connected to database");
     return;
   }
@@ -508,7 +466,7 @@ static void query_execute_impl(TuiState *state, const char *sql) {
      * appended, which keeps its ORDER BY (MySQL/MariaDB ignore ORDER BY in a
      * derived table without LIMIT). */
     QuerySqlShape shape;
-    query_sql_shape(sql, db_conn_driver_name(state->conn), &shape);
+    query_sql_shape(sql, db_conn_driver_name(TUI_CONN(state)), &shape);
     /* Only reads are paged: "WITH ... INSERT/UPDATE/DELETE" or
      * "SELECT ... INTO" run once, as written (paging them cut them off at
      * the first page) */
@@ -518,14 +476,14 @@ static void query_execute_impl(TuiState *state, const char *sql) {
     /* A PostgreSQL transaction that already failed runs the statement as
      * written, which reports the real error (query_run_derived guards the
      * paged attempt in a live one) */
-    if (pg_in_transaction(state->conn) && state->conn->transaction_failed) {
+    if (pg_in_transaction(TUI_CONN(state)) && TUI_CONN(state)->transaction_failed) {
       pageable = false;
     }
 
     if (pageable && shape.end > 0) {
       tab->query_base_sql = str_ndup(sql, shape.end);
-      tab->query_page_wrap = shape.top_level_limit;
-      char *page_sql = query_page_sql(tab, PAGE_SIZE, 0);
+      tab->query_page_wrap = query_page_needs_wrap(&shape);
+      char *page_sql = query_page_sql(tab, TUI_PAGE_SIZE, 0);
       tab->query_results =
           query_run_derived(state, page_sql, "Executing query...", &err, &cancelled);
       free(page_sql);
@@ -533,7 +491,7 @@ static void query_execute_impl(TuiState *state, const char *sql) {
         tab->query_paginated = true;
         tab->query_loaded_offset = 0;
         tab->query_loaded_count = tab->query_results->num_rows;
-        if (tab->query_results->num_rows < PAGE_SIZE) {
+        if (tab->query_results->num_rows < TUI_PAGE_SIZE) {
           /* A short first page is everything */
           tab->query_total_rows = tab->query_results->num_rows;
           tab->query_total_known = true;
@@ -576,14 +534,14 @@ static void query_execute_impl(TuiState *state, const char *sql) {
       query_calculate_result_widths(tab);
       /* Try to extract table name for editing support */
       tab->query_source_table =
-          query_extract_table_name(sql, state->conn ? state->conn->driver_type
+          query_extract_table_name(sql, TUI_CONN(state) ? TUI_CONN(state)->driver_type
                                                     : LACE_DRIVER_SQLITE);
       /* Load table schema for primary key info (needed for SQLite/PostgreSQL)
        */
       if (tab->query_source_table) {
         char *schema_err = NULL;
         tab->query_source_schema = db_get_table_schema(
-            state->conn, tab->query_source_table, &schema_err);
+            TUI_CONN(state), tab->query_source_table, &schema_err);
         free(schema_err); /* Ignore schema errors */
       }
       if (tab->query_paginated) {
@@ -606,277 +564,5 @@ static void query_execute_impl(TuiState *state, const char *sql) {
       tab->query_results->num_rows > 0) {
     ui->query_focus_results = true;
     ui->query_unfocused = false;
-  }
-}
-
-/* Calculate column widths for query results */
-void query_calculate_result_widths(Tab *tab) {
-  if (!tab->query_results || tab->query_results->num_columns == 0)
-    return;
-
-  size_t num_cols = tab->query_results->num_columns;
-
-  tab->query_result_col_widths = safe_calloc(num_cols, sizeof(int));
-  tab->query_result_num_cols = num_cols;
-
-  /* Start with column name widths */
-  for (size_t c = 0; c < num_cols; c++) {
-    const char *name = tab->query_results->columns[c].name;
-    int w = name ? utf8_width(name, strlen(name)) : 4;
-    if (w < MIN_COL_WIDTH)
-      w = MIN_COL_WIDTH;
-    tab->query_result_col_widths[c] = w;
-  }
-
-  /* Check data values */
-  for (size_t r = 0; r < tab->query_results->num_rows && r < 100; r++) {
-    Row *row = &tab->query_results->rows[r];
-    for (size_t c = 0; c < num_cols && c < row->num_cells; c++) {
-      char *str = db_value_to_string(&row->cells[c]);
-      if (str) {
-        int w = utf8_width(str, strlen(str));
-        if (w > tab->query_result_col_widths[c]) {
-          tab->query_result_col_widths[c] = w;
-        }
-        free(str);
-      }
-    }
-  }
-
-  /* Clamp to max width: content-based sizing up to 15 chars */
-  for (size_t c = 0; c < num_cols; c++) {
-    if (tab->query_result_col_widths[c] > DEFAULT_COL_WIDTH) {
-      tab->query_result_col_widths[c] = DEFAULT_COL_WIDTH;
-    }
-  }
-}
-
-/* Load more rows at end of current query results */
-bool query_load_more_rows(TuiState *state, Tab *tab) {
-  if (!state || !state->conn || !tab || !tab->query_paginated ||
-      !tab->query_base_sql || !tab->query_results)
-    return false;
-
-  size_t new_offset = tab->query_loaded_offset + tab->query_loaded_count;
-  if (tab->query_total_known && new_offset >= tab->query_total_rows)
-    return false;
-
-  char *page_sql = query_page_sql(tab, PAGE_SIZE, new_offset);
-  char *err = NULL;
-  bool cancelled = false;
-  ResultSet *more =
-      query_run_derived(state, page_sql, "Loading rows...", &err, &cancelled);
-  free(page_sql);
-
-  if (!more || more->num_rows < PAGE_SIZE) {
-    if (more || !err) {
-      /* A short page is the end: the total is known now */
-      tab->query_total_rows = new_offset + (more ? more->num_rows : 0);
-      tab->query_total_known = true;
-    } else if (!cancelled) {
-      tui_set_error(state, "Load failed: %s", err);
-    }
-  }
-  free(err);
-  if (!more || more->num_rows == 0) {
-    db_result_free(more);
-    return false;
-  }
-
-  size_t old_count = tab->query_results->num_rows;
-  size_t new_count = old_count + more->num_rows;
-  tab->query_results->rows =
-      safe_reallocarray(tab->query_results->rows, new_count, sizeof(Row));
-  for (size_t i = 0; i < more->num_rows; i++) {
-    tab->query_results->rows[old_count + i] = more->rows[i];
-    more->rows[i].cells = NULL; /* Moved */
-    more->rows[i].num_cells = 0;
-  }
-  tab->query_results->num_rows = new_count;
-  tab->query_loaded_count = new_count;
-  db_result_free(more);
-
-  /* Trim old data to keep memory bounded */
-  query_trim_loaded_data(state, tab);
-  query_status_loaded(state, tab);
-  return true;
-}
-
-/* Load previous rows (prepend to current query results) */
-bool query_load_prev_rows(TuiState *state, Tab *tab) {
-  if (!state || !state->conn || !tab || !tab->query_paginated ||
-      !tab->query_base_sql || !tab->query_results)
-    return false;
-  if (tab->query_loaded_offset == 0)
-    return false; /* Already at beginning */
-
-  /* Exactly the rows before the window */
-  size_t load_count = tab->query_loaded_offset > PAGE_SIZE
-                          ? PAGE_SIZE
-                          : tab->query_loaded_offset;
-  size_t new_offset = tab->query_loaded_offset - load_count;
-
-  char *page_sql = query_page_sql(tab, load_count, new_offset);
-  char *err = NULL;
-  bool cancelled = false;
-  ResultSet *more =
-      query_run_derived(state, page_sql, "Loading rows...", &err, &cancelled);
-  free(page_sql);
-  if (!more || more->num_rows == 0) {
-    if (err && !cancelled) {
-      tui_set_error(state, "Load failed: %s", err);
-    }
-    free(err);
-    db_result_free(more);
-    return false;
-  }
-  free(err);
-
-  size_t old_count = tab->query_results->num_rows;
-  size_t new_count = old_count + more->num_rows;
-  Row *new_rows = safe_reallocarray(NULL, new_count, sizeof(Row));
-  for (size_t i = 0; i < more->num_rows; i++) {
-    new_rows[i] = more->rows[i];
-    more->rows[i].cells = NULL; /* Moved */
-    more->rows[i].num_cells = 0;
-  }
-  for (size_t i = 0; i < old_count; i++) {
-    new_rows[more->num_rows + i] = tab->query_results->rows[i];
-  }
-  free(tab->query_results->rows);
-  tab->query_results->rows = new_rows;
-  tab->query_results->num_rows = new_count;
-
-  /* Adjust cursor position (it's now offset by the prepended rows) */
-  tab->query_result_row += more->num_rows;
-  tab->query_result_scroll_row += more->num_rows;
-  tab->query_loaded_offset = new_offset;
-  tab->query_loaded_count = new_count;
-  db_result_free(more);
-
-  query_trim_loaded_data(state, tab);
-  query_status_loaded(state, tab);
-  return true;
-}
-
-/* Trim loaded query data to keep memory bounded */
-void query_trim_loaded_data(TuiState *state, Tab *tab) {
-  (void)state; /* Currently unused */
-
-  if (!tab || !tab->query_results || tab->query_results->num_rows == 0)
-    return;
-
-  size_t max_rows = MAX_LOADED_PAGES * PAGE_SIZE;
-  if (tab->query_loaded_count <= max_rows)
-    return;
-
-  /* Calculate cursor's page within loaded data */
-  size_t cursor_page = tab->query_result_row / PAGE_SIZE;
-  size_t total_pages = (tab->query_loaded_count + PAGE_SIZE - 1) / PAGE_SIZE;
-
-  /* Determine pages to keep: TRIM_DISTANCE_PAGES on each side of cursor */
-  size_t keep_start_page = 0;
-  size_t keep_end_page = total_pages;
-
-  if (cursor_page > TRIM_DISTANCE_PAGES) {
-    keep_start_page = cursor_page - TRIM_DISTANCE_PAGES;
-  }
-  if (cursor_page + TRIM_DISTANCE_PAGES + 1 < total_pages) {
-    keep_end_page = cursor_page + TRIM_DISTANCE_PAGES + 1;
-  }
-
-  /* Ensure we don't exceed MAX_LOADED_PAGES */
-  size_t pages_to_keep = keep_end_page - keep_start_page;
-  if (pages_to_keep > MAX_LOADED_PAGES) {
-    size_t excess = pages_to_keep - MAX_LOADED_PAGES;
-    size_t pages_before_cursor = cursor_page - keep_start_page;
-    size_t pages_after_cursor = keep_end_page - cursor_page - 1;
-
-    if (pages_before_cursor > pages_after_cursor) {
-      keep_start_page += excess;
-    } else {
-      keep_end_page -= excess;
-    }
-  }
-
-  /* Convert pages to row indices */
-  size_t trim_start = keep_start_page * PAGE_SIZE;
-  size_t trim_end = keep_end_page * PAGE_SIZE;
-  if (trim_end > tab->query_loaded_count)
-    trim_end = tab->query_loaded_count;
-
-  /* Check if we actually need to trim */
-  if (trim_start == 0 && trim_end >= tab->query_loaded_count)
-    return;
-
-  /* Free rows before trim_start */
-  for (size_t i = 0; i < trim_start; i++) {
-    Row *row = &tab->query_results->rows[i];
-    for (size_t j = 0; j < row->num_cells; j++) {
-      db_value_free(&row->cells[j]);
-    }
-    free(row->cells);
-  }
-
-  /* Free rows after trim_end */
-  for (size_t i = trim_end; i < tab->query_loaded_count; i++) {
-    Row *row = &tab->query_results->rows[i];
-    for (size_t j = 0; j < row->num_cells; j++) {
-      db_value_free(&row->cells[j]);
-    }
-    free(row->cells);
-  }
-
-  /* Move remaining rows to beginning of array */
-  size_t new_count = trim_end - trim_start;
-  if (trim_start > 0) {
-    memmove(tab->query_results->rows, tab->query_results->rows + trim_start,
-            new_count * sizeof(Row));
-  }
-
-  /* Resize array */
-  tab->query_results->rows = safe_reallocarray(tab->query_results->rows, new_count, sizeof(Row));
-  tab->query_results->num_rows = new_count;
-
-  /* Adjust cursor and scroll positions */
-  if (tab->query_result_row >= trim_start) {
-    tab->query_result_row -= trim_start;
-  } else {
-    tab->query_result_row = 0;
-  }
-
-  if (tab->query_result_scroll_row >= trim_start) {
-    tab->query_result_scroll_row -= trim_start;
-  } else {
-    tab->query_result_scroll_row = 0;
-  }
-
-  /* Update tracking */
-  tab->query_loaded_offset += trim_start;
-  tab->query_loaded_count = new_count;
-}
-
-/* Check if more rows need to be loaded based on cursor position */
-void query_check_load_more(TuiState *state, Tab *tab) {
-  if (!tab || !tab->query_results || !tab->query_paginated)
-    return;
-
-  /* If cursor is within LOAD_THRESHOLD of the END, load more at end */
-  size_t rows_from_end =
-      tab->query_results->num_rows > tab->query_result_row
-          ? tab->query_results->num_rows - tab->query_result_row
-          : 0;
-
-  if (rows_from_end < LOAD_THRESHOLD) {
-    /* Check if there are more rows to load at end */
-    size_t loaded_end = tab->query_loaded_offset + tab->query_loaded_count;
-    if (!tab->query_total_known || loaded_end < tab->query_total_rows) {
-      query_load_more_rows(state, tab);
-    }
-  }
-
-  /* If cursor is within LOAD_THRESHOLD of the BEGINNING, load previous rows */
-  if (tab->query_result_row < LOAD_THRESHOLD && tab->query_loaded_offset > 0) {
-    query_load_prev_rows(state, tab);
   }
 }

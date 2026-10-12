@@ -144,61 +144,6 @@ static const char *find_connection_id_by_connstr(ConnectionManager *mgr,
   return NULL;
 }
 
-/* Build ORDER BY clause from tab's sort entries (caller must free) */
-static char *build_tab_order_clause(Tab *tab, TableSchema *schema,
-                                    const char *driver_name) {
-  if (!tab || tab->num_sort_entries == 0 || !schema || !driver_name)
-    return NULL;
-
-  /* Determine quote character based on driver */
-  bool use_backtick = (strcmp(driver_name, "mysql") == 0 ||
-                       strcmp(driver_name, "mariadb") == 0);
-
-  /* Build ORDER BY clause */
-  StringBuilder *sb = sb_new(128);
-  if (!sb)
-    return NULL;
-
-  bool first_added = false;
-  for (size_t i = 0; i < tab->num_sort_entries; i++) {
-    SortEntry *entry = &tab->sort_entries[i];
-    if (entry->column >= schema->num_columns)
-      continue;
-
-    const char *col_name = schema->columns[entry->column].name;
-    if (!col_name)
-      continue;
-
-    /* Escape column name */
-    char *escaped = use_backtick ? str_escape_identifier_backtick(col_name)
-                                 : str_escape_identifier_dquote(col_name);
-    if (!escaped) {
-      sb_free(sb);
-      return NULL;
-    }
-
-    /* Add separator if not first valid entry */
-    if (first_added) {
-      sb_append(sb, ", ");
-    }
-    first_added = true;
-
-    /* Add column with direction */
-    sb_printf(sb, "%s %s", escaped,
-              entry->direction == SORT_ASC ? "ASC" : "DESC");
-    free(escaped);
-  }
-
-  /* Return NULL if no valid entries were added */
-  if (!first_added) {
-    sb_free(sb);
-    return NULL;
-  }
-
-  char *result = sb_to_string(sb);
-  return result;
-}
-
 /* ============================================================================
  * Session Free
  * ============================================================================
@@ -209,6 +154,7 @@ static void session_filter_free(SessionFilter *f) {
     return;
   free(f->column_name);
   free(f->value);
+  free(f->value2);
 }
 
 static void session_tab_free(SessionTab *tab) {
@@ -264,15 +210,22 @@ static cJSON *serialize_filter(const ColumnFilter *f,
   if (!json)
     return NULL;
 
-  /* Get column name from schema */
+  /* Get column name from schema; a RAW condition has none */
   const char *col_name = "";
-  if (schema && f->column_index < schema->num_columns) {
+  bool raw = f->column_index == SIZE_MAX;
+  if (!raw && schema && f->column_index < schema->num_columns) {
     col_name = schema->columns[f->column_index].name;
   }
 
   JSON_ADD_STR(json, "column", col_name);
+  if (raw) {
+    JSON_ADD_BOOL(json, "raw", true);
+  }
   JSON_ADD_INT(json, "op", (int)f->op);
   JSON_ADD_STR(json, "value", f->value);
+  if (f->op == FILTER_OP_BETWEEN) {
+    JSON_ADD_STR(json, "value2", f->value2);
+  }
 
   return json;
 }
@@ -505,7 +458,6 @@ bool session_save(struct TuiState *state, char **error) {
   JSON_ADD_BOOL(settings, "header_visible", state->app->header_visible);
   JSON_ADD_BOOL(settings, "status_visible", state->app->status_visible);
   JSON_ADD_BOOL(settings, "sidebar_visible", state->sidebar_visible);
-  JSON_ADD_NUM(settings, "page_size", state->app->page_size);
   cJSON_AddItemToObject(json, "settings", settings);
 
   /* Workspaces */
@@ -566,10 +518,12 @@ static bool parse_filter(cJSON *json, SessionFilter *f) {
   int op = json_get_int(json, "op", 0);
   f->op = (op >= 0) ? op : 0;
 
+  f->raw = json_get_bool(json, "raw", false);
   f->value = json_dup_string_or(json, "value", "");
-  if (!f->value) {
-    free(f->column_name);
-    f->column_name = NULL;
+  f->value2 = json_dup_string_or(json, "value2", "");
+  if (!f->value || !f->value2) {
+    session_filter_free(f);
+    memset(f, 0, sizeof(*f));
     return false;
   }
 
@@ -715,49 +669,30 @@ Session *session_load(char **error) {
   }
 
   /* Read file */
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
-    free(path);
-    return NULL;
-  }
-
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (size <= 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
-    fclose(f);
-    err_setf(error, "Invalid file size");
-    free(path);
-    return NULL;
-  }
-
-  char *content = safe_malloc((size_t)size + 1);
-
-  size_t read_bytes = fread(content, 1, (size_t)size, f);
-  fclose(f);
-
-  if (read_bytes != (size_t)size) {
+  char *content = platform_read_file(path, 10 * 1024 * 1024); /* Max 10MB */
+  if (!content || !content[0]) {
+    if (content)
+      err_setf(error, "Empty session file");
+    else
+      err_setf(error, "Failed to read %s: %s", path, strerror(errno));
     str_secure_free(content); /* Content may contain connection strings */
-    err_setf(error, "Failed to read complete file (got %zu of %ld bytes)",
-              read_bytes, size);
     free(path);
     return NULL;
   }
-
-  content[read_bytes] = '\0';
   free(path);
 
   /* Parse JSON */
   cJSON *json = cJSON_Parse(content);
-  str_secure_free(content); /* Content may contain connection strings */
-
   if (!json) {
+    /* The error pointer points into content: report before freeing it, and
+     * only a short excerpt (the file may hold connection strings) */
     const char *err_ptr = cJSON_GetErrorPtr();
-    err_setf(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
+    err_setf(error, "JSON parse error near byte %ld",
+             err_ptr ? (long)(err_ptr - content) : -1L);
+    str_secure_free(content);
     return NULL;
   }
+  str_secure_free(content); /* Content may contain connection strings */
 
   /* Create session */
   Session *session = safe_calloc(1, sizeof(Session));
@@ -768,14 +703,10 @@ Session *session_load(char **error) {
     session->header_visible = json_get_bool(settings, "header_visible", true);
     session->status_visible = json_get_bool(settings, "status_visible", true);
     session->sidebar_visible = json_get_bool(settings, "sidebar_visible", true);
-    session->page_size = json_get_size(settings, "page_size", 500);
-    if (session->page_size == 0)
-      session->page_size = 500;
   } else {
     session->header_visible = true;
     session->status_visible = true;
     session->sidebar_visible = true;
-    session->page_size = 500;
   }
 
   /* Parse workspaces */
@@ -994,20 +925,9 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     return false;
   }
 
-  /* Find table index if this is a TABLE tab */
-  size_t table_idx = 0;
-  if (stab->type == TAB_TYPE_TABLE && stab->table_name && stab->table_name[0]) {
-    for (size_t i = 0; i < conn->num_tables; i++) {
-      if (conn->tables[i] && str_eq(conn->tables[i], stab->table_name)) {
-        table_idx = i;
-        break;
-      }
-    }
-  }
-
   /* Create the appropriate tab type */
   if (stab->type == TAB_TYPE_TABLE) {
-    tab = workspace_create_table_tab(ws, conn_idx, table_idx, stab->table_name);
+    tab = workspace_create_table_tab(ws, conn_idx, stab->table_name);
   } else if (stab->type == TAB_TYPE_QUERY) {
     tab = workspace_create_query_tab(ws, conn_idx);
   } else {
@@ -1074,10 +994,17 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     if (tab->schema && stab->num_filters > 0 && stab->filters) {
       for (size_t i = 0; i < stab->num_filters; i++) {
         SessionFilter *sf = &stab->filters[i];
-        size_t col_idx = find_column_index(tab->schema, sf->column_name);
-        if (col_idx != (size_t)-1) {
-          filters_add(&tab->filters, col_idx, (FilterOperator)sf->op,
-                      sf->value);
+        if (sf->op < 0 || sf->op >= FILTER_OP_COUNT)
+          continue;
+        size_t col_idx = sf->raw ? SIZE_MAX
+                                 : find_column_index(tab->schema, sf->column_name);
+        if (!sf->raw && col_idx == (size_t)-1)
+          continue; /* The column is gone */
+        if (filters_add(&tab->filters, col_idx, (FilterOperator)sf->op,
+                        sf->value) &&
+            sf->value2 && sf->value2[0]) {
+          ColumnFilter *cf = &tab->filters.filters[tab->filters.num_filters - 1];
+          snprintf(cf->value2, sizeof(cf->value2), "%s", sf->value2);
         }
       }
     }
@@ -1117,8 +1044,8 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
      * avoids a full-table COUNT(*) per restored tab on startup) */
     bool is_approx = true;
     size_t unfiltered_count = 0;
-    if (db_count_rows(conn->conn, stab->table_name, NULL, 0,
-                      &unfiltered_count, &is_approx, &err)) {
+    if (db_count_rows(conn->conn, stab->table_name, &unfiltered_count,
+                      &is_approx, &err)) {
       tab->unfiltered_total_rows = unfiltered_count;
     } else {
       tab->unfiltered_total_rows = 0;
@@ -1142,7 +1069,8 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       count = unfiltered_count;
     }
     tab->total_rows = count;
-    tab->row_count_approximate = is_approx;
+    /* A filtered count is exact; only the plain table's may be an estimate */
+    tab->row_count_approximate = where ? false : is_approx;
 
     /* Clamp absolute positions to total_rows (table may have shrunk) */
     if (tab->total_rows > 0) {
@@ -1156,7 +1084,7 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
 
     /* Calculate offset to load - center data window around cursor position */
-    size_t page_size = state->app->page_size;
+    size_t page_size = TUI_PAGE_SIZE; /* The window every page load uses */
     size_t load_offset = 0;
     if (abs_cursor_row >= page_size / 2) {
       load_offset = abs_cursor_row - page_size / 2;
@@ -1170,11 +1098,14 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
       }
     }
 
-    /* Build ORDER BY clause from restored sort entries */
+    /* The tab's page order, the same as every later page: with keyset
+     * paging the next page is read from this window's edge row */
     char *order_by = NULL;
     if (tab->schema && conn->conn->driver) {
-      order_by =
-          build_tab_order_clause(tab, tab->schema, conn->conn->driver->name);
+      bool keyset = state->app->config &&
+                    state->app->config->general.pagination_strategy !=
+                        LACE_PAGINATION_OFFSET;
+      order_by = tab_page_order_by(tab, conn->conn->driver->name, keyset);
     }
 
     /* Load data at the calculated offset (near saved cursor position) */
@@ -1285,7 +1216,6 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   /* Restore settings */
   state->app->header_visible = session->header_visible;
   state->app->status_visible = session->status_visible;
-  state->app->page_size = session->page_size;
   state->header_visible = session->header_visible;
   state->status_visible = session->status_visible;
   state->sidebar_visible = session->sidebar_visible;
@@ -1293,6 +1223,7 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   size_t restored_workspaces = 0;
 
   /* Restore each workspace */
+  size_t current_workspace = 0;
   for (size_t ws_i = 0; ws_i < session->num_workspaces; ws_i++) {
     SessionWorkspace *sws = &session->workspaces[ws_i];
 
@@ -1314,6 +1245,9 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     }
 
     size_t restored_tabs = 0;
+    /* The saved current tab, or failing that the last restored tab before
+     * it: positions shift when earlier tabs could not be restored */
+    size_t current_tab = 0;
 
     /* Restore each tab */
     for (size_t tab_i = 0; tab_i < sws->num_tabs; tab_i++) {
@@ -1334,16 +1268,17 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
       char *tab_err = NULL;
       if (restore_tab(state, stab, conn_idx, ws_idx, &tab_err)) {
         restored_tabs++;
+        if (tab_i <= sws->current_tab)
+          current_tab = ws->num_tabs - 1;
       }
       free(tab_err);
     }
 
     if (restored_tabs > 0) {
-      /* Set current tab (clamped to valid range) */
-      if (sws->current_tab < ws->num_tabs) {
-        ws->current_tab = sws->current_tab;
-      }
+      ws->current_tab = current_tab;
       restored_workspaces++;
+      if (ws_i <= session->current_workspace)
+        current_workspace = ws_idx;
     } else {
       /* No tabs restored - remove the empty workspace */
       app_close_workspace(state->app, ws_idx);
@@ -1357,10 +1292,8 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     return false;
   }
 
-  /* Set current workspace (clamped to valid range) */
-  if (session->current_workspace < state->app->num_workspaces) {
-    state->app->current_workspace = session->current_workspace;
-  }
+  /* The saved current workspace, or the last restored one before it */
+  state->app->current_workspace = current_workspace;
 
   /* Sync TUI state from restored app state */
   tui_sync_from_app(state);

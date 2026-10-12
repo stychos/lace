@@ -98,45 +98,8 @@ static inline void vm_notify(ViewModel *vm, unsigned int flags) {
 /* Forward declarations */
 typedef struct TableViewModel TableViewModel;
 
-/* ============================================================================
- * TableViewModel-specific change flags (extend base VM_CHANGE_* flags)
- * ============================================================================
- */
-
-#define TABLE_VM_CHANGE_COLUMN_WIDTHS (1u << 8)  /* Column widths changed */
-#define TABLE_VM_CHANGE_LOADING       (1u << 9)  /* Loading state changed */
-#define TABLE_VM_CHANGE_SORT          (1u << 10) /* Sort order changed */
-#define TABLE_VM_CHANGE_FILTER        (1u << 11) /* Filter changed */
-#define TABLE_VM_CHANGE_ERROR         (1u << 12) /* Error occurred */
-
-/* ============================================================================
- * Selection State
- * ============================================================================
- */
-
-typedef struct TableSelection {
-  size_t *rows;    /* Array of selected row indices */
-  size_t count;    /* Number of selected rows */
-  size_t capacity; /* Allocated capacity */
-  size_t anchor;   /* Anchor row for shift-select */
-  bool anchor_set; /* Whether anchor is valid */
-} TableSelection;
-
-/* ============================================================================
- * TableViewModel Callbacks
- * ============================================================================
- */
-
-typedef struct TableViewModelCallbacks {
-  /* Called when async load completes */
-  void (*on_load_complete)(TableViewModel *vm, bool success, void *ctx);
-
-  /* Called when table selection changes */
-  void (*on_table_select)(TableViewModel *vm, const char *table_name, void *ctx);
-
-  /* User context */
-  void *context;
-} TableViewModelCallbacks;
+/* TableViewModel change flag (extends the base VM_CHANGE_* flags) */
+#define TABLE_VM_CHANGE_COLUMN_WIDTHS (1u << 8)
 
 /* ============================================================================
  * TableViewModel
@@ -147,15 +110,10 @@ struct TableViewModel {
   /* Base viewmodel - MUST be first field for polymorphism */
   ViewModel base;
 
-  /* Model bindings (references, not owned) */
-  Tab *tab;            /* Underlying tab (owns data, schema) */
-  AppState *app;       /* App state for connection access */
-
-  /* Table-specific callbacks */
-  TableViewModelCallbacks table_callbacks;
-
-  /* Data, schema, pagination, cursor/scroll and sort live in `tab`. */
-  bool is_loading;            /* Currently loading data */
+  /* The app the current tab is resolved from on every access (not owned).
+   * Data, schema, pagination, cursor/scroll and sort live in that Tab; the
+   * viewmodel keeps no pointer to it, since tab arrays are reallocated. */
+  AppState *app;
 
   /* Column widths (calculated from data) */
   int *col_widths;
@@ -165,14 +123,6 @@ struct TableViewModel {
   const void *widths_data;
   size_t widths_rows;
   size_t widths_offset;
-
-  /* Selection state */
-  TableSelection selection;
-
-
-  /* UI hints for visible range (for lazy loading) */
-  size_t visible_first_row;
-  size_t visible_row_count;
 };
 
 /* ============================================================================
@@ -188,13 +138,9 @@ TableViewModel *table_vm_create(AppState *app, Tab *tab);
 /* Destroy table viewmodel. Does NOT free the bound tab. */
 void table_vm_destroy(TableViewModel *vm);
 
-/* Rebind viewmodel to a different tab (e.g., on tab switch).
- * Clears selection. Preserves scroll if same table. */
+/* Call when the current tab, or the table it shows, may have changed:
+ * re-measures column widths for it. The viewmodel stores no tab pointer. */
 void table_vm_bind(TableViewModel *vm, Tab *tab);
-
-/* Set table-specific callbacks */
-void table_vm_set_callbacks(TableViewModel *vm,
-                            const TableViewModelCallbacks *callbacks);
 
 /* ============================================================================
  * Data Access
@@ -212,36 +158,19 @@ size_t table_vm_total_rows(const TableViewModel *vm);
 
 /* Get column info */
 const char *table_vm_column_name(const TableViewModel *vm, size_t col);
-DbValueType table_vm_column_type(const TableViewModel *vm, size_t col);
-bool table_vm_column_nullable(const TableViewModel *vm, size_t col);
-bool table_vm_column_is_pk(const TableViewModel *vm, size_t col);
-int table_vm_column_width(const TableViewModel *vm, size_t col);
+
+/* Name of result column col (the cursor's column), which need not be
+ * schema column col: map between them by name */
+const char *table_vm_result_column_name(const TableViewModel *vm, size_t col);
 
 /* Get cell value */
 const DbValue *table_vm_cell(const TableViewModel *vm, size_t row, size_t col);
-const char *table_vm_cell_text(const TableViewModel *vm, size_t row,
-                               size_t col);
-bool table_vm_cell_is_null(const TableViewModel *vm, size_t row, size_t col);
 
 /* Get table name */
 const char *table_vm_table_name(const TableViewModel *vm);
 
 /* Get full schema (for GUI backends that need all column metadata) */
 const TableSchema *table_vm_get_schema(const TableViewModel *vm);
-
-/* Get column foreign key info (returns "table.column" or NULL) */
-const char *table_vm_column_fk(const TableViewModel *vm, size_t col);
-
-/* Get column auto-increment flag */
-bool table_vm_column_auto_increment(const TableViewModel *vm, size_t col);
-
-/* Get column default value (or NULL) */
-const char *table_vm_column_default(const TableViewModel *vm, size_t col);
-
-/* Get primary key column indices (for row identification).
- * Returns number of PK columns. Fills pk_cols array if not NULL. */
-size_t table_vm_pk_columns(const TableViewModel *vm, size_t *pk_cols,
-                           size_t max_cols);
 
 /* Check if viewmodel has valid data */
 bool table_vm_valid(const TableViewModel *vm);
@@ -254,54 +183,16 @@ bool table_vm_valid(const TableViewModel *vm);
 /* Get pagination state */
 size_t table_vm_loaded_offset(const TableViewModel *vm);
 size_t table_vm_loaded_count(const TableViewModel *vm);
-bool table_vm_is_loading(const TableViewModel *vm);
-
-/* Set visible range (for preloading optimization) */
-void table_vm_set_visible_range(TableViewModel *vm, size_t first, size_t count);
-
-/* Update pagination state after data load.
- * Called by pagination layer after merging results. */
-void table_vm_update_pagination(TableViewModel *vm, size_t offset, size_t count,
-                                size_t total);
 
 /* ============================================================================
  * Selection
  * ============================================================================
  */
 
-/* Single row selection */
-void table_vm_select_row(TableViewModel *vm, size_t row);
-void table_vm_deselect_row(TableViewModel *vm, size_t row);
-void table_vm_toggle_row_selection(TableViewModel *vm, size_t row);
-bool table_vm_row_selected(const TableViewModel *vm, size_t row);
-
-/* Range selection (for shift+click) */
-void table_vm_select_range(TableViewModel *vm, size_t from, size_t to);
-void table_vm_extend_selection(TableViewModel *vm, size_t to_row);
-
-/* Bulk selection */
-void table_vm_select_all(TableViewModel *vm);
-void table_vm_clear_selection(TableViewModel *vm);
-
-/* Get selected rows */
-size_t table_vm_selection_count(const TableViewModel *vm);
-const size_t *table_vm_selected_rows(const TableViewModel *vm);
-
 /* ============================================================================
  * Sorting
  * ============================================================================
  */
-
-/* Sort by column */
-void table_vm_sort_by(TableViewModel *vm, size_t col, bool descending);
-void table_vm_toggle_sort(TableViewModel *vm, size_t col);
-void table_vm_add_sort(TableViewModel *vm, size_t col, bool descending);
-void table_vm_clear_sort(TableViewModel *vm);
-
-/* Get sort state */
-bool table_vm_is_sorted(const TableViewModel *vm);
-size_t table_vm_sort_column_count(const TableViewModel *vm);
-const SortEntry *table_vm_sort_entries(const TableViewModel *vm);
 
 /* ============================================================================
  * Column Widths
@@ -316,13 +207,6 @@ void table_vm_recalc_column_widths(TableViewModel *vm);
  * triggers a full recalculation. Cheap when nothing changed. */
 void table_vm_update_column_widths(TableViewModel *vm);
 
-/* Set column width manually */
-void table_vm_set_column_width(TableViewModel *vm, size_t col, int width);
-
-/* Get column widths array */
-const int *table_vm_get_column_widths(const TableViewModel *vm,
-                                      size_t *num_cols);
-
 /* ============================================================================
  * Cursor & Navigation
  * ============================================================================
@@ -331,19 +215,6 @@ const int *table_vm_get_column_widths(const TableViewModel *vm,
 /* Get/set cursor position (stored in base.state) */
 void table_vm_get_cursor(const TableViewModel *vm, size_t *row, size_t *col);
 void table_vm_set_cursor(TableViewModel *vm, size_t row, size_t col);
-
-/* Move cursor (with clamping) */
-void table_vm_move_cursor(TableViewModel *vm, int row_delta, int col_delta);
-
-/* Jump to positions */
-void table_vm_goto_first_row(TableViewModel *vm);
-void table_vm_goto_last_row(TableViewModel *vm);
-void table_vm_goto_first_col(TableViewModel *vm);
-void table_vm_goto_last_col(TableViewModel *vm);
-
-/* Page movement */
-void table_vm_page_up(TableViewModel *vm, size_t page_size);
-void table_vm_page_down(TableViewModel *vm, size_t page_size);
 
 /* ============================================================================
  * Scroll
@@ -354,31 +225,15 @@ void table_vm_page_down(TableViewModel *vm, size_t page_size);
 void table_vm_get_scroll(const TableViewModel *vm, size_t *row, size_t *col);
 void table_vm_set_scroll(TableViewModel *vm, size_t row, size_t col);
 
-/* Ensure cursor is visible (adjusts scroll) */
-void table_vm_ensure_cursor_visible(TableViewModel *vm, size_t visible_rows,
-                                    size_t visible_cols);
-
 /* ============================================================================
  * Row Loading
  * ============================================================================
  */
 
-/* Check if a specific row is loaded */
-bool table_vm_row_loaded(const TableViewModel *vm, size_t row);
-
-/* Request that a specific row be loaded (triggers loading if needed) */
-void table_vm_ensure_row_loaded(TableViewModel *vm, size_t row);
-
 /* ============================================================================
  * Actions
  * ============================================================================
  */
-
-/* Delete selected rows */
-bool table_vm_delete_selected(TableViewModel *vm, char **error);
-
-/* Refresh/reload data */
-void table_vm_refresh(TableViewModel *vm);
 
 /* ============================================================================
  * Connection
@@ -393,30 +248,10 @@ DbConnection *table_vm_connection(const TableViewModel *vm);
  * ============================================================================
  */
 
-/* Copy cell/selection to clipboard (returns allocated string) */
-char *table_vm_copy_cell(const TableViewModel *vm);
-char *table_vm_copy_selection(const TableViewModel *vm, bool include_headers);
-
-/* ============================================================================
- * Sync with Tab
- * ============================================================================
- * These functions sync viewmodel state with the underlying Tab.
- * Used during migration - will be removed when Tab no longer owns cursor.
- */
-
-/* Sync viewmodel state FROM tab (after tab switch or data load) */
-void table_vm_sync_from_tab(TableViewModel *vm);
-
-/* Sync viewmodel state TO tab (before tab switch or save) */
-void table_vm_sync_to_tab(TableViewModel *vm);
-
 /* ============================================================================
  * ViewModel Operations (internal)
  * ============================================================================
  */
-
-/* Get ViewModelOps for TableViewModel */
-const ViewModelOps *table_vm_ops(void);
 
 /* ============================================================================
  * Type Alias (for backward compatibility in tui.h)

@@ -5,7 +5,8 @@ CC = clang
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE -g
 CFLAGS += -Isrc -I../../liblace/include
 LDFLAGS = -L../../liblace/build
-LIBS = -llace -lncursesw -lmenuw -lcjson
+# The archive by path: -llace would pick liblace.dylib/.so once built
+LIBS = ../../liblace/build/liblace.a -lncursesw -lmenuw -lcjson -pthread
 
 # Detect OS for platform-specific paths
 UNAME_S := $(shell uname -s)
@@ -25,11 +26,19 @@ else
     LDFLAGS += $(shell pkg-config --libs-only-L ncursesw 2>/dev/null)
 endif
 
+# Extra compiler flags, e.g. `make EXTRA_CFLAGS=-Werror` (CI)
+CFLAGS += $(EXTRA_CFLAGS)
+
 # make SANITIZE=1 builds with AddressSanitizer + UndefinedBehaviorSanitizer.
 # Run `make clean` first so sanitized and plain objects do not mix.
 ifeq ($(SANITIZE),1)
     CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer -O1
     LDFLAGS += -fsanitize=address,undefined
+endif
+# make SANITIZE=thread builds with ThreadSanitizer (tests/stress uses it)
+ifeq ($(SANITIZE),thread)
+    CFLAGS += -fsanitize=thread -fno-omit-frame-pointer -O1
+    LDFLAGS += -fsanitize=thread
 endif
 
 # Build and source directories
@@ -56,9 +65,12 @@ $(TARGET): $(OBJS) ../../liblace/build/liblace.a
 	@mkdir -p $(BUILD_DIR)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS) $(LIBS)
 
-# Build liblace first
-../../liblace/build/liblace.a:
+# liblace builds through its own Makefile every time (a no-op when up to
+# date), so a change there relinks the TUI instead of using a stale archive
+../../liblace/build/liblace.a: FORCE
 	$(MAKE) -C ../../liblace
+
+FORCE:
 
 # Compile source files
 $(BUILD_DIR)/%.o: %.c
@@ -88,4 +100,30 @@ release: clean all
 run: all
 	$(TARGET)
 
-.PHONY: all clean cleanall debug release run
+.PHONY: all clean cleanall debug release run FORCE
+
+# Unit tests (../../tests): every object but main, so tests call the real code
+TEST_BIN = $(BUILD_DIR)/test_tui
+TEST_OBJS = $(filter-out $(BUILD_DIR)/$(SRC_DIR)/app/main.o,$(OBJS))
+
+$(TEST_BIN): ../../tests/test_tui.c ../../tests/test.h $(TEST_OBJS) ../../liblace/build/liblace.a
+	$(CC) $(CFLAGS) -I../../tests $< $(TEST_OBJS) -o $@ $(LDFLAGS) $(LIBS)
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+.PHONY: test
+
+# Integration tests (../../tests/integration): real databases, see run.py.
+# Linked with the TUI's objects too, so tests can drive its SQL builders and
+# database layer (paging, savepoints) as well as liblace.
+IT_SRCS = $(wildcard ../../tests/integration/*.c)
+IT_BIN = $(BUILD_DIR)/test_integration
+
+$(IT_BIN): $(IT_SRCS) ../../tests/integration/it.h ../../tests/test.h $(TEST_OBJS) ../../liblace/build/liblace.a
+	$(CC) $(CFLAGS) -I../../tests $(IT_SRCS) $(TEST_OBJS) -o $@ $(LDFLAGS) $(LIBS) -lm
+
+integration: $(IT_BIN)
+
+.PHONY: integration
+

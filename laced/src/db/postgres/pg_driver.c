@@ -11,6 +11,8 @@
 #include "util/connstr.h"
 #include "../db.h"
 #include "../db_common.h"
+#include "../../../../liblace/include/lace.h"
+#include "../../log.h"
 #include <ctype.h>
 #include <errno.h>
 #include <libpq-fe.h>
@@ -20,94 +22,35 @@
 #include <string.h>
 #include <strings.h>
 
-/* Helper to safely cast size_t to int for libpq paramLengths.
- * Returns 0 on overflow (safe default for text format where length is ignored).
- * Note: paramLengths is only used for binary format; text format ignores it. */
-static inline int safe_size_to_int(size_t sz) {
-  if (sz > (size_t)INT_MAX) {
-    return 0; /* Safe default - text format ignores paramLengths anyway */
-  }
-  return (int)sz;
-}
-
-/* Parse schema-qualified table name (schema.table or just table).
- * Returns schema (or "public" if unqualified) and table name.
- * Caller must free both returned strings. */
-static bool pg_parse_table_name(const char *full_name, char **schema_out,
-                                char **table_out) {
-  if (!full_name || !schema_out || !table_out)
-    return false;
-
-  const char *dot = strchr(full_name, '.');
-  if (dot) {
-    /* Schema-qualified: schema.table */
-    size_t schema_len = (size_t)(dot - full_name);
-    *schema_out = str_ndup(full_name, schema_len);
-    *table_out = str_dup(dot + 1);
-  } else {
-    /* Unqualified: assume public schema */
-    *schema_out = str_dup("public");
-    *table_out = str_dup(full_name);
-  }
-
-  if (!*schema_out || !*table_out) {
-    free(*schema_out);
-    free(*table_out);
-    *schema_out = NULL;
-    *table_out = NULL;
-    return false;
-  }
-  return true;
-}
-
 /* PostgreSQL connection data */
 typedef struct {
   PGconn *conn;
   char *database;
-  bool broken;  /* The connection was lost: reset before the next use */
-  bool tx_lost; /* ... with a transaction open: refuse until ROLLBACK */
-  bool had_tx;  /* A transaction was open after the last statement */
+  DbLinkState link; /* Lost connection and lost transaction */
+  bool had_tx;      /* A transaction was open after the last statement */
 } PgData;
 
 #define PG_TX_LOST_MSG                                                         \
   "Connection to the PostgreSQL server was lost; the open transaction was "    \
   "rolled back. Run ROLLBACK to acknowledge, then redo the work."
 
+static void pg_notice_to_log(void *arg, const char *message) {
+  (void)arg;
+  LOG_DEBUG("PostgreSQL: %.*s", (int)strcspn(message, "\n"), message);
+}
+
 /* Forward declarations */
 static DbConnection *pg_connect(const char *connstr, char **err);
 static void pg_disconnect(DbConnection *conn);
-static bool pg_ping(DbConnection *conn);
-static ConnStatus pg_status(DbConnection *conn);
-static const char *pg_get_error(DbConnection *conn);
-static char **pg_list_tables(DbConnection *conn, size_t *count, char **err);
-static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
-                                        char **err);
 static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err);
-static int64_t pg_exec(DbConnection *conn, const char *sql, char **err);
-static ResultSet *pg_query_page(DbConnection *conn, const char *table,
-                                size_t offset, size_t limit,
-                                const char *order_by, bool desc, char **err);
-static bool pg_update_cell(DbConnection *conn, const char *table,
-                           const char **pk_cols, const DbValue *pk_vals,
-                           size_t num_pk_cols, const char *col,
-                           const DbValue *new_val, char **err);
-static bool pg_delete_row(DbConnection *conn, const char *table,
-                          const char **pk_cols, const DbValue *pk_vals,
-                          size_t num_pk_cols, char **err);
-static bool pg_insert_row(DbConnection *conn, const char *table,
-                          const ColumnDef *cols, const DbValue *vals,
-                          size_t num_cols, char **err);
-static void pg_free_result(ResultSet *rs);
-static void pg_free_schema(TableSchema *schema);
-static void pg_free_string_list(char **list, size_t count);
+static bool pg_ensure_ready(DbConnection *conn, const char *sql,
+                            bool *answered, char **err);
 static void *pg_prepare_cancel(DbConnection *conn);
 static bool pg_cancel_query(DbConnection *conn, void *cancel_handle,
                             char **err);
 static void pg_free_cancel_handle(void *cancel_handle);
 static int pg_transaction_state(DbConnection *conn);
 static void pg_connection_lost(DbConnection *conn);
-static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
-                                     char **err);
 
 /* Driver definition */
 DbDriver postgres_driver = {
@@ -115,30 +58,13 @@ DbDriver postgres_driver = {
     .display_name = "PostgreSQL",
     .connect = pg_connect,
     .disconnect = pg_disconnect,
-    .ping = pg_ping,
-    .status = pg_status,
-    .get_error = pg_get_error,
-    .list_databases = NULL,
-    .list_tables = pg_list_tables,
-    .get_table_schema = pg_get_table_schema,
     .query = pg_query,
-    .exec = pg_exec,
-    .query_page = pg_query_page,
-    .update_cell = pg_update_cell,
-    .insert_row = pg_insert_row,
-    .delete_row = pg_delete_row,
-    .begin_transaction = NULL,
-    .commit = NULL,
-    .rollback = NULL,
-    .free_result = pg_free_result,
-    .free_schema = pg_free_schema,
-    .free_string_list = pg_free_string_list,
+    .ensure_ready = pg_ensure_ready,
     .prepare_cancel = pg_prepare_cancel,
     .cancel_query = pg_cancel_query,
     .free_cancel_handle = pg_free_cancel_handle,
     .transaction_state = pg_transaction_state,
     .connection_lost = pg_connection_lost,
-    .estimate_row_count = pg_estimate_row_count,
     .library_cleanup = NULL,
 };
 
@@ -148,48 +74,6 @@ typedef struct {
   char *allocated;   /* Buffer to free (NULL if pointing to text.data) */
   int length;        /* Length for paramLengths array */
 } PgParamValue;
-
-/* Convert DbValue to PostgreSQL text parameter.
- * Caller must free allocated buffer if non-NULL. */
-static PgParamValue pg_value_to_param(const DbValue *val) {
-  PgParamValue p = {NULL, NULL, 0};
-
-  if (val->is_null) {
-    return p;
-  }
-
-  switch (val->type) {
-  case DB_TYPE_INT:
-    p.allocated = str_printf("%lld", (long long)val->int_val);
-    p.value = p.allocated;
-    p.length = p.allocated ? safe_size_to_int(strlen(p.allocated)) : 0;
-    break;
-  case DB_TYPE_FLOAT:
-    p.allocated = str_printf("%g", val->float_val);
-    p.value = p.allocated;
-    p.length = p.allocated ? safe_size_to_int(strlen(p.allocated)) : 0;
-    break;
-  case DB_TYPE_BOOL:
-    p.allocated = str_dup(val->bool_val ? "t" : "f");
-    p.value = p.allocated;
-    p.length = p.allocated ? 1 : 0;
-    break;
-  case DB_TYPE_BLOB:
-    /* PostgreSQL bytea in hex format - simplified placeholder */
-    p.allocated = str_dup("\\x");
-    p.value = p.allocated;
-    p.length = p.allocated ? safe_size_to_int(strlen(p.allocated)) : 0;
-    break;
-  case DB_TYPE_TEXT:
-  default:
-    /* Point directly to text data - no allocation */
-    p.value = val->text.data;
-    p.length = safe_size_to_int(val->text.len);
-    break;
-  }
-
-  return p;
-}
 
 /* Map PostgreSQL OID to DbValueType */
 static DbValueType pg_oid_to_db_type(Oid oid) {
@@ -247,7 +131,7 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
   }
 
   /* For oversized fields, show placeholder text instead of loading data */
-  if ((size_t)len > MAX_FIELD_SIZE) {
+  if ((size_t)len > LACE_MAX_FIELD_SIZE) {
     return db_value_oversized_placeholder("DATA", (size_t)len);
   }
 
@@ -341,11 +225,15 @@ static DbValue pg_get_value(PGresult *res, int row, int col, Oid oid) {
         val.blob.data[i] = (uint8_t)strtoul(hex_pair, NULL, 16);
       }
     } else {
-      /* Escape format or raw */
-      val.blob.data = safe_malloc(len);
+      /* Escape format (bytea_output = escape): \ooo octets and \\ */
+      size_t n = 0;
+      unsigned char *bytes = PQunescapeBytea((const unsigned char *)value, &n);
       val.type = DB_TYPE_BLOB;
-      memcpy(val.blob.data, value, len);
-      val.blob.len = len;
+      val.blob.data = safe_malloc(n ? n : 1);
+      if (bytes)
+        memcpy(val.blob.data, bytes, n);
+      val.blob.len = bytes ? n : 0;
+      PQfreemem(bytes);
     }
     break;
 
@@ -393,13 +281,32 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
   char port_str[16];
   snprintf(port_str, sizeof(port_str), "%d", port);
 
-  /* Use PQconnectdbParams which handles escaping of special characters */
-  const char *keywords[6];
-  const char *values[6];
+  /* Through an SSH tunnel: its socket's directory (libpq connects to
+   * <dir>/.s.PGSQL.<port>) */
+  char *socket_dir = NULL;
+  const char *tunnel_socket = connstr_get_option(cs, "lace_socket");
+  if (tunnel_socket && strrchr(tunnel_socket, '/')) {
+    socket_dir = str_ndup(tunnel_socket,
+                          (size_t)(strrchr(tunnel_socket, '/') - tunnel_socket));
+    host = socket_dir;
+  }
+
+  /* Use PQconnectdbParams which handles escaping of special characters.
+   * connect_timeout bounds connects and PQreset (an unreachable host would
+   * otherwise wait for the OS TCP timeout, with no way to cancel);
+   * client_encoding as a parameter survives PQreset, a SET would not */
+  char timeout_str[16];
+  snprintf(timeout_str, sizeof(timeout_str), "%d", LACED_PG_CONNECT_TIMEOUT_S);
+  const char *keywords[8];
+  const char *values[8];
   int idx = 0;
 
   keywords[idx] = "host";
   values[idx++] = host;
+  keywords[idx] = "connect_timeout";
+  values[idx++] = timeout_str;
+  keywords[idx] = "client_encoding";
+  values[idx++] = "UTF8";
   keywords[idx] = "port";
   values[idx++] = port_str;
   keywords[idx] = "user";
@@ -418,12 +325,16 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
   if (PQstatus(pgconn) != CONNECTION_OK) {
     err_setf(err, "Connection failed: %s", PQerrorMessage(pgconn));
     PQfinish(pgconn);
+    free(socket_dir);
     connstr_free(cs);
     return NULL;
   }
 
   /* Set client encoding to UTF-8 */
   PQsetClientEncoding(pgconn, "UTF8");
+  /* Server notices go to the daemon log, not libpq's default stderr
+   * (kept by PQreset) */
+  PQsetNoticeProcessor(pgconn, pg_notice_to_log, NULL);
 
   PgData *data = safe_calloc(1, sizeof(PgData));
   data->conn = pgconn;
@@ -437,9 +348,9 @@ static DbConnection *pg_connect(const char *connstr, char **err) {
   conn->host = str_dup(host);
   conn->port = port;
   conn->user = str_dup(user);
-  conn->status = CONN_STATUS_CONNECTED;
   conn->driver_data = data;
 
+  free(socket_dir); /* host may point into it until here */
   connstr_free(cs);
   return conn;
 }
@@ -460,593 +371,11 @@ static void pg_disconnect(DbConnection *conn) {
   db_common_free_connection(conn);
 }
 
-static bool pg_ping(DbConnection *conn) {
-  if (!conn)
-    return false;
-
-  PgData *data = conn->driver_data;
-  if (!data || !data->conn)
-    return false;
-
-  /* Check connection status */
-  if (PQstatus(data->conn) != CONNECTION_OK) {
-    /* Try to reset */
-    PQreset(data->conn);
-    return PQstatus(data->conn) == CONNECTION_OK;
-  }
-
-  return true;
-}
-
-static ConnStatus pg_status(DbConnection *conn) {
-  return conn ? conn->status : CONN_STATUS_DISCONNECTED;
-}
-
-static const char *pg_get_error(DbConnection *conn) {
-  return conn ? conn->last_error : NULL;
-}
-
-static int64_t pg_exec(DbConnection *conn, const char *sql, char **err) {
-  /* One code path for all statements: pg_query drains every result and
-   * catches a COMMIT that rolled back */
-  ResultSet *rs = pg_query(conn, sql, err);
-  if (!rs) {
-    return -1;
-  }
-  int64_t n = rs->num_columns > 0 ? (int64_t)rs->num_rows : rs->rows_affected;
-  db_result_free(rs);
-  return n;
-}
-
-static bool pg_update_cell(DbConnection *conn, const char *table,
-                           const char **pk_cols, const DbValue *pk_vals,
-                           size_t num_pk_cols, const char *col,
-                           const DbValue *new_val, char **err) {
-  DB_REQUIRE(table && pk_cols && pk_vals && num_pk_cols > 0 && col && new_val,
-             err, false);
-
-  /* Validate num_pk_cols fits in int for libpq (with room for +1) */
-  if (num_pk_cols > (size_t)(INT_MAX - 1)) {
-    err_set(err, "Too many primary key columns");
-    return false;
-  }
-
-  DB_REQUIRE_CONN(conn, PgData, data, conn, err, false);
-
-  /* Escape schema-qualified table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_DOUBLE, true);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build UPDATE statement using common helper */
-  char *sql = db_common_build_update_sql(escaped_table, col, pk_cols,
-                                         num_pk_cols, DB_QUOTE_DOUBLE, true, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  /* Prepare parameter values: 1 new value + N pk values */
-  size_t num_params = 1 + num_pk_cols;
-  /* PostgreSQL supports max 65535 parameters */
-  if (num_params > 65535) {
-    free(sql);
-    err_set(err, "Too many parameters (PostgreSQL limit: 65535)");
-    return false;
-  }
-  const char **paramValues = safe_calloc(num_params, sizeof(char *));
-  int *paramLengths = safe_calloc(num_params, sizeof(int));
-  int *paramFormats = safe_calloc(num_params, sizeof(int)); /* All text format (0) */
-  char **pk_bufs = safe_calloc(num_pk_cols, sizeof(char *));
-  char *new_str = NULL;
-
-  /* Parameter 1: new value */
-  PgParamValue new_param = pg_value_to_param(new_val);
-  paramValues[0] = new_param.value;
-  paramLengths[0] = new_param.length;
-  new_str = new_param.allocated; /* Track for cleanup */
-
-  /* Parameters 2..N+1: primary key values */
-  for (size_t i = 0; i < num_pk_cols; i++) {
-    PgParamValue p = pg_value_to_param(&pk_vals[i]);
-    paramValues[i + 1] = p.value;
-    paramLengths[i + 1] = p.length;
-    pk_bufs[i] = p.allocated; /* Track for cleanup */
-  }
-
-  PGresult *res =
-      PQexecParams(data->conn, sql, safe_size_to_int(num_params), NULL,
-                   paramValues, paramLengths, paramFormats, 0);
-  free(sql);
-  free(new_str);
-  for (size_t i = 0; i < num_pk_cols; i++)
-    free(pk_bufs[i]);
-  free(pk_bufs);
-  free(paramValues);
-  free(paramLengths);
-  free(paramFormats);
-
-  if (!res) {
-    err_set(err, PQerrorMessage(data->conn));
-    return false;
-  }
-
-  ExecStatusType status = PQresultStatus(res);
-  if (status != PGRES_COMMAND_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return false;
-  }
-
-  PQclear(res);
-  return true;
-}
-
-static bool pg_delete_row(DbConnection *conn, const char *table,
-                          const char **pk_cols, const DbValue *pk_vals,
-                          size_t num_pk_cols, char **err) {
-  DB_REQUIRE(table && pk_cols && pk_vals && num_pk_cols > 0, err, false);
-
-  /* PostgreSQL supports max 65535 parameters */
-  if (num_pk_cols > 65535) {
-    err_set(err, "Too many primary key columns (PostgreSQL limit: 65535)");
-    return false;
-  }
-
-  DB_REQUIRE_CONN(conn, PgData, data, conn, err, false);
-
-  /* Escape schema-qualified table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_DOUBLE, true);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build DELETE statement using common helper */
-  char *sql = db_common_build_delete_sql(escaped_table, pk_cols, num_pk_cols,
-                                         DB_QUOTE_DOUBLE, true, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  /* Prepare parameter values */
-  const char **paramValues = safe_calloc(num_pk_cols, sizeof(char *));
-  int *paramLengths = safe_calloc(num_pk_cols, sizeof(int));
-  int *paramFormats = safe_calloc(num_pk_cols, sizeof(int)); /* All text format (0) */
-  char **pk_bufs = safe_calloc(num_pk_cols, sizeof(char *));
-
-  /* Fill in primary key values */
-  for (size_t i = 0; i < num_pk_cols; i++) {
-    PgParamValue p = pg_value_to_param(&pk_vals[i]);
-    paramValues[i] = p.value;
-    paramLengths[i] = p.length;
-    pk_bufs[i] = p.allocated; /* Track for cleanup */
-  }
-
-  PGresult *res =
-      PQexecParams(data->conn, sql, safe_size_to_int(num_pk_cols), NULL,
-                   paramValues, paramLengths, paramFormats, 0);
-  free(sql);
-  for (size_t i = 0; i < num_pk_cols; i++)
-    free(pk_bufs[i]);
-  free(pk_bufs);
-  free(paramValues);
-  free(paramLengths);
-  free(paramFormats);
-
-  if (!res) {
-    err_set(err, PQerrorMessage(data->conn));
-    return false;
-  }
-
-  ExecStatusType status = PQresultStatus(res);
-  if (status != PGRES_COMMAND_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return false;
-  }
-
-  PQclear(res);
-  return true;
-}
-
-static bool pg_insert_row(DbConnection *conn, const char *table,
-                          const ColumnDef *cols, const DbValue *vals,
-                          size_t num_cols, char **err) {
-  DB_REQUIRE(table && cols && vals && num_cols > 0, err, false);
-
-  /* PostgreSQL supports max 65535 parameters */
-  if (num_cols > 65535) {
-    err_set(err, "Too many columns (PostgreSQL limit: 65535)");
-    return false;
-  }
-
-  DB_REQUIRE_CONN(conn, PgData, data, conn, err, false);
-
-  /* Escape schema-qualified table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_DOUBLE, true);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build INSERT statement using common helper */
-  DbInsertLists lists;
-  char *sql = db_common_build_insert_sql(escaped_table, cols, vals, num_cols,
-                                         DB_QUOTE_DOUBLE, true, &lists, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  /* Handle case where all columns are auto_increment */
-  if (lists.num_params == 0) {
-    db_common_free_insert_lists(&lists);
-
-    PGresult *res = PQexec(data->conn, sql);
-    free(sql);
-
-    if (!res) {
-      err_set(err, PQerrorMessage(data->conn));
-      return false;
-    }
-
-    ExecStatusType status = PQresultStatus(res);
-    if (status != PGRES_COMMAND_OK) {
-      err_set(err, PQerrorMessage(data->conn));
-      PQclear(res);
-      return false;
-    }
-
-    PQclear(res);
-    return true;
-  }
-
-  /* Prepare parameter values */
-  const char **paramValues = safe_calloc(lists.num_params, sizeof(char *));
-  int *paramLengths = safe_calloc(lists.num_params, sizeof(int));
-  int *paramFormats = safe_calloc(lists.num_params, sizeof(int)); /* All text format (0) */
-  char **val_bufs = safe_calloc(lists.num_params, sizeof(char *));
-
-  /* Fill in parameter values using column map from common helper */
-  for (size_t i = 0; i < lists.num_params; i++) {
-    size_t col_idx = lists.col_map[i];
-    PgParamValue p = pg_value_to_param(&vals[col_idx]);
-    paramValues[i] = p.value;
-    paramLengths[i] = p.length;
-    val_bufs[i] = p.allocated; /* Track for cleanup */
-  }
-
-  PGresult *res =
-      PQexecParams(data->conn, sql, safe_size_to_int(lists.num_params), NULL,
-                   paramValues, paramLengths, paramFormats, 0);
-  free(sql);
-  db_common_free_insert_lists(&lists);
-  for (size_t i = 0; i < lists.num_params; i++)
-    free(val_bufs[i]);
-  free(val_bufs);
-  free(paramValues);
-  free(paramLengths);
-  free(paramFormats);
-
-  if (!res) {
-    err_set(err, PQerrorMessage(data->conn));
-    return false;
-  }
-
-  ExecStatusType status = PQresultStatus(res);
-  if (status != PGRES_COMMAND_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return false;
-  }
-
-  PQclear(res);
-  return true;
-}
-
-static char **pg_list_tables(DbConnection *conn, size_t *count, char **err) {
-  DB_REQUIRE_PARAMS_CONN(count, conn, PgData, data, conn, err, NULL);
-  *count = 0;
-
-  /* List tables from all user schemas, prefixing with schema name when not
-   * 'public' */
-  const char *sql =
-      "SELECT CASE WHEN schemaname = 'public' THEN tablename "
-      "ELSE schemaname || '.' || tablename END AS full_name "
-      "FROM pg_tables "
-      "WHERE schemaname NOT IN ('pg_catalog', 'information_schema') "
-      "ORDER BY schemaname, tablename";
-  PGresult *res = PQexec(data->conn, sql);
-
-  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return NULL;
-  }
-
-  int num_rows = PQntuples(res);
-  if (num_rows < 0) {
-    PQclear(res);
-    err_set(err, "Invalid row count from database");
-    return NULL;
-  }
-
-  /* Handle zero tables - return empty array (not NULL) to distinguish from
-   * error */
-  if (num_rows == 0) {
-    PQclear(res);
-    char **tables = safe_calloc(1, sizeof(char *));
-    tables[0] = NULL; /* NULL-terminated empty array */
-    *count = 0;
-    return tables;
-  }
-
-  char **tables = safe_calloc((size_t)num_rows, sizeof(char *));
-
-  for (int i = 0; i < num_rows; i++) {
-    tables[i] = str_dup(PQgetvalue(res, i, 0));
-    if (!tables[i]) {
-      /* Free already allocated strings on failure */
-      for (int j = 0; j < i; j++) {
-        free(tables[j]);
-      }
-      free(tables);
-      PQclear(res);
-      err_set(err, "Memory allocation failed");
-      return NULL;
-    }
-    (*count)++;
-  }
-
-  PQclear(res);
-  return tables;
-}
-
-static TableSchema *pg_get_table_schema(DbConnection *conn, const char *table,
-                                        char **err) {
-  DB_REQUIRE_PARAMS_CONN(table, conn, PgData, data, conn, err, NULL);
-
-  /* Parse schema-qualified table name */
-  char *schema_name = NULL, *table_name = NULL;
-  if (!pg_parse_table_name(table, &schema_name, &table_name)) {
-    err_set(err, "Failed to parse table name");
-    return NULL;
-  }
-
-  /* Query column information */
-  const char *sql =
-      "SELECT column_name, data_type, is_nullable, column_default "
-      "FROM information_schema.columns "
-      "WHERE table_schema = $1 AND table_name = $2 "
-      "ORDER BY ordinal_position";
-
-  const char *paramValues[2] = {schema_name, table_name};
-  PGresult *res =
-      PQexecParams(data->conn, sql, 2, NULL, paramValues, NULL, NULL, 0);
-
-  free(schema_name);
-  free(table_name);
-
-  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return NULL;
-  }
-
-  TableSchema *schema = safe_calloc(1, sizeof(TableSchema));
-
-  schema->name = str_dup(table);
-  int num_rows = PQntuples(res);
-  if (num_rows < 0) {
-    PQclear(res);
-    db_schema_free(schema);
-    err_set(err, "Invalid row count from database");
-    return NULL;
-  }
-  schema->columns = safe_calloc(num_rows > 0 ? (size_t)num_rows : 1, sizeof(ColumnDef));
-
-  for (int i = 0; i < num_rows; i++) {
-    /* Safety check: don't exceed allocated capacity */
-    if (schema->num_columns >= (size_t)num_rows)
-      break;
-    ColumnDef *col = &schema->columns[schema->num_columns];
-    memset(col, 0, sizeof(ColumnDef));
-
-    col->name = str_dup(PQgetvalue(res, i, 0));
-    col->type_name = str_dup(PQgetvalue(res, i, 1));
-    if (!col->name || !col->type_name) {
-      /* Free partially allocated column before cleanup */
-      free(col->name);
-      free(col->type_name);
-      PQclear(res);
-      db_schema_free(schema);
-      err_set(err, "Memory allocation failed");
-      return NULL;
-    }
-    col->nullable = str_eq_nocase(PQgetvalue(res, i, 2), "YES");
-
-    char *default_val = PQgetvalue(res, i, 3);
-    col->default_val =
-        (default_val && *default_val) ? str_dup(default_val) : NULL;
-
-    /* Detect auto_increment: SERIAL types have nextval() as default */
-    col->auto_increment = (default_val && (strstr(default_val, "nextval(") ||
-                                           strstr(default_val, "GENERATED")));
-
-    /* Map type - guard against NULL type_name */
-    char *type = col->type_name;
-    if (!type) {
-      col->type = DB_TYPE_TEXT;
-    } else if (strstr(type, "int") || strstr(type, "serial")) {
-      col->type = DB_TYPE_INT;
-    } else if (strstr(type, "float") || strstr(type, "double") ||
-               strstr(type, "numeric") || strstr(type, "decimal")) {
-      col->type = DB_TYPE_FLOAT;
-    } else if (strstr(type, "bool")) {
-      col->type = DB_TYPE_BOOL;
-    } else if (strstr(type, "bytea")) {
-      col->type = DB_TYPE_BLOB;
-    } else if (strstr(type, "timestamp") || strstr(type, "date") ||
-               strstr(type, "time")) {
-      col->type = DB_TYPE_TIMESTAMP;
-    } else {
-      col->type = DB_TYPE_TEXT;
-    }
-
-    schema->num_columns++;
-  }
-
-  PQclear(res);
-
-  /* Get primary key info */
-  sql = "SELECT a.attname FROM pg_index i "
-        "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = "
-        "ANY(i.indkey) "
-        "WHERE i.indrelid = $1::regclass AND i.indisprimary";
-
-  paramValues[0] = table;
-  res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
-
-  if (PQresultStatus(res) == PGRES_TUPLES_OK) {
-    int pk_rows = PQntuples(res);
-    for (int i = 0; i < pk_rows; i++) {
-      char *pk_col = PQgetvalue(res, i, 0);
-      for (size_t j = 0; j < schema->num_columns; j++) {
-        if (str_eq(schema->columns[j].name, pk_col)) {
-          schema->columns[j].primary_key = true;
-          break;
-        }
-      }
-    }
-  }
-
-  PQclear(res);
-
-  /* Get index info */
-  sql = "SELECT i.relname AS index_name, "
-        "       ix.indisunique AS is_unique, "
-        "       ix.indisprimary AS is_primary, "
-        "       am.amname AS index_type, "
-        "       array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) "
-        "AS columns "
-        "FROM pg_index ix "
-        "JOIN pg_class i ON i.oid = ix.indexrelid "
-        "JOIN pg_class t ON t.oid = ix.indrelid "
-        "JOIN pg_am am ON am.oid = i.relam "
-        "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) "
-        "WHERE t.oid = $1::regclass "
-        "GROUP BY i.relname, ix.indisunique, ix.indisprimary, am.amname "
-        "ORDER BY i.relname";
-
-  paramValues[0] = table;
-  res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
-
-  if (PQresultStatus(res) == PGRES_TUPLES_OK) {
-    int num_indexes = PQntuples(res);
-    if (num_indexes > 0) {
-      schema->indexes = safe_calloc((size_t)num_indexes, sizeof(IndexDef));
-      for (int i = 0; i < num_indexes; i++) {
-        IndexDef *idx = &schema->indexes[schema->num_indexes];
-        memset(idx, 0, sizeof(IndexDef));
-
-        idx->name = str_dup(PQgetvalue(res, i, 0));
-        idx->unique = PQgetvalue(res, i, 1)[0] == 't';
-        idx->primary = PQgetvalue(res, i, 2)[0] == 't';
-        idx->type = str_dup(PQgetvalue(res, i, 3));
-
-        /* Parse column array: {col1,col2,...} */
-        char *cols_str = PQgetvalue(res, i, 4);
-        size_t ncols = 0;
-        idx->columns = db_common_parse_pg_array(cols_str, &ncols);
-        idx->num_columns = ncols;
-
-        schema->num_indexes++;
-      }
-    }
-  }
-  PQclear(res);
-
-  /* Get foreign key info */
-  sql = "SELECT "
-        "  con.conname AS constraint_name, "
-        "  array_agg(att.attname ORDER BY u.attposition) AS columns, "
-        "  ref.relname AS ref_table, "
-        "  array_agg(ratt.attname ORDER BY u.attposition) AS ref_columns, "
-        "  CASE con.confdeltype "
-        "    WHEN 'a' THEN 'NO ACTION' "
-        "    WHEN 'r' THEN 'RESTRICT' "
-        "    WHEN 'c' THEN 'CASCADE' "
-        "    WHEN 'n' THEN 'SET NULL' "
-        "    WHEN 'd' THEN 'SET DEFAULT' "
-        "  END AS on_delete, "
-        "  CASE con.confupdtype "
-        "    WHEN 'a' THEN 'NO ACTION' "
-        "    WHEN 'r' THEN 'RESTRICT' "
-        "    WHEN 'c' THEN 'CASCADE' "
-        "    WHEN 'n' THEN 'SET NULL' "
-        "    WHEN 'd' THEN 'SET DEFAULT' "
-        "  END AS on_update "
-        "FROM pg_constraint con "
-        "JOIN pg_class rel ON rel.oid = con.conrelid "
-        "JOIN pg_class ref ON ref.oid = con.confrelid "
-        "CROSS JOIN LATERAL unnest(con.conkey, con.confkey) "
-        "  WITH ORDINALITY AS u(attnum, refattnum, attposition) "
-        "JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = "
-        "u.attnum "
-        "JOIN pg_attribute ratt ON ratt.attrelid = ref.oid AND ratt.attnum = "
-        "u.refattnum "
-        "WHERE con.contype = 'f' AND rel.oid = $1::regclass "
-        "GROUP BY con.conname, ref.relname, con.confdeltype, con.confupdtype "
-        "ORDER BY con.conname";
-
-  paramValues[0] = table;
-  res = PQexecParams(data->conn, sql, 1, NULL, paramValues, NULL, NULL, 0);
-
-  if (PQresultStatus(res) == PGRES_TUPLES_OK) {
-    int num_fks = PQntuples(res);
-    if (num_fks > 0) {
-      schema->foreign_keys = safe_calloc((size_t)num_fks, sizeof(ForeignKeyDef));
-      for (int i = 0; i < num_fks; i++) {
-        ForeignKeyDef *fk = &schema->foreign_keys[schema->num_foreign_keys];
-        memset(fk, 0, sizeof(ForeignKeyDef));
-
-        fk->name = str_dup(PQgetvalue(res, i, 0));
-        fk->ref_table = str_dup(PQgetvalue(res, i, 2));
-        fk->on_delete = str_dup(PQgetvalue(res, i, 4));
-        fk->on_update = str_dup(PQgetvalue(res, i, 5));
-
-        /* Parse source columns array: {col1,col2,...} */
-        char *cols_str = PQgetvalue(res, i, 1);
-        size_t ncols = 0;
-        fk->columns = db_common_parse_pg_array(cols_str, &ncols);
-        fk->num_columns = ncols;
-
-        /* Parse referenced columns array */
-        cols_str = PQgetvalue(res, i, 3);
-        ncols = 0;
-        fk->ref_columns = db_common_parse_pg_array(cols_str, &ncols);
-        fk->num_ref_columns = ncols;
-
-        schema->num_foreign_keys++;
-      }
-    }
-  }
-  PQclear(res);
-
-  return schema;
-}
-
-/* Append the rows of res to rs (columns are taken from res if rs has none),
- * honouring the row and byte limits. Returns false once a limit was hit. */
-static bool pg_append_rows(ResultSet *rs, PGresult *res, size_t max_rows,
-                           size_t *bytes, size_t *cap) {
+/* Append the rows of res to the collector's result (columns are taken from
+ * res if it has none), honouring the limits. Returns false once a limit was
+ * hit. */
+static bool pg_append_rows(DbRowCollector *rows, PGresult *res) {
+  ResultSet *rs = rows->rs;
   int num_fields = PQnfields(res);
   if (num_fields < 0) {
     num_fields = 0;
@@ -1062,22 +391,13 @@ static bool pg_append_rows(ResultSet *rs, PGresult *res, size_t max_rows,
   }
   int n = PQntuples(res);
   for (int r = 0; r < n; r++) {
-    if (rs->num_rows >= max_rows || *bytes >= MAX_RESULT_BYTES) {
-      rs->truncated = true;
+    DbValue *cells = db_rows_add(rows, (size_t)num_fields);
+    if (!cells)
       return false;
-    }
-    if (rs->num_rows == *cap) {
-      *cap = *cap ? *cap * 2 : 256;
-      rs->rows = safe_realloc(rs->rows, *cap * sizeof(Row));
-    }
-    Row *row = &rs->rows[rs->num_rows];
-    row->cells = safe_calloc(num_fields > 0 ? (size_t)num_fields : 1, sizeof(DbValue));
-    row->num_cells = (size_t)num_fields;
     for (int c = 0; c < num_fields; c++) {
-      row->cells[c] = pg_get_value(res, r, c, PQftype(res, c));
-      *bytes += (size_t)PQgetlength(res, r, c) + 16;
+      cells[c] = pg_get_value(res, r, c, PQftype(res, c));
+      db_rows_count(rows, (size_t)PQgetlength(res, r, c));
     }
-    rs->num_rows++;
   }
   return true;
 }
@@ -1088,61 +408,63 @@ static bool pg_append_rows(ResultSet *rs, PGresult *res, size_t max_rows,
  * that produced rows (SELECT, ... RETURNING), else the row count of the last
  * statement. A statement without rows returns an empty result carrying its
  * row count (rows_affected), so callers decide by shape, not by keyword. */
-static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
-                               const char *sql, char **err);
+static ResultSet *pg_query_run(PgData *data, const char *sql, char **err);
 
 static void pg_connection_lost(DbConnection *conn) {
   PgData *data = conn ? conn->driver_data : NULL;
   if (!data)
     return;
-  data->broken = true;
-  if (data->had_tx)
-    data->tx_lost = true;
+  db_link_lost(&data->link, data->had_tx);
 }
 
-/*
- * Run sql on a live connection. A lost connection (server restart, network,
- * SSH tunnel) is reset before the next statement, unless a transaction was
- * open: its work is gone, and statements are refused until the client
- * acknowledges with ROLLBACK (carrying on would run them in autocommit on
- * a new session, and COMMIT would "succeed" with nothing in it).
- */
+/* PQreset, for a connection lost or found dead */
+static bool pg_reset(PgData *data, char **err) {
+  PQreset(data->conn);
+  if (PQstatus(data->conn) != CONNECTION_OK) {
+    data->link.broken = true;
+    err_setf(err, "Reconnect failed: %s", PQerrorMessage(data->conn));
+    return false;
+  }
+  db_link_restored(&data->link);
+  data->had_tx = false;
+  return true;
+}
+
+/* Before a statement: a lost connection (server restart, network, SSH
+ * tunnel) is reset here, unless a transaction went with it (DbLinkState).
+ * Runs before the cancel handle is taken, so the handle addresses the
+ * session the statement runs on. */
+static bool pg_ensure_ready(DbConnection *conn, const char *sql,
+                            bool *answered, char **err) {
+  *answered = false;
+  DB_REQUIRE_PARAMS_CONN(sql, conn, PgData, data, conn, err, false);
+
+  if (PQstatus(data->conn) != CONNECTION_OK)
+    db_link_lost(&data->link, data->had_tx);
+  switch (db_link_gate(&data->link, sql, PG_TX_LOST_MSG, err)) {
+  case DB_LINK_REFUSE:
+    return false;
+  case DB_LINK_ACK:
+    /* Nothing is left to roll back: the ROLLBACK is answered */
+    *answered = pg_reset(data, err);
+    return *answered;
+  case DB_LINK_RECONNECT:
+    return pg_reset(data, err);
+  case DB_LINK_READY:
+    break;
+  }
+  return true;
+}
+
+/* Run sql (after pg_ensure_ready). A connection lost during the statement
+ * fails it; the next pg_ensure_ready resets it. */
 static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
   DB_REQUIRE_PARAMS_CONN(sql, conn, PgData, data, conn, err, NULL);
 
-  if (data->tx_lost) {
-    if (!db_common_sql_starts_with_word(sql, "ROLLBACK") &&
-        !db_common_sql_starts_with_word(sql, "ABORT")) {
-      err_set(err, PG_TX_LOST_MSG);
-      return NULL;
-    }
-    data->tx_lost = false; /* Acknowledged: nothing is left to roll back */
-    data->had_tx = false;
-    data->broken = true;
-    PQreset(data->conn);
-    if (PQstatus(data->conn) != CONNECTION_OK) {
-      err_setf(err, "Reconnect failed: %s", PQerrorMessage(data->conn));
-      return NULL;
-    }
-    data->broken = false;
-    return db_result_alloc_empty();
-  }
-  if (data->broken || PQstatus(data->conn) != CONNECTION_OK) {
-    PQreset(data->conn);
-    if (PQstatus(data->conn) != CONNECTION_OK) {
-      data->broken = true;
-      err_setf(err, "Reconnect failed: %s", PQerrorMessage(data->conn));
-      return NULL;
-    }
-    data->broken = false;
-    data->had_tx = false;
-  }
-
-  ResultSet *rs = pg_query_run(conn, data, sql, err);
+  ResultSet *rs = pg_query_run(data, sql, err);
   if (PQstatus(data->conn) != CONNECTION_OK) {
-    data->broken = true;
-    if (data->had_tx) {
-      data->tx_lost = true;
+    db_link_lost(&data->link, data->had_tx);
+    if (data->link.tx_lost) {
       err_set(err, PG_TX_LOST_MSG);
       db_result_free(rs);
       return NULL;
@@ -1153,21 +475,29 @@ static ResultSet *pg_query(DbConnection *conn, const char *sql, char **err) {
   return rs;
 }
 
-static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
-                               const char *sql, char **err) {
+static ResultSet *pg_query_run(PgData *data, const char *sql, char **err) {
   if (!PQsendQuery(data->conn, sql)) {
     err_set(err, PQerrorMessage(data->conn));
     return NULL;
   }
   PQsetSingleRowMode(data->conn); /* Applies to the first statement */
 
-  size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
-                                              : (size_t)MAX_RESULT_ROWS;
+  /* At the row/byte limit, a lone statement outside a transaction is
+   * cancelled (fast, and nothing else is affected). Otherwise the rest of
+   * that result is read and dropped: a cancel would fail the user's
+   * transaction, or roll back the other statements of the string (one
+   * implicit transaction) and skip the later ones while reporting success. */
+  /* ...and a statement that writes (INSERT ... RETURNING, a data-modifying
+   * WITH) is never cancelled: that would roll its write back */
+  bool may_cancel = !data->had_tx &&
+                    lace_sql_single_statement(sql, LACE_DRIVER_POSTGRES) &&
+                    lace_sql_read_only(sql, LACE_DRIVER_POSTGRES);
   ResultSet *rows = NULL;  /* Last complete row result */
   ResultSet *cur = NULL;   /* Rows of the statement being read */
   int64_t last_affected = 0;
-  size_t bytes = 0, cap = 0;
-  bool limited = false;    /* Hit a limit: discard the rest of the stream */
+  DbRowCollector collector = {0};
+  bool limited = false;    /* Cancelled at a limit: discard the rest */
+  bool skipping = false;   /* At a limit: drop this statement's other rows */
   bool commit_rolled_back = false;
   char *error = NULL;
 
@@ -1185,12 +515,19 @@ static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
       PQclear(res);
       continue;
     }
+    if (skipping && (status == PGRES_SINGLE_TUPLE || status == PGRES_TUPLES_OK)) {
+      if (status == PGRES_TUPLES_OK)
+        skipping = false; /* That statement is done: the next one counts */
+      PQclear(res);
+      continue;
+    }
     if (status == PGRES_SINGLE_TUPLE || status == PGRES_TUPLES_OK) {
       if (!cur) {
         cur = db_result_alloc_empty();
-        bytes = cap = 0;
+        db_rows_init(&collector, cur);
       }
-      if (!pg_append_rows(cur, res, max_rows, &bytes, &cap)) {
+      bool full = !pg_append_rows(&collector, res);
+      if (full && may_cancel) {
         /* Limit reached: stop the server instead of reading the rest */
         limited = true;
         PGcancel *cancel = PQgetCancel(data->conn);
@@ -1199,8 +536,10 @@ static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
           PQcancel(cancel, ebuf, sizeof(ebuf));
           PQfreeCancel(cancel);
         }
+      } else if (full && status != PGRES_TUPLES_OK) {
+        skipping = true;
       }
-      if (status == PGRES_TUPLES_OK || limited) {
+      if (status == PGRES_TUPLES_OK || full) {
         /* This statement's rows are complete */
         db_result_free(rows);
         rows = cur;
@@ -1241,41 +580,6 @@ static ResultSet *pg_query_run(DbConnection *conn, PgData *data,
   return rs;
 }
 
-static ResultSet *pg_query_page(DbConnection *conn, const char *table,
-                                size_t offset, size_t limit,
-                                const char *order_by, bool desc, char **err) {
-  DB_REQUIRE(table, err, NULL);
-
-  /* Escape schema-qualified table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_DOUBLE, true);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
-
-  /* Build paginated query using common helper */
-  char *sql = db_common_build_query_page_sql(escaped_table, offset, limit,
-                                             order_by, desc, DB_QUOTE_DOUBLE, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return NULL; /* Error already set by helper */
-  }
-
-  ResultSet *rs = pg_query(conn, sql, err);
-  free(sql);
-
-  return rs;
-}
-
-static void pg_free_result(ResultSet *rs) { db_result_free(rs); }
-
-static void pg_free_schema(TableSchema *schema) { db_schema_free(schema); }
-
-static void pg_free_string_list(char **list, size_t count) {
-  db_common_free_string_list(list, count);
-}
-
 /* Query cancellation support */
 static void *pg_prepare_cancel(DbConnection *conn) {
   if (!conn)
@@ -1310,59 +614,12 @@ static void pg_free_cancel_handle(void *cancel_handle) {
   }
 }
 
-/* Approximate row count using pg_class.reltuples */
-static int64_t pg_estimate_row_count(DbConnection *conn, const char *table,
-                                     char **err) {
-  DB_REQUIRE_PARAMS_CONN(table, conn, PgData, data, conn, err, -1);
-
-  /* Parse schema-qualified table name */
-  char *schema_name = NULL, *table_name = NULL;
-  if (!pg_parse_table_name(table, &schema_name, &table_name)) {
-    err_set(err, "Failed to parse table name");
-    return -1;
-  }
-
-  /* Query pg_class for approximate row count */
-  const char *sql = "SELECT reltuples::bigint FROM pg_class c "
-                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "WHERE n.nspname = $1 AND c.relname = $2";
-
-  const char *params[2] = {schema_name, table_name};
-  PGresult *res = PQexecParams(data->conn, sql, 2, NULL, params, NULL, NULL, 0);
-
-  free(schema_name);
-  free(table_name);
-
-  if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-    err_set(err, PQerrorMessage(data->conn));
-    PQclear(res);
-    return -1;
-  }
-
-  int64_t count = -1;
-  if (PQntuples(res) > 0 && !PQgetisnull(res, 0, 0)) {
-    const char *val = PQgetvalue(res, 0, 0);
-    if (val && *val) {
-      errno = 0;
-      char *endptr;
-      long long parsed = strtoll(val, &endptr, 10);
-      /* reltuples can be -1 if never analyzed, treat as unavailable */
-      if (errno == 0 && endptr != val && parsed >= 0) {
-        count = parsed;
-      }
-    }
-  }
-
-  PQclear(res);
-  return count;
-}
-
 static int pg_transaction_state(DbConnection *conn) {
   PgData *data = conn ? conn->driver_data : NULL;
   if (!data || !data->conn) {
     return 0;
   }
-  if (data->tx_lost) {
+  if (data->link.tx_lost) {
     return 1; /* Until ROLLBACK acknowledges the loss */
   }
   switch (PQtransactionStatus(data->conn)) {

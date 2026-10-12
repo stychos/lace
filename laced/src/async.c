@@ -7,15 +7,16 @@
  */
 
 #include "async.h"
-#include "server.h"
 #include "db/db.h"
 #include "json.h"
 #include "log.h"
 #include "ssh_tunnel.h"
+#include "../../liblace/include/error.h"
 #include <util/mem.h>
 #include <util/str.h>
 #include <fcntl.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -34,11 +35,10 @@ static uint64_t get_time_ms(void) {
  * ========================================================================== */
 
 /* Forward declaration for socket client */
-struct LacedClient;
 
 struct AsyncQuery {
   AsyncQueryType type;
-  AsyncQueryStatus status;
+  _Atomic AsyncQueryStatus status; /* Workers write it, cancel reads it */
 
   /* Unique identifier */
   int64_t query_id;
@@ -54,6 +54,7 @@ struct AsyncQuery {
 
   /* Result (set by worker thread) */
   cJSON *result;
+  char *reply_line;  /* The finished reply (serialized on the worker) */
   char *error;
   int error_code;
   int tx_state;  /* After a statement: 0 none, 1 open, 2 failed; -1 unknown */
@@ -61,13 +62,15 @@ struct AsyncQuery {
   /* Threading */
   pthread_t thread;
   _Atomic bool cancel_requested;
+  _Atomic bool began; /* Owns its connection (passed begin_query) */
 
   /* Queue linkage */
   AsyncQuery *next;
   AsyncQueue *queue;
 
   /* Client tracking (for socket mode) */
-  uint64_t client_serial;  /* Owning socket client (0 = stdio) */
+  uint64_t client_serial;  /* Owning socket client (0 = stdio or internal) */
+  char owner[LACED_OWNER_MAX];          /* Its owner key ("" = internal, e.g. the reaper) */
 
   /* Generic job (connect, disconnect, cancel): runs instead of SQL */
   AsyncJobFn job_fn;
@@ -95,6 +98,9 @@ struct AsyncQueue {
 
   /* Query ID counter */
   int64_t next_query_id;
+
+  /* The client whose request is being dispatched (main thread only): jobs
+   * started meanwhile belong to it */
 };
 
 /* ==========================================================================
@@ -189,7 +195,7 @@ bool async_queue_shutdown(AsyncQueue *queue, LacedSession *session,
   pthread_mutex_unlock(&queue->mutex);
   for (size_t i = 0; i < n; i++) {
     char *err = NULL;
-    laced_session_cancel_query(session, conn_ids[i], &err);
+    laced_session_cancel_query(session, conn_ids[i], 0, &err);
     free(err);
   }
 
@@ -215,7 +221,35 @@ bool async_queue_shutdown(AsyncQueue *queue, LacedSession *session,
 }
 
 /* Push completed query to queue (called by worker thread) */
+/* On the worker: turn a result into its reply line, so the event loop only
+ * copies bytes (printing a large result took seconds there, stalling every
+ * other client). A reply that no client output queue could hold becomes an
+ * error instead of dropping the client. */
+static void serialize_reply(AsyncQuery *query) {
+  if (query->status != ASYNC_QUERY_COMPLETED || !query->result ||
+      !query->request_id)
+    return;
+  cJSON *resp = cJSON_CreateObject();
+  cJSON_AddStringToObject(resp, "jsonrpc", "2.0");
+  cJSON_AddItemToObject(resp, "id", cJSON_Duplicate(query->request_id, true));
+  cJSON_AddItemToObject(resp, "result", query->result);
+  query->result = NULL;
+  char *line = cJSON_PrintUnformatted(resp);
+  cJSON_Delete(resp);
+  /* The same bound laced_client_write_line applies, newline included */
+  if (!line || strlen(line) + 1 > LACED_MAX_PENDING_OUTPUT) {
+    free(line);
+    query->status = ASYNC_QUERY_ERROR;
+    query->error_code = LACE_ERR_RESULT_TOO_LARGE;
+    query->error = str_dup("The result is too large to send; select fewer "
+                           "rows or columns");
+    return;
+  }
+  query->reply_line = line;
+}
+
 static void async_queue_push(AsyncQueue *queue, AsyncQuery *query) {
+  serialize_reply(query);
   pthread_mutex_lock(&queue->mutex);
 
   /* Remove from active list */
@@ -236,14 +270,15 @@ static void async_queue_push(AsyncQueue *queue, AsyncQuery *query) {
   }
   queue->tail = query;
 
+  /* Signal the main loop. Still under the lock: once it is released, an
+   * idle queue may be destroyed by shutdown (the pipe is non-blocking) */
+  char c = 1;
+  (void)!write(queue->notify_pipe[1], &c, 1);
+
   if (!queue->active_head) {
     pthread_cond_broadcast(&queue->idle_cond);
   }
   pthread_mutex_unlock(&queue->mutex);
-
-  /* Signal the main loop */
-  char c = 1;
-  (void)write(queue->notify_pipe[1], &c, 1);
 }
 
 AsyncQuery *async_queue_pop(AsyncQueue *queue) {
@@ -287,7 +322,7 @@ static void *query_worker(void *arg) {
 
   if (query->job_fn) {
     char *jerr = NULL;
-    int jcode = -32603;
+    int jcode = LACE_ERR_INTERNAL_ERROR;
     cJSON *jres = query->job_fn(query->session, query->job_arg, &jerr, &jcode);
     if (jres) {
       query->result = jres;
@@ -305,25 +340,19 @@ static void *query_worker(void *arg) {
   LOG_DEBUG("Query %lld starting (conn_id=%d, type=%d)",
             (long long)query->query_id, query->conn_id, query->type);
 
-  /* Prepare cancellation - this also checks if connection is busy */
-  if (!laced_session_prepare_cancel(query->session, query->conn_id)) {
-    query->error = str_dup("Connection busy: another query is in progress");
-    query->error_code = -32001;
-    query->status = ASYNC_QUERY_ERROR;
-    LOG_WARN("Query %lld rejected: connection %d is busy",
-             (long long)query->query_id, query->conn_id);
-    async_queue_push(query->queue, query);
-    return NULL;
-  }
-
-  DbConnection *conn = laced_session_get_connection(query->session, query->conn_id);
+  /* One statement per connection: fail if this one is busy */
+  bool busy = false;
+  DbConnection *conn =
+      laced_session_begin_query(query->session, query->conn_id, &busy);
+  query->began = conn != NULL;
   if (!conn) {
-    query->error = str_dup("Invalid connection ID");
-    query->error_code = -32602;
+    query->error = str_dup(busy ? "Connection busy: another query is in progress"
+                                : "Invalid connection ID");
+    query->error_code = busy ? LACE_ERR_CONNECTION_BUSY : LACE_ERR_INVALID_CONN_ID;
     query->status = ASYNC_QUERY_ERROR;
-    LOG_ERROR("Query %lld failed: invalid connection ID %d",
-              (long long)query->query_id, query->conn_id);
-    laced_session_finish_query(query->session, query->conn_id, false);
+    LOG_WARN("Query %lld rejected: connection %d is %s",
+             (long long)query->query_id, query->conn_id,
+             busy ? "busy" : "unknown");
     async_queue_push(query->queue, query);
     return NULL;
   }
@@ -331,18 +360,42 @@ static void *query_worker(void *arg) {
   char *err = NULL;
   if (!laced_session_check_tunnel(query->session, query->conn_id, &err)) {
     query->error = err ? err : str_dup("SSH tunnel is down");
-    query->error_code = -32603;
+    query->error_code = LACE_ERR_CONNECTION_LOST;
     query->status = ASYNC_QUERY_ERROR;
     laced_session_finish_query(query->session, query->conn_id, false);
     async_queue_push(query->queue, query);
     return NULL;
   }
 
+  /* A lost connection is reopened (or refused) here, before the cancel
+   * handle is taken: a handle taken first addressed the dead session, and
+   * Esc on the first statement after a reconnect did nothing */
+  bool answered = false;
+  if (conn->driver && conn->driver->ensure_ready &&
+      !conn->driver->ensure_ready(conn, query->sql, &answered, &err)) {
+    query->error = err ? err : str_dup("Connection is not usable");
+    query->error_code = LACE_ERR_CONNECTION_LOST;
+    query->status = ASYNC_QUERY_ERROR;
+    query->tx_state = conn->driver->transaction_state
+                          ? conn->driver->transaction_state(conn)
+                          : 0;
+    laced_session_finish_query(query->session, query->conn_id, false);
+    async_queue_push(query->queue, query);
+    return NULL;
+  }
+  laced_session_arm_cancel(query->session, query->conn_id, query->query_id);
+
   /* Run it and reply with what it actually produced: rows (SELECT, but also
    * INSERT/UPDATE/DELETE ... RETURNING, CALL, CHECK TABLE, SHOW) or a row
    * count. Deciding by keyword dropped RETURNING rows and left MySQL result
-   * sets unread ("Commands out of sync"). */
-  ResultSet *rs = db_query(conn, query->sql, &err);
+   * sets unread ("Commands out of sync"). A cancel that arrived before the
+   * handle existed is honoured by not starting the statement. */
+  ResultSet *rs = NULL;
+  if (answered) {
+    rs = db_result_alloc_empty();
+  } else if (!query->cancel_requested) {
+    rs = db_query(conn, query->sql, &err);
+  }
   bool success = rs != NULL;
   /* Read while this worker still owns the connection */
   int tx_state = conn->driver && conn->driver->transaction_state
@@ -356,12 +409,12 @@ static void *query_worker(void *arg) {
   if (!rs && query->cancel_requested) {
     query->status = ASYNC_QUERY_CANCELLED;
     query->error = str_dup("Query cancelled");
-    query->error_code = -32000;
+    query->error_code = LACE_ERR_QUERY_CANCELLED;
     free(err);
   } else if (!rs) {
     query->status = ASYNC_QUERY_ERROR;
     query->error = err ? err : str_dup("Query failed");
-    query->error_code = -32603;
+    query->error_code = LACE_ERR_QUERY_FAILED;
   } else {
     cJSON *result = cJSON_CreateObject();
     if (rs->num_columns > 0) {
@@ -407,7 +460,8 @@ static void *query_worker(void *arg) {
  * ========================================================================== */
 
 static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
-                                      int conn_id, cJSON *request_id) {
+                                      int conn_id, cJSON *request_id,
+                                      const AsyncRequester *from) {
   AsyncQuery *query = safe_calloc(1, sizeof(AsyncQuery));
   if (!query) {
     return NULL;
@@ -418,6 +472,9 @@ static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
   query->session = session;
   query->conn_id = conn_id;
   query->status = ASYNC_QUERY_PENDING;
+  query->client_serial = from ? from->serial : 0;
+  snprintf(query->owner, sizeof(query->owner), "%s",
+           from && from->owner ? from->owner : "");
 
   /* Assign unique query ID and timestamp */
   pthread_mutex_lock(&queue->mutex);
@@ -433,8 +490,27 @@ static AsyncQuery *async_query_create(AsyncQueue *queue, LacedSession *session,
 }
 
 static bool async_query_launch(AsyncQuery *query) {
-  /* Add to active list */
+  /* Bounded: one thread per request, but never more than LACED_MAX_WORKERS
+   * in all, nor LACED_MAX_JOBS_PER_CLIENT for one client (a client firing
+   * requests cannot exhaust the daemon's threads for the others) */
   pthread_mutex_lock(&query->queue->mutex);
+  size_t total = 0, mine = 0;
+  for (AsyncQuery *q = query->queue->active_head; q; q = q->next) {
+    total++;
+    if (query->client_serial && q->client_serial == query->client_serial)
+      mine++;
+  }
+  if (total >= LACED_MAX_WORKERS || mine >= LACED_MAX_JOBS_PER_CLIENT) {
+    pthread_mutex_unlock(&query->queue->mutex);
+    query->status = ASYNC_QUERY_ERROR;
+    query->error = str_dup(total >= LACED_MAX_WORKERS
+                               ? "The daemon is busy: too many requests"
+                               : "Too many requests in progress from this "
+                                 "client");
+    query->error_code = LACE_ERR_DAEMON_BUSY;
+    return false;
+  }
+  /* Add to active list */
   query->next = query->queue->active_head;
   query->queue->active_head = query;
   pthread_mutex_unlock(&query->queue->mutex);
@@ -455,7 +531,7 @@ static bool async_query_launch(AsyncQuery *query) {
 
     query->status = ASYNC_QUERY_ERROR;
     query->error = str_dup("Failed to create worker thread");
-    query->error_code = -32603;
+    query->error_code = LACE_ERR_INTERNAL_ERROR;
     return false;
   }
 
@@ -465,8 +541,9 @@ static bool async_query_launch(AsyncQuery *query) {
 
 AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
                              int conn_id, const char *sql,
-                             cJSON *request_id) {
-  AsyncQuery *query = async_query_create(queue, session, conn_id, request_id);
+                             cJSON *request_id, const AsyncRequester *from) {
+  AsyncQuery *query =
+      async_query_create(queue, session, conn_id, request_id, from);
   if (!query) {
     return NULL;
   }
@@ -482,9 +559,10 @@ AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
 }
 
 AsyncQuery *async_job_start(AsyncQueue *queue, LacedSession *session,
-                            cJSON *request_id, AsyncJobFn fn, void *arg,
+                            cJSON *request_id, const AsyncRequester *from,
+                            AsyncJobFn fn, void *arg,
                             void (*arg_free)(void *arg)) {
-  AsyncQuery *query = async_query_create(queue, session, 0, request_id);
+  AsyncQuery *query = async_query_create(queue, session, 0, request_id, from);
   if (!query) {
     if (arg_free) {
       arg_free(arg);
@@ -508,6 +586,15 @@ AsyncQueryStatus async_query_status(const AsyncQuery *query) {
 
 cJSON *async_query_get_request_id(const AsyncQuery *query) {
   return query ? query->request_id : NULL;
+}
+
+char *async_query_take_reply_line(AsyncQuery *query) {
+  if (!query) {
+    return NULL;
+  }
+  char *line = query->reply_line;
+  query->reply_line = NULL;
+  return line;
 }
 
 cJSON *async_query_take_result(AsyncQuery *query) {
@@ -543,7 +630,7 @@ cJSON *async_query_error_data(const AsyncQuery *query) {
 }
 
 int async_query_get_error_code(const AsyncQuery *query) {
-  return query ? query->error_code : -32603;
+  return query ? query->error_code : LACE_ERR_INTERNAL_ERROR;
 }
 
 void async_query_free(AsyncQuery *query) {
@@ -556,6 +643,7 @@ void async_query_free(AsyncQuery *query) {
   }
   str_secure_free(query->sql); /* SQL may embed passwords or data */
   free(query->error);
+  free(query->reply_line);
   if (query->result) {
     cJSON_Delete(query->result);
   }
@@ -565,64 +653,61 @@ void async_query_free(AsyncQuery *query) {
   free(query);
 }
 
-bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session, int conn_id) {
+bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session,
+                             int conn_id, const char *owner, bool *running,
+                             char **err) {
+  if (running) {
+    *running = false;
+  }
   if (!queue || !session) {
+    err_set(err, "Invalid session");
     return false;
   }
 
-  bool found = false;
-
+  /* Only the statement running on conn_id, and (unless owner is NULL, the
+   * daemon's own reaper) only if the requesting client started it: a late
+   * cancel must not stop a statement another client began meanwhile */
+  /* The statement that owns conn_id (passed begin_query); only if none does
+   * yet, the newest launched one, whose cancel then stops it before it
+   * starts. A query about to be refused as busy must not be the target
+   * while the real one runs. (A finished one can still sit in the list
+   * until its reply is queued: the newest wins.) */
+  bool found = false, foreign = false;
+  int64_t target = 0;
   pthread_mutex_lock(&queue->mutex);
+  AsyncQuery *match = NULL;
   for (AsyncQuery *q = queue->active_head; q; q = q->next) {
-    if (!q->job_fn && q->conn_id == conn_id && q->status == ASYNC_QUERY_RUNNING) {
-      q->cancel_requested = true;
+    if (q->job_fn || q->conn_id != conn_id || q->status != ASYNC_QUERY_RUNNING) {
+      continue;
+    }
+    if (!match || (q->began && !match->began) ||
+        (q->began == match->began && q->query_id > match->query_id)) {
+      match = q;
+    }
+  }
+  if (match) {
+    if (owner && strcmp(owner, match->owner) != 0) {
+      foreign = true;
+    } else {
+      match->cancel_requested = true;
+      target = match->query_id;
       found = true;
-      break;
     }
   }
   pthread_mutex_unlock(&queue->mutex);
 
-  /* Send the cancel to the database once. The session knows whether a
-   * statement is running on this connection; with none it does nothing. */
-  char *err = NULL;
-  laced_session_cancel_query(session, conn_id, &err);
-  free(err);
-
-  return found;
-}
-
-bool async_cancel_by_query_id(AsyncQueue *queue, LacedSession *session, int64_t query_id) {
-  if (!queue || !session || query_id <= 0) {
+  if (foreign) {
+    err_set(err, "The running statement belongs to another client");
     return false;
   }
-
-  bool found = false;
-  int conn_id = 0;
-
-  pthread_mutex_lock(&queue->mutex);
-
-  /* Find query by ID in active list */
-  AsyncQuery *q = queue->active_head;
-  while (q) {
-    if (q->query_id == query_id && q->status == ASYNC_QUERY_RUNNING) {
-      q->cancel_requested = true;
-      conn_id = q->conn_id;
-      found = true;
-      break;
-    }
-    q = q->next;
+  if (!found) {
+    return true; /* Nothing running: nothing to cancel */
   }
-
-  pthread_mutex_unlock(&queue->mutex);
-
-  /* Call session cancel */
-  if (found && conn_id > 0) {
-    char *err = NULL;
-    laced_session_cancel_query(session, conn_id, &err);
-    free(err);
+  if (running) {
+    *running = true;
   }
-
-  return found;
+  /* Send the cancel to the database once, and only to that statement */
+  return laced_session_cancel_query(session, conn_id, owner ? target : 0, err);
 }
 
 /* ==========================================================================
@@ -703,12 +788,6 @@ void async_query_info_free(AsyncQueryInfo *info, size_t count) {
 /* ==========================================================================
  * Client Tracking
  * ========================================================================== */
-
-void async_query_set_client(AsyncQuery *query, struct LacedClient *client) {
-  if (query) {
-    query->client_serial = client ? client->serial : 0;
-  }
-}
 
 uint64_t async_query_get_client_serial(const AsyncQuery *query) {
   return query ? query->client_serial : 0;

@@ -9,13 +9,13 @@
 #include "../../include/util/connstr.h"
 #include "../../include/util/mem.h"
 #include "../../include/util/str.h"
+#include "../os/os.h"
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 /* Fallback for systems without PATH_MAX */
 #ifndef PATH_MAX
@@ -32,7 +32,7 @@ static char *decode_component(const char *s, size_t len) {
 }
 
 /* Maximum connection string length (4KB is more than sufficient) */
-#define MAX_CONNSTR_LEN 4096
+#define LACE_MAX_CONNSTR_LEN 4096
 
 /*
  * Post-process a parsed connection string that contains +ssh in the driver.
@@ -181,9 +181,9 @@ ConnString *connstr_parse(const char *str, char **err) {
 
   /* Prevent processing extremely long connection strings */
   size_t len = strlen(str);
-  if (len > MAX_CONNSTR_LEN) {
+  if (len > LACE_MAX_CONNSTR_LEN) {
     err_setf(err, "Connection string too long (max %d characters)",
-              MAX_CONNSTR_LEN);
+              LACE_MAX_CONNSTR_LEN);
     return NULL;
   }
 
@@ -221,15 +221,13 @@ ConnString *connstr_parse(const char *str, char **err) {
       return NULL;
     }
 
-    /* Find query string if any */
+    /* Find query string if any; the path itself is percent-decoded (a
+     * '?' or '%' in it arrives encoded: connstr_encode_path) */
     const char *query = strchr(p, '?');
-    if (query) {
-      cs->database = str_ndup(p, query - p);
-      p = query; /* Option parsing below expects to start at the '?' */
-    } else {
-      cs->database = str_dup(p);
-      p = p + strlen(p);
-    }
+    char *raw = query ? str_ndup(p, (size_t)(query - p)) : str_dup(p);
+    cs->database = raw ? str_url_decode(raw) : NULL;
+    free(raw);
+    p = query ? query : p + strlen(p); /* Options start at the '?' */
 
     if (!cs->database) {
       err_setf(err, "Out of memory");
@@ -520,7 +518,9 @@ char *connstr_build(const char *driver, const char *user, const char *password,
   if (database) {
     sb_append_char(sb, '/');
     if (str_eq(driver, "sqlite")) {
-      sb_append(sb, database);
+      char *path = connstr_encode_path(database);
+      sb_append(sb, path ? path : database);
+      free(path);
     } else {
       char *encoded_db = str_url_encode(database);
       if (!encoded_db) {
@@ -636,35 +636,23 @@ char *connstr_from_path(const char *path, char **err) {
     return NULL;
   }
 
-  /* Check if file exists */
-  struct stat st;
-  if (stat(path, &st) != 0) {
+  /* The absolute path of an existing file (a directory or anything else
+   * that is not a database fails the SQLite header check) */
+  char *abs_path = lace_os_real_path(path);
+  if (!abs_path) {
     err_setf(err, "File not found: %s", path);
     return NULL;
   }
-
-  /* Check it's a regular file */
-  if (!S_ISREG(st.st_mode)) {
-    err_setf(err, "Not a file: %s", path);
-    return NULL;
-  }
-
-  /* Validate it's a SQLite database */
-  if (!connstr_is_sqlite_file(path)) {
+  if (!connstr_is_sqlite_file(abs_path)) {
     err_setf(err, "Not a SQLite database: %s", path);
+    free(abs_path);
     return NULL;
   }
-
-  /* Resolve to absolute path */
-  char abs_path[PATH_MAX];
-  if (!realpath(path, abs_path)) {
-    /* realpath failed, use original path */
-    strncpy(abs_path, path, PATH_MAX - 1);
-    abs_path[PATH_MAX - 1] = '\0';
-  }
-
-  /* Build sqlite:// connection string */
-  return str_printf("sqlite://%s", abs_path);
+  char *enc = connstr_encode_path(abs_path);
+  char *connstr = enc ? str_printf("sqlite://%s", enc) : NULL;
+  free(enc);
+  free(abs_path);
+  return connstr;
 }
 
 char *connstr_mask_password(const char *connstr) {
@@ -720,4 +708,21 @@ char *connstr_mask_password(const char *connstr) {
 
   connstr_free(cs);
   return result;
+}
+
+char *connstr_encode_path(const char *path) {
+  if (!path)
+    return NULL;
+  StringBuilder *sb = sb_new(strlen(path) + 16);
+  for (const char *p = path; *p; p++) {
+    if (*p == '%')
+      sb_append(sb, "%25");
+    else if (*p == '?')
+      sb_append(sb, "%3F");
+    else if (*p == '#')
+      sb_append(sb, "%23");
+    else
+      sb_append_char(sb, *p);
+  }
+  return sb_finish(sb);
 }

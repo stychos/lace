@@ -29,7 +29,4 @@ typedef struct {
 /* Show connection dialog and return connection result */
 ConnectResult connect_view_show(TuiState *state);
 
-/* Show recent connections picker */
-char *connect_view_recent(TuiState *state);
-
 #endif /* LACE_CONNECT_VIEW_H */

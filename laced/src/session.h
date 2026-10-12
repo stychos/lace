@@ -10,6 +10,7 @@
 #define LACED_SESSION_H
 
 #include "db/db.h"
+#include "constants.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -71,6 +72,11 @@ size_t laced_session_collect_orphans(LacedSession *session,
  * later pass to try again. */
 void laced_session_reap_failed(LacedSession *session, int conn_id);
 
+/* Whether a reaper should keep at conn_id: false (and the reaping mark
+ * cleared) once its owner is back or the connection is gone. Checked before
+ * every attempt, so a client that returns keeps its connection. */
+bool laced_session_reap_continue(LacedSession *session, int conn_id);
+
 /*
  * Close a database connection.
  *
@@ -81,14 +87,12 @@ void laced_session_reap_failed(LacedSession *session, int conn_id);
  */
 bool laced_session_disconnect(LacedSession *session, int conn_id, char **err);
 
-/*
- * Get a database connection by ID.
- *
- * @param session  Session handle
- * @param conn_id  Connection ID
- * @return         Connection handle, or NULL if not found
- */
-DbConnection *laced_session_get_connection(LacedSession *session, int conn_id);
+/* Shutdown without teardown: ask every tunnel's ssh to exit (nothing is
+ * freed; workers may still use the connections) */
+void laced_session_stop_tunnels(LacedSession *session);
+
+/* True if conn_id is an open connection */
+bool laced_session_has_connection(LacedSession *session, int conn_id);
 
 /*
  * Before a statement on conn_id (the caller holds it busy): if its SSH
@@ -128,6 +132,9 @@ typedef struct {
   uint64_t failed_query_count;     /* Queries that failed */
   bool query_running;              /* True if a query is currently running */
   uint64_t current_query_time_ms;       /* Duration of current query (0 if not running) */
+  bool tunnel;                     /* Connected through an SSH tunnel */
+  char tunnel_socket[256]; /* The local socket the tunnel listens on */
+  char tunnel_host[256];           /* SSH server */
 } LacedConnStats;
 
 /*
@@ -165,26 +172,20 @@ bool laced_session_get_conn_stats(LacedSession *session, int conn_id,
  * Query State Management
  * ========================================================================== */
 
-/*
- * Check if a connection has a query in progress.
- * Thread-safe.
- *
- * @param session  Session handle
- * @param conn_id  Connection ID
- * @return         true if a query is currently running
- */
-bool laced_session_is_conn_busy(LacedSession *session, int conn_id);
+/* Start a statement on conn_id (the daemon runs one statement per
+ * connection): marks it busy and returns its DbConnection, which stays valid
+ * until laced_session_finish_query, because disconnect refuses a busy
+ * connection. This is the only way to reach a DbConnection outside the
+ * session. NULL if conn_id is unknown (*busy false) or already running a
+ * statement (*busy true). */
+DbConnection *laced_session_begin_query(LacedSession *session, int conn_id,
+                                        bool *busy);
 
-/*
- * Prepare cancellation handle before executing a query.
- * Call this before starting a query to enable cancellation.
- * Returns false if another query is already active on this connection.
- *
- * @param session  Session handle
- * @param conn_id  Connection ID
- * @return         true if query can proceed, false if connection is busy
- */
-bool laced_session_prepare_cancel(LacedSession *session, int conn_id);
+/* Take the driver's cancel handle for the statement begun on conn_id. Call
+ * after the driver's ensure_ready hook, so a reconnected connection is the
+ * one a cancel reaches. */
+void laced_session_arm_cancel(LacedSession *session, int conn_id,
+                              int64_t query_id);
 
 /*
  * Cancel the current query on a connection.
@@ -192,10 +193,12 @@ bool laced_session_prepare_cancel(LacedSession *session, int conn_id);
  *
  * @param session  Session handle
  * @param conn_id  Connection ID
+ * @param query_id Only if this query's handle is armed (0: whatever runs)
  * @param err      Output: error message on failure (caller must free)
  * @return         true if cancellation was sent
  */
-bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err);
+bool laced_session_cancel_query(LacedSession *session, int conn_id,
+                                int64_t query_id, char **err);
 
 /*
  * Clean up cancellation state after a query completes.

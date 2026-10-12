@@ -168,9 +168,6 @@ const char *platform_get_config_dir(void);
 /* Get the application data directory (creates if needed) */
 const char *platform_get_data_dir(void);
 
-/* Get the temporary directory */
-const char *platform_get_temp_dir(void);
-
 /* Check if a file exists */
 bool platform_file_exists(const char *path);
 
@@ -187,31 +184,16 @@ bool platform_mkdir(const char *path);
 bool platform_write_file_private(const char *path, const char *data,
                                  size_t len);
 
-/* Get environment variable (returns NULL if not set) */
-const char *platform_getenv(const char *name);
-
-/* Set environment variable */
-bool platform_setenv(const char *name, const char *value);
-
-/* Get current working directory (returns static buffer) */
-const char *platform_getcwd(void);
-
-/* Get the executable's directory */
-const char *platform_get_exe_dir(void);
+/* Read a whole file as a NUL-terminated string (an empty file gives "").
+ * Larger than max_bytes fails with EFBIG. Returns NULL with errno set on
+ * failure. The files hold passwords and connection strings: free the
+ * result with str_secure_free(). */
+char *platform_read_file(const char *path, size_t max_bytes);
 
 /* ============================================================================
  * Terminal/Console Functions
  * ============================================================================
  */
-
-/* Check if stdout is a terminal */
-bool platform_is_tty(void);
-
-/* Get terminal size */
-bool platform_get_terminal_size(int *width, int *height);
-
-/* Enable/disable raw terminal mode */
-bool platform_set_raw_mode(bool enable);
 
 /* ============================================================================
  * Include Platform-Specific Threading

@@ -11,7 +11,7 @@
 
 #include "async/async.h"
 #include "config/config.h"
-#include "../../liblace/include/constants.h"
+#include "core/constants.h"
 #include "../../liblace/include/keyset.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
@@ -40,7 +40,7 @@ void tui_calculate_column_widths(TuiState *state) {
   /* Start with column name widths */
   for (size_t i = 0; i < data->num_columns; i++) {
     const char *name = data->columns[i].name;
-    int len = name ? (int)strlen(name) : 0;
+    int len = name ? (int)utf8_width(name, strlen(name)) : 0;
     tab->col_widths[i] = len < MIN_COL_WIDTH ? MIN_COL_WIDTH : len;
   }
 
@@ -52,7 +52,7 @@ void tui_calculate_column_widths(TuiState *state) {
     for (size_t col = 0; col < data->num_columns && col < r->num_cells; col++) {
       char *str = db_value_to_string(&r->cells[col]);
       if (str) {
-        int len = (int)strlen(str);
+        int len = (int)utf8_width(str, strlen(str));
         if (len > tab->col_widths[col]) {
           tab->col_widths[col] = len;
         }
@@ -69,7 +69,14 @@ void tui_calculate_column_widths(TuiState *state) {
   }
 }
 
+/* The width the column is drawn with: the viewmodel's (re-measured over
+ * every loaded window); Tab.col_widths (the first rows at load) only
+ * before the table is bound. Editing (inline or modal) and horizontal
+ * scrolling must agree with what is on screen. */
 int tui_get_column_width(TuiState *state, size_t col) {
+  VmTable *vm = tui_vm_table(state);
+  if (vm && vm->col_widths && col < vm->num_col_widths && vm->col_widths[col] > 0)
+    return vm->col_widths[col];
   Tab *tab = TUI_TAB(state);
   if (!tab || !tab->col_widths || col >= tab->num_col_widths) {
     return DEFAULT_COL_WIDTH;
@@ -94,54 +101,37 @@ static char *build_filter_where(TuiState *state) {
   return where;
 }
 
-/* Build ORDER BY clause for current tab */
-static char *build_order_clause(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  if (!tab || tab->num_sort_entries == 0)
-    return NULL;
+static bool keyset_paging_on(TuiState *state) {
+  return state->app && state->app->config &&
+         state->app->config->general.pagination_strategy != LACE_PAGINATION_OFFSET;
+}
 
+/* The keyset ordering of the current tab, or NULL to page with OFFSET */
+static LaceKeysetState *tab_keyset(TuiState *state) {
   DbConnection *conn = TUI_CONN(state);
-  if (!tab->schema || !conn)
-    return NULL;
+  return conn ? tab_page_keyset(TUI_TAB(state), db_conn_driver_name(conn),
+                                keyset_paging_on(state))
+              : NULL;
+}
 
-  bool use_backtick = conn->driver &&
-                      (strcmp(conn->driver->name, "mysql") == 0 ||
-                       strcmp(conn->driver->name, "mariadb") == 0);
+/* ORDER BY for every page of the current tab (see tab_page_order_by) */
+static char *build_order_clause(TuiState *state) {
+  DbConnection *conn = TUI_CONN(state);
+  return conn ? tab_page_order_by(TUI_TAB(state), db_conn_driver_name(conn),
+                                  keyset_paging_on(state))
+              : NULL;
+}
 
-  StringBuilder *sb = sb_new(128);
-  if (!sb)
-    return NULL;
-
-  bool first = true;
-  for (size_t i = 0; i < tab->num_sort_entries; i++) {
-    SortEntry *entry = &tab->sort_entries[i];
-    if (entry->column >= tab->schema->num_columns)
-      continue;
-
-    const char *col_name = tab->schema->columns[entry->column].name;
-    if (!col_name)
-      continue;
-
-    char *escaped = use_backtick ? str_escape_identifier_backtick(col_name)
-                                 : str_escape_identifier_dquote(col_name);
-    if (!escaped) {
-      sb_free(sb);
-      return NULL;
-    }
-
-    if (!first)
-      sb_append(sb, ", ");
-    first = false;
-    sb_printf(sb, "%s %s", escaped, entry->direction == SORT_ASC ? "ASC" : "DESC");
-    free(escaped);
-  }
-
-  if (first) {
-    sb_free(sb);
-    return NULL;
-  }
-
-  return sb_to_string(sb);
+/* "(a) AND (b)", or whichever is set; takes ownership of both */
+static char *and_where(char *a, char *b) {
+  if (!a)
+    return b;
+  if (!b)
+    return a;
+  char *both = str_printf("(%s) AND (%s)", a, b);
+  free(a);
+  free(b);
+  return both;
 }
 
 /* Apply schema column names to result set */
@@ -158,7 +148,8 @@ static void apply_schema_columns(Tab *tab, ResultSet *data) {
     for (size_t k = 0; name && k < tab->schema->num_columns; k++) {
       if (tab->schema->columns[k].name &&
           strcmp(tab->schema->columns[k].name, name) == 0) {
-        data->columns[i].type = tab->schema->columns[k].type;
+        if (tab->schema->columns[k].type != DB_TYPE_NULL)
+          data->columns[i].type = tab->schema->columns[k].type;
         break;
       }
     }
@@ -170,6 +161,12 @@ static void apply_schema_columns(Tab *tab, ResultSet *data) {
  * ============================================================================ */
 
 bool tui_load_table_data(TuiState *state, const char *table) {
+  /* A new row being added belongs to the table shown until now: its values
+   * are sized and typed for that schema (a mouse click on another table
+   * reaches here without the add-row keys seeing it) */
+  if (state && state->adding_row) {
+    tui_cancel_add_row(state);
+  }
   DbConnection *conn = TUI_CONN(state);
   if (!state || !conn || !table)
     return false;
@@ -191,10 +188,6 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   if (tab->schema) {
     db_schema_free(tab->schema);
     tab->schema = NULL;
-  }
-  if (tab->keyset) {
-    lace_keyset_free(tab->keyset);
-    tab->keyset = NULL;
   }
 
   /* Load schema */
@@ -264,7 +257,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   data_op.conn = conn;
   data_op.table_name = str_dup(table);
   data_op.offset = 0;
-  data_op.limit = PAGE_SIZE * PREFETCH_PAGES;
+  data_op.limit = TUI_PAGE_SIZE * PREFETCH_PAGES;
   data_op.order_by = build_order_clause(state);
 
   if (where_clause) {
@@ -343,7 +336,7 @@ bool tui_load_table_data(TuiState *state, const char *table) {
 static ResultSet *load_page_modal(TuiState *state, DbConnection *conn,
                                   const char *table, size_t offset, size_t limit,
                                   char *where_clause, char *order_clause,
-                                  char **err, bool *cancelled) {
+                                  bool reverse, char **err, bool *cancelled) {
   *err = NULL;
   *cancelled = false;
   AsyncOperation op;
@@ -355,6 +348,7 @@ static ResultSet *load_page_modal(TuiState *state, DbConnection *conn,
   op.limit = limit;
   op.where_clause = where_clause; /* Owned by op now */
   op.order_by = order_clause;
+  op.reverse_rows = reverse;
   ResultSet *rs = NULL;
   if (async_start(&op)) {
     bool completed = tui_show_processing_dialog(state, &op, "Loading rows...");
@@ -380,34 +374,53 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
   /* Cancel any background load first */
   tui_cancel_background_load(state);
 
-  /* Calculate target offset */
+  /* Calculate target offset (an estimated total may be short: try) */
   size_t target_offset;
   if (forward) {
     target_offset = tab->loaded_offset + tab->loaded_count;
-    if (target_offset >= tab->total_rows)
+    if (target_offset >= tab->total_rows && !tab->row_count_approximate)
       return false;
   } else {
     if (tab->loaded_offset == 0)
       return false;
-    target_offset = tab->loaded_offset > PAGE_SIZE
-                        ? tab->loaded_offset - PAGE_SIZE
+    target_offset = tab->loaded_offset > TUI_PAGE_SIZE
+                        ? tab->loaded_offset - TUI_PAGE_SIZE
                         : 0;
   }
 
   tui_set_status(state, "Loading...");
   tui_refresh(state);
 
-  /* Build clauses */
+  /* Build clauses: with keyset paging, the rows after the window's last
+   * row (or before its first, read in reverse), whatever their offset;
+   * otherwise LIMIT/OFFSET */
   char *where_clause = build_filter_where(state);
-  char *order_clause = build_order_clause(state);
+  char *order_clause = NULL;
+  size_t load_count = forward ? TUI_PAGE_SIZE : (tab->loaded_offset - target_offset);
+  size_t query_offset = target_offset;
+  bool keyset = false;
+  LaceKeysetState *ks = tab->keyset_edge_stale ? NULL : tab_keyset(state);
+  char *edge = ks ? lace_keyset_build_where(
+                        ks, tab->data, forward ? tab->data->num_rows - 1 : 0,
+                        forward)
+                  : NULL;
+  if (edge) {
+    where_clause = and_where(where_clause, edge);
+    order_clause = lace_keyset_build_order(ks, forward);
+    query_offset = 0;
+    keyset = true;
+  } else {
+    order_clause = build_order_clause(state);
+  }
+  lace_keyset_free(ks);
 
   /* Load on a worker (spinner, Esc cancels) */
   char *err = NULL;
   bool cancelled = false;
-  size_t load_count = forward ? PAGE_SIZE : (tab->loaded_offset - target_offset);
   ResultSet *new_data =
-      load_page_modal(state, conn, tab->table_name, target_offset, load_count,
-                      where_clause, order_clause, &err, &cancelled);
+      load_page_modal(state, conn, tab->table_name, query_offset, load_count,
+                      where_clause, order_clause, keyset && !forward, &err,
+                      &cancelled);
 
   /* The dialog ran the event loop: the tab may have changed underneath */
   tab = TUI_TAB(state);
@@ -452,6 +465,11 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     }
     tab->data->num_rows = new_count;
     tab->loaded_count = new_count;
+    /* Rows past an estimated total, or a short page that shows the end */
+    size_t end = tab->loaded_offset + new_count;
+    if (end > tab->total_rows ||
+        (keyset && new_data->num_rows < load_count))
+      tab->total_rows = end;
   } else {
     /* Prepend */
     Row *merged = safe_reallocarray(NULL, new_count, sizeof(Row));
@@ -470,7 +488,14 @@ bool tui_load_page_with_dialog(TuiState *state, bool forward) {
     /* Adjust cursor and scroll */
     tab->cursor_row += new_data->num_rows;
     tab->scroll_row += new_data->num_rows;
-    tab->loaded_offset = target_offset;
+    /* A keyset page that came back short reached the first row (rows were
+     * deleted meanwhile, or offsets were estimated) */
+    if (keyset && new_data->num_rows < load_count) {
+      /* Positions moved: selections are stored as positions */
+      tab_clear_selections(tab);
+      tab->loaded_offset = 0;
+    } else
+      tab->loaded_offset = tab->loaded_offset - new_data->num_rows;
     tab->loaded_count = new_count;
 
     VmTable *vm = tui_vm_table(state);
@@ -495,17 +520,32 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     return false;
 
   if (offset >= tab->total_rows && tab->total_rows > 0) {
-    offset = tab->total_rows > PAGE_SIZE ? tab->total_rows - PAGE_SIZE : 0;
+    offset = tab->total_rows > TUI_PAGE_SIZE ? tab->total_rows - TUI_PAGE_SIZE : 0;
   }
 
   char *where_clause = build_filter_where(state);
-  char *order_clause = build_order_clause(state);
+  char *order_clause = NULL;
+  size_t limit = TUI_PAGE_SIZE;
+  bool from_end = false;
+
+  /* The last page: read the table's end in reverse order instead of
+   * skipping every row before it */
+  LaceKeysetState *ks = tab_keyset(state);
+  if (ks && offset > 0 && offset + TUI_PAGE_SIZE >= tab->total_rows &&
+      !tab->row_count_approximate) {
+    limit = tab->total_rows - offset;
+    order_clause = lace_keyset_build_order(ks, false);
+    from_end = true;
+  } else {
+    order_clause = build_order_clause(state);
+  }
+  lace_keyset_free(ks);
 
   char *err = NULL;
   bool cancelled = false;
-  ResultSet *data = load_page_modal(state, conn, tab->table_name, offset,
-                                    PAGE_SIZE, where_clause, order_clause, &err,
-                                    &cancelled);
+  ResultSet *data = load_page_modal(state, conn, tab->table_name,
+                                    from_end ? 0 : offset, limit, where_clause,
+                                    order_clause, from_end, &err, &cancelled);
   tab = TUI_TAB(state); /* The dialog ran the event loop */
   if (!data || !tab) {
     if (cancelled) {
@@ -524,6 +564,11 @@ bool tui_load_rows_at(TuiState *state, size_t offset) {
     db_result_free(tab->data);
 
   tab->data = data;
+  if (from_end && data->num_rows < limit) {
+    /* Fewer rows than the total said: these are all of them */
+    offset = 0;
+    tab->total_rows = data->num_rows;
+  }
   tab->loaded_offset = offset;
   tab->loaded_count = data->num_rows;
   apply_schema_columns(tab, tab->data);
@@ -577,7 +622,7 @@ bool tui_refresh_table(TuiState *state) {
     if (abs_row >= tab->total_rows && tab->total_rows > 0)
       abs_row = tab->total_rows - 1;
 
-    size_t target_offset = (abs_row / PAGE_SIZE) * PAGE_SIZE;
+    size_t target_offset = (abs_row / TUI_PAGE_SIZE) * TUI_PAGE_SIZE;
     if (target_offset > 0 && target_offset != tab->loaded_offset) {
       tui_load_rows_at_with_dialog(state, target_offset);
       data = tab->data;
@@ -594,7 +639,7 @@ bool tui_refresh_table(TuiState *state) {
                           ? saved_cursor_col
                           : 0;
 
-    size_t visible = state->content_rows > 0 ? (size_t)state->content_rows : 1;
+    size_t visible = (size_t)tui_get_layout_info(state).visible_rows; /* >= 1 */
     if (saved_cursor_row >= saved_scroll_row) {
       size_t screen_off = saved_cursor_row - saved_scroll_row;
       tab->scroll_row = local_cursor >= screen_off ? local_cursor - screen_off : 0;
@@ -618,14 +663,14 @@ void tui_trim_loaded_data(TuiState *state) {
   if (!tab || !tab->data || tab->data->num_rows == 0)
     return;
 
-  size_t max_rows = MAX_LOADED_PAGES * PAGE_SIZE;
+  size_t max_rows = MAX_LOADED_PAGES * TUI_PAGE_SIZE;
   if (tab->loaded_count <= max_rows)
     return;
 
   size_t cursor_row = tab->cursor_row;
   size_t scroll_row = tab->scroll_row;
-  size_t cursor_page = cursor_row / PAGE_SIZE;
-  size_t total_pages = (tab->loaded_count + PAGE_SIZE - 1) / PAGE_SIZE;
+  size_t cursor_page = cursor_row / TUI_PAGE_SIZE;
+  size_t total_pages = (tab->loaded_count + TUI_PAGE_SIZE - 1) / TUI_PAGE_SIZE;
 
   size_t keep_start = cursor_page > TRIM_DISTANCE_PAGES
                           ? cursor_page - TRIM_DISTANCE_PAGES
@@ -642,8 +687,8 @@ void tui_trim_loaded_data(TuiState *state) {
       keep_end -= excess;
   }
 
-  size_t trim_start = keep_start * PAGE_SIZE;
-  size_t trim_end = keep_end * PAGE_SIZE;
+  size_t trim_start = keep_start * TUI_PAGE_SIZE;
+  size_t trim_end = keep_end * TUI_PAGE_SIZE;
   if (trim_end > tab->loaded_count)
     trim_end = tab->loaded_count;
 
@@ -716,13 +761,13 @@ bool tui_start_background_load(TuiState *state, bool forward) {
   } else {
     if (tab->loaded_offset == 0)
       return false;
-    target_offset = tab->loaded_offset > PAGE_SIZE
-                        ? tab->loaded_offset - PAGE_SIZE
+    target_offset = tab->loaded_offset > TUI_PAGE_SIZE
+                        ? tab->loaded_offset - TUI_PAGE_SIZE
                         : 0;
   }
   /* Backward: exactly the rows before the window. A full page from 0 used
    * to overlap the window when it started less than a page in. */
-  size_t fetch_limit = forward ? PAGE_SIZE : tab->loaded_offset - target_offset;
+  size_t fetch_limit = forward ? TUI_PAGE_SIZE : tab->loaded_offset - target_offset;
 
   /* Build clauses */
   char *where_clause = build_filter_where(state);
@@ -902,8 +947,4 @@ bool tui_load_more_rows(TuiState *state) {
 
 bool tui_load_prev_rows(TuiState *state) {
   return tui_load_page_with_dialog(state, false);
-}
-
-void tui_check_load_more(TuiState *state) {
-  tui_check_speculative_prefetch(state);
 }

@@ -284,7 +284,8 @@ static ChangeFlags handle_sidebar_toggle(AppState *app, const UICallbacks *ui) {
     UI_CALL(ui, set_sidebar_visible, true);
     UI_CALL(ui, set_sidebar_focused, true);
     size_t highlight =
-        UI_CALL_RET(ui, get_sidebar_highlight_for_table, 0, tab->table_index);
+        UI_CALL_RET(ui, get_sidebar_highlight_for_table, 0,
+                    app_tab_table_position(app, tab));
     UI_CALL(ui, set_sidebar_highlight, highlight);
     UI_CALL(ui, set_sidebar_scroll, 0);
   }
@@ -595,9 +596,6 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
   /* Data loading */
   case ACTION_TABLE_LOAD:
     /* Handled by UI */
-    return CHANGED_NONE;
-  case ACTION_TABLE_REFRESH:
-    /* TODO: Implement refresh */
     return CHANGED_NONE;
   case ACTION_DATA_LOAD_MORE:
     return handle_load_more_rows(app, ui);

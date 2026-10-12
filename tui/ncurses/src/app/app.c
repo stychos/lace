@@ -18,16 +18,93 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 /*
- * Create a lace client with the specified spawn mode. lace_client_create_ex2
+ * Create a lace client with the specified spawn mode. LACE_CONN_AUTO
  * attaches to an already-running daemon first and only spawns when none
  * answers; it also records idle_timeout, so a daemon respawned later (after a
  * crash) gets the configured timeout too.
  */
 static lace_client_t *create_client_with_mode(LaceSpawnMode spawn_mode,
                                               int idle_timeout) {
-  return lace_client_create_ex2(NULL, spawn_mode, idle_timeout);
+  LaceClientConfig config = {0};
+  config.mode = LACE_CONN_AUTO;
+  config.spawn_mode = spawn_mode;
+  config.idle_timeout = idle_timeout;
+  return lace_client_create_with_config(&config);
+}
+
+/* volatile: the writes must not be optimized away */
+static void blank(char *from, const char *to) {
+  for (volatile char *v = from; v < (volatile const char *)to; v++)
+    *v = 'x';
+}
+
+/* Blank the password of the "user:password@" starting at seg, where at is
+ * its '@': everything after the first ':' (a password may hold a raw '/'
+ * or '@' even though the URL then does not parse) */
+static void scrub_userinfo(char *seg, char *at) {
+  char *colon = memchr(seg, ':', (size_t)(at - seg));
+  if (colon)
+    blank(colon + 1, at);
+}
+
+/* Blank the values of password-like query parameters (?password=...) */
+static void scrub_query(char *q) {
+  static const char *const keys[] = {"password", "passwd", "pwd",
+                                     "ssh_password", "sshpassword", NULL};
+  for (char *p = q; p && *p; p = strchr(p, '&')) {
+    p++; /* Past '?' or '&' */
+    char *eq = strchr(p, '=');
+    char *end = strchr(p, '&');
+    if (!eq || (end && eq > end))
+      continue;
+    for (int k = 0; keys[k]; k++) {
+      if ((size_t)(eq - p) == strlen(keys[k]) && strncasecmp(p, keys[k], eq - p) == 0)
+        blank(eq + 1, end ? end : eq + 1 + strlen(eq + 1));
+    }
+  }
+}
+
+/* Blank every password in a connection URL in place, as far as the text
+ * allows (also in URLs the parser would reject): scheme://user:PASS@host/db,
+ * the SSH and database passwords of a +ssh URL, and ?password= */
+static void scrub_url_passwords(char *url) {
+  char *scheme_end = strstr(url, "://");
+  if (!scheme_end)
+    return;
+  bool ssh = false;
+  for (const char *c = url; c + 4 <= scheme_end; c++) {
+    if (strncmp(c, "+ssh", 4) == 0)
+      ssh = true;
+  }
+  char *start = scheme_end + 3;
+  char *query = strchr(start, '?');
+  char *limit = query ? query : start + strlen(start);
+  /* The last '@' before the query ends the database's user part */
+  char *last_at = NULL;
+  for (char *c = start; c < limit; c++) {
+    if (*c == '@')
+      last_at = c;
+  }
+  if (ssh) {
+    /* sshuser:sshpass@sshhost:port/dbuser:dbpass@dbhost/db: the SSH part
+     * ends at the first '@', the database part at the last */
+    char *first_at = memchr(start, '@', (size_t)(limit - start));
+    if (first_at && first_at != last_at) {
+      scrub_userinfo(start, first_at);
+      char *db_seg = memchr(first_at, '/', (size_t)(limit - first_at));
+      if (db_seg && db_seg < last_at)
+        scrub_userinfo(db_seg + 1, last_at);
+    } else if (first_at) {
+      scrub_userinfo(start, first_at);
+    }
+  } else if (last_at) {
+    scrub_userinfo(start, last_at);
+  }
+  if (query)
+    scrub_query(query);
 }
 
 static struct option long_options[] = {{"help", no_argument, NULL, 'h'},
@@ -92,25 +169,9 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
       return false;
     }
 
-    /* Securely clear password in argv to prevent leakage via /proc/cmdline.
-     * Password is between first ':' after '://' and '@'.
-     * Format: scheme://user:password@host/db */
-    char *scheme_end = strstr(argv[optind], "://");
-    if (scheme_end) {
-      char *user_start = scheme_end + 3;
-      char *pass_start = strchr(user_start, ':');
-      if (pass_start) {
-        pass_start++; /* Move past ':' */
-        char *pass_end = strchr(pass_start, '@');
-        if (pass_end && pass_end > pass_start) {
-          /* Use volatile to prevent compiler from optimizing away the write */
-          volatile char *vpass = pass_start;
-          while (vpass < (volatile char *)pass_end) {
-            *vpass++ = 'x';
-          }
-        }
-      }
-    }
+    /* Blank the passwords in argv so /proc/<pid>/cmdline and ps do not
+     * show them (config->connstr keeps its own copy) */
+    scrub_url_passwords(argv[optind]);
   }
 
   return true;
@@ -159,51 +220,12 @@ static LaceSpawnMode convert_spawn_mode(int tui_mode) {
     return LACE_SPAWN_STDIO;
   case SPAWN_MODE_TCP:
     return LACE_SPAWN_TCP;
-  case SPAWN_MODE_NONE:
-    return LACE_SPAWN_NONE;
+  case SPAWN_MODE_DETECT:
+    return LACE_SPAWN_DETECT;
   case SPAWN_MODE_UNIX:
   default:
     return LACE_SPAWN_UNIX;
   }
-}
-
-/*
- * Prompt user to spawn daemon when autospawn is disabled and no daemon found.
- * Returns true if user wants to spawn, false if user refuses.
- */
-static bool prompt_spawn_daemon(void) {
-  printf("No running daemon found and autospawn is disabled.\n");
-  printf("Would you like to spawn a daemon now? [Y/n] ");
-  fflush(stdout);
-
-  int c = getchar();
-  /* Consume rest of line */
-  if (c != '\n' && c != EOF) {
-    int ch;
-    while ((ch = getchar()) != '\n' && ch != EOF)
-      ;
-  }
-
-  /* Accept Y, y, or empty (just Enter) as yes */
-  return (c == 'Y' || c == 'y' || c == '\n');
-}
-
-/*
- * Handle the case where spawn mode is NONE and no daemon is connected.
- * Asks user if they want to spawn a daemon, and if so, spawns one.
- * Returns new client if daemon was spawned, NULL if user refused.
- */
-static lace_client_t *handle_no_daemon_prompt(lace_client_t *client,
-                                              int idle_timeout) {
-  if (prompt_spawn_daemon()) {
-    /* User wants to spawn - destroy old client and create new one with Unix
-     * mode */
-    lace_client_destroy(client);
-    return lace_client_create_ex2(NULL, LACE_SPAWN_UNIX, idle_timeout);
-  }
-  /* User refused - return NULL to signal quit */
-  lace_client_destroy(client);
-  return NULL;
 }
 
 static int run_query_mode(AppConfig *config) {
@@ -225,24 +247,10 @@ static int run_query_mode(AppConfig *config) {
     return 1;
   }
   if (!lace_client_connected(client)) {
-    /* If autospawn disabled (NONE mode), ask user if they want to spawn */
-    if (spawn_mode == LACE_SPAWN_NONE) {
-      client = handle_no_daemon_prompt(client, idle_timeout);
-      if (!client) {
-        return 1; /* User refused to spawn */
-      }
-      if (!lace_client_connected(client)) {
-        fprintf(stderr, "Failed to spawn daemon: %s\n",
-                lace_client_error(client));
-        lace_client_destroy(client);
-        return 1;
-      }
-    } else {
-      fprintf(stderr, "Failed to connect to lace daemon: %s\n",
-              lace_client_error(client));
-      lace_client_destroy(client);
-      return 1;
-    }
+    fprintf(stderr, "Failed to connect to lace daemon: %s\n",
+            lace_client_error(client));
+    lace_client_destroy(client);
+    return 1;
   }
 
   char *err = NULL;
@@ -347,27 +355,11 @@ static int run_tui_mode(AppConfig *config) {
     return 1;
   }
   if (!lace_client_connected(client)) {
-    /* If autospawn disabled (NONE mode), ask user if they want to spawn */
-    if (spawn_mode == LACE_SPAWN_NONE) {
-      client = handle_no_daemon_prompt(client, idle_timeout);
-      if (!client) {
-        config_free(early_config);
-        return 1; /* User refused to spawn */
-      }
-      if (!lace_client_connected(client)) {
-        fprintf(stderr, "Failed to spawn daemon: %s\n",
-                lace_client_error(client));
-        lace_client_destroy(client);
-        config_free(early_config);
-        return 1;
-      }
-    } else {
-      fprintf(stderr, "Failed to connect to lace daemon: %s\n",
-              lace_client_error(client));
-      lace_client_destroy(client);
-      config_free(early_config);
-      return 1;
-    }
+    fprintf(stderr, "Failed to connect to lace daemon: %s\n",
+            lace_client_error(client));
+    lace_client_destroy(client);
+    config_free(early_config);
+    return 1;
   }
 
   AppState app;

@@ -10,9 +10,11 @@
 #define LACED_ASYNC_H
 
 #include "session.h"
+#include "constants.h"
 #include <cjson/cJSON.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 /* Forward declaration */
 typedef struct AsyncQuery AsyncQuery;
@@ -75,6 +77,15 @@ void async_queue_drain_notify(AsyncQueue *queue);
  * Async Query
  * ========================================================================== */
 
+/* Who started a job: it counts against that client's job limit, only that
+ * owner may cancel its statement, and the reply goes to that client
+ * (matched by serial: client pointers are reused). NULL where a job takes
+ * one: internal (the reaper), serial 0 and owner "". */
+typedef struct {
+  uint64_t serial;   /* LacedClient.serial */
+  const char *owner; /* LacedClient.owner */
+} AsyncRequester;
+
 /*
  * Start an async SQL execution.
  *
@@ -83,11 +94,12 @@ void async_queue_drain_notify(AsyncQueue *queue);
  * @param conn_id  Connection ID
  * @param sql      SQL statement
  * @param request_id  JSON-RPC request ID (will be duplicated)
+ * @param from     Requesting client
  * @return         Query handle, or NULL on error
  */
 AsyncQuery *async_exec_start(AsyncQueue *queue, LacedSession *session,
                              int conn_id, const char *sql,
-                             cJSON *request_id);
+                             cJSON *request_id, const AsyncRequester *from);
 
 /*
  * Get query status.
@@ -106,7 +118,8 @@ typedef cJSON *(*AsyncJobFn)(LacedSession *session, void *arg, char **err,
  * NULL) when the job is freed.
  */
 AsyncQuery *async_job_start(AsyncQueue *queue, LacedSession *session,
-                            cJSON *request_id, AsyncJobFn fn, void *arg,
+                            cJSON *request_id, const AsyncRequester *from,
+                            AsyncJobFn fn, void *arg,
                             void (*arg_free)(void *arg));
 
 AsyncQueryStatus async_query_status(const AsyncQuery *query);
@@ -121,6 +134,10 @@ cJSON *async_query_get_request_id(const AsyncQuery *query);
  * Ownership transfers to caller.
  */
 cJSON *async_query_take_result(AsyncQuery *query);
+
+/* A completed query's reply line, serialized on its worker (NULL if there
+ * is none: an error, a notification); caller frees */
+char *async_query_take_reply_line(AsyncQuery *query);
 
 /*
  * Get the error message (only valid after ERROR status).
@@ -144,16 +161,14 @@ cJSON *async_query_error_data(const AsyncQuery *query);
 void async_query_free(AsyncQuery *query);
 
 /*
- * Cancel a query by connection ID.
- * This sets the cancel flag and calls the session cancel function.
+ * Cancel the statement running on a connection: set its cancel flag and ask
+ * the driver to stop it, if the client owner started it (owner NULL: any,
+ * for the daemon itself). *running (optional) says whether one was.
+ * Returns false with *err set when the driver could not send the cancel.
  */
-bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session, int conn_id);
-
-/*
- * Cancel a query by query ID.
- * Returns true if query was found and cancelled.
- */
-bool async_cancel_by_query_id(AsyncQueue *queue, LacedSession *session, int64_t query_id);
+bool async_cancel_by_conn_id(AsyncQueue *queue, LacedSession *session,
+                             int conn_id, const char *owner, bool *running,
+                             char **err);
 
 /* ==========================================================================
  * Query Tracking
@@ -164,7 +179,8 @@ typedef struct {
   int64_t query_id;           /* Unique query ID */
   int conn_id;                /* Connection ID */
   AsyncQueryType type;        /* Type of query */
-  AsyncQueryStatus status;    /* Current status */
+  _Atomic AsyncQueryStatus status; /* Written by the worker, read under
+                                    * the queue lock by cancel */
   char *description;          /* SQL or table name (caller must free) */
   uint64_t started_at_ms;     /* Start time in milliseconds since epoch */
 } AsyncQueryInfo;
@@ -195,18 +211,6 @@ int64_t async_query_get_id(const AsyncQuery *query);
 /* ==========================================================================
  * Client Tracking (for socket mode)
  * ========================================================================== */
-
-/* Forward declaration for LacedClient */
-struct LacedClient;
-
-/*
- * Set the client associated with an async query.
- * Used for socket mode to route responses to the correct client.
- *
- * @param query   Query handle
- * @param client  Client pointer (may be NULL for stdio mode)
- */
-void async_query_set_client(AsyncQuery *query, struct LacedClient *client);
 
 /*
  * Get the serial of the client that issued an async query (0 for stdio).

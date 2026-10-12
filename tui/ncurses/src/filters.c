@@ -14,16 +14,26 @@
 #include "config/config.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
+#include "views/list_picker.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Start editing a filter value: the editor works on filters_edit_buffer,
+ * which is as large as ColumnFilter's values */
+static void filters_edit_load(TuiState *state, const char *text) {
+  state->filters_edit_buffer[0] = '\0';
+  text_input_bind(&state->filters_edit, state->filters_edit_buffer,
+                  sizeof(state->filters_edit_buffer), false);
+  text_input_set(&state->filters_edit, text);
+}
 
 /* Sentinel value for RAW filter (virtual column) */
 #define FILTER_COL_RAW SIZE_MAX
 
 /* Get panel height based on filter count */
 int tui_get_filters_panel_height(TuiState *state) {
-  if (!state || !state->filters_visible)
+  if (!state || !tui_filters_visible(state))
     return 0;
 
   Tab *tab = TUI_TAB(state);
@@ -38,9 +48,45 @@ int tui_get_filters_panel_height(TuiState *state) {
   return 1 + filter_rows; /* title + filters */
 }
 
+/* Store the value being edited in its filter field, end the edit and
+ * apply the filters (Enter, Tab, or a click elsewhere in the panel) */
+static void filters_commit_edit(TuiState *state, TableFilters *f) {
+  if (state->filters_cursor_row < f->num_filters) {
+    ColumnFilter *cf = &f->filters[state->filters_cursor_row];
+    /* The edit buffer is as large as the values: it always fits */
+    if (state->filters_cursor_col == 2) {
+      snprintf(cf->value, sizeof(cf->value), "%s", state->filters_edit.buf);
+    } else if (state->filters_cursor_col == 3 && cf->op == FILTER_OP_BETWEEN) {
+      snprintf(cf->value2, sizeof(cf->value2), "%s", state->filters_edit.buf);
+    }
+  }
+  state->filters_editing = false;
+  tui_apply_filters(state); /* Auto-apply */
+}
+
+/* Keep the filter cursor and scroll inside the list (after a delete) */
+static void filters_clamp_view(TuiState *state, const TableFilters *f) {
+  if (state->filters_cursor_row >= f->num_filters)
+    state->filters_cursor_row = f->num_filters > 0 ? f->num_filters - 1 : 0;
+  size_t max_scroll =
+      f->num_filters > MAX_VISIBLE_FILTERS ? f->num_filters - MAX_VISIBLE_FILTERS : 0;
+  if (state->filters_scroll > max_scroll)
+    state->filters_scroll = max_scroll;
+  if (state->filters_cursor_row < state->filters_scroll)
+    state->filters_scroll = state->filters_cursor_row;
+}
+
+/* Where the BETWEEN second value starts (the draw and click code agree) */
+static int filters_val2_x(int val_x, int val_width) {
+  int half_width = (val_width - 5) / 2; /* -5 for " AND " */
+  if (half_width < 5)
+    half_width = 5;
+  return val_x + half_width + 5;
+}
+
 /* Draw the filters panel */
 void tui_draw_filters_panel(TuiState *state) {
-  if (!state || !state->filters_visible)
+  if (!state || !tui_filters_visible(state))
     return;
 
   Tab *tab = TUI_TAB(state);
@@ -126,6 +172,7 @@ void tui_draw_filters_panel(TuiState *state) {
   int y = start_y + 1;
 
   /* Draw filter rows */
+  filters_clamp_view(state, f);
   size_t visible_start = state->filters_scroll;
   size_t visible_count = f->num_filters - visible_start;
   if (visible_count > MAX_VISIBLE_FILTERS)
@@ -135,7 +182,7 @@ void tui_draw_filters_panel(TuiState *state) {
     size_t filter_idx = visible_start + i;
     ColumnFilter *cf = &f->filters[filter_idx];
     bool row_selected =
-        state->filters_focused && (state->filters_cursor_row == filter_idx);
+        tui_filters_focused(state) && (state->filters_cursor_row == filter_idx);
     bool is_raw = (cf->column_index == FILTER_COL_RAW);
 
     /* Column name - use VmTable if available, fallback to Tab */
@@ -157,7 +204,7 @@ void tui_draw_filters_panel(TuiState *state) {
     if (row_selected && state->filters_cursor_col == 0) {
       wattron(state->main_win, A_REVERSE);
     }
-    mvwprintw(state->main_win, y, col_x, "%-14.14s", col_name);
+    tui_print_fit(state->main_win, y, col_x, 14, col_name);
     if (row_selected && state->filters_cursor_col == 0) {
       wattroff(state->main_win, A_REVERSE);
     }
@@ -184,17 +231,14 @@ void tui_draw_filters_panel(TuiState *state) {
 
       if (is_between) {
         /* BETWEEN: two value fields split evenly */
-        int half_width = (val_width - 5) / 2; /* -5 for " AND " */
-        if (half_width < 5)
-          half_width = 5;
-        int val2_x = val_x + half_width + 5;
+        int val2_x = filters_val2_x(val_x, val_width);
+        int half_width = val2_x - val_x - 5;
 
         /* Value 1 */
         if (row_selected && state->filters_cursor_col == 2) {
           if (state->filters_editing) {
-            tui_draw_edit_field(state->main_win, y, val_x, half_width,
-                                state->filters_edit_buffer,
-                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
+            text_input_draw(state->main_win, &state->filters_edit, y, val_x, half_width,
+                                COLOR_PAIR(COLOR_EDIT), true);
           } else {
             wattron(state->main_win, A_REVERSE);
             tui_print_fit(state->main_win, y, val_x, half_width, cf->value);
@@ -210,9 +254,8 @@ void tui_draw_filters_panel(TuiState *state) {
         /* Value 2 */
         if (row_selected && state->filters_cursor_col == 3) {
           if (state->filters_editing) {
-            tui_draw_edit_field(state->main_win, y, val2_x, half_width,
-                                state->filters_edit_buffer,
-                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
+            text_input_draw(state->main_win, &state->filters_edit, y, val2_x, half_width,
+                                COLOR_PAIR(COLOR_EDIT), true);
           } else {
             wattron(state->main_win, A_REVERSE);
             tui_print_fit(state->main_win, y, val2_x, half_width, cf->value2);
@@ -226,9 +269,8 @@ void tui_draw_filters_panel(TuiState *state) {
         const char *display_val = cf->value;
         if (row_selected && state->filters_cursor_col == 2) {
           if (state->filters_editing) {
-            tui_draw_edit_field(state->main_win, y, val_x, val_width,
-                                state->filters_edit_buffer,
-                                state->filters_edit_len, COLOR_PAIR(COLOR_EDIT));
+            text_input_draw(state->main_win, &state->filters_edit, y, val_x, val_width,
+                                COLOR_PAIR(COLOR_EDIT), true);
           } else {
             wattron(state->main_win, A_REVERSE);
             if (show_placeholder) {
@@ -269,179 +311,30 @@ void tui_draw_filters_panel(TuiState *state) {
  * Caller must check if result == schema->num_columns to detect RAW. */
 static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
                                     size_t filter_row) {
-  /* Get schema via VmTable if available, fallback to Tab */
   VmTable *vm = tui_vm_table(state);
   Tab *tab = TUI_TAB(state);
-  const TableSchema *schema = vm ? table_vm_get_schema(vm) : (tab ? tab->schema : NULL);
-  if (!state || !schema || schema->num_columns == 0)
+  const TableSchema *schema =
+      vm ? table_vm_get_schema(vm) : (tab ? tab->schema : NULL);
+  if (!schema || schema->num_columns == 0)
     return -1;
 
-  size_t num_cols = schema->num_columns;
-  size_t total_items = num_cols + 1; /* +1 for RAW */
+  /* The columns, then (RAW): index num_columns means RAW to the caller */
+  size_t n = schema->num_columns + 1;
+  const char **labels = safe_calloc(n, sizeof(*labels));
+  for (size_t i = 0; i < schema->num_columns; i++)
+    labels[i] = schema->columns[i].name ? schema->columns[i].name : "?";
+  labels[n - 1] = "(RAW)";
+  size_t current =
+      current_col == FILTER_COL_RAW ? n - 1 : current_col;
 
-  /* Calculate dropdown dimensions */
-  int max_width = 5; /* "(RAW)" length */
-  for (size_t i = 0; i < num_cols; i++) {
-    int len = (int)strlen(schema->columns[i].name);
-    if (len > max_width)
-      max_width = len;
-  }
-
-  int width = max_width + 6; /* padding + marker */
-  if (width < 20)
-    width = 20;
-  if (width > 40)
-    width = 40;
-
-  int height = (int)total_items + 2;
-  if (height > 15)
-    height = 15;
-
-  /* Position dropdown below the filter row being edited */
   int main_y, main_x;
   getbegyx(state->main_win, main_y, main_x);
-  int start_y = main_y + (int)filter_row + 2; /* +2 for panel header */
-  int start_x = main_x + 2;
-
-  /* Ensure dropdown fits on screen */
-  int max_y, max_x;
-  getmaxyx(stdscr, max_y, max_x);
-  if (start_y + height > max_y)
-    start_y = max_y - height;
-  if (start_y < 0)
-    start_y = 0;
-  if (start_x + width > max_x)
-    start_x = max_x - width;
-  (void)max_x; /* unused after bounds check */
-
-  /* Create window */
-  WINDOW *menu_win = newwin(height, width, start_y, start_x);
-  if (!menu_win)
-    return -1;
-
-  keypad(menu_win, TRUE);
-  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-  DRAW_BOX(menu_win, COLOR_BORDER);
-  WITH_ATTR(menu_win, A_BOLD, mvwprintw(menu_win, 0, 2, " Column "));
-
-  /* Create menu items: columns + RAW */
-  ITEM **items = safe_calloc(total_items + 1, sizeof(ITEM *));
-
-  for (size_t i = 0; i < num_cols; i++) {
-    items[i] = new_item(schema->columns[i].name, "");
-  }
-  items[num_cols] = new_item("(RAW)", ""); /* RAW as last item */
-  items[total_items] = NULL;
-
-  MENU *menu = new_menu(items);
-  if (!menu) {
-    for (size_t i = 0; i < total_items; i++)
-      free_item(items[i]);
-    free(items);
-    delwin(menu_win);
-    return -1;
-  }
-
-  menu_setup(menu, menu_win, height, width, 1);
-
-  /* Set current item */
-  if (current_col == FILTER_COL_RAW)
-    set_current_item(menu, items[num_cols]);
-  else if (current_col < num_cols)
-    set_current_item(menu, items[current_col]);
-
-  wrefresh(menu_win);
-
-  ssize_t result = -1;
-  bool running = true;
-  while (running) {
-    int ch = wgetch(menu_win);
-    switch (ch) {
-    case KEY_MOUSE: {
-      MEVENT mevent;
-      if (getmouse(&mevent) == OK) {
-        /* Check if click is within menu window */
-        if (wenclose(menu_win, mevent.y, mevent.x)) {
-          /* Convert to window-relative coordinates */
-          int rel_y = mevent.y - start_y;
-          int rel_x = mevent.x - start_x;
-          (void)rel_x;
-
-          /* Handle scroll wheel */
-          if (mevent.bstate & BUTTON4_PRESSED) {
-            menu_driver(menu, REQ_UP_ITEM);
-          } else if (mevent.bstate & BUTTON5_PRESSED) {
-            menu_driver(menu, REQ_DOWN_ITEM);
-          }
-          /* Handle click - select item at clicked row */
-          else if (mevent.bstate & BUTTON1_CLICKED ||
-                   mevent.bstate & BUTTON1_DOUBLE_CLICKED) {
-            int menu_row = rel_y - 1; /* -1 for border */
-            if (menu_row >= 0 && menu_row < height - 2) {
-              /* Get top row index */
-              int top_idx = top_row(menu);
-              int target_idx = top_idx + menu_row;
-              if (target_idx >= 0 && target_idx < (int)total_items) {
-                set_current_item(menu, items[target_idx]);
-                wrefresh(menu_win);
-                /* Click selects and confirms - return index directly
-                 * (num_cols = RAW, handled by caller) */
-                result = target_idx;
-                running = false;
-              }
-            }
-          }
-        } else {
-          /* Click outside menu - close */
-          running = false;
-        }
-      }
-      break;
-    }
-    case KEY_DOWN:
-    case 'j':
-      menu_driver(menu, REQ_DOWN_ITEM);
-      break;
-    case KEY_UP:
-    case 'k':
-      menu_driver(menu, REQ_UP_ITEM);
-      break;
-    case KEY_NPAGE:
-      menu_driver(menu, REQ_SCR_DPAGE);
-      break;
-    case KEY_PPAGE:
-      menu_driver(menu, REQ_SCR_UPAGE);
-      break;
-    case '\n':
-    case KEY_ENTER: {
-      ITEM *cur = current_item(menu);
-      if (cur) {
-        /* Return index directly (num_cols = RAW, handled by caller) */
-        result = item_index(cur);
-      }
-      running = false;
-      break;
-    }
-    case 27: /* Escape */
-    case 'q':
-      running = false;
-      break;
-    }
-    wrefresh(menu_win);
-  }
-
-  /* Cleanup */
-  unpost_menu(menu);
-  free_menu(menu);
-  for (size_t i = 0; i < total_items; i++)
-    free_item(items[i]);
-  free(items);
-  delwin(menu_win);
-
-  touchwin(stdscr);
+  int sel = tui_pick_from_list(state->app->config, "Column", labels, n,
+                               current, main_y + (int)filter_row + 2,
+                               main_x + 2, 20, 40, 15);
+  free(labels);
   tui_refresh(state);
-
-  return result;
+  return sel;
 }
 
 /* Number of operators to show (excludes RAW which is now a virtual column) */
@@ -450,163 +343,18 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
 /* Show operator dropdown and return selected index, or -1 if cancelled */
 static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
                                   size_t filter_row) {
-  if (!state)
-    return -1;
+  const char *labels[FILTER_OP_VISIBLE];
+  for (int i = 0; i < FILTER_OP_VISIBLE; i++)
+    labels[i] = filter_op_name((FilterOperator)i); /* RAW is not offered */
 
-  /* Calculate dropdown dimensions */
-  int max_width = 0;
-  for (int i = 0; i < FILTER_OP_VISIBLE; i++) {
-    int len = (int)strlen(filter_op_name((FilterOperator)i));
-    if (len > max_width)
-      max_width = len;
-  }
-
-  int width = max_width + 6;
-  if (width < 18)
-    width = 18;
-
-  int height = FILTER_OP_VISIBLE + 2;
-  if (height > 16)
-    height = 16;
-
-  /* Position dropdown below the filter row being edited */
   int main_y, main_x;
   getbegyx(state->main_win, main_y, main_x);
-  int start_y = main_y + (int)filter_row + 2;
-  int start_x = main_x + 18; /* Operator column offset */
-
-  /* Ensure dropdown fits on screen */
-  int max_y, max_x;
-  getmaxyx(stdscr, max_y, max_x);
-  if (start_y + height > max_y)
-    start_y = max_y - height;
-  if (start_y < 0)
-    start_y = 0;
-  if (start_x + width > max_x)
-    start_x = max_x - width;
-  (void)max_x;
-
-  /* Create window */
-  WINDOW *menu_win = newwin(height, width, start_y, start_x);
-  if (!menu_win)
-    return -1;
-
-  keypad(menu_win, TRUE);
-  mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, NULL);
-  DRAW_BOX(menu_win, COLOR_BORDER);
-  WITH_ATTR(menu_win, A_BOLD, mvwprintw(menu_win, 0, 2, " Operator "));
-
-  /* Create menu items (exclude RAW) */
-  ITEM **items = safe_calloc(FILTER_OP_VISIBLE + 1, sizeof(ITEM *));
-
-  for (int i = 0; i < FILTER_OP_VISIBLE; i++) {
-    items[i] = new_item(filter_op_name((FilterOperator)i), "");
-  }
-  items[FILTER_OP_VISIBLE] = NULL;
-
-  MENU *menu = new_menu(items);
-  if (!menu) {
-    for (int i = 0; i < FILTER_OP_VISIBLE; i++)
-      free_item(items[i]);
-    free(items);
-    delwin(menu_win);
-    return -1;
-  }
-
-  menu_setup(menu, menu_win, height, width, 1);
-
-  if ((int)current_op < FILTER_OP_VISIBLE)
-    set_current_item(menu, items[(int)current_op]);
-
-  wrefresh(menu_win);
-
-  int result = -1;
-  bool running = true;
-  while (running) {
-    int ch = wgetch(menu_win);
-    switch (ch) {
-    case KEY_MOUSE: {
-      MEVENT mevent;
-      if (getmouse(&mevent) == OK) {
-        /* Check if click is within menu window */
-        if (wenclose(menu_win, mevent.y, mevent.x)) {
-          /* Convert to window-relative coordinates */
-          int rel_y = mevent.y - start_y;
-          int rel_x = mevent.x - start_x;
-          (void)rel_x;
-
-          /* Handle scroll wheel */
-          if (mevent.bstate & BUTTON4_PRESSED) {
-            menu_driver(menu, REQ_UP_ITEM);
-          } else if (mevent.bstate & BUTTON5_PRESSED) {
-            menu_driver(menu, REQ_DOWN_ITEM);
-          }
-          /* Handle click - select item at clicked row */
-          else if (mevent.bstate & BUTTON1_CLICKED ||
-                   mevent.bstate & BUTTON1_DOUBLE_CLICKED) {
-            int menu_row = rel_y - 1; /* -1 for border */
-            if (menu_row >= 0 && menu_row < height - 2) {
-              /* Get top row index */
-              int top_idx = top_row(menu);
-              int target_idx = top_idx + menu_row;
-              if (target_idx >= 0 && target_idx < FILTER_OP_VISIBLE) {
-                set_current_item(menu, items[target_idx]);
-                wrefresh(menu_win);
-                /* Click selects and confirms */
-                result = target_idx;
-                running = false;
-              }
-            }
-          }
-        } else {
-          /* Click outside menu - close */
-          running = false;
-        }
-      }
-      break;
-    }
-    case KEY_DOWN:
-    case 'j':
-      menu_driver(menu, REQ_DOWN_ITEM);
-      break;
-    case KEY_UP:
-    case 'k':
-      menu_driver(menu, REQ_UP_ITEM);
-      break;
-    case KEY_NPAGE:
-      menu_driver(menu, REQ_SCR_DPAGE);
-      break;
-    case KEY_PPAGE:
-      menu_driver(menu, REQ_SCR_UPAGE);
-      break;
-    case '\n':
-    case KEY_ENTER: {
-      ITEM *cur = current_item(menu);
-      if (cur)
-        result = item_index(cur);
-      running = false;
-      break;
-    }
-    case 27: /* Escape */
-    case 'q':
-      running = false;
-      break;
-    }
-    wrefresh(menu_win);
-  }
-
-  /* Cleanup */
-  unpost_menu(menu);
-  free_menu(menu);
-  for (int i = 0; i < FILTER_OP_VISIBLE; i++)
-    free_item(items[i]);
-  free(items);
-  delwin(menu_win);
-
-  touchwin(stdscr);
+  int sel = tui_pick_from_list(state->app->config, "Operator", labels,
+                               FILTER_OP_VISIBLE, (size_t)current_op,
+                               main_y + (int)filter_row + 2, main_x + 18, 18,
+                               60, 16);
   tui_refresh(state);
-
-  return result;
+  return sel;
 }
 
 /* Handle filters panel input */
@@ -626,8 +374,6 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     filters_add(f, 0, FILTER_OP_EQ, "");
   }
 
-  int key_char = render_event_get_char(event);
-
   bool is_tab = render_event_is_special(event, UI_KEY_TAB);
   bool is_btab = render_event_is_special(event, UI_KEY_BTAB);
 
@@ -639,67 +385,21 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     } else if (render_event_is_special(event, UI_KEY_ENTER) || is_tab ||
                is_btab) {
       /* Enter, or Tab/Shift+Tab before moving on: confirm edit */
-      /* Confirm edit and auto-apply */
-      if (state->filters_cursor_row < f->num_filters) {
-        size_t filter_idx = state->filters_cursor_row;
-        ColumnFilter *cf = &f->filters[filter_idx];
-        if (state->filters_cursor_col == 2) {
-          strncpy(cf->value, state->filters_edit_buffer, sizeof(cf->value) - 1);
-          cf->value[sizeof(cf->value) - 1] = '\0';
-        } else if (state->filters_cursor_col == 3 &&
-                   cf->op == FILTER_OP_BETWEEN) {
-          strncpy(cf->value2, state->filters_edit_buffer,
-                  sizeof(cf->value2) - 1);
-          cf->value2[sizeof(cf->value2) - 1] = '\0';
-        }
-      }
-      state->filters_editing = false;
-      tui_apply_filters(state); /* Auto-apply */
-    } else if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
-      if (state->filters_edit_len > 0) {
-        state->filters_edit_len =
-            utf8_prev(state->filters_edit_buffer, state->filters_edit_len);
-        state->filters_edit_buffer[state->filters_edit_len] = '\0';
-      }
+      filters_commit_edit(state, f);
     } else if (render_event_is_ctrl(event, 'K')) {
       /* Ctrl+K - copy filter value to clipboard */
-      if (state->filters_edit_len > 0) {
-        tui_clipboard_copy(state, state->filters_edit_buffer);
+      if (state->filters_edit.len > 0) {
+        tui_clipboard_copy(state, state->filters_edit.buf);
         tui_set_status(state, "Copied to clipboard");
       }
     } else if (render_event_is_ctrl(event, 'U')) {
-      /* Ctrl+U - paste from clipboard */
+      /* Ctrl+U - paste from clipboard at the cursor */
       char *paste_text = tui_clipboard_read(state);
-      if (paste_text && paste_text[0]) {
-        /* Strip newlines for single-line filter field */
-        for (char *p = paste_text; *p; p++) {
-          if (*p == '\n' || *p == '\r')
-            *p = ' ';
-        }
-        size_t paste_len = strlen(paste_text);
-        size_t space_left =
-            sizeof(state->filters_edit_buffer) - 1 - state->filters_edit_len;
-        if (paste_len > space_left)
-          paste_len = utf8_truncate(paste_text, space_left);
-        if (paste_len > 0) {
-          memcpy(state->filters_edit_buffer + state->filters_edit_len,
-                 paste_text, paste_len);
-          state->filters_edit_len += paste_len;
-          state->filters_edit_buffer[state->filters_edit_len] = '\0';
-        }
-      }
+      text_input_insert(&state->filters_edit, paste_text);
       free(paste_text);
-    } else if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
-      /* Printable character; a lead byte needs room for its whole
-       * character */
-      if (state->filters_edit_len + utf8_seq_len((unsigned char)key_char) <
-          sizeof(state->filters_edit_buffer)) {
-        state->filters_edit_buffer[state->filters_edit_len++] = (char)key_char;
-        state->filters_edit_buffer[state->filters_edit_len] = '\0';
-      }
+    } else {
+      text_input_handle_key(&state->filters_edit, event);
     }
-    /* Sync focus state to Tab so it persists across tab switches */
-    tab_sync_focus(state);
     if (!(is_tab || is_btab))
       return true;
     /* Tab/Shift+Tab confirmed the edit; now move like in navigation mode */
@@ -870,19 +570,12 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       /* Value - edit */
       if (is_raw || filter_op_needs_value(cf->op)) {
         state->filters_editing = true;
-        strncpy(state->filters_edit_buffer, cf->value,
-                sizeof(state->filters_edit_buffer) - 1);
-        state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] =
-            '\0';
-        state->filters_edit_len = strlen(state->filters_edit_buffer);
+        filters_edit_load(state, cf->value);
       }
     } else if (state->filters_cursor_col == 3 && is_between) {
       /* Value2 - edit (only for BETWEEN) */
       state->filters_editing = true;
-      strncpy(state->filters_edit_buffer, cf->value2,
-              sizeof(state->filters_edit_buffer) - 1);
-      state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
-      state->filters_edit_len = strlen(state->filters_edit_buffer);
+      filters_edit_load(state, cf->value2);
     } else if (state->filters_cursor_col == del_col) {
       /* Delete */
       bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
@@ -891,8 +584,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       }
       if (f->num_filters > 1) {
         filters_remove(f, filter_idx);
-        if (state->filters_cursor_row >= f->num_filters)
-          state->filters_cursor_row = f->num_filters - 1;
+        filters_clamp_view(state, f);
       } else {
         /* Last filter - remove it and close panel */
         filters_remove(f, filter_idx);
@@ -1049,16 +741,13 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
       if (is_raw || filter_op_needs_value(cf->op)) {
         /* Start editing with the typed character */
         state->filters_editing = true;
-        state->filters_edit_buffer[0] = (char)key_char;
-        state->filters_edit_buffer[1] = '\0';
-        state->filters_edit_len = 1;
+        filters_edit_load(state, "");
+        text_input_handle_key(&state->filters_edit, event);
       }
     }
   }
   /* Consume all other keys when filters focused */
 
-  /* Sync focus state to Tab so it persists across tab switches */
-  tab_sync_focus(state);
   return true;
 }
 
@@ -1099,7 +788,7 @@ void tui_apply_filters(TuiState *state) {
  * rel_x, rel_y are coordinates relative to main_win (0,0)
  * Returns true if click was handled */
 bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
-  if (!state || !state->filters_visible)
+  if (!state || !tui_filters_visible(state))
     return false;
 
   Tab *tab = TUI_TAB(state);
@@ -1113,6 +802,11 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   /* Row 0 is title bar, rows 1+ are filter rows */
   if (rel_y < 1)
     return true; /* Clicked on title bar - just focus filters */
+
+  /* A value being typed is kept, as when Tab leaves the field */
+  if (state->filters_editing) {
+    filters_commit_edit(state, f);
+  }
 
   int filter_row_idx = rel_y - 1; /* 0-based filter row within visible area */
 
@@ -1136,11 +830,21 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   getmaxyx(state->main_win, win_rows, win_cols);
   (void)win_rows;
   int del_x = win_cols - 4;
+  int val_width = del_x - val_x - 1; /* As tui_draw_filters_panel */
+  if (val_width < 10)
+    val_width = 10;
+  if (val_width > 255)
+    val_width = 255;
+  /* BETWEEN rows have two value fields, and the delete button is the
+   * fifth field (cursor column 4) */
+  bool row_between = f->filters[target_filter].op == FILTER_OP_BETWEEN;
 
   /* Determine which field was clicked */
   size_t target_col;
   if (rel_x >= del_x && rel_x < del_x + 3) {
-    target_col = 3; /* Delete button */
+    target_col = row_between ? 4 : 3; /* Delete button */
+  } else if (row_between && rel_x >= filters_val2_x(val_x, val_width)) {
+    target_col = 3; /* Second value */
   } else if (rel_x >= val_x) {
     target_col = 2; /* Value field */
   } else if (rel_x >= op_x) {
@@ -1203,17 +907,11 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   } else if (target_col == 2 && (is_raw || filter_op_needs_value(cf->op))) {
     /* Value field - start editing */
     state->filters_editing = true;
-    strncpy(state->filters_edit_buffer, cf->value,
-            sizeof(state->filters_edit_buffer) - 1);
-    state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
-    state->filters_edit_len = strlen(state->filters_edit_buffer);
+    filters_edit_load(state, cf->value);
   } else if (target_col == 3 && is_between) {
     /* Value2 field for BETWEEN - start editing */
     state->filters_editing = true;
-    strncpy(state->filters_edit_buffer, cf->value2,
-            sizeof(state->filters_edit_buffer) - 1);
-    state->filters_edit_buffer[sizeof(state->filters_edit_buffer) - 1] = '\0';
-    state->filters_edit_len = strlen(state->filters_edit_buffer);
+    filters_edit_load(state, cf->value2);
   } else if (target_col == del_col) {
     /* Delete button - delete filter */
     bool had_effect = cf->value[0] != '\0' || !filter_op_needs_value(cf->op);
@@ -1222,8 +920,7 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
     }
     if (f->num_filters > 1) {
       filters_remove(f, target_filter);
-      if (state->filters_cursor_row >= f->num_filters)
-        state->filters_cursor_row = f->num_filters - 1;
+      filters_clamp_view(state, f);
     } else {
       /* Last filter - remove it and close panel */
       filters_remove(f, target_filter);

@@ -107,7 +107,7 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   table_vm_set_scroll(vm, scroll_row, scroll_col);
 
   /* Check if we need to load more rows */
-  tui_check_load_more(state);
+  tui_check_speculative_prefetch(state);
 }
 
 void tui_page_up(TuiState *state) {
@@ -158,7 +158,7 @@ void tui_page_up(TuiState *state) {
   table_vm_set_scroll(vm, scroll_row, scroll_col);
 
   /* Check if we need to load previous rows (for speculative loading) */
-  tui_check_load_more(state);
+  tui_check_speculative_prefetch(state);
 }
 
 void tui_page_down(TuiState *state) {
@@ -218,7 +218,7 @@ void tui_page_down(TuiState *state) {
   table_vm_set_scroll(vm, scroll_row, scroll_col);
 
   /* Check if we need to load more rows (for speculative loading) */
-  tui_check_load_more(state);
+  tui_check_speculative_prefetch(state);
 }
 
 void tui_home(TuiState *state) {
@@ -253,7 +253,7 @@ void tui_end(TuiState *state) {
   if (loaded_end < total_rows) {
     /* Load last page of data */
     size_t last_page_offset =
-        total_rows > PAGE_SIZE ? total_rows - PAGE_SIZE : 0;
+        total_rows > TUI_PAGE_SIZE ? total_rows - TUI_PAGE_SIZE : 0;
     if (!tui_load_rows_at_with_dialog(state, last_page_offset)) {
       return; /* Cancelled or failed */
     }
@@ -344,47 +344,3 @@ void tui_column_last(TuiState *state) {
   table_vm_set_scroll(vm, scroll_row, scroll_col);
 }
 
-void tui_next_table(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-  if (!tab || !tables || num_tables == 0)
-    return;
-
-  size_t current = tab->table_index;
-  current++;
-  if (current >= num_tables) {
-    current = 0;
-  }
-  tab->table_index = current;
-
-  /* Clear filters when switching tables */
-  if (tab->type == TAB_TYPE_TABLE) {
-    filters_clear(&tab->filters);
-  }
-
-  tui_load_table_data(state, tables[current]);
-}
-
-void tui_prev_table(TuiState *state) {
-  Tab *tab = TUI_TAB(state);
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-  if (!tab || !tables || num_tables == 0)
-    return;
-
-  size_t current = tab->table_index;
-  if (current == 0) {
-    current = num_tables - 1;
-  } else {
-    current--;
-  }
-  tab->table_index = current;
-
-  /* Clear filters when switching tables */
-  if (tab->type == TAB_TYPE_TABLE) {
-    filters_clear(&tab->filters);
-  }
-
-  tui_load_table_data(state, tables[current]);
-}

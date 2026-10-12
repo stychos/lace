@@ -31,9 +31,6 @@ typedef enum { FOCUS_TABS, FOCUS_SETTINGS, FOCUS_BUTTONS } DialogFocus;
 typedef enum {
   FIELD_SHOW_HEADER,
   FIELD_SHOW_STATUS,
-  FIELD_PAGE_SIZE,
-  FIELD_PREFETCH_PAGES,
-  FIELD_MAX_RESULT_ROWS,
   FIELD_DELETE_CONFIRM,
   FIELD_PAGINATION_STRATEGY,
   FIELD_HISTORY_MODE,
@@ -43,6 +40,7 @@ typedef enum {
   FIELD_DAEMON_SPAWN_MODE,
   FIELD_DAEMON_IDLE_TIMEOUT,
   FIELD_RESTORE_SESSION,
+  FIELD_RESTORE_CURSOR,
   FIELD_QUIT_CONFIRM,
   FIELD_COUNT
 } GeneralField;
@@ -244,8 +242,8 @@ static const char *spawn_mode_name(int mode) {
     return "Stdio pipes";
   case SPAWN_MODE_TCP:
     return "TCP socket";
-  case SPAWN_MODE_NONE:
-    return "Connect only";
+  case SPAWN_MODE_DETECT:
+    return "Detect";
   default:
     return "Unknown";
   }
@@ -253,16 +251,8 @@ static const char *spawn_mode_name(int mode) {
 
 /* Get pagination strategy name */
 static const char *pagination_strategy_name(int mode) {
-  switch (mode) {
-  case 0:  /* LACE_PAGINATION_OFFSET */
-    return "Offset (default)";
-  case 1:  /* LACE_PAGINATION_KEYSET */
-    return "Keyset (auto-fallback)";
-  case 2:  /* LACE_PAGINATION_SMART */
-    return "Keyset (smart)";
-  default:
-    return "Unknown";
-  }
+  return mode == LACE_PAGINATION_OFFSET ? "Offset"
+                                        : "Keyset (offset without a key)";
 }
 
 /* ============================================================================
@@ -300,33 +290,6 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   y++;
 
   int cursor_x_temp = 0;
-  draw_number_field(win, y++, start_x + 2, "Page size (rows)",
-                    ds->config->general.page_size,
-                    ds->selected_field == FIELD_PAGE_SIZE, focused,
-                    ds->editing_number, &ds->num_input, &cursor_x_temp);
-  if (ds->selected_field == FIELD_PAGE_SIZE && ds->editing_number) {
-    *cursor_y = y - 1;
-    *cursor_x = cursor_x_temp;
-  }
-
-  draw_number_field(win, y++, start_x + 2, "Prefetch pages",
-                    ds->config->general.prefetch_pages,
-                    ds->selected_field == FIELD_PREFETCH_PAGES, focused,
-                    ds->editing_number, &ds->num_input, &cursor_x_temp);
-  if (ds->selected_field == FIELD_PREFETCH_PAGES && ds->editing_number) {
-    *cursor_y = y - 1;
-    *cursor_x = cursor_x_temp;
-  }
-
-  draw_number_field(win, y++, start_x + 2, "Max query rows",
-                    ds->config->general.max_result_rows,
-                    ds->selected_field == FIELD_MAX_RESULT_ROWS, focused,
-                    ds->editing_number, &ds->num_input, &cursor_x_temp);
-  if (ds->selected_field == FIELD_MAX_RESULT_ROWS && ds->editing_number) {
-    *cursor_y = y - 1;
-    *cursor_x = cursor_x_temp;
-  }
-
   draw_checkbox(win, y++, start_x + 2, "Confirm before delete",
                 ds->config->general.delete_confirmation,
                 ds->selected_field == FIELD_DELETE_CONFIRM, focused);
@@ -396,6 +359,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_checkbox(win, y++, start_x + 2, "Restore session on startup",
                 ds->config->general.restore_session,
                 ds->selected_field == FIELD_RESTORE_SESSION, focused);
+
+  draw_checkbox(win, y++, start_x + 2, "Restore cursor positions",
+                ds->config->general.restore_cursor_position,
+                ds->selected_field == FIELD_RESTORE_CURSOR, focused);
 
   draw_checkbox(win, y++, start_x + 2, "Confirm before quit",
                 ds->config->general.quit_confirmation,
@@ -914,13 +881,7 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       /* Finish editing */
       int value = number_input_value(&ds->num_input);
 
-      if (ds->selected_field == FIELD_PAGE_SIZE) {
-        ds->config->general.page_size = value;
-      } else if (ds->selected_field == FIELD_PREFETCH_PAGES) {
-        ds->config->general.prefetch_pages = value;
-      } else if (ds->selected_field == FIELD_MAX_RESULT_ROWS) {
-        ds->config->general.max_result_rows = value;
-      } else if (ds->selected_field == FIELD_HISTORY_MAX_SIZE) {
+      if (ds->selected_field == FIELD_HISTORY_MAX_SIZE) {
         ds->config->general.history_max_size = value;
       } else if (ds->selected_field == FIELD_DAEMON_IDLE_TIMEOUT) {
         ds->config->general.daemon_idle_timeout = value;
@@ -935,7 +896,7 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
   }
 
   /* Navigation */
-  if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_UP)) {
     if (ds->selected_field > 0) {
       ds->selected_field--;
     } else {
@@ -944,7 +905,7 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_DOWN)) {
     if (ds->selected_field < FIELD_COUNT - 1) {
       ds->selected_field++;
     } else {
@@ -963,24 +924,13 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->config->general.show_status_bar =
           !ds->config->general.show_status_bar;
       break;
-    case FIELD_PAGE_SIZE:
-      number_input_init(&ds->num_input, ds->config->general.page_size,
-                        CONFIG_PAGE_SIZE_MIN, CONFIG_PAGE_SIZE_MAX);
-      ds->editing_number = true;
-      break;
-    case FIELD_PREFETCH_PAGES:
-      number_input_init(&ds->num_input, ds->config->general.prefetch_pages,
-                        CONFIG_PREFETCH_PAGES_MIN, CONFIG_PREFETCH_PAGES_MAX);
-      ds->editing_number = true;
-      break;
-    case FIELD_MAX_RESULT_ROWS:
-      number_input_init(&ds->num_input, ds->config->general.max_result_rows,
-                        CONFIG_MAX_RESULT_ROWS_MIN, CONFIG_MAX_RESULT_ROWS_MAX);
-      ds->editing_number = true;
-      break;
     case FIELD_RESTORE_SESSION:
       ds->config->general.restore_session =
           !ds->config->general.restore_session;
+      break;
+    case FIELD_RESTORE_CURSOR:
+      ds->config->general.restore_cursor_position =
+          !ds->config->general.restore_cursor_position;
       break;
     case FIELD_QUIT_CONFIRM:
       ds->config->general.quit_confirmation =
@@ -991,9 +941,10 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
           !ds->config->general.delete_confirmation;
       break;
     case FIELD_PAGINATION_STRATEGY:
-      /* Cycle through pagination strategies: Offset -> Keyset -> Smart -> Offset */
       ds->config->general.pagination_strategy =
-          (ds->config->general.pagination_strategy + 1) % 3;
+          ds->config->general.pagination_strategy == LACE_PAGINATION_OFFSET
+              ? LACE_PAGINATION_KEYSET
+              : LACE_PAGINATION_OFFSET;
       break;
     case FIELD_HISTORY_MODE:
       /* Cycle through history modes: Off -> Session -> Persistent -> Off */
@@ -1014,7 +965,7 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
           !ds->config->general.close_conn_on_last_tab;
       break;
     case FIELD_DAEMON_SPAWN_MODE:
-      /* Cycle through spawn modes: Unix -> Stdio -> TCP -> None -> Unix */
+      /* Cycle through spawn modes: Unix -> Stdio -> TCP -> Detect -> Unix */
       ds->config->general.daemon_spawn_mode =
           (ds->config->general.daemon_spawn_mode + 1) % 4;
       break;
@@ -1037,7 +988,7 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
   size_t total_items = get_hotkey_display_count();
 
   /* Navigation - skip category headers */
-  if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_UP)) {
     size_t prev = find_prev_selectable(ds->hotkey_highlight);
     if (prev < ds->hotkey_highlight) {
       ds->hotkey_highlight = prev;
@@ -1048,7 +999,7 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
     return true;
   }
 
-  if (render_event_is_special(event, UI_KEY_DOWN) || key_char == 'j') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_DOWN)) {
     size_t next = find_next_selectable(ds->hotkey_highlight, total_items);
     if (next > ds->hotkey_highlight) {
       ds->hotkey_highlight = next;
@@ -1136,21 +1087,19 @@ static bool handle_hotkeys_input(DialogState *ds, const UiEvent *event) {
 
 static bool handle_button_input(DialogState *ds, const UiEvent *event,
                                 bool *should_exit, ConfigResult *result) {
-  int key_char = render_event_get_char(event);
-
-  if (render_event_is_special(event, UI_KEY_LEFT) || key_char == 'h') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_LEFT)) {
     if (ds->selected_button > 0)
       ds->selected_button--;
     return true;
   }
 
-  if (render_event_is_special(event, UI_KEY_RIGHT) || key_char == 'l') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_RIGHT)) {
     if (ds->selected_button < BTN_COUNT - 1)
       ds->selected_button++;
     return true;
   }
 
-  if (render_event_is_special(event, UI_KEY_UP) || key_char == 'k') {
+  if (hotkey_matches(ds->config, event, HOTKEY_MOVE_UP)) {
     ds->focus = FOCUS_SETTINGS;
     return true;
   }
@@ -1280,13 +1229,7 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
       if (ds.editing_number) {
         /* Finish number editing first */
         int value = number_input_value(&ds.num_input);
-        if (ds.selected_field == FIELD_PAGE_SIZE) {
-          ds.config->general.page_size = value;
-        } else if (ds.selected_field == FIELD_PREFETCH_PAGES) {
-          ds.config->general.prefetch_pages = value;
-        } else if (ds.selected_field == FIELD_MAX_RESULT_ROWS) {
-          ds.config->general.max_result_rows = value;
-        } else if (ds.selected_field == FIELD_HISTORY_MAX_SIZE) {
+        if (ds.selected_field == FIELD_HISTORY_MAX_SIZE) {
           ds.config->general.history_max_size = value;
         } else if (ds.selected_field == FIELD_DAEMON_IDLE_TIMEOUT) {
           ds.config->general.daemon_idle_timeout = value;
@@ -1374,7 +1317,6 @@ ConfigResult config_view_show_tab(TuiState *state, ConfigStartTab start_tab) {
       state->app->config = new_config;
 
       /* Apply runtime settings */
-      state->app->page_size = (size_t)new_config->general.page_size;
       state->app->header_visible = new_config->general.show_header;
       state->app->status_visible = new_config->general.show_status_bar;
     }

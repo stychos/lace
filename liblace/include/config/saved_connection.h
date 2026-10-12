@@ -12,8 +12,11 @@
 #ifndef LIBLACE_SAVED_CONNECTION_H
 #define LIBLACE_SAVED_CONNECTION_H
 
+#include "../lace_export.h"
 #include <stdbool.h>
 #include <stddef.h>
+
+LACE_BEGIN_DECLS
 
 /* ==========================================================================
  * Saved Connection
@@ -93,5 +96,7 @@ bool lace_driver_is_valid(const char *driver);
 /* Normalize driver name (e.g., "postgresql" -> "postgres")
  * Returns static string, do not free */
 const char *lace_driver_normalize(const char *driver);
+
+LACE_END_DECLS
 
 #endif /* LIBLACE_SAVED_CONNECTION_H */

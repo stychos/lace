@@ -11,6 +11,7 @@
 #include "../db_compat.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
+#include "../../liblace/include/util/connstr.h"
 #include "history.h"
 #include <stdlib.h>
 #include <string.h>
@@ -166,11 +167,6 @@ void tab_free_data(Tab *tab) {
   tab->num_col_widths = 0;
   filters_free(&tab->filters);
 
-  /* Free keyset state */
-  if (tab->keyset) {
-    lace_keyset_free(tab->keyset);
-    tab->keyset = NULL;
-  }
 
   /* Free query data */
   FREE_NULL(tab->query_text);
@@ -199,8 +195,19 @@ Tab *workspace_current_tab(Workspace *ws) {
   return &ws->tabs[ws->current_tab];
 }
 
+size_t app_tab_table_position(AppState *app, const Tab *tab) {
+  if (!tab || tab->type != TAB_TYPE_TABLE || !tab->table_name)
+    return SIZE_MAX;
+  Connection *conn = app_get_tab_connection(app, (Tab *)tab);
+  for (size_t i = 0; conn && conn->tables && i < conn->num_tables; i++) {
+    if (conn->tables[i] && strcmp(conn->tables[i], tab->table_name) == 0)
+      return i;
+  }
+  return SIZE_MAX;
+}
+
 Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
-                                size_t table_index, const char *table_name) {
+                                const char *table_name) {
   if (!ws || !table_name)
     return NULL;
 
@@ -214,7 +221,6 @@ Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
   tab->active = true;
   tab->type = TAB_TYPE_TABLE;
   tab->connection_index = connection_index;
-  tab->table_index = table_index;
   tab->table_name = str_dup(table_name);
 
   ws->num_tabs++;
@@ -267,30 +273,24 @@ Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
   tab->type = TAB_TYPE_CONNECTION;
   tab->connection_index = connection_index;
 
-  /* Create a short display name from connection string */
-  if (connstr) {
-    /* Try to extract database name from URL */
-    const char *last_slash = strrchr(connstr, '/');
-    if (last_slash && last_slash[1] != '\0') {
-      /* Has path component - use it */
-      const char *db_name = last_slash + 1;
-      /* Remove query parameters if any */
-      const char *query = strchr(db_name, '?');
-      if (query) {
-        size_t len = query - db_name;
-        tab->table_name = safe_malloc(len + 1);
-        memcpy(tab->table_name, db_name, len);
-        tab->table_name[len] = '\0';
-      } else {
-        tab->table_name = str_dup(db_name);
-      }
-    } else {
-      /* Fallback to full connstr */
-      tab->table_name = str_dup(connstr);
+  /* A short display name: the database (a file's base name), else the
+   * host. Parsed, never cut from the raw string, which holds passwords. */
+  tab->table_name = NULL;
+  ConnString *cs = connstr ? connstr_parse(connstr, NULL) : NULL;
+  if (cs) {
+    const char *name = NULL;
+    if (cs->database && cs->database[0]) {
+      const char *slash = strrchr(cs->database, '/');
+      name = slash && slash[1] ? slash + 1 : cs->database;
+    } else if (cs->host && cs->host[0]) {
+      name = cs->host;
     }
-  } else {
-    tab->table_name = str_dup("Connection");
+    if (name)
+      tab->table_name = str_dup(name);
+    connstr_free(cs);
   }
+  if (!tab->table_name)
+    tab->table_name = str_dup("Connection");
 
   tab->active = true;
   ws->num_tabs++;
@@ -630,12 +630,10 @@ void app_state_init(AppState *app) {
   app->config = config_load(NULL);
   if (app->config) {
     /* Apply config values */
-    app->page_size = (size_t)app->config->general.page_size;
     app->header_visible = app->config->general.show_header;
     app->status_visible = app->config->general.show_status_bar;
   } else {
     /* Fallback defaults if config failed to load */
-    app->page_size = CONFIG_PAGE_SIZE_DEFAULT;
     app->header_visible = true;
     app->status_visible = true;
   }
@@ -758,18 +756,6 @@ void tab_clear_selections(Tab *tab) {
     return;
   tab->num_selected = 0;
   /* Keep the array allocated for reuse */
-}
-
-/* Get selected row indices */
-const size_t *tab_get_selections(Tab *tab, size_t *count) {
-  if (!tab) {
-    if (count)
-      *count = 0;
-    return NULL;
-  }
-  if (count)
-    *count = tab->num_selected;
-  return tab->selected_rows;
 }
 
 /* ============================================================================

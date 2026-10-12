@@ -54,6 +54,28 @@ static void init_folder_item(ConnectionItem *item, const char *name) {
   item->parent = NULL;
 }
 
+/* Children live by value in their folder's array, so growing or shifting
+ * an array moves items, and every parent pointer into it goes stale. After
+ * any change to the tree, re-link the whole of it from the root. */
+static void relink_children(ConnectionItem *folder, int depth) {
+  if (!folder || folder->type != CONN_ITEM_FOLDER || depth > MAX_FOLDER_DEPTH)
+    return;
+  for (size_t i = 0; i < folder->folder.num_children; i++) {
+    ConnectionItem *child = &folder->folder.children[i];
+    child->parent = folder;
+    relink_children(child, depth + 1);
+  }
+}
+
+/* The root above item: its ancestors were not moved by a change below them,
+ * so the path up is valid before the change */
+static ConnectionItem *tree_root(ConnectionItem *item) {
+  int guard = 0;
+  while (item && item->parent && guard++ <= MAX_FOLDER_DEPTH)
+    item = item->parent;
+  return item;
+}
+
 /* Ensure folder has capacity for more children */
 static void folder_ensure_capacity(ConnectionFolder *folder, size_t needed) {
   if (!folder)
@@ -334,47 +356,30 @@ ConnectionManager *connmgr_load(char **error) {
   }
 
   /* Read file */
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+  char *content = platform_read_file(path, 10 * 1024 * 1024); /* Max 10MB */
+  if (!content || !content[0]) {
+    if (content)
+      err_setf(error, "Empty file: %s", path);
+    else
+      err_setf(error, "Failed to read %s: %s", path, strerror(errno));
+    str_secure_free(content);
     free(path);
     return NULL;
   }
-
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (size < 0) {
-    fclose(f);
-    err_setf(error, "Failed to determine file size: %s", strerror(errno));
-    free(path);
-    return NULL;
-  }
-
-  if (size == 0 || size > 10 * 1024 * 1024) { /* Max 10MB */
-    fclose(f);
-    err_setf(error, "Invalid file size");
-    free(path);
-    return NULL;
-  }
-
-  char *content = safe_malloc((size_t)size + 1);
-
-  size_t read = fread(content, 1, (size_t)size, f);
-  fclose(f);
-  content[read] = '\0';
 
   /* Parse JSON */
   cJSON *json = cJSON_Parse(content);
-  free(content);
-
   if (!json) {
+    /* The error pointer points into content: report its offset (never the
+     * text, which holds passwords) before freeing it */
     const char *err_ptr = cJSON_GetErrorPtr();
-    err_setf(error, "JSON parse error: %s", err_ptr ? err_ptr : "unknown");
+    err_setf(error, "JSON parse error near byte %ld",
+             err_ptr ? (long)(err_ptr - content) : -1L);
+    str_secure_free(content);
     free(path);
     return NULL;
   }
+  str_secure_free(content); /* Holds saved passwords */
 
   /* Create manager */
   ConnectionManager *mgr = safe_calloc(1, sizeof(ConnectionManager));
@@ -534,14 +539,17 @@ bool connmgr_add_connection(ConnectionItem *folder, SavedConnection *conn) {
   if (!folder || folder->type != CONN_ITEM_FOLDER || !conn)
     return false;
 
+  ConnectionItem *root = tree_root(folder);
   folder_ensure_capacity(&folder->folder, 1);
 
   ConnectionItem *item = &folder->folder.children[folder->folder.num_children];
   item->type = CONN_ITEM_CONNECTION;
   item->connection = *conn;
   item->parent = folder;
+  free(conn); /* Its contents now belong to the tree */
 
   folder->folder.num_children++;
+  relink_children(root, 0);
   return true;
 }
 
@@ -603,6 +611,7 @@ bool connmgr_remove_item(ConnectionManager *mgr, ConnectionItem *item) {
     parent->children[i] = parent->children[i + 1];
   }
   parent->num_children--;
+  relink_children(&mgr->root, 0);
 
   mgr->modified = true;
   return true;
@@ -769,6 +778,7 @@ bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
     }
   }
 
+  relink_children(&mgr->root, 0);
   mgr->modified = true;
   return true;
 }
@@ -799,14 +809,17 @@ bool connmgr_add_folder(ConnectionItem *parent, ConnectionFolder *folder) {
   if (!parent || parent->type != CONN_ITEM_FOLDER || !folder)
     return false;
 
+  ConnectionItem *root = tree_root(parent);
   folder_ensure_capacity(&parent->folder, 1);
 
   ConnectionItem *item = &parent->folder.children[parent->folder.num_children];
   item->type = CONN_ITEM_FOLDER;
   item->folder = *folder;
   item->parent = parent;
+  free(folder); /* Its contents now belong to the tree */
 
   parent->folder.num_children++;
+  relink_children(root, 0);
   return true;
 }
 

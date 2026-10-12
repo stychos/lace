@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <grp.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -22,6 +23,7 @@
 #include "crash.h"
 #include "log.h"
 #include "server.h"
+#include "ssh_tunnel.h"
 
 /* Global state */
 static volatile sig_atomic_t g_shutdown_requested = 0;
@@ -40,9 +42,11 @@ typedef struct {
   char *socket_group;    /* Group allowed to connect besides the owner */
   char *token_file;      /* TCP: where to write the authentication token */
   char *bind_addr;       /* TCP bind address (NULL for localhost) */
+  bool allow_remote;     /* --allow-remote: bind_addr may be non-loopback */
   int port;              /* TCP port (0 for default 7433) */
   size_t max_clients;    /* Max concurrent clients (0 for default 64) */
   int idle_timeout;      /* Shutdown after N seconds with no clients (0=disabled) */
+  int orphan_grace;      /* --orphan-grace (-1: default) */
   bool daemonize;        /* Fork to background */
   char *pidfile;         /* PID file path */
   /* Logging options */
@@ -67,21 +71,29 @@ static void print_usage(const char *prog) {
           "Lace database daemon - JSON-RPC server for database operations.\n"
           "\n"
           "Transport modes (mutually exclusive):\n"
-          "  --unix [PATH]        Listen on Unix socket (default)\n"
-          "  --token-file PATH    TCP mode: write the client token here (0600;\n"
-          "                       default laced-<port>.token next to the socket)\n"
+          "  --unix [PATH]        Listen on Unix socket (default). Default path:\n"
+          "                       macOS ~/Library/Caches/laced.sock; Linux\n"
+          "                       $XDG_RUNTIME_DIR/laced.sock (if private) or\n"
+          "                       ~/.cache/lace/laced.sock; root /run/laced.sock\n"
           "  --socket-group NAME  Let this group's members connect to the Unix\n"
           "                       socket too (socket 0660; directory perms are\n"
           "                       up to you). Other users are always refused.\n"
-          "                       Default: $XDG_RUNTIME_DIR/laced.sock or /tmp/laced-{uid}.sock\n"
           "  --tcp [HOST:]PORT    Listen on TCP socket\n"
           "                       Default: localhost:7433\n"
+          "  --allow-remote       TCP: allow a HOST other than loopback. The\n"
+          "                       token handshake authenticates but does not\n"
+          "                       encrypt: passwords and data cross the network\n"
+          "                       in clear. Prefer an SSH forward to localhost.\n"
+          "  --token-file PATH    TCP mode: write the client token here (0600;\n"
+          "                       default laced-<port>.token next to the socket)\n"
           "  --stdio              Use stdin/stdout (for embedded/spawn mode)\n"
           "\n"
           "Options:\n"
           "  --daemonize, -d      Fork to background (socket modes only)\n"
           "  --pidfile PATH       Write PID to file\n"
           "  --max-clients N      Maximum concurrent clients (default: 64)\n"
+          "  --orphan-grace SECS  Close a client's database connections this long\n"
+          "                       after its last socket closed (default: 60)\n"
           "  --idle-timeout SECS  Shutdown after N seconds with no clients (0=disabled)\n"
           "                       Default: 0 (disabled, daemon runs until signal)\n"
           "  -q, --quiet          Suppress log output to stderr\n"
@@ -89,7 +101,8 @@ static void print_usage(const char *prog) {
           "  -v, --version        Show version information\n"
           "\n"
           "Logging options:\n"
-          "  --log PATH           Log file path (default: platform-specific)\n"
+          "  --log PATH           Log file path (default: $LACED_LOG, else\n"
+          "                       platform-specific; stdio mode: stderr)\n"
           "  --log-level LEVEL    Minimum log level: debug, info, warn, error, fatal\n"
           "                       Default: info (debug builds: debug)\n"
           "  --log-max-size SIZE  Max log file size in MB before rotation (default: 10)\n"
@@ -99,7 +112,7 @@ static void print_usage(const char *prog) {
           "  %s                      # Unix socket with default path (default)\n"
           "  %s --unix /tmp/my.sock  # Unix socket with custom path\n"
           "  %s --tcp 7433           # TCP on localhost:7433\n"
-          "  %s --tcp 0.0.0.0:7433   # TCP on all interfaces\n"
+          "  %s --tcp 0.0.0.0:7433 --allow-remote  # All interfaces (unencrypted)\n"
           "  %s -d                   # Background daemon with Unix socket\n"
           "  %s --stdio              # Use with liblace spawn mode\n"
           "  %s --log /var/log/laced.log --log-level debug\n",
@@ -108,7 +121,7 @@ static void print_usage(const char *prog) {
 
 /* Print version information */
 static void print_version(void) {
-  fprintf(stderr, "laced version 0.1.0\n");
+  fprintf(stderr, "laced version %s\n", LACED_VERSION);
   fprintf(stderr, "Protocol version: 1.0\n");
 }
 
@@ -172,6 +185,7 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
   config->port = 0;
   config->max_clients = 0;
   config->idle_timeout = 0;
+  config->orphan_grace = -1;
   config->daemonize = false;
   config->pidfile = NULL;
   /* Log defaults */
@@ -224,8 +238,11 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       }
       i++;
       free(config->socket_group);
-  free(config->token_file);
       config->socket_group = str_dup(argv[i]);
+      continue;
+    }
+    if (strcmp(argv[i], "--allow-remote") == 0) {
+      config->allow_remote = true;
       continue;
     }
     if (strcmp(argv[i], "--tcp") == 0) {
@@ -282,6 +299,19 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
       config->idle_timeout = atoi(argv[i]);
       if (config->idle_timeout < 0 || config->idle_timeout > 86400) {
         fprintf(stderr, "Invalid --idle-timeout value: %s (must be 0-86400)\n", argv[i]);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--orphan-grace") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "--orphan-grace requires an argument\n");
+        return -1;
+      }
+      i++;
+      config->orphan_grace = atoi(argv[i]);
+      if (config->orphan_grace < 0 || config->orphan_grace > 86400) {
+        fprintf(stderr, "Invalid --orphan-grace value: %s (must be 0-86400)\n", argv[i]);
         return -1;
       }
       continue;
@@ -351,6 +381,7 @@ static int parse_args(int argc, char **argv, DaemonConfig *config) {
 
 /* Free config resources */
 static void free_config(DaemonConfig *config) {
+  free(config->token_file);
   free(config->socket_path);
   free(config->socket_group);
   free(config->bind_addr);
@@ -369,25 +400,71 @@ static bool write_pidfile(const char *path) {
   return true;
 }
 
-/* Remove PID file */
+/* The PID file is written once this daemon listens (laced_signal_ready),
+ * not before: a second daemon that then fails to bind (the first one holds
+ * the socket or port) must not overwrite, or on exit remove, its file */
+static const char *g_pidfile = NULL;
+static bool g_pidfile_written = false;
+
+/* Remove the PID file, if this daemon wrote it */
 static void remove_pidfile(const char *path) {
-  if (path) {
+  if (path && g_pidfile_written) {
     unlink(path);
   }
 }
 
 /* Daemonize the process */
+/* Write end of the pipe the waiting parent of "laced -d" reads (-1: none) */
+static int g_ready_fd = -1;
+
+void laced_signal_ready(void) {
+  if (g_pidfile && !g_pidfile_written) {
+    g_pidfile_written = write_pidfile(g_pidfile);
+    if (!g_pidfile_written)
+      LOG_ERROR("Failed to write PID file: %s", g_pidfile);
+  }
+  if (g_ready_fd >= 0) {
+    (void)!write(g_ready_fd, "1", 1);
+    close(g_ready_fd);
+    g_ready_fd = -1;
+  }
+}
+
+/* Fork to the background. The parent waits until the child is listening
+ * (laced_signal_ready) and exits 0, or exits 1 if the child dies first:
+ * "another daemon is running" or a bind failure is reported to whoever
+ * started laced instead of only to the log. */
 static bool do_daemonize(void) {
+  int ready[2];
+  if (pipe(ready) != 0) {
+    return false;
+  }
   pid_t pid = fork();
   if (pid < 0) {
+    close(ready[0]);
+    close(ready[1]);
     return false;
   }
   if (pid > 0) {
-    /* Parent exits */
-    _exit(0);
+    close(ready[1]);
+    char c;
+    ssize_t n;
+    do {
+      n = read(ready[0], &c, 1);
+    } while (n < 0 && errno == EINTR);
+    if (n == 1) {
+      _exit(0);
+    }
+    const char *log = log_get_path();
+    fprintf(stderr, "laced: failed to start; see %s\n",
+            log && log[0] ? log : "the log");
+    _exit(1);
   }
 
   /* Child continues */
+  close(ready[0]);
+  fcntl(ready[1], F_SETFD, FD_CLOEXEC); /* Not for ssh children */
+  g_ready_fd = ready[1];
   setsid();
 
   /* Redirect stdin/stdout/stderr to /dev/null */
@@ -426,6 +503,22 @@ int main(int argc, char **argv) {
     free_config(&config);
     return 1;
   }
+  /* The handshake proves who is talking but nothing is encrypted: reaching
+   * past this machine needs an explicit choice */
+  if (config.mode == MODE_TCP && config.bind_addr && config.bind_addr[0] &&
+      !config.allow_remote) {
+    struct in_addr a;
+    if (inet_pton(AF_INET, config.bind_addr, &a) != 1 ||
+        (ntohl(a.s_addr) >> 24) != 127) {
+      fprintf(stderr,
+              "Refusing to listen on %s: not a loopback address. TCP traffic\n"
+              "is not encrypted; use an SSH forward to 127.0.0.1, or pass\n"
+              "--allow-remote to accept that.\n",
+              config.bind_addr);
+      free_config(&config);
+      return 1;
+    }
+  }
 
   /* Initialize logging BEFORE daemonization */
   LogConfig log_config = {
@@ -437,6 +530,14 @@ int main(int argc, char **argv) {
       .use_stderr = (config.mode == MODE_STDIO && !config.quiet),
       .log_path = config.log_path,
   };
+  /* $LACED_LOG: the log file when --log is not given (a daemon spawned by
+   * liblace takes no options, but inherits the environment) */
+  const char *env_log = getenv("LACED_LOG");
+  if (!log_config.log_path && env_log && *env_log)
+    log_config.log_path = env_log;
+  /* A stdio daemon logs to stderr unless a log file was named */
+  if (log_config.log_path)
+    log_config.use_stderr = false;
 
   if (!log_init(&log_config)) {
     fprintf(stderr, "Failed to initialize logging\n");
@@ -479,20 +580,13 @@ int main(int argc, char **argv) {
   /* Ignore SIGPIPE - we handle write errors explicitly */
   signal(SIGPIPE, SIG_IGN);
 
-  /* Write PID file */
-  if (config.pidfile) {
-    if (!write_pidfile(config.pidfile)) {
-      LOG_ERROR("Failed to write PID file: %s", config.pidfile);
-      crash_handler_uninstall();
-      log_shutdown();
-      free_config(&config);
-      return 1;
-    }
-    LOG_DEBUG("PID file written: %s", config.pidfile);
-  }
+  /* PID file: written once listening (laced_signal_ready) */
+  g_pidfile = config.pidfile;
 
   /* Initialize server */
   LacedServer *server = laced_server_create();
+  if (server && config.orphan_grace >= 0)
+    laced_server_set_orphan_grace(server, config.orphan_grace);
   if (!server) {
     LOG_ERROR("Failed to create server");
     remove_pidfile(config.pidfile);
@@ -518,6 +612,9 @@ int main(int argc, char **argv) {
     laced_server_set_token_file(server, config.token_file);
   }
 
+  /* What crashed daemons left: tunnel directories, askpass files */
+  ssh_tunnel_sweep_stale();
+
   LOG_INFO("Server initialized, entering main loop");
 
   /* Run server loop based on transport mode */
@@ -534,6 +631,10 @@ int main(int argc, char **argv) {
     break;
 
   case MODE_TCP:
+    if (config.allow_remote) {
+      LOG_WARN("--allow-remote: TCP traffic, database passwords included, is "
+               "not encrypted");
+    }
     result = laced_server_run_tcp(server, config.bind_addr, config.port,
                                   config.max_clients, config.idle_timeout,
                                   &g_shutdown_requested);

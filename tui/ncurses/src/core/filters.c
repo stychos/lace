@@ -140,46 +140,63 @@ bool filter_op_needs_value(FilterOperator op) {
  * ============================================================================
  */
 
-/* Escape a value for SQL */
-static char *escape_sql_value(const char *value) {
-  if (!value)
-    return str_dup("");
-
-  size_t len = strlen(value);
-  StringBuilder *sb = sb_new(len * 2 + 2);
-  if (!sb)
-    return NULL;
-
-  bool failed = false;
-  for (const char *p = value; *p; p++) {
-    if (*p == '\'') {
-      if (!sb_append(sb, "''")) {
-        failed = true;
-        break;
-      }
-    } else {
-      if (!sb_append_char(sb, *p)) {
-        failed = true;
-        break;
-      }
-    }
-  }
-
-  if (failed) {
-    sb_free(sb);
-    return NULL;
-  }
-
-  return sb_to_string(sb);
+/* Map a driver name to the dialect liblace builds literals for */
+static LaceDriver filter_driver(const char *driver_name) {
+  if (str_eq(driver_name, "mysql"))
+    return LACE_DRIVER_MYSQL;
+  if (str_eq(driver_name, "mariadb"))
+    return LACE_DRIVER_MARIADB;
+  if (str_eq(driver_name, "postgres") || str_eq(driver_name, "postgresql") ||
+      str_eq(driver_name, "pg"))
+    return LACE_DRIVER_POSTGRES;
+  return LACE_DRIVER_SQLITE;
 }
 
-char *filters_parse_in_values(const char *input, char **err) {
+/* A string literal for the value, quotes included (caller frees). Quoting is
+ * left to liblace: MySQL needs more than doubled quotes (a backslash escapes
+ * unless NO_BACKSLASH_ESCAPES is set). */
+static char *sql_literal(LaceDriver driver, const char *value) {
+  return lace_sql_string_literal(driver, value ? value : "");
+}
+
+/* A literal for prefix + value + suffix, e.g. a LIKE or GLOB pattern */
+static char *sql_pattern_literal(LaceDriver driver, const char *prefix,
+                                 const char *value, const char *suffix) {
+  char *pattern = str_printf("%s%s%s", prefix, value ? value : "", suffix);
+  if (!pattern)
+    return NULL;
+  char *lit = sql_literal(driver, pattern);
+  free(pattern);
+  return lit;
+}
+
+/* True when [start, end) is a plain decimal number that can be inlined */
+static bool is_plain_number(const char *start, const char *end) {
+  const char *c = start;
+  if (c < end && (*c == '-' || *c == '+'))
+    c++;
+  bool digits = false, dot = false;
+  for (; c < end; c++) {
+    if (isdigit((unsigned char)*c)) {
+      digits = true;
+    } else if (*c == '.' && !dot) {
+      dot = true;
+    } else {
+      return false;
+    }
+  }
+  return digits;
+}
+
+char *filters_parse_in_values(const char *input, const char *driver_name,
+                              char **err) {
   if (!input || !*input) {
     if (err)
       *err = str_dup("Empty value list");
     return NULL;
   }
 
+  LaceDriver driver = filter_driver(driver_name);
   StringBuilder *sb = sb_new(strlen(input) * 2);
   if (!sb) {
     if (err)
@@ -195,7 +212,7 @@ char *filters_parse_in_values(const char *input, char **err) {
   if (*p == '(')
     p++;
 
-/* Limit number of values to prevent DoS (MAX_IN_VALUES from constants.h) */
+  /* Limit number of values to prevent DoS (MAX_IN_VALUES from constants.h) */
   size_t value_count = 0;
 
   bool first = true;
@@ -220,63 +237,48 @@ char *filters_parse_in_values(const char *input, char **err) {
       ok = sb_append(sb, ", ");
     first = false;
 
+    /* Numbers are inlined; everything else becomes a string literal */
+    StringBuilder *val = sb_new(64);
+    if (!val) {
+      ok = false;
+      break;
+    }
+    bool number = false;
     if (*p == '\'' || *p == '"') {
-      /* Quoted value - find closing quote */
-      char quote = *p;
-      p++;
-      const char *start = p;
-      while (*p && *p != quote) {
-        if (*p == '\\' && *(p + 1))
-          p++; /* Skip escaped chars */
-        p++;
+      /* Quoted value: a doubled quote or a backslash takes the next
+       * character literally */
+      char quote = *p++;
+      while (*p) {
+        if (*p == quote && p[1] != quote)
+          break;
+        if ((*p == quote || *p == '\\') && p[1])
+          p++;
+        sb_append_char(val, *p++);
       }
-      ok = ok && sb_append_char(sb, '\'');
-      /* Copy and escape single quotes */
-      for (const char *c = start; c < p && ok; c++) {
-        if (*c == '\'')
-          ok = sb_append(sb, "''");
-        else
-          ok = sb_append_char(sb, *c);
-      }
-      ok = ok && sb_append_char(sb, '\'');
       if (*p == quote)
         p++;
     } else {
-      /* Unquoted value - read until comma or end */
+      /* Unquoted value - read until comma or end, trailing space trimmed */
       const char *start = p;
       while (*p && *p != ',' && *p != ')')
         p++;
-      /* Trim trailing whitespace */
       const char *end = p;
       while (end > start && isspace((unsigned char)*(end - 1)))
         end--;
-
-      if (end > start) {
-        /* Check if numeric */
-        bool is_numeric = true;
-        for (const char *c = start; c < end; c++) {
-          if (!isdigit((unsigned char)*c) && *c != '.' && *c != '-' &&
-              *c != '+') {
-            is_numeric = false;
-            break;
-          }
-        }
-
-        if (is_numeric) {
-          ok = sb_append_len(sb, start, (size_t)(end - start));
-        } else {
-          ok = sb_append_char(sb, '\'');
-          /* Escape single quotes in value */
-          for (const char *c = start; c < end && ok; c++) {
-            if (*c == '\'')
-              ok = sb_append(sb, "''");
-            else
-              ok = sb_append_char(sb, *c);
-          }
-          ok = ok && sb_append_char(sb, '\'');
-        }
-      }
+      number = end > start && is_plain_number(start, end);
+      sb_append_len(val, start, (size_t)(end - start));
     }
+    if (!sb_ok(val)) {
+      sb_free(val);
+      ok = false;
+      break;
+    }
+    char *text = sb_finish(val);
+    char *lit = number ? text : sql_literal(driver, text);
+    ok = ok && lit && sb_append(sb, lit);
+    if (lit != text)
+      free(lit);
+    free(text);
 
     /* Skip comma */
     while (*p && isspace((unsigned char)*p))
@@ -318,8 +320,7 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
 
   bool first = true;
   bool ok = true; /* Track StringBuilder operation success */
-  bool use_backticks =
-      str_eq(driver_name, "mysql") || str_eq(driver_name, "mariadb");
+  LaceDriver driver = filter_driver(driver_name);
 
   /* Process each column filter */
   if (!f->filters && f->num_filters > 0) {
@@ -343,32 +344,28 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
       continue;
     }
 
+    /* Validate column index */
+    if (!is_raw && cf->column_index >= schema->num_columns)
+      continue;
+
     if (!first)
       ok = sb_append(sb, " AND ");
     first = false;
 
     /* Handle RAW filters (virtual column) - advanced feature for SQL-savvy
      * users */
-    if (cf->column_index == SIZE_MAX) {
+    if (is_raw) {
       ok = ok && sb_printf(sb, "(%s)", cf->value);
       continue;
     }
 
-    /* Validate column index */
-    if (cf->column_index >= schema->num_columns)
-      continue;
-
     const char *col_name = schema->columns[cf->column_index].name;
 
-    /* Escape column name */
-    char *escaped_col;
-    if (use_backticks) {
-      escaped_col = str_escape_identifier_backtick(col_name);
-    } else {
-      escaped_col = str_escape_identifier_dquote(col_name);
-    }
-    if (!escaped_col)
+    char *escaped_col = lace_quote_identifier(driver, col_name);
+    if (!escaped_col) {
+      ok = false;
       continue;
+    }
 
     switch (cf->op) {
     case FILTER_OP_EQ:
@@ -377,16 +374,16 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     case FILTER_OP_GE:
     case FILTER_OP_LT:
     case FILTER_OP_LE: {
-      char *escaped_val = escape_sql_value(cf->value);
-      ok = sb_printf(sb, "%s %s '%s'", escaped_col, filter_op_sql(cf->op),
-                     escaped_val ? escaped_val : "");
-      free(escaped_val);
+      char *lit = sql_literal(driver, cf->value);
+      ok = lit && sb_printf(sb, "%s %s %s", escaped_col, filter_op_sql(cf->op),
+                            lit);
+      free(lit);
       break;
     }
 
     case FILTER_OP_IN: {
       char *in_err = NULL;
-      char *in_list = filters_parse_in_values(cf->value, &in_err);
+      char *in_list = filters_parse_in_values(cf->value, driver_name, &in_err);
       if (in_list) {
         ok = sb_printf(sb, "%s IN (%s)", escaped_col, in_list);
         free(in_list);
@@ -399,42 +396,37 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     }
 
     case FILTER_OP_CONTAINS: {
-      char *escaped_val = escape_sql_value(cf->value);
-      /* Escape LIKE wildcards */
-      ok = sb_printf(sb, "%s LIKE '%%%s%%'", escaped_col,
-                     escaped_val ? escaped_val : "");
-      free(escaped_val);
+      /* % and _ in the value stay wildcards */
+      char *lit = sql_pattern_literal(driver, "%", cf->value, "%");
+      ok = lit && sb_printf(sb, "%s LIKE %s", escaped_col, lit);
+      free(lit);
       break;
     }
 
     case FILTER_OP_REGEX: {
-      char *escaped_val = escape_sql_value(cf->value);
-      /* Driver-specific regex */
-      if (str_eq(driver_name, "mysql") || str_eq(driver_name, "mariadb")) {
-        ok = sb_printf(sb, "%s REGEXP '%s'", escaped_col,
-                       escaped_val ? escaped_val : "");
-      } else if (str_eq(driver_name, "postgres") ||
-                 str_eq(driver_name, "postgresql") ||
-                 str_eq(driver_name, "pg")) {
-        ok = sb_printf(sb, "%s ~ '%s'", escaped_col,
-                       escaped_val ? escaped_val : "");
+      char *lit = NULL;
+      if (driver == LACE_DRIVER_MYSQL || driver == LACE_DRIVER_MARIADB) {
+        lit = sql_literal(driver, cf->value);
+        ok = lit && sb_printf(sb, "%s REGEXP %s", escaped_col, lit);
+      } else if (driver == LACE_DRIVER_POSTGRES) {
+        lit = sql_literal(driver, cf->value);
+        ok = lit && sb_printf(sb, "%s ~ %s", escaped_col, lit);
       } else {
         /* SQLite - use GLOB as fallback (not true regex) */
-        ok = sb_printf(sb, "%s GLOB '*%s*'", escaped_col,
-                       escaped_val ? escaped_val : "");
+        lit = sql_pattern_literal(driver, "*", cf->value, "*");
+        ok = lit && sb_printf(sb, "%s GLOB %s", escaped_col, lit);
       }
-      free(escaped_val);
+      free(lit);
       break;
     }
 
     case FILTER_OP_BETWEEN: {
-      char *escaped_val1 = escape_sql_value(cf->value);
-      char *escaped_val2 = escape_sql_value(cf->value2);
-      ok = sb_printf(sb, "%s BETWEEN '%s' AND '%s'", escaped_col,
-                     escaped_val1 ? escaped_val1 : "",
-                     escaped_val2 ? escaped_val2 : "");
-      free(escaped_val1);
-      free(escaped_val2);
+      char *lit1 = sql_literal(driver, cf->value);
+      char *lit2 = sql_literal(driver, cf->value2);
+      ok = lit1 && lit2 &&
+           sb_printf(sb, "%s BETWEEN %s AND %s", escaped_col, lit1, lit2);
+      free(lit1);
+      free(lit2);
       break;
     }
 
@@ -481,4 +473,70 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
   }
 
   return sb_to_string(sb);
+}
+
+/* ============================================================================
+ * ORDER BY Building
+ * ============================================================================
+ */
+
+char *filters_build_order_by(const SortEntry *entries, size_t num_entries,
+                             const TableSchema *schema,
+                             const char *driver_name) {
+  if (!entries || num_entries == 0 || !schema)
+    return NULL;
+
+  LaceDriver driver = filter_driver(driver_name);
+  StringBuilder *sb = sb_new(128);
+  bool first = true;
+  for (size_t i = 0; i < num_entries; i++) {
+    /* Sort entries refer to columns by index: skip any the schema lacks */
+    if (entries[i].column >= schema->num_columns ||
+        !schema->columns[entries[i].column].name)
+      continue;
+    char *col = lace_quote_identifier(driver,
+                                      schema->columns[entries[i].column].name);
+    if (!col) {
+      sb_free(sb);
+      return NULL;
+    }
+    sb_printf(sb, "%s%s %s", first ? "" : ", ", col,
+              entries[i].direction == SORT_ASC ? "ASC" : "DESC");
+    free(col);
+    first = false;
+  }
+  if (first) {
+    sb_free(sb);
+    return NULL;
+  }
+  return sb_finish(sb);
+}
+
+LaceKeysetState *tab_page_keyset(const Tab *tab, const char *driver_name,
+                                 bool keyset_paging) {
+  if (!tab || !tab->schema || !keyset_paging)
+    return NULL;
+  LaceSort sorts[MAX_SORT_COLUMNS];
+  size_t n = 0;
+  for (size_t i = 0; i < tab->num_sort_entries && n < MAX_SORT_COLUMNS; i++) {
+    sorts[n].column = tab->sort_entries[i].column;
+    sorts[n].dir = tab->sort_entries[i].direction == SORT_DESC ? LACE_SORT_DESC
+                                                               : LACE_SORT_ASC;
+    n++;
+  }
+  return lace_keyset_create(tab->schema, sorts, n, filter_driver(driver_name));
+}
+
+char *tab_page_order_by(const Tab *tab, const char *driver_name,
+                        bool keyset_paging) {
+  if (!tab)
+    return NULL;
+  LaceKeysetState *ks = tab_page_keyset(tab, driver_name, keyset_paging);
+  if (ks) {
+    char *order = lace_keyset_build_order(ks, true);
+    lace_keyset_free(ks);
+    return order;
+  }
+  return filters_build_order_by(tab->sort_entries, tab->num_sort_entries,
+                                tab->schema, driver_name);
 }

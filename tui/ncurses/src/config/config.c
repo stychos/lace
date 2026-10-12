@@ -11,7 +11,7 @@
 #include "../core/ui_types.h"
 #include "../platform/platform.h"
 #include "util/json_helpers.h"
-#include "../../liblace/include/constants.h"
+#include "../core/constants.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include <cjson/cJSON.h>
@@ -538,12 +538,10 @@ Config *config_get_defaults(void) {
   /* General settings */
   config->general.show_header = true;
   config->general.show_status_bar = true;
-  config->general.page_size = CONFIG_PAGE_SIZE_DEFAULT;
-  config->general.prefetch_pages = CONFIG_PREFETCH_PAGES_DEFAULT;
   config->general.restore_session = true;
+  config->general.restore_cursor_position = true;
   config->general.quit_confirmation = false;
   config->general.delete_confirmation = true; /* Default: ask before delete */
-  config->general.max_result_rows = CONFIG_MAX_RESULT_ROWS_DEFAULT;
   config->general.auto_open_first_table = false;
   config->general.close_conn_on_last_tab = false;
   config->general.history_mode =
@@ -551,7 +549,7 @@ Config *config_get_defaults(void) {
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
   config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
   config->general.daemon_idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
-  config->general.pagination_strategy = LACE_PAGINATION_OFFSET; /* Default: offset */
+  config->general.pagination_strategy = LACE_PAGINATION_KEYSET;
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -689,33 +687,20 @@ Config *config_load(char **error) {
     return config_get_defaults();
   }
 
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+  char *content = platform_read_file(path, 1024 * 1024); /* Max 1MB */
+  if (!content || !content[0]) {
+    if (content)
+      err_setf(error, "Empty config file");
+    else
+      err_setf(error, "Failed to read %s: %s", path, strerror(errno));
+    free(content);
     free(path);
     return config_get_defaults();
   }
-
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (size <= 0 || size > 1024 * 1024) { /* Max 1MB */
-    fclose(f);
-    err_setf(error, "Invalid config file size");
-    free(path);
-    return config_get_defaults();
-  }
-
-  char *content = safe_malloc((size_t)size + 1);
-
-  size_t read_bytes = fread(content, 1, (size_t)size, f);
-  fclose(f);
-  content[read_bytes] = '\0';
   free(path);
 
   cJSON *json = cJSON_Parse(content);
-  free(content);
+  str_secure_free(content);
 
   if (!json) {
     err_setf(error, "JSON parse error");
@@ -740,6 +725,9 @@ Config *config_load(char **error) {
         json_get_bool(general, "show_status_bar", config->general.show_status_bar);
     config->general.restore_session =
         json_get_bool(general, "restore_session", config->general.restore_session);
+    config->general.restore_cursor_position =
+        json_get_bool(general, "restore_cursor_position",
+                      config->general.restore_cursor_position);
     config->general.quit_confirmation =
         json_get_bool(general, "quit_confirmation", config->general.quit_confirmation);
     config->general.delete_confirmation =
@@ -750,19 +738,7 @@ Config *config_load(char **error) {
         json_get_bool(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
 
     /* Integer settings with range validation */
-    int val = json_get_int(general, "page_size", config->general.page_size);
-    if (val >= CONFIG_PAGE_SIZE_MIN && val <= CONFIG_PAGE_SIZE_MAX)
-      config->general.page_size = val;
-
-    val = json_get_int(general, "prefetch_pages", config->general.prefetch_pages);
-    if (val >= CONFIG_PREFETCH_PAGES_MIN && val <= CONFIG_PREFETCH_PAGES_MAX)
-      config->general.prefetch_pages = val;
-
-    val = json_get_int(general, "max_result_rows", config->general.max_result_rows);
-    if (val >= CONFIG_MAX_RESULT_ROWS_MIN && val <= CONFIG_MAX_RESULT_ROWS_MAX)
-      config->general.max_result_rows = val;
-
-    val = json_get_int(general, "history_mode", config->general.history_mode);
+    int val = json_get_int(general, "history_mode", config->general.history_mode);
     if (val >= HISTORY_MODE_OFF && val <= HISTORY_MODE_PERSISTENT)
       config->general.history_mode = val;
 
@@ -771,7 +747,7 @@ Config *config_load(char **error) {
       config->general.history_max_size = val;
 
     val = json_get_int(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
-    if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_NONE)
+    if (val >= SPAWN_MODE_UNIX && val <= SPAWN_MODE_DETECT)
       config->general.daemon_spawn_mode = val;
 
     val = json_get_int(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
@@ -779,8 +755,11 @@ Config *config_load(char **error) {
       config->general.daemon_idle_timeout = val;
 
     val = json_get_int(general, "pagination_strategy", config->general.pagination_strategy);
-    if (val >= LACE_PAGINATION_OFFSET && val <= LACE_PAGINATION_SMART)
-      config->general.pagination_strategy = val;
+    /* 2 was "smart" keyset, now the same as keyset */
+    if (val == LACE_PAGINATION_OFFSET || val == LACE_PAGINATION_KEYSET || val == 2)
+      config->general.pagination_strategy =
+          val == LACE_PAGINATION_OFFSET ? LACE_PAGINATION_OFFSET
+                                        : LACE_PAGINATION_KEYSET;
   }
 
   /* Parse hotkeys */
@@ -837,12 +816,11 @@ bool config_save(const Config *config, char **error) {
   cJSON *general = cJSON_CreateObject();
   JSON_ADD_BOOL(general, "show_header", config->general.show_header);
   JSON_ADD_BOOL(general, "show_status_bar", config->general.show_status_bar);
-  JSON_ADD_INT(general, "page_size", config->general.page_size);
-  JSON_ADD_INT(general, "prefetch_pages", config->general.prefetch_pages);
   JSON_ADD_BOOL(general, "restore_session", config->general.restore_session);
+  JSON_ADD_BOOL(general, "restore_cursor_position",
+                config->general.restore_cursor_position);
   JSON_ADD_BOOL(general, "quit_confirmation", config->general.quit_confirmation);
   JSON_ADD_BOOL(general, "delete_confirmation", config->general.delete_confirmation);
-  JSON_ADD_INT(general, "max_result_rows", config->general.max_result_rows);
   JSON_ADD_BOOL(general, "auto_open_first_table", config->general.auto_open_first_table);
   JSON_ADD_BOOL(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
@@ -909,14 +887,6 @@ void config_reset_hotkey(Config *config, HotkeyAction action) {
   }
 }
 
-void config_reset_all_hotkeys(Config *config) {
-  if (!config)
-    return;
-  for (int i = 0; i < HOTKEY_COUNT; i++) {
-    config_reset_hotkey(config, (HotkeyAction)i);
-  }
-}
-
 /* ============================================================================
  * Validation
  * ============================================================================
@@ -955,12 +925,6 @@ const char *hotkey_action_name(HotkeyAction action) {
   if (action < 0 || action >= HOTKEY_COUNT)
     return "Unknown";
   return action_meta[action].name;
-}
-
-const char *hotkey_action_key(HotkeyAction action) {
-  if (action < 0 || action >= HOTKEY_COUNT)
-    return NULL;
-  return action_meta[action].key;
 }
 
 HotkeyAction hotkey_action_from_key(const char *key) {
@@ -1131,25 +1095,6 @@ bool hotkey_remove_key(Config *config, HotkeyAction action, size_t key_index) {
   return true;
 }
 
-char **hotkey_get_default_keys(HotkeyAction action, size_t *num_keys) {
-  if (action < 0 || action >= HOTKEY_COUNT || !num_keys)
-    return NULL;
-
-  const ActionMeta *meta = &action_meta[action];
-  *num_keys = meta->num_default_keys;
-
-  if (meta->num_default_keys == 0)
-    return NULL;
-
-  char **keys = safe_calloc(meta->num_default_keys, sizeof(char *));
-
-  for (size_t i = 0; i < meta->num_default_keys; i++) {
-    keys[i] = str_dup(meta->default_keys[i]);
-  }
-
-  return keys;
-}
-
 /* ============================================================================
  * Category API
  * ============================================================================
@@ -1167,19 +1112,3 @@ const char *hotkey_category_name(HotkeyCategory category) {
   return category_names[category];
 }
 
-HotkeyAction hotkey_category_first(HotkeyCategory category) {
-  for (HotkeyAction i = 0; i < HOTKEY_COUNT; i++) {
-    if (action_meta[i].category == category)
-      return i;
-  }
-  return HOTKEY_COUNT;
-}
-
-size_t hotkey_category_count(HotkeyCategory category) {
-  size_t count = 0;
-  for (HotkeyAction i = 0; i < HOTKEY_COUNT; i++) {
-    if (action_meta[i].category == category)
-      count++;
-  }
-  return count;
-}

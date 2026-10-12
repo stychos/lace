@@ -15,9 +15,6 @@
 
 #define CONFIG_FILE "config.json"
 
-/* Validation limits are in core/constants.h:
- * CONFIG_PAGE_SIZE_*, CONFIG_PREFETCH_PAGES_*, CONFIG_MAX_RESULT_ROWS_* */
-
 /* ============================================================================
  * Hotkey Categories - for conflict detection and UI grouping
  * ============================================================================
@@ -151,27 +148,25 @@ typedef enum {
   SPAWN_MODE_UNIX = 0,   /* Unix socket (default, supports multi-client) */
   SPAWN_MODE_STDIO = 1,  /* Stdio pipes (single client, auto-exit) */
   SPAWN_MODE_TCP = 2,    /* TCP socket (network, multi-client) */
-  SPAWN_MODE_NONE = 3    /* Don't spawn, connect to existing only */
+  SPAWN_MODE_DETECT = 3  /* A running daemon (Unix socket, then TCP), else a
+                            private stdio one; detected again if lost */
 } DaemonSpawnMode;
 
 /* General application settings */
 typedef struct {
   bool show_header;
   bool show_status_bar;
-  int page_size;
-  int prefetch_pages;
   bool restore_session;
   bool restore_cursor_position; /* Restore cursor/scroll on session load */
   bool quit_confirmation;
   bool delete_confirmation;    /* Ask for confirmation before deleting rows */
-  int max_result_rows;         /* Maximum rows returned by raw SQL queries */
   bool auto_open_first_table;  /* Open first table instead of connection tab */
   bool close_conn_on_last_tab; /* Close connection when last tab closes */
   int history_mode;            /* 0=off, 1=session, 2=persistent */
   int history_max_size;        /* Max history entries per connection */
   int daemon_spawn_mode;       /* 0=unix socket, 1=stdio pipes */
   int daemon_idle_timeout;     /* Seconds before daemon shuts down with no clients (0=disabled) */
-  int pagination_strategy;     /* 0=offset, 1=keyset, 2=smart (see LacePaginationStrategy) */
+  int pagination_strategy;     /* LacePaginationStrategy */
 } GeneralConfig;
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */
@@ -209,9 +204,6 @@ Config *config_copy(const Config *config);
 /* Reset a single hotkey to its default */
 void config_reset_hotkey(Config *config, HotkeyAction action);
 
-/* Reset all hotkeys to defaults */
-void config_reset_all_hotkeys(Config *config);
-
 /* Validate configuration (check for hotkey conflicts) */
 bool config_validate(const Config *config, char **error);
 
@@ -236,9 +228,6 @@ char *hotkey_get_display(const Config *config, HotkeyAction action);
 /* Get action name for display (e.g., "Move up") */
 const char *hotkey_action_name(HotkeyAction action);
 
-/* Get action key for JSON (e.g., "move_up") */
-const char *hotkey_action_key(HotkeyAction action);
-
 /* Find action by JSON key, returns ACTION_COUNT if not found */
 HotkeyAction hotkey_action_from_key(const char *key);
 
@@ -252,19 +241,10 @@ bool hotkey_add_key(Config *config, HotkeyAction action, const char *key);
 /* Remove a key from an action's bindings */
 bool hotkey_remove_key(Config *config, HotkeyAction action, size_t key_index);
 
-/* Get default keys for an action - caller must free result */
-char **hotkey_get_default_keys(HotkeyAction action, size_t *num_keys);
-
 /* Get category for an action */
 HotkeyCategory hotkey_get_category(HotkeyAction action);
 
 /* Get category display name */
 const char *hotkey_category_name(HotkeyCategory category);
-
-/* Get first action in a category (for iteration) */
-HotkeyAction hotkey_category_first(HotkeyCategory category);
-
-/* Get action count in a category */
-size_t hotkey_category_count(HotkeyCategory category);
 
 #endif /* LACE_CONFIG_CONFIG_H */

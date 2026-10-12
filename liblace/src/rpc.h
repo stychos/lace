@@ -33,6 +33,12 @@ int lace_rpc_call(lace_client_t *client, const char *method,
 int lace_rpc_try_call(lace_client_t *client, const char *method,
                       cJSON *params, cJSON **result);
 
+/* stdio only: send method as a notification (no id, no reply) even while
+ * another thread holds the single link and waits for its reply. The daemon
+ * runs it on a worker and answers nothing, so the waiting reader sees no
+ * extra line. LACE_ERR_INVALID_REQUEST if the client is not stdio. */
+int lace_rpc_notify(lace_client_t *client, const char *method, cJSON *params);
+
 /* ==========================================================================
  * JSON to Types Conversion
  * ========================================================================== */
@@ -61,17 +67,5 @@ LaceSchema *lace_rpc_parse_schema(cJSON *json);
  * @return      true on success, false on error
  */
 bool lace_rpc_parse_value(cJSON *json, LaceValue *val);
-
-/* ==========================================================================
- * Types to JSON Conversion
- * ========================================================================== */
-
-/*
- * Convert a LaceValue to JSON.
- *
- * @param val  Value to convert
- * @return     JSON value (caller must cJSON_Delete), or NULL on error
- */
-cJSON *lace_rpc_value_to_json(const LaceValue *val);
 
 #endif /* LIBLACE_RPC_H */

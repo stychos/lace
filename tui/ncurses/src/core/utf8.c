@@ -6,7 +6,11 @@
  * https://github.com/stychos/lace
  */
 
+/* wcwidth(): X/Open. The build may already set it (Debian's ncursesw
+ * pkg-config passes -D_XOPEN_SOURCE=600, which is enough) */
+#ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
+#endif
 #include "utf8.h"
 #include <string.h>
 #include <wchar.h>

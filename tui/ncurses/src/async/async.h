@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 /* Operation types */
 typedef enum {
@@ -22,7 +23,6 @@ typedef enum {
   ASYNC_OP_GET_SCHEMA,
   ASYNC_OP_QUERY_PAGE,
   ASYNC_OP_QUERY_PAGE_WHERE,
-  ASYNC_OP_QUERY_KEYSET,     /* Keyset (cursor-based) pagination query */
   ASYNC_OP_COUNT_ROWS,
   ASYNC_OP_COUNT_ROWS_WHERE,
   ASYNC_OP_QUERY,
@@ -56,12 +56,9 @@ typedef struct {
   bool desc;
   bool use_approximate;
 
-  /* Keyset pagination parameters (for ASYNC_OP_QUERY_KEYSET) */
-  LaceKeysetState *keyset;    /* Keyset state for cursor-based pagination */
-  bool keyset_forward;        /* true = forward, false = backward */
-
-  /* Row reversal flag (for backward keyset queries using pre-built WHERE) */
-  bool reverse_rows;          /* true = reverse result rows after query */
+  /* QUERY_PAGE(_WHERE): reverse the rows read (a backward keyset page is
+   * read in reverse order) */
+  bool reverse_rows;
 
   /* Output results (set by worker thread) */
   void *result;        /* ResultSet*, TableSchema*, DbConnection*, char** */
@@ -73,7 +70,7 @@ typedef struct {
   /* Synchronization */
   lace_mutex_t mutex;
   lace_cond_t cond;
-  volatile bool cancel_requested;
+  _Atomic bool cancel_requested; /* Set by any thread, read by the worker */
 
   /* For cancellation */
   void *cancel_handle; /* Driver-specific cancel handle */

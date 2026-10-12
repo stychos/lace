@@ -10,9 +10,10 @@
 #define LIBLACE_CLIENT_INTERNAL_H
 
 #include "../include/lace.h"
+#include "os/os.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
-#include <sys/types.h>
 
 /* Maximum tracked connections */
 #define LACE_CLIENT_MAX_CONNECTIONS 64
@@ -32,9 +33,13 @@ typedef struct {
  * so calls on different links never wait for each other.
  */
 typedef struct LaceLink {
-  int rfd;              /* Read side (the socket, or the daemon's stdout) */
-  int wfd;              /* Write side (the socket, or the daemon's stdin) */
+  LaceOsHandle rfd;     /* Read side (the socket, or the daemon's stdout) */
+  LaceOsHandle wfd;     /* Write side (the socket, or the daemon's stdin) */
   bool is_socket;
+  bool tcp;             /* A TCP socket: initializing it runs the token
+                           handshake (decided by the link, never by the
+                           client's current mode, which detect may change) */
+  uint64_t epoch;       /* The client's link_epoch when it was opened */
   bool initialized;     /* "hello" and identity check done */
   int64_t next_id;      /* Request ids are per link */
   char *buf;            /* Buffered reads */
@@ -44,13 +49,25 @@ typedef struct LaceLink {
 
 /* Client structure */
 struct lace_client {
-  pid_t daemon_pid;       /* Daemon process ID (0 if connected to socket) */
+  /* Respawning a daemon from the link pool: one thread at a time, so two
+   * calls that both find no listener do not fork two daemons. Guards
+   * daemon_pid. Taken without client->lock held (spawning waits seconds). */
+  pthread_mutex_t spawn_lock;
+  LaceOsProcess daemon_pid; /* Daemon we spawned (0 if none) */
+  char *daemon_path;      /* laced binary given by the caller (NULL: search) */
   LaceConnMode conn_mode; /* Connection mode */
-  int timeout_ms;         /* Reply timeout for control calls */
-  int query_timeout_ms;   /* Reply timeout for "query" (0 = none) */
-  bool connected;         /* A daemon was reached (links can be reopened) */
+  /* Read by every calling thread without the lock, hence atomic */
+  _Atomic int timeout_ms;       /* Reply timeout for control calls */
+  _Atomic int query_timeout_ms; /* Reply timeout for "query" (0 = none) */
+  _Atomic bool connected;       /* A daemon was reached (links can be reopened) */
   bool owns_daemon;       /* Spawned in stdio mode: exits with this client */
   int idle_timeout;       /* --idle-timeout passed to daemons we spawn */
+  bool no_respawn;        /* Spawning is off (a Unix socket without
+                             spawn_if_missing): a daemon that went away is
+                             not replaced */
+  bool detect;            /* LACE_SPAWN_DETECT: a lost daemon is replaced by
+                             whatever detection finds now (shared socket
+                             daemon, else a private stdio one) */
 
   /* Guards everything below: the link pool, generation and identity, the
    * socket path and the connection table. Never held during network I/O. */
@@ -61,6 +78,10 @@ struct lace_client {
   size_t num_idle;
   size_t num_links;       /* Open links, idle or borrowed */
   bool single_link;       /* stdio: no second link to the daemon exists */
+  LaceOsHandle stdio_wfd; /* stdio: the daemon's stdin (LACE_OS_INVALID
+                             otherwise), for notifications while the link
+                             is borrowed */
+  pthread_mutex_t write_lock; /* stdio: one writer at a time on stdio_wfd */
 
   /* Random id sent in "hello" on every link: the daemon keeps this
    * client's database connections while any link with this id is open */
@@ -68,7 +89,10 @@ struct lace_client {
 
   /* Bumped whenever the daemon was respawned: every conn_id from before is
    * gone and callers must reconnect their databases. */
-  uint64_t generation;
+  _Atomic uint64_t generation; /* Changed under lock, read without it */
+  uint64_t link_epoch;    /* Bumped when detect moves to another daemon or
+                             transport: links from an older epoch are freed,
+                             never pooled or borrowed again */
 
   /* Identity of the daemon behind the socket ("version" -> "instance").
    * Checked on every new link: a different daemon means a fresh,
@@ -87,18 +111,29 @@ struct lace_client {
   size_t num_connections;
 };
 
+/* A column's value type from its declared type name (schema rows) */
+LaceValueType lace_type_from_name(const char *type_name, LaceDriver driver);
+
+/* Connect to a daemon socket (socket.c); LACE_OS_INVALID on failure */
+LaceOsHandle lace_connect_unix(const char *path, int timeout_ms);
+LaceOsHandle lace_connect_tcp(const char *host, int port, int timeout_ms);
+
 /* Initialize the fields every constructor must set (lock, ids, timeouts). */
 void lace_client_init_common(lace_client_t *client);
 
 /* Wrap file descriptors in a link (takes ownership of both). */
-LaceLink *lace_link_new(int rfd, int wfd, bool is_socket);
+LaceLink *lace_link_new(LaceOsHandle rfd, LaceOsHandle wfd, bool is_socket);
 
 /* Close a link's descriptors and free it. */
 void lace_link_free(LaceLink *link);
 
+/* Before freeing link: if it is the stdio pipe, stop notifications from
+ * writing to its fd */
+void lace_client_forget_stdio(lace_client_t *client, const LaceLink *link);
+
 /* Add a connected socket as an idle link. Takes ownership of fd.
  * Returns false (fd closed) on failure. */
-bool lace_client_attach_socket(lace_client_t *client, int fd);
+bool lace_client_attach_socket(lace_client_t *client, LaceOsHandle fd, bool tcp);
 
 /* Close every idle link without touching the daemon process. */
 void lace_client_close_streams(lace_client_t *client);
@@ -107,8 +142,17 @@ void lace_client_close_streams(lace_client_t *client);
  * endpoint, or spawn a fresh daemon on the default socket path if none is
  * listening there. Returns 0 on failure, 1 when connected to a listening
  * daemon (possibly a different one: verify its instance), 2 when it spawned
- * one. Must be called without client->lock held. */
+ * one. The link it returns is already counted in num_links and carries the
+ * current link_epoch. Must be called without client->lock held. */
 int lace_client_open_link(lace_client_t *client, LaceLink **out);
+
+/* lace_client_open_link() results besides 0 (none), 1 (opened) and 2 (a
+ * daemon this call started): another thread has just switched the client
+ * to a stdio daemon, whose single link the caller should wait for */
+#define LACE_OPEN_LINK_WAIT 3
+
+/* hello (with the TCP handshake on a TCP link) and the identity check */
+int lace_link_initialize(lace_client_t *client, LaceLink *l, bool respawned);
 
 /* True if the calling thread declared (lace_expect_generation) a different
  * generation for this client than the current one. */

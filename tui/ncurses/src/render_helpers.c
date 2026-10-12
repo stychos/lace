@@ -203,13 +203,6 @@ bool render_translate_key(int ncurses_key, UiEvent *event) {
   return true;
 }
 
-bool render_event_is_key(const UiEvent *event, int key, UiKeyMod mods) {
-  if (!event || event->type != UI_EVENT_KEY)
-    return false;
-
-  return event->key.key == key && event->key.mods == mods;
-}
-
 bool render_event_is_char(const UiEvent *event) {
   if (!event || event->type != UI_EVENT_KEY)
     return false;

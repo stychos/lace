@@ -148,7 +148,6 @@ typedef enum {
 
   /* Data Loading */
   ACTION_TABLE_LOAD,     /* Load table data */
-  ACTION_TABLE_REFRESH,  /* Refresh current table */
   ACTION_DATA_LOAD_MORE, /* Load more rows (pagination) */
   ACTION_DATA_LOAD_PREV, /* Load previous rows */
 

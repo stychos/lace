@@ -9,6 +9,7 @@
 #ifndef LACE_TUI_INTERNAL_H
 #define LACE_TUI_INTERNAL_H
 
+#include "core/actions.h"
 #include "core/constants.h"
 #include "core/utf8.h"
 #include "db_compat.h"
@@ -138,7 +139,7 @@ static inline LayoutInfo tui_get_layout_info(TuiState *state) {
 
   /* Calculate filters panel height */
   layout.filters_height =
-      state->filters_visible ? tui_get_filters_panel_height(state) : 0;
+      tui_filters_visible(state) ? tui_get_filters_panel_height(state) : 0;
 
   /* Header rows: border + column names + separator = 3
    * Add 1 more row when sorting is active (sort indicator row) */
@@ -411,14 +412,13 @@ void tui_recreate_windows(TuiState *state);
 /* Initialize a workspace struct (zeroes and inits filters) */
 void workspace_init(Workspace *ws);
 
-/* Save current TUI state to current tab */
-void tab_save(TuiState *state);
-
 /* Restore TUI state from current tab */
 void tab_restore(TuiState *state);
 
-/* Sync focus and panel state from TuiState to current Tab */
-void tab_sync_focus(TuiState *state);
+/* Columns a tab takes in the tab bar (label, padding, separator) */
+int tui_tab_width(const Tab *tab);
+void tui_bind_connection(TuiState *state);
+void sidebar_open_table(TuiState *state, size_t actual_idx);
 
 /* Switch to a different tab */
 void tab_switch(TuiState *state, size_t index);
@@ -432,11 +432,6 @@ bool tab_create_query(TuiState *state);
 /* Close current tab */
 void tab_close(TuiState *state);
 
-/* Legacy wrappers for compatibility */
-void workspace_save(TuiState *state);
-void workspace_restore(TuiState *state);
-void workspace_switch(TuiState *state, size_t index);
-bool workspace_create(TuiState *state, size_t table_index);
 void workspace_close(TuiState *state);
 
 /* ============================================================================
@@ -476,9 +471,6 @@ bool tui_load_prev_rows(TuiState *state);
 /* Trim loaded data to keep memory bounded */
 void tui_trim_loaded_data(TuiState *state);
 
-/* Check if more rows need to be loaded based on cursor position */
-void tui_check_load_more(TuiState *state);
-
 /* Load a page with blocking dialog (for fast scrolling past loaded data) */
 bool tui_load_page_with_dialog(TuiState *state, bool forward);
 
@@ -510,9 +502,6 @@ void tui_check_speculative_prefetch(TuiState *state);
  * ============================================================================
  */
 
-/* Find primary key column indices */
-size_t tui_find_pk_columns(TuiState *state, size_t *pk_indices, size_t max_pks);
-
 /* Start inline editing */
 void tui_start_edit(TuiState *state);
 
@@ -543,8 +532,75 @@ char *tui_clipboard_read(TuiState *state);
 /* Delete current row */
 void tui_delete_row(TuiState *state);
 
+/* Where an edit writes: one row source, a table tab's window or a query
+ * tab's results (EditTarget.query_result). Query results require every key
+ * column exactly once, verify every loaded column of the table before any
+ * write, and keep an edit on screen only when the row has no usable key or
+ * the source table is unknown; a table tab refuses such a write. */
+typedef struct {
+  DbConnection *conn;
+  const char *table;         /* Source table (NULL: unknown) */
+  const TableSchema *schema; /* Its schema (NULL: not loaded) */
+  ResultSet *data;           /* The rows on screen */
+  Tab *tab;                  /* For marking the table's other tabs dirty */
+  bool query_result;
+} EditTarget;
+
+/* The active table tab; false if it has no connection, table or schema */
+bool tui_edit_target_table(TuiState *state, EditTarget *t);
+void tui_edit_target_query(TuiState *state, Tab *tab, EditTarget *t);
+
+/* Write text (NULL = an explicit NULL) into cell (row, col): unchanged text
+ * writes nothing; otherwise key, row check, UPDATE, then the cell on
+ * screen. Shows done_msg or why it was refused. True if the cell changed. */
+bool tui_edit_write_cell(TuiState *state, const EditTarget *t, size_t row,
+                         size_t col, const char *text, const char *done_msg);
+
+/* Paste the clipboard into a cell (an empty clipboard writes nothing) */
+void tui_edit_paste_cell(TuiState *state, const EditTarget *t, size_t row,
+                         size_t col);
+
+/* Delete row `row` of t->data in the database: key, check of every loaded
+ * column, DELETE. *err is allocated on failure. */
+bool tui_edit_delete_row(const EditTarget *t, size_t row, char **err);
+
+/* Ask before deleting count rows, if the delete_confirmation setting says
+ * so; false (status set) if the user declined */
+bool tui_edit_confirm_delete(TuiState *state, size_t count);
+
+/* The tab's selected rows, highest first (free it) */
+size_t *tui_edit_selection_desc(const Tab *tab);
+
 /* Handle edit mode input */
 bool tui_handle_edit_input(TuiState *state, const UiEvent *event);
+
+/* Line-editing keys (see TextInput) on an inline cell editor's text, which
+ * is NULL while the cell is NULL: typing starts text, other keys leave a
+ * NULL alone. Returns true if the key was an editing key. */
+bool tui_edit_buffer_key(char **buf, size_t *pos, const UiEvent *event);
+
+/* Paste text at the cursor (line breaks become spaces); a NULL text becomes
+ * the pasted text. */
+void tui_edit_buffer_insert(char **buf, size_t *pos, const char *text);
+
+/* What a key in an inline cell editor asks of its owner */
+typedef enum {
+  CELL_EDIT_CONTINUE,  /* Handled (or ignored); keep editing */
+  CELL_EDIT_CONFIRM,   /* Enter */
+  CELL_EDIT_SET_NULL,  /* Explicit NULL (*buf is NULL); confirm it */
+  CELL_EDIT_SET_EMPTY, /* Explicit '' (*buf is ""); confirm it */
+  CELL_EDIT_CANCEL,    /* Escape */
+} CellEditAction;
+
+/* The keys of every inline cell editor (table cells, query results, new
+ * rows): Esc, Enter, Ctrl+K copy, Ctrl+U paste, the editor NULL / empty
+ * hotkeys, and line editing on *buf (NULL = the cell is NULL). */
+/* Add-row editor: store an explicit NULL (set_null) or '' in the cell being
+ * edited and finish its edit */
+void tui_add_row_set_cell(TuiState *state, bool set_null);
+
+CellEditAction tui_cell_edit_key(TuiState *state, char **buf, size_t *pos,
+                                 const UiEvent *event);
 
 /* ============================================================================
  * Navigation functions (navigation.c)
@@ -584,6 +640,7 @@ typedef struct {
   bool show_header_line;   /* Whether to draw top border line */
   SortEntry *sort_entries; /* Array of sort columns (NULL if none) */
   size_t num_sort_entries; /* Number of sort columns */
+  const TableSchema *sort_schema; /* What sort_entries[].column indexes */
 } GridDrawParams;
 
 /* Draw a result set grid (used by table view and query results) */
@@ -613,5 +670,13 @@ void tui_show_goto_dialog(TuiState *state);
 bool tui_edit_new_value(const DbValue *orig, LaceValueType col_type,
                         const char *buffer, DbValue *out, bool *unchanged,
                         char **err);
+
+/* Detect arrival at another tab (by Tab.uid) and leave an arriving query
+ * tab unfocused; tui_refresh() calls it first (focus.c) */
+void tui_note_tab_switch(TuiState *state);
+
+/* The UICallbacks through which core/actions.c reaches the TUI
+ * (callbacks.c) */
+UICallbacks tui_make_callbacks(TuiState *state);
 
 #endif /* LACE_TUI_INTERNAL_H */

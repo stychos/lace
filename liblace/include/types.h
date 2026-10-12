@@ -9,22 +9,14 @@
 #ifndef LIBLACE_TYPES_H
 #define LIBLACE_TYPES_H
 
+#include "lace_export.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* ==========================================================================
- * Limits
- * ========================================================================== */
+#include "constants.h"
 
-/* Maximum field size before truncation (1MB) - DoS/OOM protection */
-#define LACE_MAX_FIELD_SIZE (1024 * 1024)
-
-/* Maximum rows for a result set (1M rows) */
-#define LACE_MAX_RESULT_ROWS (1024 * 1024)
-
-/* Maximum primary key columns */
-#define LACE_MAX_PK_COLUMNS 16
+LACE_BEGIN_DECLS
 
 /* ==========================================================================
  * Database Value Types
@@ -143,38 +135,7 @@ typedef struct {
 } LaceResult;
 
 /* ==========================================================================
- * Filter Types
- * ========================================================================== */
-
-typedef enum {
-  LACE_FILTER_EQ,           /* = */
-  LACE_FILTER_NE,           /* <> */
-  LACE_FILTER_GT,           /* > */
-  LACE_FILTER_GE,           /* >= */
-  LACE_FILTER_LT,           /* < */
-  LACE_FILTER_LE,           /* <= */
-  LACE_FILTER_IN,           /* IN (value list) */
-  LACE_FILTER_CONTAINS,     /* LIKE '%value%' */
-  LACE_FILTER_REGEX,        /* REGEXP/~ (driver-specific) */
-  LACE_FILTER_BETWEEN,      /* BETWEEN value AND value2 */
-  LACE_FILTER_IS_EMPTY,     /* = '' */
-  LACE_FILTER_IS_NOT_EMPTY, /* <> '' */
-  LACE_FILTER_IS_NULL,      /* IS NULL */
-  LACE_FILTER_IS_NOT_NULL,  /* IS NOT NULL */
-  LACE_FILTER_RAW,          /* Raw SQL condition */
-  LACE_FILTER_COUNT         /* Number of filter operations (must be last) */
-} LaceFilterOp;
-
-/* Single column filter */
-typedef struct {
-  size_t column;         /* Column index */
-  LaceFilterOp op;
-  char *value;           /* Filter value (for ops that need it) */
-  char *value2;          /* Second value (for BETWEEN) */
-} LaceFilter;
-
-/* ==========================================================================
- * Sort Types
+ * Sort Types (keyset paging)
  * ========================================================================== */
 
 typedef enum {
@@ -233,9 +194,6 @@ void lace_result_free(LaceResult *result);
 /* Free a schema (columns, indexes, foreign keys) */
 void lace_schema_free(LaceSchema *schema);
 
-/* Free a filter */
-void lace_filter_free(LaceFilter *filter);
-
 /* Free connection info */
 void lace_conn_info_free(LaceConnInfo *info);
 
@@ -248,6 +206,7 @@ LaceValue lace_value_int(int64_t val);
 LaceValue lace_value_float(double val);
 LaceValue lace_value_text(const char *str);
 LaceValue lace_value_text_len(const char *str, size_t len);
+/* data NULL: a NULL value; len 0 with data: an empty BLOB (not NULL) */
 LaceValue lace_value_blob(const uint8_t *data, size_t len);
 LaceValue lace_value_bool(bool val);
 LaceValue lace_value_copy(const LaceValue *src);
@@ -261,15 +220,6 @@ char *lace_value_to_string(const LaceValue *val);
 
 /* Get type name as string */
 const char *lace_type_name(LaceValueType type);
-
-/* Get filter operator name as string */
-const char *lace_filter_op_name(LaceFilterOp op);
-
-/* Get filter operator SQL representation */
-const char *lace_filter_op_sql(LaceFilterOp op);
-
-/* Check if filter operator needs a value */
-bool lace_filter_op_needs_value(LaceFilterOp op);
 
 /* Exact text for a double: shortest form that reads back as the same
  * value, '.' as decimal point; "NaN", "Infinity", "-Infinity" */
@@ -285,5 +235,7 @@ char *lace_value_to_edit_text(const LaceValue *val);
  * *err) for input that cannot be such a value (e.g. bad hex). */
 bool lace_value_from_edit_text(const char *text, LaceValueType like,
                                LaceValue *out, char **err);
+
+LACE_END_DECLS
 
 #endif /* LIBLACE_TYPES_H */

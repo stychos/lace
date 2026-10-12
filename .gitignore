@@ -1,2 +1,5 @@
 /.*
+!/.gitignore
+!/.github/
+!/.clang-format
 build/

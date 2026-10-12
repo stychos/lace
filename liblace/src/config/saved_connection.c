@@ -232,8 +232,13 @@ char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
     if (conn->port > 0)
       sb_printf(sb, ":%d", conn->port);
     sb_append_char(sb, '/');
-    if (conn->database && conn->database[0])
-      sb_append(sb, conn->database);
+    if (conn->database && conn->database[0]) {
+      char *db = str_url_encode(conn->database);
+      ok = ok && db;
+      if (db)
+        sb_append(sb, db);
+      free(db);
+    }
   } else {
     /* Standard format: driver://[user[:password]@]host[:port]/database */
     sb_printf(sb, "%s://", conn->driver);
@@ -247,7 +252,13 @@ char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
       sb_append_char(sb, '/');
     }
     if (conn->database && conn->database[0]) {
-      sb_append(sb, conn->database);
+      /* A path for SQLite ('/' kept), a name elsewhere */
+      char *db = is_sqlite ? connstr_encode_path(conn->database)
+                           : str_url_encode(conn->database);
+      ok = ok && db;
+      if (db)
+        sb_append(sb, db);
+      free(db);
     }
   }
 

@@ -8,6 +8,8 @@
 
 #include "server.h"
 #include "log.h"
+#include "constants.h"
+#include "../../liblace/include/lace.h" /* Default socket and token paths */
 #include <util/mem.h>
 #include <util/str.h>
 #include <arpa/inet.h>
@@ -24,18 +26,13 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
-
-/* Default port for TCP mode */
-#define LACED_DEFAULT_PORT 7433
 
 /* ==========================================================================
  * Socket Path Resolution
  * ========================================================================== */
 
-/* Shared with liblace (util), so the daemon listens exactly where clients
- * look: one canonical, per-user path (see lace_get_default_socket_path). */
-extern char *lace_get_default_socket_path(void);
 
 char *laced_get_default_socket_path(void) {
   char *path = lace_get_default_socket_path();
@@ -47,11 +44,14 @@ char *laced_get_default_socket_path(void) {
   char *slash = strrchr(path, '/');
   if (slash && slash != path) {
     *slash = '\0';
-    const char *home = getenv("HOME");
-    char cache[512] = "";
-    if (home) {
-      snprintf(cache, sizeof(cache), "%s/.cache", home);
-      mkdir(cache, 0700); /* Parent of ~/.cache/lace; fine if it exists */
+    /* Every missing component (~/.cache on a fresh account, too); the ones
+     * created here are private */
+    for (char *p = path + 1; *p; p++) {
+      if (*p == '/') {
+        *p = '\0';
+        mkdir(path, 0700);
+        *p = '/';
+      }
     }
     if (mkdir(path, 0700) != 0 && errno != EEXIST) {
       LOG_WARN("Cannot create socket directory %s: %s", path, strerror(errno));
@@ -98,7 +98,14 @@ bool laced_remove_stale_socket(const char *path) {
   struct sockaddr_un addr;
   memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+  /* A longer path would be cut short silently: refuse it rather than
+   * bind or connect to a different (truncated) path */
+  if (strlen(path) >= sizeof(addr.sun_path)) {
+    close(fd);
+    errno = ENAMETOOLONG;
+    return true; /* Nothing to remove; binding reports the error */
+  }
+  memcpy(addr.sun_path, path, strlen(path) + 1);
 
   int result = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
   close(fd);
@@ -202,7 +209,14 @@ int laced_create_unix_socket(const char *path, gid_t group) {
   struct sockaddr_un addr;
   memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+  /* A longer path would be cut short silently: refuse it rather than
+   * bind or connect to a different (truncated) path */
+  if (strlen(path) >= sizeof(addr.sun_path)) {
+    close(fd);
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  memcpy(addr.sun_path, path, strlen(path) + 1);
 
   /* Create the socket with its final permissions (no window in which it
    * is open to others): owner only, or owner and group with a socket group */
@@ -279,9 +293,6 @@ int laced_create_tcp_socket(const char *bind_addr, int port) {
  * Client Management
  * ========================================================================== */
 
-/* How long a write may wait for a client to drain its socket buffer */
-#define LACED_WRITE_TIMEOUT_MS 5000
-
 LacedClient *laced_accept_client(int listen_fd) {
   struct sockaddr_storage addr;
   socklen_t addr_len = sizeof(addr);
@@ -304,6 +315,7 @@ LacedClient *laced_accept_client(int listen_fd) {
   }
 
   client->fd = client_fd;
+  client->out_fd = -1; /* Replies go back over the socket */
   return client;
 }
 
@@ -315,64 +327,83 @@ void laced_client_free(LacedClient *client) {
   if (client->fd >= 0) {
     close(client->fd);
   }
+  if (client->out_fd >= 0 && client->out_fd != client->fd) {
+    close(client->out_fd);
+  }
   free(client->partial_buf);
+  free(client->out_buf);
   free(client);
 }
 
-bool laced_client_write_line(LacedClient *client, const char *line) {
-  if (!client || client->fd < 0 || !line) {
+uint64_t laced_mono_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+bool laced_client_flush(LacedClient *client) {
+  if (!client || client->fd < 0 || client->closed)
     return false;
-  }
-
-  size_t len = strlen(line);
-  size_t total = len + 1; /* Include newline */
-
-  /* Allocate buffer for line + newline */
-  char *buf = safe_malloc(total);
-  if (!buf) {
-    return false;
-  }
-  memcpy(buf, line, len);
-  buf[len] = '\n';
-
-  /* Write in a loop to handle partial writes. The socket is non-blocking.
-   * LACED_WRITE_TIMEOUT_MS bounds a *stall* (no progress at all), not the
-   * whole transfer: a reader that keeps draining may take as long as it
-   * needs for a large result, while one that stopped reading is dropped so
-   * it cannot freeze the event loop. */
-  size_t written = 0;
-  while (written < total) {
-    ssize_t n = write(client->fd, buf + written, total - written);
+  while (client->out_off < client->out_len) {
+    int wfd = client->out_fd >= 0 ? client->out_fd : client->fd;
+    ssize_t n = write(wfd, client->out_buf + client->out_off,
+                      client->out_len - client->out_off);
     if (n > 0) {
-      written += (size_t)n;
+      client->out_off += (size_t)n;
+      client->out_progress_ms = laced_mono_ms();
       continue;
     }
-    if (n < 0 && errno == EINTR) {
+    if (n < 0 && errno == EINTR)
       continue;
-    }
-    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      struct pollfd pfd = {.fd = client->fd, .events = POLLOUT};
-      int r = poll(&pfd, 1, LACED_WRITE_TIMEOUT_MS);
-      if (r > 0 && !(pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
-        continue; /* Writable again */
-      }
-      if (r < 0 && errno == EINTR) {
-        continue;
-      }
-      /* Timed out with zero progress, or the peer went away */
-    }
-    client->closed = true; /* Stalled, EPIPE, ECONNRESET, ... */
-    free(buf);
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      return true; /* The event loop resumes when the socket is writable */
+    client->closed = true; /* EPIPE, ECONNRESET, ... */
     return false;
   }
-
-  free(buf);
+  client->out_off = client->out_len = 0; /* All sent */
+  /* One huge reply must not pin its buffer for the rest of the session */
+  if (client->out_cap > LACED_OUT_BUF_KEEP) {
+    free(client->out_buf);
+    client->out_buf = NULL;
+    client->out_cap = 0;
+  }
   return true;
 }
 
-/* Requests longer than this are refused: the client is dropped instead of
- * growing the daemon's buffer without bound */
-#define LACED_MAX_REQUEST_LINE (64u * 1024u * 1024u)
+bool laced_client_write_line(LacedClient *client, const char *line) {
+  if (!client || client->fd < 0 || !line || client->closed) {
+    return false;
+  }
+  size_t len = strlen(line);
+  size_t pending = client->out_len - client->out_off;
+  if (pending + len + 1 > LACED_MAX_PENDING_OUTPUT) {
+    LOG_WARN("Client fd=%d is not reading its replies; dropping it",
+             client->fd);
+    client->closed = true;
+    return false;
+  }
+  /* Queue the line (dropping what was already sent), then send what the
+   * socket takes now; the rest goes out from the event loop. A reader that
+   * makes no progress for LACED_WRITE_TIMEOUT_MS is dropped there. */
+  if (client->out_off > 0) {
+    memmove(client->out_buf, client->out_buf + client->out_off, pending);
+    client->out_off = 0;
+    client->out_len = pending;
+  }
+  if (client->out_len + len + 1 > client->out_cap) {
+    size_t cap = client->out_cap ? client->out_cap : 4096;
+    while (cap < client->out_len + len + 1)
+      cap *= 2;
+    client->out_buf = safe_realloc(client->out_buf, cap);
+    client->out_cap = cap;
+  }
+  if (pending == 0)
+    client->out_progress_ms = laced_mono_ms(); /* The stall clock starts now */
+  memcpy(client->out_buf + client->out_len, line, len);
+  client->out_buf[client->out_len + len] = '\n';
+  client->out_len += len + 1;
+  return laced_client_flush(client);
+}
 
 /* Take the first complete line out of the client's buffer, or NULL */
 static char *take_buffered_line(LacedClient *client) {
@@ -433,9 +464,11 @@ char *laced_client_try_read_line(LacedClient *client) {
   }
 
   size_t needed = client->partial_len + (size_t)n + 1;
-  if (needed > LACED_MAX_REQUEST_LINE) {
+  /* Until it has authenticated, a client gets only room for a hello */
+  unsigned cap = client->authed ? LACED_MAX_REQUEST_LINE : LACED_MAX_UNAUTHED_LINE;
+  if (needed > cap) {
     LOG_WARN("Client fd=%d sent a request over %u bytes; dropping it",
-             client->fd, LACED_MAX_REQUEST_LINE);
+             client->fd, cap);
     free(client->partial_buf);
     client->partial_buf = NULL;
     client->partial_len = client->partial_cap = client->partial_scanned = 0;

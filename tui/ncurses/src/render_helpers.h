@@ -29,9 +29,6 @@
  * and key.key contains a UiKeyCode value. */
 bool render_translate_key(int ncurses_key, UiEvent *event);
 
-/* Helper to check if event matches a specific key with optional modifiers */
-bool render_event_is_key(const UiEvent *event, int key, UiKeyMod mods);
-
 /* Helper to check if event is a printable character */
 bool render_event_is_char(const UiEvent *event);
 

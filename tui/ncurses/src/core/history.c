@@ -90,32 +90,21 @@ bool history_load(QueryHistory *history, char **error) {
   }
 
   /* Read file */
-  FILE *f = fopen(path, "r");
-  if (!f) {
-    err_setf(error, "Failed to open %s: %s", path, strerror(errno));
+  char *content = platform_read_file(path, 64 * 1024 * 1024);
+  if (!content) {
+    err_setf(error, "Failed to read %s: %s", path, strerror(errno));
     free(path);
     return false;
   }
-
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-
-  if (size <= 0) {
-    fclose(f);
+  if (!content[0]) {
+    free(content);
     free(path);
     return true; /* Empty file is valid */
   }
 
-  char *content = safe_malloc((size_t)size + 1);
-
-  size_t read_size = fread(content, 1, (size_t)size, f);
-  fclose(f);
-  content[read_size] = '\0';
-
   /* Parse JSON */
   cJSON *json = cJSON_Parse(content);
-  free(content);
+  str_secure_free(content); /* Statements can hold values and passwords */
 
   if (!json) {
     err_setf(error, "Failed to parse history JSON: %s", path);

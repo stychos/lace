@@ -13,10 +13,13 @@
 #ifndef LIBLACE_HISTORY_H
 #define LIBLACE_HISTORY_H
 
+#include "../lace_export.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+
+LACE_BEGIN_DECLS
 
 /* ==========================================================================
  * History Configuration Constants
@@ -124,5 +127,7 @@ const char *lace_history_type_to_string(LaceHistoryType type);
 
 /* Parse type from string */
 LaceHistoryType lace_history_type_from_string(const char *str);
+
+LACE_END_DECLS
 
 #endif /* LIBLACE_HISTORY_H */

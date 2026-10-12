@@ -22,7 +22,7 @@
 #include <time.h>
 
 /* Maximum concurrent connections */
-#define MAX_CONNECTIONS 64
+#define MAX_CONNECTIONS LACED_MAX_CONNECTIONS
 
 /* Connection slot */
 typedef struct {
@@ -31,9 +31,12 @@ typedef struct {
   bool in_use;
   bool reserved;          /* Slot reserved during connection setup */
   void *cancel_handle;    /* Active cancel handle during query execution */
+  int64_t armed_query;    /* The query that cancel_handle belongs to */
   bool query_active;      /* True while a query is running */
   int cancel_refs;        /* Cancels in flight using cancel_handle/conn */
-  void *orphan_handle;    /* Handle released by finish_query during a cancel */
+  void **orphans;         /* Handles finish_query released while cancels
+                             were using them; freed when none is left */
+  size_t num_orphans;
   SshTunnel *ssh_tunnel;  /* SSH tunnel for this connection (NULL if none) */
   /* Statistics */
   uint64_t connect_time_ms;       /* When connection was established */
@@ -42,7 +45,7 @@ typedef struct {
   uint64_t failed_query_count;    /* Queries that failed */
   uint64_t current_query_start_ms; /* When current query started (0 if none) */
   /* Owner: the client that opened it (liblace "hello" id, else its socket) */
-  char owner[64];
+  char owner[LACED_OWNER_MAX];
   time_t orphaned_since;  /* When the owner was last seen gone (0 = present) */
   bool reaping;           /* A reaper job is closing this connection */
 } ConnectionSlot;
@@ -50,6 +53,7 @@ typedef struct {
 /* Session structure */
 struct LacedSession {
   pthread_mutex_t mutex;
+  pthread_cond_t cancel_done; /* A connection's cancel_refs dropped to 0 */
   ConnectionSlot connections[MAX_CONNECTIONS];
   int next_conn_id;
   bool initialized;
@@ -78,6 +82,12 @@ LacedSession *laced_session_create(void) {
 
   /* Initialize mutex */
   if (pthread_mutex_init(&session->mutex, NULL) != 0) {
+    free(session);
+    return NULL;
+  }
+  if (pthread_cond_init(&session->cancel_done, NULL) != 0) {
+    pthread_cond_destroy(&session->cancel_done);
+  pthread_mutex_destroy(&session->mutex);
     free(session);
     return NULL;
   }
@@ -166,6 +176,15 @@ bool laced_session_connect(LacedSession *session, const char *connstr,
     str_secure_free(full_connstr); /* Holds DB/SSH passwords */
     return false;
   }
+  /* lace_socket is how the daemon points a driver at its own SSH tunnel;
+   * from a client it would bypass the tunnel, or reach any local socket
+   * the daemon's user can (a server trusting peer authentication) */
+  if (connstr_has_option(cs, "lace_socket")) {
+    connstr_free(cs);
+    str_secure_free(full_connstr);
+    err_set(err, "The option lace_socket is internal to the daemon");
+    return false;
+  }
 
   /* A password passed separately replaces the one in the string (the
    * database password; an SSH password stays in the string) */
@@ -187,20 +206,29 @@ bool laced_session_connect(LacedSession *session, const char *connstr,
 
   if (cs->ssh) {
     /* Create SSH tunnel -- this is a slow operation */
-    int local_port = 0;
-    tunnel = ssh_tunnel_create(cs, &local_port, err);
+    tunnel = ssh_tunnel_create(cs, err);
     if (!tunnel) {
       connstr_free(cs);
       str_secure_free(full_connstr); /* Holds DB/SSH passwords */
       return false;
     }
 
-    /* Build a plain connection string that goes through the tunnel */
-    db_connstr = connstr_build(cs->driver, cs->user, cs->password,
-                               "127.0.0.1", local_port, cs->database,
-                               (const char **)cs->option_keys,
-                               (const char **)cs->option_values,
-                               cs->num_options);
+    /* A plain connection string through the tunnel: the driver connects to
+     * its socket (option lace_socket), the port stays the database's */
+    size_t n = cs->num_options;
+    const char **keys = safe_calloc(n + 1, sizeof(char *));
+    const char **vals = safe_calloc(n + 1, sizeof(char *));
+    for (size_t i = 0; i < n; i++) {
+      keys[i] = cs->option_keys[i];
+      vals[i] = cs->option_values[i];
+    }
+    keys[n] = "lace_socket";
+    vals[n] = ssh_tunnel_socket_path(tunnel);
+    db_connstr = connstr_build(cs->driver, cs->user, cs->password, "localhost",
+                               cs->port > 0 ? cs->port : connstr_get_port(cs),
+                               cs->database, keys, vals, n + 1);
+    free(keys);
+    free(vals);
     connstr_free(cs);
     str_secure_free(full_connstr); /* Holds DB/SSH passwords */
     full_connstr = NULL;
@@ -379,19 +407,14 @@ bool laced_session_check_tunnel(LacedSession *session, int conn_id,
   return true;
 }
 
-DbConnection *laced_session_get_connection(LacedSession *session, int conn_id) {
+bool laced_session_has_connection(LacedSession *session, int conn_id) {
   if (!session) {
-    return NULL;
+    return false;
   }
-
   pthread_mutex_lock(&session->mutex);
-
-  int slot = find_slot_by_id_locked(session, conn_id);
-  DbConnection *conn = (slot >= 0) ? session->connections[slot].conn : NULL;
-
+  bool found = find_slot_by_id_locked(session, conn_id) >= 0;
   pthread_mutex_unlock(&session->mutex);
-
-  return conn;
+  return found;
 }
 
 size_t laced_session_connection_count(LacedSession *session) {
@@ -499,24 +522,11 @@ void laced_conn_info_array_free(LacedConnInfo *info, size_t count) {
  * Query State Management
  * ========================================================================== */
 
-bool laced_session_is_conn_busy(LacedSession *session, int conn_id) {
+DbConnection *laced_session_begin_query(LacedSession *session, int conn_id,
+                                        bool *busy) {
+  *busy = false;
   if (!session) {
-    return false;
-  }
-
-  pthread_mutex_lock(&session->mutex);
-
-  int slot = find_slot_by_id_locked(session, conn_id);
-  bool busy = (slot >= 0) && session->connections[slot].query_active;
-
-  pthread_mutex_unlock(&session->mutex);
-
-  return busy;
-}
-
-bool laced_session_prepare_cancel(LacedSession *session, int conn_id) {
-  if (!session) {
-    return false;
+    return NULL;
   }
 
   pthread_mutex_lock(&session->mutex);
@@ -524,42 +534,61 @@ bool laced_session_prepare_cancel(LacedSession *session, int conn_id) {
   int slot = find_slot_by_id_locked(session, conn_id);
   if (slot < 0) {
     pthread_mutex_unlock(&session->mutex);
-    return false;
+    return NULL;
   }
 
   ConnectionSlot *cs = &session->connections[slot];
-
-  /* Check if connection is already busy */
-  if (cs->query_active) {
+  /* A cancel of the previous statement may still be on its way to the
+   * server (PQcancel, sqlite3_interrupt run outside the lock): starting now
+   * would let it stop this statement instead. Wait for it, a little. */
+  if (!cs->query_active && cs->cancel_refs > 0) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += LACED_CANCEL_SETTLE_S;
+    while (cs->cancel_refs > 0 &&
+           pthread_cond_timedwait(&session->cancel_done, &session->mutex,
+                                  &until) == 0) {
+    }
+    slot = find_slot_by_id_locked(session, conn_id); /* It may be gone */
+    if (slot < 0) {
+      pthread_mutex_unlock(&session->mutex);
+      return NULL;
+    }
+    cs = &session->connections[slot];
+  }
+  if (cs->query_active || cs->cancel_refs > 0) {
     pthread_mutex_unlock(&session->mutex);
     LOG_WARN("Rejected query on conn_id=%d: another query already active", conn_id);
-    return false;
+    *busy = true;
+    return NULL;
   }
 
-  /* Record query start time */
   cs->current_query_start_ms = get_time_ms();
-
-  if (!cs->conn || !cs->conn->driver || !cs->conn->driver->prepare_cancel) {
-    /* Mark as active even without cancel support */
-    cs->query_active = true;
-    pthread_mutex_unlock(&session->mutex);
-    return true;
-  }
-
-  /* Free any existing cancel handle */
-  if (cs->cancel_handle && cs->conn->driver->free_cancel_handle) {
-    cs->conn->driver->free_cancel_handle(cs->cancel_handle);
-  }
-
-  cs->cancel_handle = cs->conn->driver->prepare_cancel(cs->conn);
   cs->query_active = true;
+  DbConnection *conn = cs->conn;
 
   pthread_mutex_unlock(&session->mutex);
-
-  return true;
+  return conn;
 }
 
-bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err) {
+void laced_session_arm_cancel(LacedSession *session, int conn_id,
+                              int64_t query_id) {
+  if (!session) {
+    return;
+  }
+  pthread_mutex_lock(&session->mutex);
+  int slot = find_slot_by_id_locked(session, conn_id);
+  ConnectionSlot *cs = slot >= 0 ? &session->connections[slot] : NULL;
+  if (cs && cs->query_active && cs->conn && cs->conn->driver &&
+      cs->conn->driver->prepare_cancel && !cs->cancel_handle) {
+    cs->cancel_handle = cs->conn->driver->prepare_cancel(cs->conn);
+    cs->armed_query = query_id;
+  }
+  pthread_mutex_unlock(&session->mutex);
+}
+
+bool laced_session_cancel_query(LacedSession *session, int conn_id,
+                                int64_t query_id, char **err) {
   if (!session) {
     err_set(err, "Invalid session");
     return false;
@@ -578,6 +607,18 @@ bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err) 
   if (!cs->query_active) {
     pthread_mutex_unlock(&session->mutex);
     /* No query running - not an error, just nothing to cancel */
+    return true;
+  }
+  if (!cs->cancel_handle) {
+    /* The statement is about to start (the connection is being checked):
+     * the worker sees its cancel flag and does not run it */
+    pthread_mutex_unlock(&session->mutex);
+    return true;
+  }
+  if (query_id && cs->armed_query != query_id) {
+    /* That statement has finished; the handle is the next one's (perhaps
+     * another client's): leave it alone */
+    pthread_mutex_unlock(&session->mutex);
     return true;
   }
 
@@ -602,11 +643,15 @@ bool laced_session_cancel_query(LacedSession *session, int conn_id, char **err) 
 
   pthread_mutex_lock(&session->mutex);
   cs->cancel_refs--;
-  if (cs->cancel_refs == 0 && cs->orphan_handle) {
-    if (conn->driver->free_cancel_handle) {
-      conn->driver->free_cancel_handle(cs->orphan_handle);
+  if (cs->cancel_refs == 0) {
+    pthread_cond_broadcast(&session->cancel_done);
+    for (size_t i = 0; i < cs->num_orphans; i++) {
+      if (conn->driver->free_cancel_handle)
+        conn->driver->free_cancel_handle(cs->orphans[i]);
     }
-    cs->orphan_handle = NULL;
+    free(cs->orphans);
+    cs->orphans = NULL;
+    cs->num_orphans = 0;
   }
   pthread_mutex_unlock(&session->mutex);
 
@@ -641,7 +686,9 @@ void laced_session_finish_query(LacedSession *session, int conn_id, bool success
 
   if (cs->cancel_handle && cs->cancel_refs > 0) {
     /* A cancel is using this handle right now; it frees it when done */
-    cs->orphan_handle = cs->cancel_handle;
+    /* Overlapping slow cancels can leave several: keep them all */
+    cs->orphans = safe_reallocarray(cs->orphans, cs->num_orphans + 1, sizeof(void *));
+    cs->orphans[cs->num_orphans++] = cs->cancel_handle;
     if (cs->conn && cs->conn->driver &&
         cs->conn->driver->cancel_handle_finished) {
       cs->conn->driver->cancel_handle_finished(cs->cancel_handle);
@@ -706,6 +753,20 @@ void laced_session_reap_failed(LacedSession *session, int conn_id) {
   pthread_mutex_unlock(&session->mutex);
 }
 
+bool laced_session_reap_continue(LacedSession *session, int conn_id) {
+  if (!session) {
+    return false;
+  }
+  pthread_mutex_lock(&session->mutex);
+  int slot = find_slot_by_id_locked(session, conn_id);
+  bool go = slot >= 0 && session->connections[slot].orphaned_since != 0;
+  if (slot >= 0 && !go) {
+    session->connections[slot].reaping = false;
+  }
+  pthread_mutex_unlock(&session->mutex);
+  return go;
+}
+
 bool laced_session_get_conn_stats(LacedSession *session, int conn_id,
                                   LacedConnStats *stats) {
   if (!session || !stats) {
@@ -735,6 +796,26 @@ bool laced_session_get_conn_stats(LacedSession *session, int conn_id,
     stats->current_query_time_ms = 0;
   }
 
+  stats->tunnel = cs->ssh_tunnel != NULL;
+  /* Host and port only: whether ssh is alive is checked (and reaped,
+   * restarted) by the worker that owns the connection, outside this lock */
+  const char *sock = ssh_tunnel_socket_path(cs->ssh_tunnel);
+  snprintf(stats->tunnel_socket, sizeof(stats->tunnel_socket), "%s",
+           sock ? sock : "");
+  const char *host = ssh_tunnel_host(cs->ssh_tunnel);
+  snprintf(stats->tunnel_host, sizeof(stats->tunnel_host), "%s",
+           host ? host : "");
+
   pthread_mutex_unlock(&session->mutex);
   return true;
+}
+
+void laced_session_stop_tunnels(LacedSession *session) {
+  if (!session)
+    return;
+  /* No lock: a stuck worker may hold it, and the process is exiting */
+  for (int i = 0; i < LACED_MAX_CONNECTIONS; i++) {
+    if (session->connections[i].ssh_tunnel)
+      ssh_tunnel_signal_exit(session->connections[i].ssh_tunnel);
+  }
 }

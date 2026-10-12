@@ -70,13 +70,8 @@ static bool conn_refresh(DbConnection *conn) {
   return changed;
 }
 
-/* True for ROLLBACK / ABORT (ending a transaction without keeping it) */
-static bool sql_is_rollback(const char *sql) {
-  while (sql && (*sql == ' ' || *sql == '\t' || *sql == '\n' || *sql == '\r'))
-    sql++;
-  return sql && (strncasecmp(sql, "ROLLBACK", 8) == 0 ||
-                 strncasecmp(sql, "ABORT", 5) == 0);
-}
+/* True for exactly ROLLBACK / ABORT (see lace_sql_is_rollback) */
+static bool sql_is_rollback(const char *sql) { return lace_sql_is_rollback(sql); }
 
 #define TX_LOST_MSG                                                            \
   "The connection was reset while a transaction was open: everything since "  \
@@ -244,12 +239,6 @@ const char *db_conn_driver_name(DbConnection *conn) {
   return conn->driver->name;
 }
 
-/* Get driver stub from connection */
-const DbDriver *db_get_driver(DbConnection *conn) {
-  if (!conn) return &g_driver_unknown;
-  return conn->driver;
-}
-
 /* ==========================================================================
  * Database operation wrappers
  * ========================================================================== */
@@ -328,11 +317,6 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err) {
   }
   read_savepoint_end(conn, sp, true);
   return tables;
-}
-
-/* Free table list */
-void db_free_tables(char **tables, size_t count) {
-  lace_tables_free(tables, count);
 }
 
 /* Get table schema */
@@ -416,39 +400,6 @@ int64_t db_exec(DbConnection *conn, const char *sql, char **err) {
   return affected;
 }
 
-/* Query table with pagination and optional filters/sorts */
-ResultSet *db_query_table(DbConnection *conn, const char *table,
-                          const LaceFilter *filters, size_t num_filters,
-                          const LaceSort *sorts, size_t num_sorts,
-                          size_t offset, size_t limit, char **err) {
-  if (!conn || !table) {
-    if (err) *err = str_dup("Invalid arguments");
-    return NULL;
-  }
-
-  LaceResult *result = NULL;
-  conn_refresh(conn);
-  if (!conn_guard(conn, NULL, err, NULL)) {
-    return NULL;
-  }
-  bool sp = read_savepoint_begin(conn);
-  int rc = lace_query(conn->client, conn->conn_id, table,
-                      filters, num_filters, sorts, num_sorts,
-                      offset, limit, &result);
-  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
-    rc = lace_query(conn->client, conn->conn_id, table,
-                        filters, num_filters, sorts, num_sorts,
-                        offset, limit, &result);
-  }
-  if (rc != LACE_OK) {
-    if (err) *err = conn_error(conn);
-    read_savepoint_end(conn, sp, false);
-    return NULL;
-  }
-  read_savepoint_end(conn, sp, true);
-  return result;
-}
-
 /* Query page (simple pagination without filters) */
 ResultSet *db_query_page(DbConnection *conn, const char *table,
                          size_t offset, size_t limit,
@@ -484,9 +435,8 @@ ResultSet *db_query_page_where(DbConnection *conn, const char *table,
 }
 
 /* Count rows in table (with optional filters) */
-bool db_count_rows(DbConnection *conn, const char *table,
-                   const LaceFilter *filters, size_t num_filters,
-                   size_t *count, bool *approximate, char **err) {
+bool db_count_rows(DbConnection *conn, const char *table, size_t *count,
+                   bool *approximate, char **err) {
   if (!conn || !table || !count) {
     if (err) *err = str_dup("Invalid arguments");
     return false;
@@ -497,11 +447,9 @@ bool db_count_rows(DbConnection *conn, const char *table,
     return false;
   }
   bool sp = read_savepoint_begin(conn);
-  int rc = lace_count(conn->client, conn->conn_id, table,
-                      filters, num_filters, count, approximate);
+  int rc = lace_count(conn->client, conn->conn_id, table, count, approximate);
   if (rc != LACE_OK && conn_should_retry(conn, rc)) {
-    rc = lace_count(conn->client, conn->conn_id, table,
-                        filters, num_filters, count, approximate);
+    rc = lace_count(conn->client, conn->conn_id, table, count, approximate);
   }
   if (rc != LACE_OK) {
     if (err) *err = conn_error(conn);
@@ -598,16 +546,17 @@ bool db_update_cell(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
+
   LacePkValue *pk = build_pk_array(pk_cols, pk_vals, num_pk);
   if (!pk) {
     if (err) *err = str_dup("Failed to build PK array");
     return false;
   }
 
-  conn_refresh(conn);
-  if (!conn_guard(conn, NULL, err, NULL)) {
-    return false;
-  }
   int rc = lace_update(conn->client, conn->conn_id, table,
                        pk, num_pk, column, value);
   free_pk_array(pk, num_pk);
@@ -632,16 +581,17 @@ bool db_delete_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
+
   LacePkValue *pk = build_pk_array(pk_cols, pk_vals, num_pk);
   if (!pk) {
     if (err) *err = str_dup("Failed to build PK array");
     return false;
   }
 
-  conn_refresh(conn);
-  if (!conn_guard(conn, NULL, err, NULL)) {
-    return false;
-  }
   int rc = lace_delete(conn->client, conn->conn_id, table, pk, num_pk);
   free_pk_array(pk, num_pk);
 
@@ -665,18 +615,19 @@ bool db_insert_row(DbConnection *conn, const char *table,
     return false;
   }
 
+  conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
+
   /* Extract column names from LaceColumn array (0 columns: all defaults) */
   const char **col_names = safe_malloc((num_columns ? num_columns : 1) * sizeof(char *));
   for (size_t i = 0; i < num_columns; i++) {
     col_names[i] = columns[i].name;
   }
 
-  conn_refresh(conn);
-  if (!conn_guard(conn, NULL, err, NULL)) {
-    return false;
-  }
   int rc = lace_insert(conn->client, conn->conn_id, table,
-                       col_names, values, num_columns, NULL, NULL);
+                       col_names, values, num_columns);
   free(col_names);
 
   if (rc != LACE_OK) {
@@ -774,8 +725,9 @@ bool db_verify_row(DbConnection *conn, const char *table, const char **pk_cols,
       free(sb);
       if (!same) {
         ok = false;
-        *why = str_printf("column '%s' changed in the database since it was "
-                          "loaded (refresh to see the current value)",
+        *why = str_printf("column '%s' does not match the database (changed "
+                          "since it was loaded, or a computed/aliased column; "
+                          "refresh first)",
                           cols[i]);
       }
     }
@@ -784,3 +736,12 @@ bool db_verify_row(DbConnection *conn, const char *table, const char **pk_cols,
   return ok;
 }
 
+size_t db_schema_column_index(const TableSchema *schema, const char *name) {
+  if (!schema || !name)
+    return SIZE_MAX;
+  for (size_t k = 0; k < schema->num_columns; k++) {
+    if (schema->columns[k].name && strcmp(schema->columns[k].name, name) == 0)
+      return k;
+  }
+  return SIZE_MAX;
+}

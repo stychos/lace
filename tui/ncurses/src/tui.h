@@ -15,6 +15,7 @@
 #include "db_compat.h"
 #include "viewmodel/table_viewmodel.h"
 #include "core/ui_types.h"
+#include "views/text_input.h"
 #include <ncurses.h>
 #include <stdbool.h>
 
@@ -116,15 +117,14 @@ struct TuiState {
   bool filters_was_focused;     /* Was filters focused before sidebar? */
   size_t sidebar_last_position; /* Sidebar highlight before leaving */
 
-  /* Filters panel state (synced from current workspace) */
-  bool filters_visible;
-  bool filters_focused;
+  /* Filters panel editing state (global; visibility and focus are per tab,
+   * in UITabState: tui_filters_visible/tui_filters_focused) */
   size_t filters_cursor_row;
   size_t filters_cursor_col;
   size_t filters_scroll;
   bool filters_editing;
-  char filters_edit_buffer[256];
-  size_t filters_edit_len;
+  char filters_edit_buffer[256]; /* Edited through filters_edit */
+  TextInput filters_edit;
   size_t filters_edit_pos;
 
   /* Status message */
@@ -144,7 +144,6 @@ struct TuiState {
   size_t new_row_num_cols;      /* Number of columns */
   size_t new_row_cursor_col;    /* Currently focused column in new row */
   char *new_row_edit_buffer;    /* Edit buffer for current cell */
-  size_t new_row_edit_len;      /* Length of edit buffer content */
   size_t new_row_edit_pos;      /* Cursor position in edit buffer */
   bool new_row_cell_editing; /* True when editing a cell within the new row */
 
@@ -161,18 +160,10 @@ struct TuiState {
    * =========================================================================
    */
 
-  /* Cached from current tab's connection */
-  DbConnection *conn;
-  char **tables;
-  size_t num_tables;
-
-  /* Cached from app->workspaces (for initialization/cleanup) */
-  Workspace *workspaces;
-  size_t num_workspaces;
-  size_t current_workspace;
-
-  /* Cached from app */
-  size_t page_size;
+  /* The table list the sidebar position belongs to. Only compared, never
+   * dereferenced: the connection and its tables are always read through the
+   * current tab (TUI_CONN, TUI_TABLES). */
+  const void *sidebar_tables_key;
 
   /* =========================================================================
    * Per-tab UI state (TUI-specific, indexed by [workspace][tab])
@@ -330,12 +321,10 @@ static inline void tui_set_sidebar_scroll(TuiState *state, size_t scroll) {
 
 /* Filters setters - visibility is per-tab, editing state is global */
 static inline void tui_set_filters_visible(TuiState *state, bool visible) {
-  if (state) state->filters_visible = visible;
   UITabState *ui = tui_current_tab_ui(state);
   if (ui) ui->filters_visible = visible;
 }
 static inline void tui_set_filters_focused(TuiState *state, bool focused) {
-  if (state) state->filters_focused = focused;
   UITabState *ui = tui_current_tab_ui(state);
   if (ui) ui->filters_focused = focused;
 }
@@ -418,7 +407,7 @@ void tui_draw_tabs(TuiState *state);
  * ============================================================================
  */
 
-bool tui_load_tables(TuiState *state);
+bool tui_load_tables(TuiState *state, Connection *conn_obj);
 bool tui_load_table_data(TuiState *state, const char *table);
 bool tui_refresh_table(TuiState *state);
 bool tui_load_schema(TuiState *state, const char *table);
@@ -441,12 +430,9 @@ void tui_column_last(TuiState *state);
  * ============================================================================
  */
 
-void tui_next_table(TuiState *state);
-void tui_prev_table(TuiState *state);
 void tui_show_schema(TuiState *state);
 void tui_show_connect_dialog(TuiState *state);
 void tui_show_history_dialog(TuiState *state);
-void tui_show_table_selector(TuiState *state);
 void tui_show_config(TuiState *state);
 
 /* Password input dialog (masks input with asterisks).
@@ -523,7 +509,8 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event);
 void tui_add_row_start_cell_edit(TuiState *state, size_t col);
 
 /* Confirm cell edit in new row */
-void tui_add_row_confirm_cell(TuiState *state);
+/* False while the text does not fit the column (the edit stays open) */
+bool tui_add_row_confirm_cell(TuiState *state);
 
 /* Cancel cell edit in new row */
 void tui_add_row_cancel_cell(TuiState *state);
@@ -543,20 +530,5 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
 
 /* Connect to database with progress dialog */
 DbConnection *tui_connect_with_progress(TuiState *state, const char *connstr);
-
-/* Load table list with progress dialog */
-bool tui_load_tables_with_progress(TuiState *state);
-
-/* Count rows with progress dialog (uses approximate count if available) */
-int64_t tui_count_rows_with_progress(TuiState *state, const char *table,
-                                     bool *is_approximate);
-
-/* Load table schema with progress dialog */
-TableSchema *tui_get_schema_with_progress(TuiState *state, const char *table);
-
-/* Query page with progress dialog */
-ResultSet *tui_query_page_with_progress(TuiState *state, const char *table,
-                                        size_t offset, size_t limit,
-                                        const char *order_by, bool desc);
 
 #endif /* LACE_TUI_H */

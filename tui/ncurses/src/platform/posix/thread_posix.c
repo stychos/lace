@@ -52,14 +52,6 @@ bool lace_thread_create(lace_thread_t *thread, const lace_thread_attr_t *attr,
   return result == 0;
 }
 
-bool lace_thread_join(lace_thread_t thread, void **retval) {
-  return pthread_join(thread, retval) == 0;
-}
-
-bool lace_thread_detach(lace_thread_t thread) {
-  return pthread_detach(thread) == 0;
-}
-
 /* ============================================================================
  * Mutex Functions
  * ============================================================================
@@ -118,18 +110,6 @@ void lace_cond_signal(lace_cond_t *cond) {
   }
 }
 
-void lace_cond_broadcast(lace_cond_t *cond) {
-  if (cond) {
-    pthread_cond_broadcast(cond);
-  }
-}
-
-void lace_cond_wait(lace_cond_t *cond, lace_mutex_t *mutex) {
-  if (cond && mutex) {
-    pthread_cond_wait(cond, mutex);
-  }
-}
-
 bool lace_cond_timedwait(lace_cond_t *cond, lace_mutex_t *mutex,
                          int timeout_ms) {
   if (!cond || !mutex)
@@ -145,27 +125,6 @@ bool lace_cond_timedwait(lace_cond_t *cond, lace_mutex_t *mutex,
   }
 
   return pthread_cond_timedwait(cond, mutex, &ts) != ETIMEDOUT;
-}
-
-/* ============================================================================
- * Time Functions
- * ============================================================================
- */
-
-uint64_t lace_time_ms(void) {
-  struct timespec ts;
-#ifdef CLOCK_MONOTONIC
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-#else
-  clock_gettime(CLOCK_REALTIME, &ts);
-#endif
-  return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-}
-
-void lace_sleep_ms(int ms) {
-  if (ms > 0) {
-    usleep((useconds_t)ms * 1000);
-  }
 }
 
 #endif /* LACE_PLATFORM_POSIX */

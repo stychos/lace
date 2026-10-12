@@ -22,13 +22,6 @@ typedef struct {
   size_t len;   /* Length of line (excluding newline) */
 } QueryLineInfo;
 
-/* Primary key info for query result database operations */
-typedef struct {
-  const char **col_names;
-  DbValue *values;
-  size_t count;
-} QueryPkInfo;
-
 /* ============================================================================
  * query_editor.c - Text editing functions
  * ============================================================================
@@ -65,13 +58,31 @@ void query_delete_char(Tab *tab);
 /* Delete character before cursor (backspace) */
 void query_backspace(Tab *tab);
 
-/* Find the byte boundaries of the query at cursor position.
- * Returns true if a valid query range was found. */
+/* Byte range of the statement at the cursor (its ';' included), split like
+ * "run all" splits; in blank space after a ';' it is the previous statement.
+ * Ctrl+R runs exactly what this range highlights. */
 bool query_find_bounds_at_cursor(const char *text, size_t cursor,
-                                 size_t *out_start, size_t *out_end);
+                                 const char *driver, size_t *out_start,
+                                 size_t *out_end);
 
 /* Find the query at cursor position (caller must free result) */
 char *query_find_at_cursor(const char *text, size_t cursor, const char *driver);
+
+/* What the SQL scanners must skip, per dialect */
+typedef struct {
+  bool mysql;    /* backslash escapes in strings, # comments, `ident` */
+  bool sqlite;   /* `ident` and [ident] */
+  bool postgres; /* $tag$ ... $tag$ bodies */
+} SqlDialect;
+
+SqlDialect query_sql_dialect(const char *driver);
+SqlDialect query_sql_dialect_of(LaceDriver driver);
+
+/* If s starts a string literal, quoted identifier, comment or PostgreSQL
+ * dollar-quoted body, return its length (to the end of text if unclosed) and
+ * set *is_comment; otherwise return 0. Every SQL scanner in the query tab
+ * uses this, so they agree on what is code and what is not. */
+size_t query_sql_skip(const char *s, SqlDialect d, bool *is_comment);
 
 /* Length of the SQL statement at p up to its terminating ';' (or end).
  * Dialect-aware: quotes, comments, and PostgreSQL $$ bodies. */
@@ -87,14 +98,34 @@ typedef struct {
                             REPLACE/VALUES/TABLE/UPSERT (after any WITH list) */
   bool top_level_into;   /* SELECT ... INTO (new table, OUTFILE, variables) */
   bool top_level_limit;
+  bool nested_write;     /* Not read-only by lace_sql_read_only(): a writing
+                            verb at any depth (a data-modifying WITH) or INTO */
   size_t end;
 } QuerySqlShape;
 
 /* True for a statement that only reads and can take LIMIT/OFFSET: its verb
- * is SELECT, VALUES or TABLE (also behind a WITH list) and it has no
- * top-level INTO. Anything else must run exactly once, as written. */
+ * is SELECT, VALUES or TABLE (also behind a WITH list), it has no
+ * top-level INTO, and nothing in it writes (WITH u AS (UPDATE ...) SELECT
+ * would repeat the UPDATE for every page and count). Anything else must run exactly once, as written. */
 bool query_sql_pageable(const QuerySqlShape *shape);
+
+/* A page must wrap the statement in "SELECT * FROM (...) AS lace_page"
+ * instead of appending LIMIT: it has its own top-level LIMIT/OFFSET/FETCH,
+ * or it is a VALUES list (SQLite takes no LIMIT after VALUES) */
+bool query_page_needs_wrap(const QuerySqlShape *shape);
 void query_sql_shape(const char *sql, const char *driver, QuerySqlShape *out);
+
+/* What Ctrl+R, Ctrl+A and Ctrl+T run from the editor */
+typedef enum {
+  QUERY_RUN_AT_CURSOR,   /* The statement at the cursor */
+  QUERY_RUN_ALL,         /* Every statement; errors do not stop the run */
+  QUERY_RUN_TRANSACTION, /* Every statement inside BEGIN; the first error or
+                            a cancel rolls back, otherwise COMMIT */
+} QueryRunMode;
+
+/* Run the current query tab's text in the given mode, reporting the outcome
+ * in the status bar. A cancel stops the run. */
+void query_run_script(TuiState *state, QueryRunMode mode);
 
 /* Collect the background row count of the current query tab when done */
 void query_poll_count(TuiState *state);
@@ -108,7 +139,6 @@ void query_poll_count(TuiState *state);
 char *query_extract_table_name(const char *sql, LaceDriver driver);
 
 /* Check if query has LIMIT or OFFSET clause */
-
 
 /* Count total rows for a SELECT query using COUNT wrapper */
 /* SQL for one page of a paginated query tab */
@@ -126,6 +156,9 @@ ResultSet *query_run_modal(TuiState *state, const char *sql,
 ResultSet *query_run_derived(TuiState *state, const char *sql,
                              const char *message, char **err,
                              bool *cancelled);
+
+/* "Loaded N/M rows" (or N/M+ while counting) in the status bar */
+void query_status_loaded(TuiState *state, Tab *tab);
 
 /* Make query_total_rows exact for a paginated tab (counts in the foreground,
  * cancellable, if the background count has not finished). */
@@ -160,6 +193,15 @@ void query_check_load_more(TuiState *state, Tab *tab);
 /* Get column width for query results */
 int query_get_col_width(Tab *tab, size_t col);
 
+/* Rows of the SQL editor in a main window win_rows high (30%, at least 3);
+ * the separator is the next row and the results start below it. Result
+ * rows begin 3 lines into the results area (title, header, rule). */
+int query_editor_height(int win_rows);
+#define QUERY_RESULTS_HEADER_ROWS 3
+
+/* Result rows that fit below the editor in the current main window (>= 1) */
+int query_visible_result_rows(TuiState *state);
+
 /* Start editing a cell in query results (inline or modal based on content) */
 void query_result_start_edit(TuiState *state, Tab *tab);
 
@@ -172,17 +214,8 @@ void query_result_confirm_edit(TuiState *state, Tab *tab);
 /* Cancel editing in query results */
 void query_result_cancel_edit(TuiState *state, Tab *tab);
 
-/* Find column index in result set by name */
-size_t query_find_column_by_name(Tab *tab, const char *name);
 
-/* Find primary key columns in query results */
-size_t query_find_pk_columns(Tab *tab, size_t *pk_indices, size_t max_pks);
 
-/* Build PK info from query result row. Returns false on error. */
-bool query_pk_info_build(QueryPkInfo *pk, Tab *tab, size_t row_idx);
-
-/* Free PK info resources */
-void query_pk_info_free(QueryPkInfo *pk);
 
 /* Set query result cell directly to NULL or empty string */
 void query_result_set_cell_direct(TuiState *state, Tab *tab, bool set_null);

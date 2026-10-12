@@ -36,60 +36,6 @@ const char *lace_type_name(LaceValueType type) {
   }
 }
 
-const char *lace_filter_op_name(LaceFilterOp op) {
-  switch (op) {
-  case LACE_FILTER_EQ:           return "equals";
-  case LACE_FILTER_NE:           return "not equals";
-  case LACE_FILTER_GT:           return "greater than";
-  case LACE_FILTER_GE:           return "greater or equal";
-  case LACE_FILTER_LT:           return "less than";
-  case LACE_FILTER_LE:           return "less or equal";
-  case LACE_FILTER_IN:           return "in";
-  case LACE_FILTER_CONTAINS:     return "contains";
-  case LACE_FILTER_REGEX:        return "regex";
-  case LACE_FILTER_BETWEEN:      return "between";
-  case LACE_FILTER_IS_EMPTY:     return "is empty";
-  case LACE_FILTER_IS_NOT_EMPTY: return "is not empty";
-  case LACE_FILTER_IS_NULL:      return "is null";
-  case LACE_FILTER_IS_NOT_NULL:  return "is not null";
-  case LACE_FILTER_RAW:          return "raw";
-  default:                       return "unknown";
-  }
-}
-
-const char *lace_filter_op_sql(LaceFilterOp op) {
-  switch (op) {
-  case LACE_FILTER_EQ:           return "=";
-  case LACE_FILTER_NE:           return "<>";
-  case LACE_FILTER_GT:           return ">";
-  case LACE_FILTER_GE:           return ">=";
-  case LACE_FILTER_LT:           return "<";
-  case LACE_FILTER_LE:           return "<=";
-  case LACE_FILTER_IN:           return "IN";
-  case LACE_FILTER_CONTAINS:     return "LIKE";
-  case LACE_FILTER_REGEX:        return "~";      /* PostgreSQL style */
-  case LACE_FILTER_BETWEEN:      return "BETWEEN";
-  case LACE_FILTER_IS_EMPTY:     return "= ''";
-  case LACE_FILTER_IS_NOT_EMPTY: return "<> ''";
-  case LACE_FILTER_IS_NULL:      return "IS NULL";
-  case LACE_FILTER_IS_NOT_NULL:  return "IS NOT NULL";
-  case LACE_FILTER_RAW:          return "";
-  default:                       return "=";
-  }
-}
-
-bool lace_filter_op_needs_value(LaceFilterOp op) {
-  switch (op) {
-  case LACE_FILTER_IS_EMPTY:
-  case LACE_FILTER_IS_NOT_EMPTY:
-  case LACE_FILTER_IS_NULL:
-  case LACE_FILTER_IS_NOT_NULL:
-    return false;
-  default:
-    return true;
-  }
-}
-
 /* ==========================================================================
  * Value Creation Helpers
  * ========================================================================== */
@@ -146,13 +92,12 @@ LaceValue lace_value_text_len(const char *str, size_t len) {
 LaceValue lace_value_blob(const uint8_t *data, size_t len) {
   LaceValue v = {0};
   v.type = LACE_TYPE_BLOB;
-  if (data && len > 0) {
+  if (!data) {
+    v.is_null = true; /* No bytes at all: NULL. len 0 with data: empty BLOB */
+  } else if (len > 0) {
     v.blob.data = safe_malloc(len);
     memcpy(v.blob.data, data, len);
     v.blob.len = len;
-    v.is_null = false;
-  } else {
-    v.is_null = true;
   }
   return v;
 }
@@ -564,14 +509,6 @@ void lace_result_free(LaceResult *result) {
 
   free(result->source_table);
   free(result);
-}
-
-void lace_filter_free(LaceFilter *filter) {
-  if (!filter) return;
-
-  free(filter->value);
-  free(filter->value2);
-  memset(filter, 0, sizeof(LaceFilter));
 }
 
 void lace_conn_info_free(LaceConnInfo *info) {

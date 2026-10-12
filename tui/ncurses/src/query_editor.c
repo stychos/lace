@@ -151,87 +151,34 @@ void query_backspace(Tab *tab) {
   query_delete_char(tab);
 }
 
-/* Find the byte boundaries of the query at cursor position.
- * Returns true if a valid query range was found.
- * out_start and out_end are set to the byte positions (not trimmed).
- * If cursor is in empty space after a query, falls back to the last query. */
-bool query_find_bounds_at_cursor(const char *text, size_t cursor,
-                                 size_t *out_start, size_t *out_end) {
-  if (!text || !*text) {
-    *out_start = 0;
-    *out_end = 0;
-    return false;
-  }
+SqlDialect query_sql_dialect(const char *driver) {
+  SqlDialect d = {false, false, false};
+  if (!driver)
+    return d;
+  d.mysql = strcmp(driver, "mysql") == 0 || strcmp(driver, "mariadb") == 0;
+  d.sqlite = strcmp(driver, "sqlite") == 0;
+  d.postgres = strcmp(driver, "postgres") == 0 ||
+               strcmp(driver, "postgresql") == 0 || strcmp(driver, "pg") == 0;
+  return d;
+}
 
-  size_t len = strlen(text);
-  if (cursor > len)
-    cursor = len;
+SqlDialect query_sql_dialect_of(LaceDriver driver) {
+  SqlDialect d = {driver == LACE_DRIVER_MYSQL || driver == LACE_DRIVER_MARIADB,
+                  driver == LACE_DRIVER_SQLITE, driver == LACE_DRIVER_POSTGRES};
+  return d;
+}
 
-  /* Scan from beginning to cursor to find query start (after last ';') */
-  size_t last_semi = 0;
-  size_t prev_semi = 0; /* Track the semicolon before last_semi */
-  bool in_string = false;
-  char quote_char = 0;
+/* The shared lexer (liblace) for this dialect: an unknown driver lexes the
+ * common subset */
+static int dialect_driver(SqlDialect d) {
+  return d.mysql      ? LACE_DRIVER_MYSQL
+         : d.sqlite   ? LACE_DRIVER_SQLITE
+         : d.postgres ? LACE_DRIVER_POSTGRES
+                      : -1;
+}
 
-  for (size_t i = 0; i < cursor; i++) {
-    char c = text[i];
-    if (in_string) {
-      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
-        in_string = false;
-      }
-    } else {
-      if (c == '\'' || c == '"') {
-        in_string = true;
-        quote_char = c;
-      } else if (c == ';') {
-        prev_semi = last_semi;
-        last_semi = i + 1;
-      }
-    }
-  }
-
-  size_t start = last_semi;
-
-  /* Scan forward from cursor to find query end (next ';' or end of text) */
-  size_t end = len;
-  in_string = false;
-  quote_char = 0;
-
-  for (size_t i = cursor; i < len; i++) {
-    char c = text[i];
-    if (in_string) {
-      if (c == quote_char && (i == 0 || text[i - 1] != '\\')) {
-        in_string = false;
-      }
-    } else {
-      if (c == '\'' || c == '"') {
-        in_string = true;
-        quote_char = c;
-      } else if (c == ';') {
-        end = i + 1; /* Include the semicolon */
-        break;
-      }
-    }
-  }
-
-  /* Check if the current range is empty/whitespace only */
-  bool is_empty = true;
-  for (size_t i = start; i < end && is_empty; i++) {
-    char c = text[i];
-    if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != ';') {
-      is_empty = false;
-    }
-  }
-
-  /* If empty and we have a previous query, use that instead */
-  if (is_empty && last_semi > 0) {
-    start = prev_semi;
-    end = last_semi; /* Include the semicolon of the previous query */
-  }
-
-  *out_start = start;
-  *out_end = end;
-  return start < end;
+size_t query_sql_skip(const char *s, SqlDialect d, bool *is_comment) {
+  return lace_sql_skip(s, dialect_driver(d), is_comment);
 }
 
 /* Find the query at cursor position (caller must free result) */
@@ -241,64 +188,7 @@ bool query_find_bounds_at_cursor(const char *text, size_t cursor,
  * bodies ($$ ... $$, $tag$ ... $tag$) do not end a statement. Backslash
  * escapes inside strings only exist in MySQL/MariaDB. */
 size_t query_statement_length(const char *p, const char *driver) {
-  bool mysql = driver && (strcmp(driver, "mysql") == 0 || strcmp(driver, "mariadb") == 0);
-  bool pg = driver && strcmp(driver, "postgres") == 0;
-  const char *s = p;
-  while (*s) {
-    char c = *s;
-    if (c == ';') {
-      break;
-    }
-    if (c == '\'' || c == '"' || (mysql && c == '`')) {
-      char quote = c;
-      s++;
-      while (*s) {
-        if (mysql && *s == '\\' && s[1]) {
-          s += 2;
-          continue;
-        }
-        if (*s == quote) {
-          if (s[1] == quote) { /* doubled quote = literal quote */
-            s += 2;
-            continue;
-          }
-          break;
-        }
-        s++;
-      }
-      if (*s) s++;
-      continue;
-    }
-    if (c == '-' && s[1] == '-') {
-      while (*s && *s != '\n') s++;
-      continue;
-    }
-    if (c == '#' && mysql) {
-      while (*s && *s != '\n') s++;
-      continue;
-    }
-    if (c == '/' && s[1] == '*') {
-      s += 2;
-      while (*s && !(s[0] == '*' && s[1] == '/')) s++;
-      if (*s) s += 2;
-      continue;
-    }
-    if (pg && c == '$') {
-      /* $tag$ where tag is [A-Za-z0-9_]* */
-      const char *t = s + 1;
-      while (*t && (isalnum((unsigned char)*t) || *t == '_')) t++;
-      if (*t == '$') {
-        size_t taglen = (size_t)(t - s) + 1;
-        const char *body = t + 1;
-        const char *close = body;
-        while (*close && strncmp(close, s, taglen) != 0) close++;
-        s = *close ? close + taglen : close;
-        continue;
-      }
-    }
-    s++;
-  }
-  return (size_t)(s - p);
+  return lace_sql_statement_length(p, dialect_driver(query_sql_dialect(driver)));
 }
 
 void query_sql_shape(const char *sql, const char *driver, QuerySqlShape *out) {
@@ -306,62 +196,20 @@ void query_sql_shape(const char *sql, const char *driver, QuerySqlShape *out) {
   if (!sql) {
     return;
   }
-  bool mysql = driver && (strcmp(driver, "mysql") == 0 || strcmp(driver, "mariadb") == 0);
-  bool pg = driver && strcmp(driver, "postgres") == 0;
+  SqlDialect d = query_sql_dialect(driver);
   int depth = 0;
   const char *s = sql;
   while (*s) {
     char c = *s;
-    /* Strings and quoted identifiers */
-    if (c == '\'' || c == '"' || (mysql && c == '`')) {
-      char quote = c;
-      s++;
-      while (*s) {
-        if (mysql && *s == '\\' && s[1]) {
-          s += 2;
-          continue;
-        }
-        if (*s == quote) {
-          if (s[1] == quote) {
-            s += 2;
-            continue;
-          }
-          break;
-        }
-        s++;
-      }
-      if (*s) {
-        s++;
-      }
-      out->end = (size_t)(s - sql);
-      continue;
-    }
-    /* Comments: skipped, never part of the significant end */
-    if (c == '-' && s[1] == '-') {
-      while (*s && *s != '\n') s++;
-      continue;
-    }
-    if (c == '#' && mysql) {
-      while (*s && *s != '\n') s++;
-      continue;
-    }
-    if (c == '/' && s[1] == '*') {
-      s += 2;
-      while (*s && !(s[0] == '*' && s[1] == '/')) s++;
-      if (*s) s += 2;
-      continue;
-    }
-    if (pg && c == '$') {
-      const char *t = s + 1;
-      while (*t && (isalnum((unsigned char)*t) || *t == '_')) t++;
-      if (*t == '$') {
-        size_t taglen = (size_t)(t - s) + 1;
-        const char *close = t + 1;
-        while (*close && strncmp(close, s, taglen) != 0) close++;
-        s = *close ? close + taglen : close;
+    /* Strings, quoted identifiers and $tag$ bodies count toward the end;
+     * comments are skipped, never part of the significant end */
+    bool comment;
+    size_t skip = query_sql_skip(s, d, &comment);
+    if (skip) {
+      s += skip;
+      if (!comment)
         out->end = (size_t)(s - sql);
-        continue;
-      }
+      continue;
     }
     if (isspace((unsigned char)c) || c == ';') {
       s++; /* Trailing ';' and whitespace do not count */
@@ -409,6 +257,13 @@ void query_sql_shape(const char *sql, const char *driver, QuerySqlShape *out) {
     s++;
     out->end = (size_t)(s - sql);
   }
+  /* A writing verb anywhere (a data-modifying WITH) or INTO: liblace's
+   * read-only test, the same one the daemon's row limit uses */
+  out->nested_write = !lace_sql_read_only(sql, dialect_driver(d));
+}
+
+bool query_page_needs_wrap(const QuerySqlShape *shape) {
+  return shape->top_level_limit || strcmp(shape->verb, "VALUES") == 0;
 }
 
 bool query_sql_pageable(const QuerySqlShape *shape) {
@@ -418,7 +273,8 @@ bool query_sql_pageable(const QuerySqlShape *shape) {
                       strcmp(kw, "VALUES") == 0 || strcmp(kw, "TABLE") == 0;
   bool reads = strcmp(v, "SELECT") == 0 || strcmp(v, "VALUES") == 0 ||
                strcmp(v, "TABLE") == 0;
-  return starts_query && reads && !shape->top_level_into && shape->end > 0;
+  return starts_query && reads && !shape->top_level_into &&
+         !shape->nested_write && shape->end > 0;
 }
 
 /* Copy text[start, start+len) without surrounding whitespace */
@@ -433,9 +289,13 @@ static char *dup_trimmed(const char *text, size_t start, size_t len) {
   return str_ndup(text + start, len);
 }
 
-char *query_find_at_cursor(const char *text, size_t cursor, const char *driver) {
+bool query_find_bounds_at_cursor(const char *text, size_t cursor,
+                                 const char *driver, size_t *out_start,
+                                 size_t *out_end) {
+  *out_start = 0;
+  *out_end = 0;
   if (!text || !*text)
-    return str_dup("");
+    return false;
 
   size_t len = strlen(text);
   if (cursor > len)
@@ -445,28 +305,44 @@ char *query_find_at_cursor(const char *text, size_t cursor, const char *driver) 
    * containing the cursor (or ending at it) wins; if the cursor sits in
    * blank space after the last ';', fall back to the previous statement. */
   size_t start = 0;
-  char *prev = NULL;
+  bool have_prev = false;
+  size_t prev_start = 0, prev_end = 0;
   while (start <= len) {
     size_t slen = query_statement_length(text + start, driver);
+    size_t end = start + slen < len ? start + slen + 1 : len; /* With ';' */
     char *stmt = dup_trimmed(text, start, slen);
     QuerySqlShape shape;
     query_sql_shape(stmt, driver, &shape);
     bool blank = !stmt || shape.end == 0; /* Whitespace or comments only */
+    free(stmt);
     if (cursor <= start + slen) {
-      if (blank && prev) {
-        free(stmt);
-        return prev;
+      if (blank && have_prev) {
+        *out_start = prev_start;
+        *out_end = prev_end;
+      } else {
+        *out_start = start;
+        *out_end = end;
       }
-      free(prev);
-      return stmt ? stmt : str_dup("");
+      return *out_start < *out_end;
     }
     if (!blank) {
-      free(prev);
-      prev = stmt;
-    } else {
-      free(stmt);
+      have_prev = true;
+      prev_start = start;
+      prev_end = end;
     }
     start += slen + 1; /* skip the ';' */
   }
-  return prev ? prev : str_dup("");
+  if (have_prev) {
+    *out_start = prev_start;
+    *out_end = prev_end;
+  }
+  return have_prev;
+}
+
+char *query_find_at_cursor(const char *text, size_t cursor, const char *driver) {
+  size_t start, end;
+  if (!query_find_bounds_at_cursor(text, cursor, driver, &start, &end))
+    return str_dup("");
+  size_t slen = query_statement_length(text + start, driver);
+  return dup_trimmed(text, start, slen);
 }

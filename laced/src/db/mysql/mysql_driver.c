@@ -11,6 +11,7 @@
 #include "util/connstr.h"
 #include "../db.h"
 #include "../db_common.h"
+#include "../../../../liblace/include/lace.h"
 #include <ctype.h>
 #include <errno.h>
 #include <mysql.h>
@@ -31,8 +32,7 @@ typedef struct {
   char *database;
   bool is_mariadb; /* Connection scheme was mariadb:// */
   time_t last_used; /* For the liveness check before a statement */
-  bool broken;      /* The connection was lost: reopen before the next use */
-  bool tx_lost;     /* ... with a transaction open: refuse until ROLLBACK */
+  DbLinkState link; /* Lost connection and lost transaction */
 } MySqlData;
 
 /*
@@ -49,111 +49,13 @@ static void mysql_consume_pending_results(MYSQL *mysql) {
   }
 }
 
-/*
- * Finish a prepared statement: consume results, close, and cleanup connection.
- * Call this before freeing bind arrays.
- */
-static void mysql_stmt_finish(MYSQL_STMT *stmt, MYSQL *mysql) {
-  /* Consume any results from the statement before closing */
-  for (int i = 0; i < MAX_RESULT_CONSUME_ITERATIONS &&
-                  mysql_stmt_next_result(stmt) == 0;
-       i++) {
-    /* Just consume, no results expected from DML */
-  }
-  mysql_stmt_close(stmt);
-  mysql_consume_pending_results(mysql);
-}
-
-/* Bind a DbValue to a MYSQL_BIND entry.
- * Caller must provide stable storage for int/float values and is_null/length.
- * int_storage/float_storage: only one is used based on type
- * len_storage: used for text/blob length
- * null_storage: stores is_null flag */
-static void mysql_bind_value(MYSQL_BIND *bind, const DbValue *val,
-                             long long *int_storage, double *float_storage,
-                             unsigned long *len_storage, my_bool *null_storage) {
-  memset(bind, 0, sizeof(*bind));
-  *null_storage = val->is_null;
-  bind->is_null = null_storage;
-
-  if (val->is_null) {
-    bind->buffer_type = MYSQL_TYPE_NULL;
-    return;
-  }
-
-  switch (val->type) {
-  case DB_TYPE_INT:
-    bind->buffer_type = MYSQL_TYPE_LONGLONG;
-    *int_storage = val->int_val;
-    bind->buffer = int_storage;
-    break;
-  case DB_TYPE_FLOAT:
-    bind->buffer_type = MYSQL_TYPE_DOUBLE;
-    *float_storage = val->float_val;
-    bind->buffer = float_storage;
-    break;
-  case DB_TYPE_BOOL:
-    bind->buffer_type = MYSQL_TYPE_LONGLONG;
-    *int_storage = val->bool_val ? 1 : 0;
-    bind->buffer = int_storage;
-    break;
-  case DB_TYPE_BLOB:
-    if (!val->blob.data || val->blob.len == 0) {
-      /* Empty blob - bind as NULL */
-      bind->buffer_type = MYSQL_TYPE_NULL;
-      *null_storage = true;
-    } else {
-      bind->buffer_type = MYSQL_TYPE_BLOB;
-      bind->buffer = (void *)val->blob.data;
-      bind->buffer_length = val->blob.len;
-      *len_storage = val->blob.len;
-      bind->length = len_storage;
-    }
-    break;
-  default:
-    bind->buffer_type = MYSQL_TYPE_STRING;
-    bind->buffer = val->text.data;
-    bind->buffer_length = val->text.len;
-    *len_storage = val->text.len;
-    bind->length = len_storage;
-    break;
-  }
-}
-
 /* Forward declarations */
 static DbConnection *mysql_driver_connect(const char *connstr, char **err);
 static void mysql_driver_disconnect(DbConnection *conn);
-static bool mysql_driver_ping(DbConnection *conn);
-static ConnStatus mysql_driver_status(DbConnection *conn);
-static const char *mysql_driver_get_error(DbConnection *conn);
-static char **mysql_driver_list_tables(DbConnection *conn, size_t *count,
-                                       char **err);
-static TableSchema *mysql_driver_get_table_schema(DbConnection *conn,
-                                                  const char *table,
-                                                  char **err);
 static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
                                      char **err);
-static int64_t mysql_driver_exec(DbConnection *conn, const char *sql,
-                                 char **err);
-static ResultSet *mysql_driver_query_page(DbConnection *conn, const char *table,
-                                          size_t offset, size_t limit,
-                                          const char *order_by, bool desc,
-                                          char **err);
-static bool mysql_driver_update_cell(DbConnection *conn, const char *table,
-                                     const char **pk_cols,
-                                     const DbValue *pk_vals, size_t num_pk_cols,
-                                     const char *col, const DbValue *new_val,
-                                     char **err);
-static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
-                                    const char **pk_cols,
-                                    const DbValue *pk_vals, size_t num_pk_cols,
-                                    char **err);
-static bool mysql_driver_insert_row(DbConnection *conn, const char *table,
-                                    const ColumnDef *cols, const DbValue *vals,
-                                    size_t num_cols, char **err);
-static void mysql_driver_free_result(ResultSet *rs);
-static void mysql_driver_free_schema(TableSchema *schema);
-static void mysql_driver_free_string_list(char **list, size_t count);
+static bool mysql_driver_ensure_ready(DbConnection *conn, const char *sql,
+                                      bool *answered, char **err);
 static void mysql_driver_library_cleanup(void);
 static void *mysql_driver_prepare_cancel(DbConnection *conn);
 static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
@@ -163,8 +65,6 @@ static void mysql_driver_library_init(void);
 static int mysql_driver_transaction_state(DbConnection *conn);
 static void mysql_driver_connection_lost(DbConnection *conn);
 static void mysql_driver_cancel_handle_finished(void *cancel_handle);
-static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
-                                               const char *table, char **err);
 
 /* Driver definitions - both mysql and mariadb use the same implementation */
 DbDriver mysql_driver = {
@@ -172,29 +72,12 @@ DbDriver mysql_driver = {
     .display_name = "MySQL",
     .connect = mysql_driver_connect,
     .disconnect = mysql_driver_disconnect,
-    .ping = mysql_driver_ping,
-    .status = mysql_driver_status,
-    .get_error = mysql_driver_get_error,
-    .list_databases = NULL,
-    .list_tables = mysql_driver_list_tables,
-    .get_table_schema = mysql_driver_get_table_schema,
     .query = mysql_driver_query,
-    .exec = mysql_driver_exec,
-    .query_page = mysql_driver_query_page,
-    .update_cell = mysql_driver_update_cell,
-    .insert_row = mysql_driver_insert_row,
-    .delete_row = mysql_driver_delete_row,
-    .begin_transaction = NULL,
-    .commit = NULL,
-    .rollback = NULL,
-    .free_result = mysql_driver_free_result,
-    .free_schema = mysql_driver_free_schema,
-    .free_string_list = mysql_driver_free_string_list,
+    .ensure_ready = mysql_driver_ensure_ready,
     .prepare_cancel = mysql_driver_prepare_cancel,
     .cancel_query = mysql_driver_cancel_query,
     .free_cancel_handle = mysql_driver_free_cancel_handle,
     .cancel_handle_finished = mysql_driver_cancel_handle_finished,
-    .estimate_row_count = mysql_driver_estimate_row_count,
     .transaction_state = mysql_driver_transaction_state,
     .connection_lost = mysql_driver_connection_lost,
     .library_init = mysql_driver_library_init,
@@ -206,29 +89,12 @@ DbDriver mariadb_driver = {
     .display_name = "MariaDB",
     .connect = mysql_driver_connect,
     .disconnect = mysql_driver_disconnect,
-    .ping = mysql_driver_ping,
-    .status = mysql_driver_status,
-    .get_error = mysql_driver_get_error,
-    .list_databases = NULL,
-    .list_tables = mysql_driver_list_tables,
-    .get_table_schema = mysql_driver_get_table_schema,
     .query = mysql_driver_query,
-    .exec = mysql_driver_exec,
-    .query_page = mysql_driver_query_page,
-    .update_cell = mysql_driver_update_cell,
-    .insert_row = mysql_driver_insert_row,
-    .delete_row = mysql_driver_delete_row,
-    .begin_transaction = NULL,
-    .commit = NULL,
-    .rollback = NULL,
-    .free_result = mysql_driver_free_result,
-    .free_schema = mysql_driver_free_schema,
-    .free_string_list = mysql_driver_free_string_list,
+    .ensure_ready = mysql_driver_ensure_ready,
     .prepare_cancel = mysql_driver_prepare_cancel,
     .cancel_query = mysql_driver_cancel_query,
     .free_cancel_handle = mysql_driver_free_cancel_handle,
     .cancel_handle_finished = mysql_driver_cancel_handle_finished,
-    .estimate_row_count = mysql_driver_estimate_row_count,
     .transaction_state = mysql_driver_transaction_state,
     .connection_lost = mysql_driver_connection_lost,
     .library_init = mysql_driver_library_init,
@@ -283,6 +149,10 @@ static DbValueType mysql_type_to_db_type(enum enum_field_types type,
   case MYSQL_TYPE_TIMESTAMP:
     return DB_TYPE_TIMESTAMP;
 
+  case MYSQL_TYPE_BIT:      /* Bits come as raw bytes (b'0' is a NUL byte) */
+  case MYSQL_TYPE_GEOMETRY: /* Well-known binary */
+    return DB_TYPE_BLOB;
+
   default:
     return DB_TYPE_TEXT;
   }
@@ -307,7 +177,7 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
   }
 
   /* For oversized fields, show placeholder text instead of loading data */
-  if (lengths[col] > MAX_FIELD_SIZE) {
+  if (lengths[col] > LACE_MAX_FIELD_SIZE) {
     return db_value_oversized_placeholder("DATA", lengths[col]);
   }
 
@@ -323,9 +193,10 @@ static DbValue mysql_get_value(MYSQL_ROW row, unsigned long *lengths, int col,
       val.type = DB_TYPE_INT;
       val.int_val = parsed;
     } else {
-      /* Conversion failed - store as text instead */
+      /* Beyond int64 (BIGINT UNSIGNED): keep the exact digits as a DECIMAL,
+       * written back unquoted (MySQL compares a quoted one as a double) */
       val.text.data = safe_malloc((size_t)lengths[col] + 1);
-      val.type = DB_TYPE_TEXT;
+      val.type = DB_TYPE_DECIMAL;
       val.text.len = (size_t)lengths[col];
       memcpy(val.text.data, row[col], (size_t)lengths[col]);
       val.text.data[(size_t)lengths[col]] = '\0';
@@ -427,9 +298,17 @@ static MYSQL *mysql_open(const ConnString *cs, unsigned int timeout_sec,
 
   /* CLIENT_FOUND_ROWS: affected rows count matched rows, so an UPDATE that
    * sets a value it already had still reports 1 (lets callers tell "row
-   * not found" from "nothing changed") */
+   * not found" from "nothing changed"). CLIENT_MULTI_STATEMENTS: a string
+   * of several statements runs them all, as on SQLite and PostgreSQL
+   * (mysql_driver_query reads every result). */
+  /* Through an SSH tunnel: its Unix socket (host "localhost" makes the
+   * client use it) */
+  const char *tunnel_socket = connstr_get_option(cs, "lace_socket");
+  if (tunnel_socket)
+    host = "localhost";
   if (!mysql_real_connect(mysql, host, user, cs->password, database, port,
-                          NULL, CLIENT_FOUND_ROWS)) {
+                          tunnel_socket,
+                          CLIENT_FOUND_ROWS | CLIENT_MULTI_STATEMENTS)) {
     err_setf(err, "Connection failed: %s", mysql_error(mysql));
     mysql_close(mysql);
     return NULL;
@@ -456,7 +335,7 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
   const char *user = cs->user ? cs->user : "root";
   const char *database = cs->database ? cs->database : "mysql";
 
-  MYSQL *mysql = mysql_open(cs, 10, true, err);
+  MYSQL *mysql = mysql_open(cs, LACED_MYSQL_CONNECT_TIMEOUT_S, true, err);
   if (!mysql) {
     connstr_free(cs);
     return NULL;
@@ -475,7 +354,6 @@ static DbConnection *mysql_driver_connect(const char *connstr, char **err) {
   conn->host = str_dup(host);
   conn->port = port;
   conn->user = str_dup(user);
-  conn->status = CONN_STATUS_CONNECTED;
   conn->driver_data = data;
 
   connstr_free(cs);
@@ -498,595 +376,10 @@ static void mysql_driver_disconnect(DbConnection *conn) {
   db_common_free_connection(conn);
 }
 
-static bool mysql_driver_ping(DbConnection *conn) {
-  if (!conn)
-    return false;
-
-  MySqlData *data = conn->driver_data;
-  if (!data || !data->mysql)
-    return false;
-
-  return mysql_ping(data->mysql) == 0;
-}
-
-static ConnStatus mysql_driver_status(DbConnection *conn) {
-  return conn ? conn->status : CONN_STATUS_DISCONNECTED;
-}
-
-static const char *mysql_driver_get_error(DbConnection *conn) {
-  return conn ? conn->last_error : NULL;
-}
-
-static int64_t mysql_driver_exec(DbConnection *conn, const char *sql,
-                                 char **err) {
-  /* Through the query path, which reads every result the statement makes */
-  ResultSet *rs = mysql_driver_query(conn, sql, err);
-  if (!rs) {
-    return -1;
-  }
-  int64_t n = rs->num_columns > 0 ? (int64_t)rs->num_rows : rs->rows_affected;
-  db_result_free(rs);
-  return n;
-}
-
-static bool mysql_driver_update_cell(DbConnection *conn, const char *table,
-                                     const char **pk_cols,
-                                     const DbValue *pk_vals, size_t num_pk_cols,
-                                     const char *col, const DbValue *new_val,
-                                     char **err) {
-  DB_REQUIRE_PARAMS_CONN(table && pk_cols && pk_vals && num_pk_cols > 0 && col &&
-                             new_val,
-                         conn, MySqlData, data, mysql, err, false);
-
-  /* Escape table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_BACKTICK, false);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build UPDATE statement using common helper */
-  char *sql = db_common_build_update_sql(escaped_table, col, pk_cols,
-                                         num_pk_cols, DB_QUOTE_BACKTICK, false, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  MYSQL_STMT *stmt = mysql_stmt_init(data->mysql);
-  if (!stmt) {
-    free(sql);
-    err_set(err, "Failed to initialize statement");
-    return false;
-  }
-
-  if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    mysql_stmt_close(stmt);
-    free(sql);
-    return false;
-  }
-  free(sql);
-
-  /* Allocate bind array: 1 new value + N pk values */
-  size_t num_params = 1 + num_pk_cols;
-  MYSQL_BIND *bind = safe_calloc(num_params, sizeof(MYSQL_BIND));
-  long long *pk_ints = safe_calloc(num_pk_cols, sizeof(long long));
-  double *pk_floats = safe_calloc(num_pk_cols, sizeof(double));
-  my_bool *pk_is_nulls = safe_calloc(num_pk_cols, sizeof(my_bool));
-  unsigned long *pk_lens = safe_calloc(num_pk_cols, sizeof(unsigned long));
-
-  /* Parameter 1: new value */
-  long long new_int = 0;
-  double new_float = 0;
-  my_bool new_is_null = 0;
-  unsigned long new_len = 0;
-  mysql_bind_value(&bind[0], new_val, &new_int, &new_float, &new_len,
-                   &new_is_null);
-
-  /* Parameters 2..N+1: primary key values */
-  for (size_t i = 0; i < num_pk_cols; i++) {
-    mysql_bind_value(&bind[i + 1], &pk_vals[i], &pk_ints[i], &pk_floats[i],
-                     &pk_lens[i], &pk_is_nulls[i]);
-  }
-
-  bool success = true;
-  if (mysql_stmt_bind_param(stmt, bind) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  } else if (mysql_stmt_execute(stmt) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  }
-
-  mysql_stmt_finish(stmt, data->mysql);
-
-  free(bind);
-  free(pk_ints);
-  free(pk_floats);
-  free(pk_is_nulls);
-  free(pk_lens);
-
-  return success;
-}
-
-static bool mysql_driver_delete_row(DbConnection *conn, const char *table,
-                                    const char **pk_cols,
-                                    const DbValue *pk_vals, size_t num_pk_cols,
-                                    char **err) {
-  DB_REQUIRE_PARAMS_CONN(table && pk_cols && pk_vals && num_pk_cols > 0, conn,
-                         MySqlData, data, mysql, err, false);
-
-  /* Escape table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_BACKTICK, false);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build DELETE statement using common helper */
-  char *sql = db_common_build_delete_sql(escaped_table, pk_cols, num_pk_cols,
-                                         DB_QUOTE_BACKTICK, false, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  MYSQL_STMT *stmt = mysql_stmt_init(data->mysql);
-  if (!stmt) {
-    free(sql);
-    err_set(err, "Failed to initialize statement");
-    return false;
-  }
-
-  if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    mysql_stmt_close(stmt);
-    free(sql);
-    return false;
-  }
-  free(sql);
-
-  /* Allocate bind array for pk values */
-  MYSQL_BIND *bind = safe_calloc(num_pk_cols, sizeof(MYSQL_BIND));
-  long long *pk_ints = safe_calloc(num_pk_cols, sizeof(long long));
-  double *pk_floats = safe_calloc(num_pk_cols, sizeof(double));
-  my_bool *pk_is_nulls = safe_calloc(num_pk_cols, sizeof(my_bool));
-  unsigned long *pk_lens = safe_calloc(num_pk_cols, sizeof(unsigned long));
-
-  /* Bind primary key values */
-  for (size_t i = 0; i < num_pk_cols; i++) {
-    mysql_bind_value(&bind[i], &pk_vals[i], &pk_ints[i], &pk_floats[i],
-                     &pk_lens[i], &pk_is_nulls[i]);
-  }
-
-  bool success = true;
-  if (mysql_stmt_bind_param(stmt, bind) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  } else if (mysql_stmt_execute(stmt) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  }
-
-  mysql_stmt_finish(stmt, data->mysql);
-
-  free(bind);
-  free(pk_ints);
-  free(pk_floats);
-  free(pk_is_nulls);
-  free(pk_lens);
-
-  return success;
-}
-
-static bool mysql_driver_insert_row(DbConnection *conn, const char *table,
-                                    const ColumnDef *cols, const DbValue *vals,
-                                    size_t num_cols, char **err) {
-  DB_REQUIRE_PARAMS_CONN(table && cols && vals && num_cols > 0, conn, MySqlData,
-                         data, mysql, err, false);
-
-  /* Escape table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_BACKTICK, false);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return false;
-  }
-
-  /* Build INSERT statement using common helper */
-  DbInsertLists lists;
-  char *sql = db_common_build_insert_sql(escaped_table, cols, vals, num_cols,
-                                         DB_QUOTE_BACKTICK, false, &lists, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return false; /* Error already set by helper */
-  }
-
-  /* Handle case where all columns are auto_increment */
-  if (lists.num_params == 0) {
-    db_common_free_insert_lists(&lists);
-
-    if (mysql_query(data->mysql, sql) != 0) {
-      err_set(err, mysql_error(data->mysql));
-      free(sql);
-      return false;
-    }
-    free(sql);
-    return true;
-  }
-
-  MYSQL_STMT *stmt = mysql_stmt_init(data->mysql);
-  if (!stmt) {
-    free(sql);
-    db_common_free_insert_lists(&lists);
-    err_set(err, "Failed to initialize statement");
-    return false;
-  }
-
-  if (mysql_stmt_prepare(stmt, sql, strlen(sql)) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    mysql_stmt_close(stmt);
-    free(sql);
-    db_common_free_insert_lists(&lists);
-    return false;
-  }
-  free(sql);
-
-  /* Allocate bind array and value storage */
-  MYSQL_BIND *bind = safe_calloc(lists.num_params, sizeof(MYSQL_BIND));
-  long long *val_ints = safe_calloc(lists.num_params, sizeof(long long));
-  double *val_floats = safe_calloc(lists.num_params, sizeof(double));
-  my_bool *val_is_nulls = safe_calloc(lists.num_params, sizeof(my_bool));
-  unsigned long *val_lens = safe_calloc(lists.num_params, sizeof(unsigned long));
-
-  /* Bind values using column map from common helper */
-  for (size_t i = 0; i < lists.num_params; i++) {
-    size_t col_idx = lists.col_map[i];
-    mysql_bind_value(&bind[i], &vals[col_idx], &val_ints[i],
-                     &val_floats[i], &val_lens[i], &val_is_nulls[i]);
-  }
-
-  db_common_free_insert_lists(&lists);
-
-  bool success = true;
-  if (mysql_stmt_bind_param(stmt, bind) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  } else if (mysql_stmt_execute(stmt) != 0) {
-    err_set(err, mysql_stmt_error(stmt));
-    success = false;
-  }
-
-  mysql_stmt_finish(stmt, data->mysql);
-
-  free(bind);
-  free(val_ints);
-  free(val_floats);
-  free(val_is_nulls);
-  free(val_lens);
-
-  return success;
-}
-
-static char **mysql_driver_list_tables(DbConnection *conn, size_t *count,
-                                       char **err) {
-  DB_REQUIRE_PARAMS_CONN(count, conn, MySqlData, data, mysql, err, NULL);
-  *count = 0;
-
-  if (mysql_query(data->mysql, "SHOW TABLES") != 0) {
-    err_set(err, mysql_error(data->mysql));
-    return NULL;
-  }
-
-  MYSQL_RES *result = mysql_store_result(data->mysql);
-  if (!result) {
-    err_set(err, mysql_error(data->mysql));
-    return NULL;
-  }
-
-  size_t num_rows = mysql_num_rows(result);
-
-  /* Handle zero tables - return empty array (not NULL) to distinguish from
-   * error */
-  if (num_rows == 0) {
-    mysql_free_result(result);
-    char **tables = safe_calloc(1, sizeof(char *));
-    tables[0] = NULL; /* NULL-terminated empty array */
-    *count = 0;
-    return tables;
-  }
-
-  char **tables = safe_calloc(num_rows, sizeof(char *));
-
-  MYSQL_ROW row;
-  while ((row = mysql_fetch_row(result))) {
-    if (row[0]) {
-      tables[*count] = str_dup(row[0]);
-      (*count)++;
-    }
-  }
-
-  mysql_free_result(result);
-  return tables;
-}
-
-static TableSchema *mysql_driver_get_table_schema(DbConnection *conn,
-                                                  const char *table,
-                                                  char **err) {
-  DB_REQUIRE_PARAMS_CONN(table, conn, MySqlData, data, mysql, err, NULL);
-
-  /* Escape identifier to prevent SQL injection */
-  char *escaped_table = str_escape_identifier_backtick(table);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
-
-  char *sql = str_printf("DESCRIBE %s", escaped_table);
-  free(escaped_table);
-  if (!sql) {
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
-
-  if (mysql_query(data->mysql, sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
-    free(sql);
-    return NULL;
-  }
-  free(sql);
-
-  MYSQL_RES *result = mysql_store_result(data->mysql);
-  if (!result) {
-    err_set(err, mysql_error(data->mysql));
-    return NULL;
-  }
-
-  TableSchema *schema = safe_calloc(1, sizeof(TableSchema));
-
-  schema->name = str_dup(table);
-  size_t num_rows = mysql_num_rows(result);
-  schema->columns = safe_calloc(num_rows, sizeof(ColumnDef));
-
-  /* DESCRIBE returns: Field, Type, Null, Key, Default, Extra */
-  MYSQL_ROW row;
-  while ((row = mysql_fetch_row(result)) && schema->num_columns < num_rows) {
-    ColumnDef *col = &schema->columns[schema->num_columns];
-    memset(col, 0, sizeof(ColumnDef));
-
-    col->name = row[0] ? str_dup(row[0]) : NULL;
-    col->type_name = row[1] ? str_dup(row[1]) : NULL;
-    col->nullable = row[2] && (str_eq_nocase(row[2], "YES"));
-    col->primary_key = row[3] && str_eq(row[3], "PRI");
-    col->default_val = (row[4] && row[4][0] && !str_eq(row[4], "NULL"))
-                           ? str_dup(row[4])
-                           : NULL;
-    /* Extra column (row[5]) contains "auto_increment" for auto-increment cols
-     */
-    col->auto_increment = row[5] && strcasestr(row[5], "auto_increment");
-
-    /* Map type */
-    if (col->type_name) {
-      char *type_lower = str_dup(col->type_name);
-      for (char *c = type_lower; *c; c++)
-        *c = tolower((unsigned char)*c);
-
-      if (strstr(type_lower, "int") || strstr(type_lower, "serial"))
-        col->type = DB_TYPE_INT;
-      else if (strstr(type_lower, "float") || strstr(type_lower, "double") ||
-               strstr(type_lower, "decimal") || strstr(type_lower, "numeric"))
-        col->type = DB_TYPE_FLOAT;
-      else if (strstr(type_lower, "bool") || str_eq(type_lower, "tinyint(1)"))
-        col->type = DB_TYPE_BOOL;
-      else if (strstr(type_lower, "blob") || strstr(type_lower, "binary"))
-        col->type = DB_TYPE_BLOB;
-      else if (strstr(type_lower, "date") || strstr(type_lower, "time"))
-        col->type = DB_TYPE_TIMESTAMP;
-      else
-        col->type = DB_TYPE_TEXT;
-
-      free(type_lower);
-    }
-
-    schema->num_columns++;
-  }
-
-  mysql_free_result(result);
-
-  /* Get index info using SHOW INDEX */
-  escaped_table = str_escape_identifier_backtick(table);
-  if (escaped_table) {
-    sql = str_printf("SHOW INDEX FROM %s", escaped_table);
-    free(escaped_table);
-
-    if (sql && mysql_query(data->mysql, sql) == 0) {
-      MYSQL_RES *idx_result = mysql_store_result(data->mysql);
-      if (idx_result) {
-        /* Count unique index names */
-        size_t num_idx_rows = mysql_num_rows(idx_result);
-        if (num_idx_rows > 0) {
-          /* Collect unique index names first */
-          char **idx_names = safe_calloc(num_idx_rows, sizeof(char *));
-          size_t num_unique_idx = 0;
-
-          {
-            MYSQL_ROW idx_row;
-            while ((idx_row = mysql_fetch_row(idx_result))) {
-              /* Column 2 is Key_name */
-              char *idx_name = idx_row[2];
-              bool found = false;
-              for (size_t j = 0; j < num_unique_idx; j++) {
-                if (str_eq(idx_names[j], idx_name)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found && num_unique_idx < num_idx_rows) {
-                idx_names[num_unique_idx++] = idx_name;
-              }
-            }
-
-            schema->indexes = safe_calloc(num_unique_idx, sizeof(IndexDef));
-            {
-              mysql_data_seek(idx_result, 0);
-
-              for (size_t i = 0; i < num_unique_idx; i++) {
-                IndexDef *idx = &schema->indexes[schema->num_indexes];
-                memset(idx, 0, sizeof(IndexDef));
-                idx->name = str_dup(idx_names[i]);
-
-                /* Count columns for this index and collect properties */
-                mysql_data_seek(idx_result, 0);
-                size_t col_count = 0;
-                while ((idx_row = mysql_fetch_row(idx_result))) {
-                  if (str_eq(idx_row[2], idx_names[i])) {
-                    if (col_count == 0) {
-                      /* First row: get index properties */
-                      /* Column 1: Non_unique (0=unique) */
-                      idx->unique = idx_row[1] && idx_row[1][0] == '0';
-                      idx->primary = str_eq(idx_row[2], "PRIMARY");
-                      /* Column 10: Index_type */
-                      idx->type = idx_row[10] ? str_dup(idx_row[10]) : NULL;
-                    }
-                    col_count++;
-                  }
-                }
-
-                if (col_count > 0) {
-                  idx->columns = safe_calloc(col_count, sizeof(char *));
-                  mysql_data_seek(idx_result, 0);
-                  size_t c = 0;
-                  while ((idx_row = mysql_fetch_row(idx_result)) &&
-                         c < col_count) {
-                    if (str_eq(idx_row[2], idx_names[i])) {
-                      /* Column 4: Column_name */
-                      idx->columns[c++] =
-                          idx_row[4] ? str_dup(idx_row[4]) : NULL;
-                    }
-                  }
-                  idx->num_columns = c;
-                }
-
-                schema->num_indexes++;
-              }
-            }
-            free(idx_names);
-          }
-        }
-        mysql_free_result(idx_result);
-      }
-    }
-    free(sql);
-  }
-
-  /* Get foreign key info from information_schema */
-  /* Need to get database name for the query */
-  const char *db_name = data->database;
-  if (db_name) {
-    sql = str_printf(
-        "SELECT "
-        "  kcu.CONSTRAINT_NAME, "
-        "  kcu.COLUMN_NAME, "
-        "  kcu.REFERENCED_TABLE_NAME, "
-        "  kcu.REFERENCED_COLUMN_NAME, "
-        "  rc.DELETE_RULE, "
-        "  rc.UPDATE_RULE "
-        "FROM information_schema.KEY_COLUMN_USAGE kcu "
-        "JOIN information_schema.REFERENTIAL_CONSTRAINTS rc "
-        "  ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME "
-        "  AND kcu.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA "
-        "WHERE kcu.TABLE_SCHEMA = '%s' AND kcu.TABLE_NAME = '%s' "
-        "  AND kcu.REFERENCED_TABLE_NAME IS NOT NULL "
-        "ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
-        db_name, table);
-
-    if (sql && mysql_query(data->mysql, sql) == 0) {
-      MYSQL_RES *fk_result = mysql_store_result(data->mysql);
-      if (fk_result) {
-        size_t num_fk_rows = mysql_num_rows(fk_result);
-        if (num_fk_rows > 0) {
-          /* Count unique constraint names */
-          char **fk_names = safe_calloc(num_fk_rows, sizeof(char *));
-          size_t num_unique_fk = 0;
-
-          {
-            MYSQL_ROW fk_row;
-            while ((fk_row = mysql_fetch_row(fk_result))) {
-              char *fk_name = fk_row[0];
-              bool found = false;
-              for (size_t j = 0; j < num_unique_fk; j++) {
-                if (str_eq(fk_names[j], fk_name)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found && num_unique_fk < num_fk_rows) {
-                fk_names[num_unique_fk++] = fk_name;
-              }
-            }
-
-            schema->foreign_keys = safe_calloc(num_unique_fk, sizeof(ForeignKeyDef));
-            {
-              for (size_t i = 0; i < num_unique_fk; i++) {
-                ForeignKeyDef *fk =
-                    &schema->foreign_keys[schema->num_foreign_keys];
-                memset(fk, 0, sizeof(ForeignKeyDef));
-                fk->name = str_dup(fk_names[i]);
-
-                /* Count columns for this FK */
-                mysql_data_seek(fk_result, 0);
-                size_t col_count = 0;
-                while ((fk_row = mysql_fetch_row(fk_result))) {
-                  if (str_eq(fk_row[0], fk_names[i])) {
-                    if (col_count == 0) {
-                      /* First row: get FK properties */
-                      fk->ref_table = fk_row[2] ? str_dup(fk_row[2]) : NULL;
-                      fk->on_delete = fk_row[4] ? str_dup(fk_row[4]) : NULL;
-                      fk->on_update = fk_row[5] ? str_dup(fk_row[5]) : NULL;
-                    }
-                    col_count++;
-                  }
-                }
-
-                if (col_count > 0) {
-                  fk->columns = safe_calloc(col_count, sizeof(char *));
-                  fk->ref_columns = safe_calloc(col_count, sizeof(char *));
-                  mysql_data_seek(fk_result, 0);
-                  size_t c = 0;
-                  while ((fk_row = mysql_fetch_row(fk_result)) &&
-                         c < col_count) {
-                    if (str_eq(fk_row[0], fk_names[i])) {
-                      fk->columns[c] = fk_row[1] ? str_dup(fk_row[1]) : NULL;
-                      fk->ref_columns[c] =
-                          fk_row[3] ? str_dup(fk_row[3]) : NULL;
-                      c++;
-                    }
-                  }
-                  fk->num_columns = c;
-                  fk->num_ref_columns = c;
-                }
-
-                schema->num_foreign_keys++;
-              }
-            }
-            free(fk_names);
-          }
-        }
-        mysql_free_result(fk_result);
-      }
-    }
-    free(sql);
-  }
-
-  return schema;
-}
-
 /* Collect the rows of the current (streamed) result set; frees result */
 static ResultSet *mysql_collect_rows(DbConnection *conn, MySqlData *data,
-                                    MYSQL_RES *result, char **err) {
+                                    MYSQL_RES *result, bool may_cancel,
+                                    char **err) {
   ResultSet *rs = db_result_alloc_empty();
 
   /* Get column info */
@@ -1111,37 +404,10 @@ static ResultSet *mysql_collect_rows(DbConnection *conn, MySqlData *data,
   }
 
   /* Get rows (count unknown while streaming) */
-  size_t max_rows = conn->max_result_rows > 0 ? conn->max_result_rows
-                                              : (size_t)MAX_RESULT_ROWS;
-  size_t bytes = 0;
-
+  DbRowCollector rows;
+  db_rows_init(&rows, rs);
   MYSQL_ROW row;
-  size_t allocated_rows = 0;
   while ((row = mysql_fetch_row(result))) {
-    /* Stop at the row or size limit, and stop the server too: freeing a
-     * streamed result otherwise reads every remaining row */
-    if (rs->num_rows >= max_rows || bytes >= MAX_RESULT_BYTES) {
-      rs->truncated = true;
-      void *kill = mysql_driver_prepare_cancel(conn);
-      if (kill) {
-        char *kerr = NULL;
-        mysql_driver_cancel_query(conn, kill, &kerr);
-        free(kerr);
-        mysql_driver_free_cancel_handle(kill);
-      }
-      break;
-    }
-    /* Check if we need to expand the rows array */
-    if (rs->num_rows >= allocated_rows) {
-      size_t new_size = allocated_rows == 0 ? 16 : allocated_rows * 2;
-      Row *new_rows = safe_reallocarray(rs->rows, new_size, sizeof(Row));
-      /* Zero out the new rows */
-      memset(new_rows + allocated_rows, 0,
-             (new_size - allocated_rows) * sizeof(Row));
-      rs->rows = new_rows;
-      allocated_rows = new_size;
-    }
-
     unsigned long *lengths = mysql_fetch_lengths(result);
     if (!lengths) {
       /* mysql_fetch_lengths can return NULL on error */
@@ -1150,17 +416,24 @@ static ResultSet *mysql_collect_rows(DbConnection *conn, MySqlData *data,
       err_set(err, "Failed to get field lengths");
       return NULL;
     }
-
-    Row *r = &rs->rows[rs->num_rows];
-    r->cells = safe_calloc(num_fields, sizeof(DbValue));
-    r->num_cells = num_fields;
-
-    for (unsigned int i = 0; i < num_fields; i++) {
-      r->cells[i] = mysql_get_value(row, lengths, i, &fields[i]);
-      bytes += lengths[i] + 16;
+    DbValue *cells = db_rows_add(&rows, num_fields);
+    if (!cells) {
+      /* Limit reached: stop the server too (freeing a streamed result
+       * otherwise reads every remaining row), unless more statements
+       * follow: then the rest is read and dropped */
+      void *kill = may_cancel ? mysql_driver_prepare_cancel(conn) : NULL;
+      if (kill) {
+        char *kerr = NULL;
+        mysql_driver_cancel_query(conn, kill, &kerr);
+        free(kerr);
+        mysql_driver_free_cancel_handle(kill);
+      }
+      break;
     }
-
-    rs->num_rows++;
+    for (unsigned int i = 0; i < num_fields; i++) {
+      cells[i] = mysql_get_value(row, lengths, i, &fields[i]);
+      db_rows_count(&rows, lengths[i]);
+    }
   }
 
   /* A NULL row is the end, or a failure mid-stream (not after our kill) */
@@ -1184,29 +457,22 @@ static bool mysql_reopen(DbConnection *conn, MySqlData *data, char **err) {
   if (!cs) {
     return false;
   }
-  MYSQL *fresh = mysql_open(cs, 10, true, err);
+  MYSQL *fresh = mysql_open(cs, LACED_MYSQL_CONNECT_TIMEOUT_S, true, err);
   connstr_free(cs);
   if (!fresh) {
     return false;
   }
   mysql_close(data->mysql);
   data->mysql = fresh;
-  data->broken = false;
+  db_link_restored(&data->link);
   return true;
 }
 
-/* After a failed statement: was the connection itself lost? Then the next
- * statement reconnects, unless a transaction was open: its work is gone,
- * and further statements are refused until the client acknowledges with
- * ROLLBACK (carrying on would run them in autocommit on a new connection,
- * and COMMIT would "succeed" with nothing in it). */
-static void mysql_note_failure(MySqlData *data, bool had_tx) {
-  unsigned int e = mysql_errno(data->mysql);
-  if (e == CR_SERVER_GONE_ERROR || e == CR_SERVER_LOST) {
-    data->broken = true;
-    if (had_tx)
-      data->tx_lost = true;
-  }
+/* After a failed statement: was the connection itself lost? (DbLinkState
+ * decides what the next statement does) */
+static void mysql_note_failure(MySqlData *data, bool had_tx, unsigned int e) {
+  if (e == CR_SERVER_GONE_ERROR || e == CR_SERVER_LOST)
+    db_link_lost(&data->link, had_tx);
 }
 
 /* Before a statement: make sure there is a live connection to run it on.
@@ -1216,29 +482,34 @@ static bool mysql_ensure_alive(DbConnection *conn, MySqlData *data,
                                const char *sql, bool *answered, char **err) {
   *answered = false;
   time_t now = time(NULL);
-  bool idle = data->last_used != 0 && now - data->last_used > 30;
+  bool idle = data->last_used != 0 && now - data->last_used > LACED_MYSQL_IDLE_PING_S;
   data->last_used = now;
-  if (data->tx_lost) {
-    if (!db_common_sql_starts_with_word(sql, "ROLLBACK")) {
-      err_set(err, MYSQL_TX_LOST_MSG);
-      return false;
-    }
-    /* Acknowledged: nothing is left to roll back */
-    data->tx_lost = false;
-    *answered = true;
-    return mysql_reopen(conn, data, err);
-  }
-  if (!data->broken && (!idle || mysql_ping(data->mysql) == 0)) {
-    return true;
-  }
-  if (!data->broken &&
-      (data->mysql->server_status & SERVER_STATUS_IN_TRANS)) {
-    data->broken = true;
-    data->tx_lost = true;
-    err_set(err, MYSQL_TX_LOST_MSG);
+  if (!data->link.broken && idle && mysql_ping(data->mysql) != 0)
+    db_link_lost(&data->link,
+                 (data->mysql->server_status & SERVER_STATUS_IN_TRANS) != 0);
+  switch (db_link_gate(&data->link, sql, MYSQL_TX_LOST_MSG, err)) {
+  case DB_LINK_REFUSE:
     return false;
+  case DB_LINK_ACK:
+    /* Nothing is left to roll back: the ROLLBACK is answered */
+    *answered = mysql_reopen(conn, data, err);
+    return *answered;
+  case DB_LINK_RECONNECT:
+    return mysql_reopen(conn, data, err);
+  case DB_LINK_READY:
+    break;
   }
-  return mysql_reopen(conn, data, err);
+  return true;
+}
+
+/* DbDriver hook: before a statement, and before its cancel handle (the
+ * server thread id) is taken, so a reopened connection is the one KILL
+ * QUERY addresses */
+static bool mysql_driver_ensure_ready(DbConnection *conn, const char *sql,
+                                      bool *answered, char **err) {
+  *answered = false;
+  DB_REQUIRE_PARAMS_CONN(sql, conn, MySqlData, data, mysql, err, false);
+  return mysql_ensure_alive(conn, data, sql, answered, err);
 }
 
 /* Run sql and read every result it produces (CALL, multi-result statements):
@@ -1249,26 +520,27 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
                                      char **err) {
   DB_REQUIRE_PARAMS_CONN(sql, conn, MySqlData, data, mysql, err, NULL);
 
-  bool answered = false;
-  if (!mysql_ensure_alive(conn, data, sql, &answered, err)) {
-    return NULL;
-  }
-  if (answered) {
-    return db_result_alloc_empty();
-  }
   bool had_tx = (data->mysql->server_status & SERVER_STATUS_IN_TRANS) != 0;
   if (mysql_query(data->mysql, sql) != 0) {
     err_set(err, mysql_error(data->mysql));
-    mysql_note_failure(data, had_tx);
-    if (data->tx_lost)
+    mysql_note_failure(data, had_tx, mysql_errno(data->mysql));
+    if (data->link.tx_lost)
       err_set(err, MYSQL_TX_LOST_MSG);
     return NULL;
   }
 
+  /* At the row/byte limit the rest of a lone statement that only reads is
+   * killed (fast). Otherwise the rest of the result is read and dropped:
+   * later statements of the string must still run, and killing a writing
+   * statement (INSERT ... RETURNING) would undo its write while the reply
+   * reports success. */
+  bool may_cancel = lace_sql_single_statement(sql, LACE_DRIVER_MYSQL) &&
+                    lace_sql_read_only(sql, LACE_DRIVER_MYSQL);
   ResultSet *rows = NULL;
   int64_t last_affected = 0;
   bool limited = false;
   char *error = NULL;
+  unsigned int error_code = 0; /* mysql_next_result clears the client's */
   for (;;) {
     if (mysql_field_count(data->mysql) > 0) {
       /* Stream the rows (use_result), so the limits bound what is held */
@@ -1276,18 +548,20 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
       if (!result) {
         if (!limited && !error) {
           error = str_dup(mysql_error(data->mysql));
+          error_code = mysql_errno(data->mysql);
         }
       } else if (limited || error) {
         mysql_free_result(result); /* Drain */
       } else {
         char *cerr = NULL;
-        ResultSet *rs = mysql_collect_rows(conn, data, result, &cerr);
+        ResultSet *rs = mysql_collect_rows(conn, data, result, may_cancel, &cerr);
         if (!rs) {
           error = cerr ? cerr : str_dup("Failed to read result");
+          error_code = mysql_errno(data->mysql);
         } else {
           db_result_free(rows);
           rows = rs;
-          limited = rs->truncated;
+          limited = rs->truncated && may_cancel;
         }
       }
     } else if (!limited && !error) {
@@ -1297,6 +571,7 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
     if (more != 0) {
       if (more > 0 && !limited && !error) {
         error = str_dup(mysql_error(data->mysql));
+        error_code = mysql_errno(data->mysql);
       }
       break;
     }
@@ -1304,8 +579,8 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
 
   if (error) {
     db_result_free(rows);
-    mysql_note_failure(data, had_tx);
-    err_set(err, data->tx_lost ? MYSQL_TX_LOST_MSG : error);
+    mysql_note_failure(data, had_tx, error_code);
+    err_set(err, data->link.tx_lost ? MYSQL_TX_LOST_MSG : error);
     free(error);
     return NULL;
   }
@@ -1315,44 +590,6 @@ static ResultSet *mysql_driver_query(DbConnection *conn, const char *sql,
   ResultSet *rs = db_result_alloc_empty();
   rs->rows_affected = last_affected;
   return rs;
-}
-
-static ResultSet *mysql_driver_query_page(DbConnection *conn, const char *table,
-                                          size_t offset, size_t limit,
-                                          const char *order_by, bool desc,
-                                          char **err) {
-  DB_REQUIRE(table, err, NULL);
-
-  /* Escape table name */
-  char *escaped_table = db_common_escape_table(table, DB_QUOTE_BACKTICK, false);
-  if (!escaped_table) {
-    err_set(err, "Memory allocation failed");
-    return NULL;
-  }
-
-  /* Build paginated query using common helper */
-  char *sql = db_common_build_query_page_sql(escaped_table, offset, limit,
-                                             order_by, desc, DB_QUOTE_BACKTICK, err);
-  free(escaped_table);
-
-  if (!sql) {
-    return NULL; /* Error already set by helper */
-  }
-
-  ResultSet *rs = mysql_driver_query(conn, sql, err);
-  free(sql);
-
-  return rs;
-}
-
-static void mysql_driver_free_result(ResultSet *rs) { db_result_free(rs); }
-
-static void mysql_driver_free_schema(TableSchema *schema) {
-  db_schema_free(schema);
-}
-
-static void mysql_driver_free_string_list(char **list, size_t count) {
-  db_common_free_string_list(list, count);
 }
 
 static void mysql_driver_library_cleanup(void) {
@@ -1394,8 +631,6 @@ static void *mysql_driver_prepare_cancel(DbConnection *conn) {
   return handle;
 }
 
-#define MYSQL_CANCEL_TIMEOUT_SEC 3
-
 static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
                                       char **err) {
   (void)conn; /* Busy with the query on another thread; never touch it */
@@ -1411,7 +646,7 @@ static bool mysql_driver_cancel_query(DbConnection *conn, void *cancel_handle,
   ConnString *cs = connstr_parse(handle->connstr, err);
   if (!cs)
     return false;
-  MYSQL *side = mysql_open(cs, MYSQL_CANCEL_TIMEOUT_SEC, false, err);
+  MYSQL *side = mysql_open(cs, LACED_MYSQL_CANCEL_TIMEOUT_S, false, err);
   connstr_free(cs);
   if (!side)
     return false;
@@ -1450,73 +685,20 @@ static void mysql_driver_free_cancel_handle(void *cancel_handle) {
   free(handle);
 }
 
-/* Approximate row count using information_schema */
-static int64_t mysql_driver_estimate_row_count(DbConnection *conn,
-                                               const char *table, char **err) {
-  DB_REQUIRE_PARAMS_CONN(table, conn, MySqlData, data, mysql, err, -1);
-
-  /* Escape table name for query */
-  char escaped_table[256];
-  size_t table_len = strlen(table);
-  /* mysql_real_escape_string can expand to 2*len+1 in worst case */
-  if (table_len * 2 + 1 > sizeof(escaped_table)) {
-    err_set(err, "Table name too long");
-    return -1;
-  }
-  mysql_real_escape_string(data->mysql, escaped_table, table, table_len);
-
-  /* Query information_schema for approximate row count */
-  char *sql =
-      str_printf("SELECT TABLE_ROWS FROM information_schema.TABLES "
-                 "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s'",
-                 escaped_table);
-  if (!sql) {
-    err_set(err, "Memory allocation failed");
-    return -1;
-  }
-
-  if (mysql_query(data->mysql, sql) != 0) {
-    err_set(err, mysql_error(data->mysql));
-    free(sql);
-    return -1;
-  }
-  free(sql);
-
-  MYSQL_RES *result = mysql_store_result(data->mysql);
-  if (!result) {
-    err_set(err, mysql_error(data->mysql));
-    return -1;
-  }
-
-  int64_t count = -1;
-  MYSQL_ROW row = mysql_fetch_row(result);
-  if (row && row[0]) {
-    errno = 0;
-    char *endptr;
-    long long parsed = strtoll(row[0], &endptr, 10);
-    if (errno == 0 && endptr != row[0] && parsed >= 0) {
-      count = parsed;
-    }
-  }
-
-  mysql_free_result(result);
-  return count;
-}
-
 static void mysql_driver_connection_lost(DbConnection *conn) {
   MySqlData *data = conn ? conn->driver_data : NULL;
   if (!data || !data->mysql)
     return;
-  if (!data->broken && (data->mysql->server_status & SERVER_STATUS_IN_TRANS))
-    data->tx_lost = true;
-  data->broken = true;
+  db_link_lost(&data->link,
+               !data->link.broken &&
+                   (data->mysql->server_status & SERVER_STATUS_IN_TRANS));
 }
 
 static int mysql_driver_transaction_state(DbConnection *conn) {
   MySqlData *data = conn ? conn->driver_data : NULL;
-  if (data && data->tx_lost)
+  if (data && data->link.tx_lost)
     return 1; /* Until ROLLBACK acknowledges the loss */
-  return data && data->mysql && !data->broken &&
+  return data && data->mysql && !data->link.broken &&
                  (data->mysql->server_status & SERVER_STATUS_IN_TRANS)
              ? 1
              : 0;

@@ -23,9 +23,18 @@ void async_cancel_and_wait(AsyncOperation *op) {
   if (!op) {
     return;
   }
+  /* A cancel that reaches the daemon before the worker's statement does
+   * stops nothing, and the statement may run unbounded: repeat it while
+   * waiting. Only this connection's statement can be running meanwhile
+   * (the main thread is here, and a connection runs one at a time). */
+  int waited_ms = 0;
   async_cancel(op);
   while (async_poll(op) == ASYNC_STATE_RUNNING) {
     async_wait(op, 50);
+    waited_ms += 50;
+    if (waited_ms % 500 == 0) {
+      async_cancel(op);
+    }
   }
 }
 
@@ -35,78 +44,77 @@ static void *async_worker_thread(void *arg) {
 
   /* state is already RUNNING (set by async_start before the thread exists) */
 
-  /* Execute the operation */
+  /* Execute the operation, unless it was cancelled before it started (a
+   * cancel sent to the daemon now would find nothing to stop) */
   char *err = NULL;
 
-  switch (op->op_type) {
-  case ASYNC_OP_CONNECT:
-    op->result = db_connect(op->client, op->connstr, &err);
-    break;
+  if (!op->cancel_requested) {
+    switch (op->op_type) {
+    case ASYNC_OP_CONNECT:
+      op->result = db_connect(op->client, op->connstr, &err);
+      break;
 
-  case ASYNC_OP_LIST_TABLES:
-    op->result_count = 0; /* Initialize in case db_list_tables fails early */
-    op->result = db_list_tables(op->conn, &op->result_count, &err);
-    break;
+    case ASYNC_OP_LIST_TABLES:
+      op->result_count = 0; /* Initialize in case db_list_tables fails early */
+      op->result = db_list_tables(op->conn, &op->result_count, &err);
+      break;
 
-  case ASYNC_OP_GET_SCHEMA:
-    op->result = db_get_table_schema(op->conn, op->table_name, &err);
-    break;
+    case ASYNC_OP_GET_SCHEMA:
+      op->result = db_get_table_schema(op->conn, op->table_name, &err);
+      break;
 
-  case ASYNC_OP_QUERY_PAGE:
-    op->result = db_query_page(op->conn, op->table_name, op->offset, op->limit,
-                               op->order_by, op->desc, &err);
-    break;
+    case ASYNC_OP_QUERY_PAGE:
+      op->result = db_query_page(op->conn, op->table_name, op->offset, op->limit,
+                                 op->order_by, op->desc, &err);
+      break;
 
-  case ASYNC_OP_QUERY_PAGE_WHERE:
-    op->result =
-        db_query_page_where(op->conn, op->table_name, op->offset, op->limit,
-                            op->where_clause, op->order_by, op->desc, &err);
-    break;
+    case ASYNC_OP_QUERY_PAGE_WHERE:
+      op->result =
+          db_query_page_where(op->conn, op->table_name, op->offset, op->limit,
+                              op->where_clause, op->order_by, op->desc, &err);
+      break;
 
-  case ASYNC_OP_QUERY_KEYSET: {
-    /* Keyset (cursor-based) pagination */
-    LaceResult *result = NULL;
-    int rc = lace_query_keyset(op->conn->client, op->conn->conn_id,
-                                op->table_name, op->keyset, op->keyset_forward,
-                                op->where_clause, op->limit, &result);
-    if (rc == LACE_OK) {
-      op->result = result;
-    } else {
-      err = str_dup(lace_client_error(op->conn->client));
+    case ASYNC_OP_COUNT_ROWS: {
+      size_t count = 0;
+      bool approximate = op->use_approximate; /* in: estimate allowed */
+      if (db_count_rows(op->conn, op->table_name, &count, &approximate, &err)) {
+        op->count = (int64_t)count;
+        op->is_approximate = approximate;
+      } else {
+        op->count = -1;
+      }
+      break;
     }
-    break;
-  }
 
-  case ASYNC_OP_COUNT_ROWS: {
-    size_t count = 0;
-    bool approximate = op->use_approximate; /* in: estimate allowed */
-    if (db_count_rows(op->conn, op->table_name, NULL, 0, &count, &approximate, &err)) {
-      op->count = (int64_t)count;
-      op->is_approximate = approximate;
-    } else {
-      op->count = -1;
+    case ASYNC_OP_COUNT_ROWS_WHERE: {
+      size_t count = 0;
+      if (db_count_rows_where(op->conn, op->table_name, op->where_clause, &count, &err)) {
+        op->count = (int64_t)count;
+      } else {
+        op->count = -1;
+      }
+      op->is_approximate = false; /* WHERE counts are always exact */
+      break;
     }
-    break;
-  }
 
-  case ASYNC_OP_COUNT_ROWS_WHERE: {
-    size_t count = 0;
-    if (db_count_rows_where(op->conn, op->table_name, op->where_clause, &count, &err)) {
-      op->count = (int64_t)count;
-    } else {
-      op->count = -1;
+    case ASYNC_OP_QUERY:
+      op->result = db_query(op->conn, op->sql, &err);
+      break;
+
+    case ASYNC_OP_EXEC:
+      op->count = db_exec(op->conn, op->sql, &err);
+      break;
     }
-    op->is_approximate = false; /* WHERE counts are always exact */
-    break;
-  }
-
-  case ASYNC_OP_QUERY:
-    op->result = db_query(op->conn, op->sql, &err);
-    break;
-
-  case ASYNC_OP_EXEC:
-    op->count = db_exec(op->conn, op->sql, &err);
-    break;
+    if ((op->op_type == ASYNC_OP_QUERY_PAGE ||
+         op->op_type == ASYNC_OP_QUERY_PAGE_WHERE) &&
+        op->reverse_rows && op->result) {
+      ResultSet *rs = op->result;
+      for (size_t i = 0; rs->rows && i < rs->num_rows / 2; i++) {
+        Row tmp = rs->rows[i];
+        rs->rows[i] = rs->rows[rs->num_rows - 1 - i];
+        rs->rows[rs->num_rows - 1 - i] = tmp;
+      }
+    }
   }
 
   /* Update state and signal completion */
@@ -123,7 +131,6 @@ static void *async_worker_thread(void *arg) {
       case ASYNC_OP_QUERY:
       case ASYNC_OP_QUERY_PAGE:
       case ASYNC_OP_QUERY_PAGE_WHERE:
-      case ASYNC_OP_QUERY_KEYSET:
         db_result_free(op->result);
         break;
       case ASYNC_OP_GET_SCHEMA:

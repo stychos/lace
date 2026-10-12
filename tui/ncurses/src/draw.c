@@ -142,11 +142,13 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 
       /* Check if this column is sorted */
       bool found = false;
+      /* Sort entries index the schema: find this result column there */
+      size_t schema_col = db_schema_column_index(params->sort_schema,
+                                                 data->columns[col].name);
       for (size_t i = 0; i < params->num_sort_entries; i++) {
-        /* Bounds check: skip invalid column indices */
-        if (params->sort_entries[i].column >= data->num_columns)
-          continue;
-        if (params->sort_entries[i].column == col) {
+        if (schema_col == SIZE_MAX)
+          break;
+        if (params->sort_entries[i].column == schema_col) {
           /* Show: arrow + direction + priority (e.g., "▲ asc, 1") */
           const char *arrow = (params->sort_entries[i].direction == SORT_ASC)
                                   ? "\xE2\x96\xB2"  /* ▲ UTF-8 */
@@ -246,10 +248,8 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
         }
       } else if (is_selected) {
         /* Check if this column is a primary key */
-        bool is_pk_col = false;
-        if (effective_schema && col < effective_schema->num_columns) {
-          is_pk_col = effective_schema->columns[col].primary_key;
-        }
+        size_t sc = db_schema_column_index(effective_schema, data->columns[col].name);
+        bool is_pk_col = sc != SIZE_MAX && effective_schema->columns[sc].primary_key;
 
         /* Use reverse video for PK on marked row to show white text */
         if (is_pk_col && is_marked_row) {
@@ -279,10 +279,8 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
       } else {
         DbValue *val = &r->cells[col];
         /* Check if this column is a primary key */
-        bool is_pk_col = false;
-        if (effective_schema && col < effective_schema->num_columns) {
-          is_pk_col = effective_schema->columns[col].primary_key;
-        }
+        size_t sc = db_schema_column_index(effective_schema, data->columns[col].name);
+        bool is_pk_col = sc != SIZE_MAX && effective_schema->columns[sc].primary_key;
 
         if (val->is_null) {
           wattron(win, COLOR_PAIR(COLOR_NULL));
@@ -345,22 +343,22 @@ void tui_draw_header(TuiState *state) {
   wbkgd(state->header_win, COLOR_PAIR(COLOR_HEADER));
 
   /* Draw connection info: driver://host:port/database */
-  if (state->conn) {
+  if (TUI_CONN(state)) {
     int x = 1;
 
     /* Driver name */
-    if (state->conn->driver && state->conn->driver->name) {
-      mvwprintw(state->header_win, 0, x, "%s://", state->conn->driver->name);
-      x += (int)strlen(state->conn->driver->name) + 3;
+    if (TUI_CONN(state)->driver && TUI_CONN(state)->driver->name) {
+      mvwprintw(state->header_win, 0, x, "%s://", TUI_CONN(state)->driver->name);
+      x += (int)strlen(TUI_CONN(state)->driver->name) + 3;
     }
 
     /* Host (for network databases) or just database path (for SQLite) */
-    if (state->conn->host && state->conn->host[0]) {
-      mvwprintw(state->header_win, 0, x, "%s", state->conn->host);
-      x += (int)strlen(state->conn->host);
-      if (state->conn->port > 0) {
-        int port_len = snprintf(NULL, 0, ":%d", state->conn->port);
-        mvwprintw(state->header_win, 0, x, ":%d", state->conn->port);
+    if (TUI_CONN(state)->host && TUI_CONN(state)->host[0]) {
+      mvwprintw(state->header_win, 0, x, "%s", TUI_CONN(state)->host);
+      x += (int)strlen(TUI_CONN(state)->host);
+      if (TUI_CONN(state)->port > 0) {
+        int port_len = snprintf(NULL, 0, ":%d", TUI_CONN(state)->port);
+        mvwprintw(state->header_win, 0, x, ":%d", TUI_CONN(state)->port);
         x += port_len;
       }
       mvwprintw(state->header_win, 0, x, "/");
@@ -368,8 +366,8 @@ void tui_draw_header(TuiState *state) {
     }
 
     /* Database name */
-    if (state->conn->database) {
-      mvwprintw(state->header_win, 0, x, "%s", state->conn->database);
+    if (TUI_CONN(state)->database) {
+      mvwprintw(state->header_win, 0, x, "%s", TUI_CONN(state)->database);
     }
   }
 
@@ -527,8 +525,8 @@ static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
   int row_y = overlay_y + 1;
 
   /* Use the table's scroll_col for horizontal alignment */
-  VmTable *widget = state->vm_table;
-  size_t scroll_col = (widget && widget->tab) ? widget->tab->scroll_col : 0;
+  Tab *overlay_tab = TUI_TAB(state);
+  size_t scroll_col = overlay_tab ? overlay_tab->scroll_col : 0;
 
   /* Draw cells aligned with the main table */
   int x = params->start_x + 1;
@@ -557,6 +555,14 @@ static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
   }
 }
 
+/* Print text centered on row y, clipped to the window width (UTF-8 aware) */
+static void draw_centered_clip(WINDOW *win, int y, int win_cols,
+                               const char *text) {
+  int width = utf8_width(text, strlen(text));
+  int x = width < win_cols ? (win_cols - width) / 2 : 0;
+  tui_print_clip(win, y, x, win_cols - x, text);
+}
+
 /* ============================================================================
  * Table Drawing
  * ============================================================================
@@ -574,7 +580,7 @@ void tui_draw_table(TuiState *state) {
 
   /* Calculate filters panel height and draw if visible */
   int filters_height = 0;
-  if (state->filters_visible) {
+  if (tui_filters_visible(state)) {
     filters_height = tui_get_filters_panel_height(state);
     tui_draw_filters_panel(state);
   }
@@ -596,13 +602,13 @@ void tui_draw_table(TuiState *state) {
     table_vm_update_column_widths(widget);
   }
 
-  /* Read view state from TableWidget (source of truth) */
+  /* Column widths from the viewmodel; cursor and scroll from the tab */
   int *col_widths = widget ? widget->col_widths : tab->col_widths;
   size_t num_col_widths = widget ? widget->num_col_widths : tab->num_col_widths;
-  size_t cursor_row = (widget && widget->tab) ? widget->tab->cursor_row : 0;
-  size_t cursor_col = (widget && widget->tab) ? widget->tab->cursor_col : 0;
-  size_t scroll_row = (widget && widget->tab) ? widget->tab->scroll_row : 0;
-  size_t scroll_col = (widget && widget->tab) ? widget->tab->scroll_col : 0;
+  size_t cursor_row = tab->cursor_row;
+  size_t cursor_col = tab->cursor_col;
+  size_t scroll_row = tab->scroll_row;
+  size_t scroll_col = tab->scroll_col;
 
   bool is_editing = state->editing;
   char *edit_buffer = state->edit_buffer;
@@ -612,19 +618,15 @@ void tui_draw_table(TuiState *state) {
   if (tab && tab->table_error) {
     int center_y = filters_height + (win_rows - filters_height) / 2;
     wattron(state->main_win, COLOR_PAIR(COLOR_ERROR_TEXT) | A_BOLD);
-    const char *msg1 = "Failed to load table:";
-    mvwprintw(state->main_win, center_y - 2, (win_cols - (int)strlen(msg1)) / 2,
-              "%s", msg1);
+    draw_centered_clip(state->main_win, center_y - 2, win_cols,
+                       "Failed to load table:");
     wattroff(state->main_win, A_BOLD);
-    mvwprintw(state->main_win, center_y - 1,
-              (win_cols - (int)strlen(tab->table_name)) / 2, "%s",
-              tab->table_name ? tab->table_name : "(unknown)");
+    draw_centered_clip(state->main_win, center_y - 1, win_cols,
+                       tab->table_name ? tab->table_name : "(unknown)");
 
-    /* Show actual error message (truncated if needed) */
-    char err_display[80];
-    snprintf(err_display, sizeof(err_display), "%.78s", tab->table_error);
-    mvwprintw(state->main_win, center_y + 1,
-              (win_cols - (int)strlen(err_display)) / 2, "%s", err_display);
+    /* Show actual error message (clipped to the window) */
+    draw_centered_clip(state->main_win, center_y + 1, win_cols,
+                       tab->table_error);
     wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR_TEXT));
 
     wattron(state->main_win, A_DIM);
@@ -633,8 +635,7 @@ void tui_draw_table(TuiState *state) {
     snprintf(hint, sizeof(hint), "Press [%s] to close this tab",
              close_key ? close_key : "-");
     free(close_key);
-    mvwprintw(state->main_win, center_y + 3, (win_cols - (int)strlen(hint)) / 2,
-              "%s", hint);
+    draw_centered_clip(state->main_win, center_y + 3, win_cols, hint);
     wattroff(state->main_win, A_DIM);
     wrefresh(state->main_win);
     return;
@@ -660,7 +661,7 @@ void tui_draw_table(TuiState *state) {
                            .cursor_col = cursor_col,
                            .scroll_row = scroll_row,
                            .scroll_col = scroll_col,
-                           .selection_offset = (widget && widget->tab) ? widget->tab->loaded_offset : 0,
+                           .selection_offset = tab->loaded_offset,
                            .is_focused = !tui_sidebar_focused(state) &&
                                          !tui_filters_focused(state),
                            .is_editing = is_editing,
@@ -668,7 +669,8 @@ void tui_draw_table(TuiState *state) {
                            .edit_pos = edit_pos,
                            .show_header_line = true,
                            .sort_entries = tab ? tab->sort_entries : NULL,
-                           .num_sort_entries = tab ? tab->num_sort_entries : 0};
+                           .num_sort_entries = tab ? tab->num_sort_entries : 0,
+                           .sort_schema = tab ? tab->schema : NULL};
 
   tui_draw_result_grid(state, &params);
 
@@ -766,12 +768,12 @@ void tui_draw_connection_tab(TuiState *state) {
  * invisible */
 static void draw_status_position(TuiState *state, int right_pos, const char *pos) {
   const char *tx = "";
-  if (state->conn && state->conn->transaction_lost) {
+  if (TUI_CONN(state) && TUI_CONN(state)->transaction_lost) {
     tx = "[TX LOST] ";
-  } else if (state->conn && state->conn->in_transaction &&
-             state->conn->transaction_failed) {
+  } else if (TUI_CONN(state) && TUI_CONN(state)->in_transaction &&
+             TUI_CONN(state)->transaction_failed) {
     tx = "[TX FAILED] ";
-  } else if (state->conn && state->conn->in_transaction) {
+  } else if (TUI_CONN(state) && TUI_CONN(state)->in_transaction) {
     tx = "[TX] ";
   }
   char text[160];
@@ -785,6 +787,28 @@ static void draw_status_position(TuiState *state, int right_pos, const char *pos
  * Status Bar Drawing
  * ============================================================================
  */
+
+/* Status bar, left: name, type and flags of a column, clipped to the bar */
+static void draw_column_info(TuiState *state, const char *prefix,
+                             const ColumnDef *col) {
+  StringBuilder *sb = sb_new(128);
+  sb_printf(sb, "%s%s", prefix, col->name ? col->name : "?");
+  if (col->type_name)
+    sb_printf(sb, " : %s", col->type_name);
+  if (col->primary_key)
+    sb_append(sb, " [PK]");
+  if (col->auto_increment)
+    sb_append(sb, " [AI]");
+  if (!col->nullable)
+    sb_append(sb, " NOT NULL");
+  if (col->default_val)
+    sb_printf(sb, " DEFAULT %s", col->default_val);
+  char *info = sb_finish(sb);
+  if (info) {
+    tui_print_clip(state->status_win, 0, 1, state->term_cols - 2, info);
+    free(info);
+  }
+}
 
 void tui_draw_status(TuiState *state) {
   if (!state || !state->status_win || !state->status_visible)
@@ -842,95 +866,21 @@ void tui_draw_status(TuiState *state) {
     /* Use schema column if found, otherwise use result column */
     ColumnDef *display_col = schema_col ? schema_col : col;
 
-    /* Build column info string */
-    char info[256];
-    int pos = 0;
-
-    /* Column name */
-    pos += snprintf(info + pos, sizeof(info) - pos, "%s",
-                    display_col->name ? display_col->name : "?");
-
-    /* Type */
-    if (display_col->type_name) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " : %s",
-                      display_col->type_name);
-    }
-
-    /* Flags */
-    if (display_col->primary_key) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " [PK]");
-    }
-    if (!display_col->nullable) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " NOT NULL");
-    }
-    if (display_col->default_val) {
-      snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s",
-               display_col->default_val);
-    }
-
-    mvwprintw(state->status_win, 0, 1, "%s", info);
+    draw_column_info(state, "", display_col);
   } else if (state->adding_row && tab && tab->schema &&
              state->new_row_cursor_col < tab->schema->num_columns) {
     /* Add-row mode: show column info for current cursor position */
     ColumnDef *col = &tab->schema->columns[state->new_row_cursor_col];
 
-    /* Build column info string */
-    char info[256];
-    int pos = 0;
-
-    /* Column name */
-    pos += snprintf(info + pos, sizeof(info) - pos, "[+] %s",
-                    col->name ? col->name : "?");
-
-    /* Type */
-    if (col->type_name) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " : %s", col->type_name);
+    draw_column_info(state, "[+] ", col);
+  } else if (tab && tab->schema && widget && tab->data &&
+             tab->cursor_col < tab->data->num_columns) {
+    /* The cursor is on a result column: its schema column by name */
+    size_t sc = db_schema_column_index(tab->schema,
+                                       tab->data->columns[tab->cursor_col].name);
+    if (sc != SIZE_MAX) {
+      draw_column_info(state, "", &tab->schema->columns[sc]);
     }
-
-    /* Flags */
-    if (col->primary_key) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " [PK]");
-    }
-    if (col->auto_increment) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " [AI]");
-    }
-    if (!col->nullable) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " NOT NULL");
-    }
-    if (col->default_val) {
-      snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s", col->default_val);
-    }
-
-    mvwprintw(state->status_win, 0, 1, "%s", info);
-  } else if (tab && tab->schema && widget &&
-             tab->cursor_col < tab->schema->num_columns) {
-    ColumnDef *col = &tab->schema->columns[tab->cursor_col];
-
-    /* Build column info string */
-    char info[256];
-    int pos = 0;
-
-    /* Column name */
-    pos += snprintf(info + pos, sizeof(info) - pos, "%s",
-                    col->name ? col->name : "?");
-
-    /* Type */
-    if (col->type_name) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " : %s", col->type_name);
-    }
-
-    /* Flags */
-    if (col->primary_key) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " [PK]");
-    }
-    if (!col->nullable) {
-      pos += snprintf(info + pos, sizeof(info) - pos, " NOT NULL");
-    }
-    if (col->default_val) {
-      snprintf(info + pos, sizeof(info) - pos, " DEFAULT %s", col->default_val);
-    }
-
-    mvwprintw(state->status_win, 0, 1, "%s", info);
   }
 
   /* Center: status/error message */
@@ -958,7 +908,9 @@ void tui_draw_status(TuiState *state) {
   if (query_results_active) {
     /* Query results row position */
     char pos[64];
-    if (tab->query_paginated) {
+    if (tab->query_results->num_rows == 0) {
+      snprintf(pos, sizeof(pos), "No rows");
+    } else if (tab->query_paginated) {
       /* Paginated: show actual row number in total dataset ("N+" while the
        * total is still being counted) */
       size_t actual_row = tab->query_loaded_offset + tab->query_result_row + 1;
@@ -980,6 +932,8 @@ void tui_draw_status(TuiState *state) {
     size_t actual_row = tab->loaded_offset + tab->cursor_row + 1;
     size_t total =
         tab->total_rows > 0 ? tab->total_rows : tab->data->num_rows;
+    if (tab->data->num_rows == 0)
+      actual_row = 0; /* "Row 0/0": nothing under the cursor */
     /* Show ~ prefix for approximate counts */
     bool approx = tab->row_count_approximate;
     bool filtered = has_active_filters(tab);
@@ -991,8 +945,8 @@ void tui_draw_status(TuiState *state) {
                total);
     }
     draw_status_position(state, right_pos, pos);
-  } else if (state->conn &&
-             (state->conn->in_transaction || state->conn->transaction_lost)) {
+  } else if (TUI_CONN(state) &&
+             (TUI_CONN(state)->in_transaction || TUI_CONN(state)->transaction_lost)) {
     draw_status_position(state, right_pos, "");
   }
 
@@ -1001,500 +955,4 @@ void tui_draw_status(TuiState *state) {
   }
 
   wrefresh(state->status_win);
-}
-
-/* ============================================================================
- * Mouse Event Handling
- * ============================================================================
- */
-
-bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
-  if (!event || event->type != UI_EVENT_MOUSE)
-    return false;
-
-  int mouse_y = event->mouse.y;
-  int mouse_x = event->mouse.x;
-  bool is_double = (event->mouse.action == UI_MOUSE_DOUBLE_CLICK);
-  bool is_click = (event->mouse.action == UI_MOUSE_CLICK);
-  bool is_scroll_up = (event->mouse.button == UI_MOUSE_SCROLL_UP);
-  bool is_scroll_down = (event->mouse.button == UI_MOUSE_SCROLL_DOWN);
-
-  /* Determine click location */
-  int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
-
-  /* Handle scroll wheel - scroll relative to cursor */
-  if (is_scroll_up || is_scroll_down) {
-    /* Only scroll in main area */
-    if (mouse_x >= sidebar_width) {
-      int scroll_amount = 3; /* Scroll 3 rows at a time */
-
-      /* Check if we're in a query tab with results */
-      Tab *scroll_tab = TUI_TAB(state);
-      if (scroll_tab && scroll_tab->type == TAB_TYPE_QUERY &&
-          scroll_tab->query_results &&
-          scroll_tab->query_results->num_rows > 0) {
-        /* Calculate results area position */
-        int win_rows = state->term_rows - 4;
-        int editor_height = (win_rows - 1) * 3 / 10;
-        if (editor_height < 3)
-          editor_height = 3;
-        int results_start_y = 2 + editor_height + 1;
-
-        if (mouse_y >= results_start_y) {
-          /* Scroll query results using helper that handles pagination */
-          UITabState *scroll_ui = TUI_TAB_UI(state);
-          if (scroll_ui) {
-            scroll_ui->query_focus_results = true;
-            scroll_ui->query_unfocused = false;
-          }
-          int delta = is_scroll_up ? -scroll_amount : scroll_amount;
-          tui_query_scroll_results(state, delta);
-          tui_set_sidebar_focused(state, false);
-          return true;
-        }
-      }
-
-      /* Handle table data scrolling via VmTable */
-      VmTable *scroll_vm = tui_vm_table(state);
-      if (scroll_vm) {
-        size_t cursor_row, cursor_col;
-        table_vm_get_cursor(scroll_vm, &cursor_row, &cursor_col);
-        size_t scroll_row, scroll_col;
-        table_vm_get_scroll(scroll_vm, &scroll_row, &scroll_col);
-        size_t loaded_rows = table_vm_row_count(scroll_vm);
-
-        if (is_scroll_up) {
-          /* Scroll up - move cursor up */
-          if (cursor_row >= (size_t)scroll_amount) {
-            cursor_row -= scroll_amount;
-          } else {
-            cursor_row = 0;
-          }
-        } else {
-          /* Scroll down - move cursor down */
-          cursor_row += scroll_amount;
-          if (cursor_row >= loaded_rows) {
-            cursor_row = loaded_rows > 0 ? loaded_rows - 1 : 0;
-          }
-        }
-
-        /* Adjust scroll to keep cursor visible using layout info */
-        LayoutInfo layout = tui_get_layout_info(state);
-        int visible_rows = layout.visible_rows;
-        if (cursor_row < scroll_row) {
-          scroll_row = cursor_row;
-        } else if (cursor_row >= scroll_row + (size_t)visible_rows) {
-          scroll_row = cursor_row - visible_rows + 1;
-        }
-
-        /* Update via viewmodel */
-        table_vm_set_cursor(scroll_vm, cursor_row, cursor_col);
-        table_vm_set_scroll(scroll_vm, scroll_row, scroll_col);
-
-        /* Check if we need to load more rows (pagination) */
-        tui_check_load_more(state);
-
-        tui_set_sidebar_focused(state, false);
-        tui_set_filters_focused(state, false);
-      }
-    }
-    return true;
-  }
-
-  if (!is_click && !is_double)
-    return false;
-
-  /* Check if click is on tab bar (row 1) */
-  if (mouse_y == 1 && TUI_NUM_WORKSPACES(state) > 0) {
-    /* If currently editing, save the edit first */
-    if (state->editing) {
-      tui_confirm_edit(state);
-    }
-
-    /* Calculate which tab was clicked based on x position */
-    Workspace *click_ws = TUI_WORKSPACE(state);
-    if (!click_ws)
-      return true;
-
-    int x = 0;
-    for (size_t i = 0; i < click_ws->num_tabs; i++) {
-      Tab *click_tab = &click_ws->tabs[i];
-      if (!click_tab->active)
-        continue;
-
-      const char *name = click_tab->table_name ? click_tab->table_name : "?";
-      int tab_width = (int)strlen(name) + 4; /* " name  " with padding */
-
-      if (mouse_x >= x && mouse_x < x + tab_width) {
-        if (is_double) {
-          /* Double-click: close the tab */
-          Tab *target_tab = &click_ws->tabs[i];
-
-          /* Check if query tab has content */
-          if (target_tab->type == TAB_TYPE_QUERY &&
-              ((target_tab->query_text && target_tab->query_len > 0) ||
-               target_tab->query_results)) {
-            /* Ask for confirmation */
-            if (!tui_show_confirm_dialog(
-                    state, "Close query tab with unsaved content?")) {
-              return true; /* User cancelled */
-            }
-          }
-
-          /* Switch to tab first if not current, then close */
-          if (i != click_ws->current_tab) {
-            tab_switch(state, i);
-          }
-          tab_close(state);
-          tui_set_sidebar_focused(state, false);
-          tui_set_filters_focused(state, false);
-        } else {
-          /* Single click: switch to tab */
-          if (i != click_ws->current_tab) {
-            tab_switch(state, i);
-            tui_set_sidebar_focused(state, false);
-            tui_set_filters_focused(state, false);
-          }
-        }
-        return true;
-      }
-
-      x += tab_width;
-      if (x > state->term_cols)
-        break;
-    }
-    return true; /* Clicked on tab bar but not on a specific tab */
-  }
-
-  /* Check if click is in sidebar */
-  if (state->sidebar_visible && mouse_x < sidebar_width) {
-    /* If currently editing, save the edit first */
-    if (state->editing) {
-      tui_confirm_edit(state);
-    }
-
-    /* Sidebar layout (inside sidebar_win which starts at screen y=2):
-       row 0 = border+title, row 1 = filter, row 2 = separator, row 3+ = table
-       list */
-    int sidebar_row = mouse_y - 2; /* Convert to sidebar_win coordinates */
-
-    /* Validate sidebar_row is non-negative before use */
-    if (sidebar_row < 0) {
-      return true;
-    }
-
-    /* Click on filter field (row 1 in sidebar_win = screen row 2) */
-    if (sidebar_row == 1) {
-      tui_set_sidebar_focused(state, true);
-      state->sidebar_filter_active = true;
-      tui_set_filters_focused(state, false);
-      return true;
-    }
-
-    /* Clicking elsewhere in sidebar deactivates filter */
-    state->sidebar_filter_active = false;
-    tui_set_filters_focused(state, false);
-
-    /* Click on table list */
-    int list_start_y = 3; /* First table entry row in sidebar window */
-    int clicked_row = sidebar_row - list_start_y;
-
-    if (clicked_row >= 0) {
-      size_t filtered_count = tui_count_filtered_tables(state);
-      char **tables = TUI_TABLES(state);
-      size_t num_tables = TUI_NUM_TABLES(state);
-
-      size_t target_idx = tui_sidebar_scroll(state) + (size_t)clicked_row;
-      if (target_idx < filtered_count) {
-        /* Find the actual table index */
-        size_t actual_idx = tui_get_filtered_table_index(state, target_idx);
-        if (actual_idx < num_tables && tables) {
-          /* Update sidebar highlight */
-          tui_set_sidebar_highlight(state, target_idx);
-          tui_set_sidebar_focused(state, true);
-
-          if (is_double) {
-            /* Double-click: always open in new tab */
-            tab_create(state, actual_idx);
-            tui_set_sidebar_focused(state, false);
-          } else {
-            /* Single click: change current tab's table or switch to existing */
-            Workspace *curr_ws = TUI_WORKSPACE(state);
-            Tab *curr_tab = TUI_TAB(state);
-            if (curr_ws && curr_tab) {
-              if (curr_tab->type == TAB_TYPE_QUERY) {
-                /* Query tab active - check if table tab already exists */
-                bool found = false;
-                for (size_t i = 0; i < curr_ws->num_tabs; i++) {
-                  Tab *t = &curr_ws->tabs[i];
-                  if (t->type == TAB_TYPE_TABLE &&
-                      t->table_index == actual_idx) {
-                    /* Found existing tab - switch to it */
-                    tab_switch(state, i);
-                    found = true;
-                    break;
-                  }
-                }
-                if (!found) {
-                  /* No existing tab - create new one */
-                  tab_create(state, actual_idx);
-                }
-                tui_set_sidebar_focused(state, false);
-              } else if (curr_tab->type == TAB_TYPE_CONNECTION) {
-                /* Connection tab active - convert to table tab */
-                free(curr_tab->table_name);
-                curr_tab->table_name = str_dup(tables[actual_idx]);
-                curr_tab->type = TAB_TYPE_TABLE;
-                curr_tab->table_index = actual_idx;
-
-                /* Tab data will be loaded by tui_load_table_data */
-                tui_set_sidebar_highlight(state, actual_idx);
-
-                /* Update sidebar last position */
-                state->sidebar_last_position = actual_idx;
-
-                tui_load_table_data(state, tables[actual_idx]);
-                tui_set_sidebar_focused(state, false);
-              } else if (curr_tab->table_index != actual_idx) {
-                /* Table tab - update current tab with new table */
-                /* Update table name safely (copy first to avoid use-after-free
-                 * if pointers were ever aliased) */
-                char *new_name = str_dup(tables[actual_idx]);
-                free(curr_tab->table_name);
-                curr_tab->table_name = new_name;
-                curr_tab->table_index = actual_idx;
-                /* Clear filters when switching tables */
-                filters_clear(&curr_tab->filters);
-                /* Load new table data */
-                tui_load_table_data(state, tables[actual_idx]);
-              }
-            } else {
-              /* No tabs yet - create first one */
-              tab_create(state, actual_idx);
-            }
-          }
-          return true;
-        }
-      }
-    }
-    return true;
-  }
-
-  /* Check if click is in query tab area */
-  Tab *query_click_tab = TUI_TAB(state);
-  UITabState *query_click_ui = TUI_TAB_UI(state);
-  if (mouse_x >= sidebar_width && query_click_tab && query_click_ui &&
-      query_click_tab->type == TAB_TYPE_QUERY) {
-    state->sidebar_filter_active = false;
-    tui_set_sidebar_focused(state, false);
-    tui_set_filters_focused(state, false);
-
-    /* If currently editing query results, save the edit first */
-    if (query_click_ui->query_result_editing) {
-      tui_query_confirm_result_edit(state);
-    }
-
-    /* Get actual main window dimensions */
-    int main_win_rows, main_win_cols;
-    getmaxyx(state->main_win, main_win_rows, main_win_cols);
-
-    /* Calculate query view layout */
-    int win_rows = main_win_rows;
-    int editor_height = (win_rows - 1) * 3 / 10; /* 30% for editor */
-    if (editor_height < 3)
-      editor_height = 3;
-    /* Grid starts at results_start = editor_height + 1 (window coords)
-     * In screen coords: 2 + editor_height + 1 (main_win starts at y=2)
-     * Grid layout: column headers (1 row) + separator (1 row) + data */
-    int results_start_y = 2 + editor_height + 1; /* screen coords */
-    int results_data_y =
-        results_start_y + 2; /* After col headers + separator */
-
-    if (mouse_y < results_start_y) {
-      /* Clicked in editor area */
-      query_click_ui->query_focus_results = false;
-      query_click_ui->query_unfocused = false;
-    } else if (query_click_tab->query_results &&
-               query_click_tab->query_results->num_rows > 0 &&
-               mouse_y >= results_data_y) {
-      /* Clicked in results data area */
-      query_click_ui->query_focus_results = true;
-      query_click_ui->query_unfocused = false;
-
-      /* Calculate which row was clicked */
-      int clicked_row = mouse_y - results_data_y;
-      size_t target_row =
-          query_click_tab->query_result_scroll_row + (size_t)clicked_row;
-
-      if (target_row < query_click_tab->query_results->num_rows) {
-        /* Calculate which column was clicked */
-        int rel_x = mouse_x - sidebar_width;
-        int x_pos = 1;
-        size_t target_col = query_click_tab->query_result_scroll_col;
-
-        for (size_t col = query_click_tab->query_result_scroll_col;
-             col < query_click_tab->query_results->num_columns; col++) {
-          int width = DEFAULT_COL_WIDTH;
-          if (query_click_tab->query_result_col_widths &&
-              col < query_click_tab->query_result_num_cols) {
-            width = query_click_tab->query_result_col_widths[col];
-          }
-          if (rel_x >= x_pos && rel_x < x_pos + width) {
-            target_col = col;
-            break;
-          }
-          x_pos += width + 1;
-          if (x_pos > main_win_cols)
-            break;
-          target_col = col + 1;
-        }
-
-        if (target_col < query_click_tab->query_results->num_columns) {
-          query_click_tab->query_result_row = target_row;
-          query_click_tab->query_result_col = target_col;
-
-          /* Double-click: enter edit mode */
-          if (is_double && !query_click_ui->query_result_editing) {
-            tui_query_start_result_edit(state);
-          }
-        }
-      }
-    } else {
-      /* Clicked in results header area */
-      query_click_ui->query_focus_results = true;
-      query_click_ui->query_unfocused = false;
-    }
-    return true;
-  }
-
-  /* Check if click is in filters panel (TABLE tabs only, when filters visible)
-   */
-  Tab *filters_click_tab = TUI_TAB(state);
-  if (mouse_x >= sidebar_width && state->filters_visible && filters_click_tab &&
-      filters_click_tab->type == TAB_TYPE_TABLE) {
-    /* Main window starts at screen y=2 */
-    int rel_y = mouse_y - 2;
-    int rel_x = mouse_x - sidebar_width;
-    int filters_height = tui_get_filters_panel_height(state);
-
-    if (rel_y >= 0 && rel_y < filters_height) {
-      /* Click is in filters panel area - delegate to filters handler */
-      state->sidebar_filter_active = false;
-      tui_handle_filters_click(state, rel_x, rel_y);
-      return true;
-    }
-  }
-
-  /* Check if click is in main table area */
-  if (mouse_x >= sidebar_width) {
-    /* Connection tab: clicking main area should not unfocus sidebar */
-    Tab *main_click_tab = TUI_TAB(state);
-    if (main_click_tab && main_click_tab->type == TAB_TYPE_CONNECTION) {
-      return true; /* Ignore clicks in connection tab main area */
-    }
-
-    /* Clicking in main area deactivates sidebar filter and unfocuses panels */
-    state->sidebar_filter_active = false;
-    tui_set_sidebar_focused(state, false);
-    tui_set_filters_focused(state, false);
-
-    /* If currently editing, save the edit first */
-    if (state->editing) {
-      tui_confirm_edit(state);
-    }
-
-    /* Use VmTable for cursor/scroll access */
-    VmTable *click_vm = tui_vm_table(state);
-    if (!click_vm) {
-      return true; /* No data to select, but focus is updated */
-    }
-
-    size_t loaded_rows = table_vm_row_count(click_vm);
-    size_t num_cols = table_vm_col_count(click_vm);
-    if (loaded_rows == 0 || num_cols == 0) {
-      return true;
-    }
-
-    /* Get actual main window dimensions */
-    int table_win_rows, table_win_cols;
-    getmaxyx(state->main_win, table_win_rows, table_win_cols);
-    (void)table_win_rows;
-
-    /* Adjust coordinates relative to main window (starts at screen y=2) */
-    int rel_x = mouse_x - sidebar_width;
-    int rel_y = mouse_y - 2;
-
-    /* Calculate data start row accounting for all header elements */
-    int filters_height = 0;
-    Tab *click_tab = TUI_TAB(state);
-    if (state->filters_visible && click_tab &&
-        click_tab->type == TAB_TYPE_TABLE) {
-      filters_height = tui_get_filters_panel_height(state);
-    }
-
-    /* Data rows start after: filters panel + header line + column names +
-     * sort indicator row (if sorting) + separator */
-    int data_start_y =
-        filters_height + 3; /* +3 = header line + col names + separator */
-
-    /* Add extra row if sorting is active (sort indicator row) */
-    if (click_tab && click_tab->num_sort_entries > 0) {
-      data_start_y += 1;
-    }
-
-    int clicked_data_row = rel_y - data_start_y;
-
-    if (clicked_data_row >= 0) {
-      /* Get current scroll position */
-      size_t scroll_row, scroll_col;
-      table_vm_get_scroll(click_vm, &scroll_row, &scroll_col);
-
-      /* Calculate which row was clicked */
-      size_t target_row = scroll_row + (size_t)clicked_data_row;
-
-      if (target_row < loaded_rows) {
-        /* Calculate which column was clicked */
-        int x_pos = 1; /* Data starts at x=1 */
-        size_t target_col = scroll_col;
-
-        /* Use widget col_widths if available (same as drawing code) */
-        int *col_widths = click_vm->col_widths;
-        size_t num_col_widths = click_vm->num_col_widths;
-
-        for (size_t col = scroll_col; col < num_cols; col++) {
-          int width = (col_widths && col < num_col_widths)
-                          ? col_widths[col]
-                          : DEFAULT_COL_WIDTH;
-          /* Include separator in clickable area for preceding column */
-          if (rel_x >= x_pos && rel_x <= x_pos + width) {
-            target_col = col;
-            break;
-          }
-          x_pos += width + 1; /* +1 for separator */
-          if (x_pos > table_win_cols)
-            break;
-          target_col = col + 1;
-        }
-
-        if (target_col < num_cols) {
-          /* Update cursor position via viewmodel */
-          table_vm_set_cursor(click_vm, target_row, target_col);
-          tui_set_sidebar_focused(state, false);
-          tui_set_filters_focused(state, false);
-
-          /* Check if we need to load more rows (pagination) */
-          tui_check_load_more(state);
-
-          /* Double-click: enter edit mode */
-          if (is_double) {
-            tui_start_edit(state);
-          }
-
-          return true;
-        }
-      }
-    }
-  }
-
-  return false;
 }

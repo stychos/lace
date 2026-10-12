@@ -124,7 +124,6 @@ typedef struct {
   size_t connection_index; /* Index into app->connections[] */
 
   /* Table identification */
-  size_t table_index; /* Index into connection's tables array */
   char *table_name;   /* Table name (for display) */
   char *table_error;  /* Error message if table failed to load */
 
@@ -132,27 +131,23 @@ typedef struct {
   ResultSet *data;
   TableSchema *schema;
 
-  /* =========================================================================
-   * View state - DEPRECATED: Migrating to TableWidget
-   * These fields are kept for backwards compatibility during migration.
-   * New code should use TableWidget for cursor/scroll state.
-   * =========================================================================
-   */
-  size_t cursor_row;  /* DEPRECATED: Use TableWidget.base.state.cursor_row */
-  size_t cursor_col;  /* DEPRECATED: Use TableWidget.base.state.cursor_col */
-  size_t scroll_row;  /* DEPRECATED: Use TableWidget.base.state.scroll_row */
-  size_t scroll_col;  /* DEPRECATED: Use TableWidget.base.state.scroll_col */
+  /* View state. Tab is the single source of truth: the table viewmodel and
+   * the draw code read these through the current tab, never a copy. */
+  size_t cursor_row; /* Within the loaded window */
+  size_t cursor_col;
+  size_t scroll_row;
+  size_t scroll_col;
 
-  /* Pagination state - DEPRECATED: Migrating to TableWidget */
-  size_t total_rows;  /* DEPRECATED: Use TableWidget.total_rows */
-  size_t loaded_offset;  /* DEPRECATED: Use TableWidget.loaded_offset */
-  size_t loaded_count;   /* DEPRECATED: Use TableWidget.loaded_count */
-  bool row_count_approximate;   /* DEPRECATED: Use TableWidget.row_count_approximate */
+  /* Pagination: a sliding window of rows [loaded_offset, +loaded_count) */
+  size_t total_rows;
+  size_t loaded_offset;
+  size_t loaded_count;
+  bool row_count_approximate;   /* total_rows is a catalog estimate */
   size_t unfiltered_total_rows; /* Original row count before filtering */
 
-  /* Column widths - DEPRECATED: Migrating to TableWidget */
-  int *col_widths;      /* DEPRECATED: Use TableWidget.col_widths */
-  size_t num_col_widths;  /* DEPRECATED: Use TableWidget.num_col_widths */
+  /* Column widths restored from the session; the viewmodel measures its own */
+  int *col_widths;
+  size_t num_col_widths;
 
   /* Filters (per-table) */
   TableFilters filters;
@@ -161,28 +156,23 @@ typedef struct {
   SortEntry sort_entries[MAX_SORT_COLUMNS]; /* Sort columns in priority order */
   size_t num_sort_entries;                  /* Number of active sort columns */
 
-  /* =========================================================================
-   * Query mode fields - Migrating to QueryWidget
-   * Model data (query_text, query_results) stays in Tab.
-   * View state (cursor, scroll) moves to QueryWidget.
-   * =========================================================================
-   */
-  char *query_text;           /* Query text (model - stays) */
-  size_t query_len;           /* Text length (model - stays) */
-  size_t query_capacity;      /* Buffer capacity (model - stays) */
-  size_t query_cursor;        /* DEPRECATED: Use QueryWidget.cursor_offset */
-  size_t query_scroll_line;   /* DEPRECATED: Use QueryWidget.base.state.scroll_row */
-  size_t query_scroll_col;    /* DEPRECATED: Use QueryWidget.base.state.scroll_col */
-  ResultSet *query_results;   /* Query results (model - stays) */
-  int64_t query_affected;     /* Affected rows (model - stays) */
+  /* Query tab: editor text, results and their view state */
+  char *query_text;
+  size_t query_len;
+  size_t query_capacity;
+  size_t query_cursor; /* Byte offset in query_text */
+  size_t query_scroll_line;
+  size_t query_scroll_col;
+  ResultSet *query_results;
+  int64_t query_affected;     /* Affected rows of the last non-SELECT */
   bool query_exec_success;    /* True if last exec (non-SELECT) succeeded */
-  char *query_error;          /* Error message (model - stays) */
-  size_t query_result_row;    /* DEPRECATED: Use QueryWidget results TableWidget */
-  size_t query_result_col;    /* DEPRECATED: Use QueryWidget results TableWidget */
-  size_t query_result_scroll_row;   /* DEPRECATED: Use QueryWidget results */
-  size_t query_result_scroll_col;   /* DEPRECATED: Use QueryWidget results */
-  int *query_result_col_widths;     /* DEPRECATED: Use QueryWidget results */
-  size_t query_result_num_cols;     /* DEPRECATED: Use QueryWidget results */
+  char *query_error;
+  size_t query_result_row;    /* Results cursor, within the loaded window */
+  size_t query_result_col;
+  size_t query_result_scroll_row;
+  size_t query_result_scroll_col;
+  int *query_result_col_widths;
+  size_t query_result_num_cols;
 
   /* Query results editing - source table tracking */
   char *query_source_table;
@@ -207,6 +197,11 @@ typedef struct {
   uint64_t load_generation;
   uint64_t bg_load_generation;
 
+  /* A loaded row's key or sort column was edited: the window's edge rows
+   * no longer say where the window ends in the table's order, so the next
+   * neighbour page uses OFFSET instead of keyset. Cleared with the data. */
+  bool keyset_edge_stale;
+
   /* Unique for the life of the process (tabs[] shifts, so indices and
    * addresses do not identify a tab). Assigned by tab_init. */
   uint64_t uid;
@@ -215,9 +210,6 @@ typedef struct {
   void *bg_load_op;             /* AsyncOperation* - current background load */
   bool bg_load_forward;         /* Direction: true=forward, false=backward */
   size_t bg_load_target_offset; /* Target offset being loaded */
-
-  /* Keyset pagination state (NULL if using offset pagination) */
-  LaceKeysetState *keyset;      /* Keyset state for cursor-based pagination */
 
   /* Row selection (for bulk operations) */
   size_t *selected_rows;    /* Array of selected global row indices */
@@ -266,7 +258,6 @@ typedef struct {
   bool running;
 
   /* Page size for data loading */
-  size_t page_size;
 
   /* Connection pool (dynamic array) */
   Connection *connections;
@@ -319,7 +310,12 @@ void query_count_stop(Tab *tab);
 void tab_free_data(Tab *tab);
 Tab *workspace_current_tab(Workspace *ws);
 Tab *workspace_create_table_tab(Workspace *ws, size_t connection_index,
-                                size_t table_index, const char *table_name);
+                                const char *table_name);
+
+/* Position of a table tab's table in its connection's table list, found by
+ * name (the list can be reloaded or reordered); SIZE_MAX if it is not
+ * there (dropped, or not a table tab) */
+size_t app_tab_table_position(AppState *app, const Tab *tab);
 Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index);
 Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
                                      const char *connstr);
@@ -354,9 +350,29 @@ void filters_remove(TableFilters *f, size_t index);
 const char *filter_op_name(FilterOperator op);
 const char *filter_op_sql(FilterOperator op);
 bool filter_op_needs_value(FilterOperator op);
-char *filters_parse_in_values(const char *input, char **err);
+char *filters_parse_in_values(const char *input, const char *driver_name,
+                              char **err);
+/* "col1 ASC, col2 DESC" for the sort entries, quoted for the driver; NULL
+ * when no entry names a column of the schema. Caller frees. */
+char *filters_build_order_by(const SortEntry *entries, size_t num_entries,
+                             const TableSchema *schema,
+                             const char *driver_name);
 char *filters_build_where(TableFilters *f, TableSchema *schema,
                           const char *driver_name, char **err);
+
+/* The keyset ordering of a table tab (its sort columns, then the primary
+ * key), or NULL to page with OFFSET: keyset_paging off, no schema or
+ * primary key, or a column that cannot be a keyset boundary. Free with
+ * lace_keyset_free(). */
+LaceKeysetState *tab_page_keyset(const Tab *tab, const char *driver_name,
+                                 bool keyset_paging);
+
+/* ORDER BY body for every page of a table tab (NULL: none). With keyset
+ * paging the primary key follows the sort columns, so OFFSET pages and
+ * keyset pages agree on every row's position. Every page query of a table
+ * tab, session restore included, must use this. Caller frees. */
+char *tab_page_order_by(const Tab *tab, const char *driver_name,
+                        bool keyset_paging);
 
 /* ============================================================================
  * Row Selection Operations
@@ -371,9 +387,6 @@ bool tab_is_row_selected(Tab *tab, size_t global_row);
 
 /* Clear all selections */
 void tab_clear_selections(Tab *tab);
-
-/* Get selected row indices (returns array, caller should not free) */
-const size_t *tab_get_selections(Tab *tab, size_t *count);
 
 /* ============================================================================
  * Data Change Tracking
@@ -392,6 +405,7 @@ void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
 static inline void tab_data_replaced(Tab *tab) {
   if (tab) {
     tab->load_generation++;
+    tab->keyset_edge_stale = false;
     tab_clear_selections(tab);
   }
 }

@@ -73,7 +73,7 @@ void connmgr_free(ConnectionManager *mgr);
 /* Create a new saved connection with generated UUID */
 SavedConnection *connmgr_new_connection(void);
 
-/* Add a connection to a folder (takes ownership) */
+/* Add a connection to a folder (takes ownership; frees conn on success) */
 bool connmgr_add_connection(ConnectionItem *folder, SavedConnection *conn);
 
 /* Find a connection by ID */
@@ -97,7 +97,9 @@ bool connmgr_move_item(ConnectionManager *mgr, ConnectionItem *item,
 /* Create a new folder */
 ConnectionFolder *connmgr_new_folder(const char *name);
 
-/* Add a folder to a parent folder */
+/* Add a folder to a parent folder (takes ownership; frees folder on
+ * success). Like every change to the tree, it may move items: pointers to
+ * items other than the root are stale afterwards. */
 bool connmgr_add_folder(ConnectionItem *parent, ConnectionFolder *folder);
 
 /* ============================================================================
