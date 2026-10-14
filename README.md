@@ -18,6 +18,17 @@ A fast, lightweight TUI database viewer and manager for SQLite, PostgreSQL, MySQ
 - Compatible with Linux and macOS
 - Works over SSH
 
+## Frontends
+
+- **lace** — the terminal (ncurses) frontend, `tui/ncurses/`.
+- **lace-gtk** — a GTK4/libadwaita desktop frontend, `gui/gtk/`: each window is a
+  workspace, each tab a database connection, with a tables sidebar, paged grids
+  that scroll the whole table, in-place editing, filters, a SQL editor with paged
+  results, and shared saved connections and query history with the TUI. Build it
+  with `make gtk` (needs `gtk4`, `libadwaita`, `gtksourceview5`) and run
+  `./gui/gtk/build/lace-gtk [URL or SQLite file]`; `make install-gtk` installs it
+  with a desktop entry.
+
 ## Installation
 
 ### Dependencies

@@ -1,0 +1,114 @@
+/*
+ * Lace GTK frontend
+ * Jobs: units of liblace work run on a connection's worker thread
+ *
+ * A job owns its inputs and outputs. It is built on the main thread, run on
+ * the connection's worker, and its done callback runs back on the main loop
+ * with the results filled in. Read results only in the done callback.
+ *
+ * (c) iloveyou, 2025. MIT License.
+ * https://github.com/stychos/lace
+ */
+
+#ifndef LACE_GTK_JOBS_H
+#define LACE_GTK_JOBS_H
+
+#include "sql/row_key.h"
+#include <glib-object.h>
+#include <lace.h>
+
+G_BEGIN_DECLS
+
+typedef struct _LaceConnection LaceConnection;
+
+typedef enum {
+  LACE_JOB_EXEC,       /* sql -> result */
+  LACE_JOB_SCHEMA,     /* table -> schema */
+  LACE_JOB_TABLES,     /* -> tables (string array) */
+  LACE_JOB_COUNT,      /* sql (or table + where) -> count */
+  LACE_JOB_UPDATE,     /* table, key, snapshot, column, value */
+  LACE_JOB_DELETE,     /* table, key, snapshot */
+  LACE_JOB_INSERT,     /* table, columns, values */
+  LACE_JOB_DISCONNECT, /* close the database connection */
+} LaceJobKind;
+
+typedef struct _LaceJob LaceJob;
+typedef void (*LaceJobDone)(LaceJob *job, gpointer user_data);
+
+struct _LaceJob {
+  /* Private to the connection */
+  gatomicrefcount ref;
+  LaceJobKind kind;
+  LaceJobDone done;
+  gpointer user_data;
+  GDestroyNotify destroy_data; /* Frees user_data after done, delivered or not */
+  GWeakRef owner;
+  gboolean has_owner;
+  gpointer tag; /* Caller's marker, e.g. a page number */
+  gboolean read_only;   /* May be retried after a reconnect */
+  gboolean savepoint;   /* Wrap in SAVEPOINT inside a PostgreSQL transaction */
+  gboolean record;      /* Record the statement in history on success */
+  gboolean was_running; /* Set when the worker picked it up */
+
+  /* Inputs */
+  char *sql;
+  char *table;
+  char *where;
+  gboolean approximate; /* COUNT: a catalog estimate is acceptable */
+  RowKey key;
+  RowSnapshot snapshot;
+  char *column;
+  LaceValue value;
+  char **columns;
+  LaceValue *values;
+  size_t num_values;
+
+  /* Outputs */
+  LaceResult *result;
+  LaceSchema *schema;
+  char **tables;
+  size_t num_tables;
+  int64_t count;
+  gboolean count_approximate;
+  int64_t affected;
+  char *error; /* NULL on success */
+  int code;    /* LACE_OK or the error code */
+  gboolean cancelled;
+  double elapsed_ms;
+  int tx_state; /* Transaction state after the job (LACE_TX_*) */
+  char *last_sql; /* The SQL liblace sent (for history), if any */
+};
+
+LaceJob *lace_job_exec(const char *sql);
+/* A read the daemon runs for us (page, count, schema): retried after a
+ * reconnect and protected by a savepoint inside a PostgreSQL transaction */
+LaceJob *lace_job_read(const char *sql);
+LaceJob *lace_job_schema(const char *table);
+LaceJob *lace_job_tables(void);
+/* COUNT(*) of a table with an optional WHERE; with approximate and no
+ * WHERE, large server tables may get a catalog estimate */
+LaceJob *lace_job_table_count(const char *table, const char *where,
+                              gboolean approximate);
+LaceJob *lace_job_count_sql(const char *sql); /* SELECT COUNT(*) ... */
+LaceJob *lace_job_update(const char *table, const RowKey *key,
+                         const RowSnapshot *snapshot, const char *column,
+                         const LaceValue *value);
+LaceJob *lace_job_delete(const char *table, const RowKey *key,
+                         const RowSnapshot *snapshot);
+LaceJob *lace_job_insert(const char *table, const char *const *columns,
+                         const LaceValue *values, size_t n);
+LaceJob *lace_job_disconnect(void);
+
+LaceJob *lace_job_ref(LaceJob *job);
+void lace_job_unref(LaceJob *job);
+
+/* Take the result out of a finished job (the job no longer frees it) */
+LaceResult *lace_job_steal_result(LaceJob *job);
+LaceSchema *lace_job_steal_schema(LaceJob *job);
+
+/* Error text for display ("Query failed: ...") */
+const char *lace_job_error(const LaceJob *job);
+
+G_END_DECLS
+
+#endif /* LACE_GTK_JOBS_H */

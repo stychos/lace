@@ -1,0 +1,182 @@
+/* Lace GTK frontend stylesheet. Colours come from libadwaita's named
+ * colours so light and dark both work. */
+
+/* Data grid */
+lace-grid columnview.data-table {
+  font-family: monospace;
+  font-size: 0.92em;
+}
+lace-grid columnview.data-table > listview > row > cell {
+  padding: 0;
+}
+lace-grid columnview.data-table > listview > row {
+  min-height: 0;
+}
+lace-grid columnview.data-table > listview > row.odd {
+  background-color: alpha(@view_fg_color, 0.025);
+}
+lace-grid columnview.data-table > listview > row:selected {
+  background-color: alpha(@accent_bg_color, 0.22);
+}
+lace-grid columnview.data-table > listview > row:selected:focus-within {
+  background-color: alpha(@accent_bg_color, 0.30);
+}
+lace-grid .cell {
+  padding: 3px 8px;
+  min-height: 22px;
+  border-radius: 3px;
+  outline: none;
+}
+lace-grid .cell.current {
+  box-shadow: inset 0 0 0 2px alpha(@accent_bg_color, 0.55);
+  background-color: alpha(@accent_bg_color, 0.14);
+}
+lace-grid .cell.current:focus {
+  box-shadow: inset 0 0 0 2px @accent_bg_color;
+  background-color: alpha(@accent_bg_color, 0.22);
+}
+lace-grid columnview.data-table > listview > row:focus-within {
+  outline: none;
+}
+lace-grid .cell.null {
+  color: alpha(@view_fg_color, 0.45);
+  font-style: italic;
+}
+lace-grid .cell.num {
+  font-variant-numeric: tabular-nums;
+}
+lace-grid .cell.bool {
+  color: @accent_color;
+}
+lace-grid .cell.blob {
+  color: alpha(@view_fg_color, 0.7);
+}
+lace-grid .cell.date {
+  color: alpha(@view_fg_color, 0.85);
+}
+lace-grid .cell.rownum {
+  color: alpha(@view_fg_color, 0.45);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9em;
+}
+lace-grid .cell.placeholder {
+  background: linear-gradient(90deg, alpha(@view_fg_color, 0.06), alpha(@view_fg_color, 0.1), alpha(@view_fg_color, 0.06));
+  margin: 6px 8px;
+  min-height: 10px;
+  border-radius: 4px;
+}
+lace-grid columnview.data-table > header > button {
+  padding: 4px 8px;
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+/* Cell editor popover */
+.cell-editor > contents {
+  padding: 10px;
+}
+
+/* Filter bar */
+lace-filterbar .filter-bar {
+  padding: 6px 8px;
+  border-bottom: 1px solid @border_color;
+  background-color: alpha(@view_fg_color, 0.02);
+}
+lace-filterbar .chip > button {
+  padding: 2px 8px;
+  min-height: 24px;
+  font-size: 0.9em;
+}
+lace-filterbar .chip > button:first-child {
+  border-top-left-radius: 12px;
+  border-bottom-left-radius: 12px;
+}
+lace-filterbar .chip > button:last-child {
+  border-top-right-radius: 12px;
+  border-bottom-right-radius: 12px;
+  padding: 2px 4px;
+}
+
+/* Footers: one faint line, not the action bar's bright edge */
+.table-footer,
+.table-footer > revealer > box {
+  border-top: 1px solid alpha(@view_fg_color, 0.07);
+  box-shadow: none;
+  background-color: alpha(@view_fg_color, 0.02);
+}
+.table-footer > revealer > box {
+  border-top: none;
+}
+.table-footer label.caption {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sidebar */
+lace-sidebar .sidebar-head {
+  padding: 10px 12px 6px 12px;
+}
+lace-sidebar .sidebar-search {
+  margin: 0 8px 6px 8px;
+}
+lace-sidebar listview.navigation-sidebar > row {
+  padding: 4px 10px;
+  min-height: 28px;
+}
+.tx-badge {
+  background-color: alpha(@warning_bg_color, 0.9);
+  color: @warning_fg_color;
+  font-size: 0.75em;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+.tx-badge.error {
+  background-color: alpha(@error_bg_color, 0.9);
+  color: @error_fg_color;
+}
+
+/* Inner tabs: lighter than the connection tabs; a preview tab in italics */
+tabbar.inner-tabs {
+  font-size: 0.95em;
+}
+tabbar tab.preview label {
+  font-style: italic;
+}
+
+/* Query editor */
+.query-toolbar {
+  padding: 2px 6px;
+  border-bottom: 1px solid @border_color;
+}
+.sql-editor {
+  font-size: 0.95em;
+}
+
+/* Welcome page */
+.welcome-list {
+  margin: 0 24px 24px 24px;
+}
+.welcome-title {
+  font-size: 2em;
+  font-weight: 800;
+}
+.welcome-icon {
+  -gtk-icon-size: 96px;
+}
+
+/* Connect dialog */
+.connect-list row.folder-row {
+  font-weight: 700;
+  font-size: 0.85em;
+  color: alpha(@view_fg_color, 0.6);
+  padding: 8px 12px 2px 12px;
+}
+.connect-list row {
+  padding: 6px 12px;
+}
+.connect-form {
+  padding: 12px;
+}
+.history-row {
+  font-family: monospace;
+}

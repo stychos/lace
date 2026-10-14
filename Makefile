@@ -1,7 +1,7 @@
 # Lace - Database Viewer and Manager
 # Top-level Makefile
 
-.PHONY: all laced liblace ncurses gtk test test-tui test-integration test-windows fuzz stress clean distclean install help
+.PHONY: all laced liblace ncurses gtk test test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
 
 # Default target
 all: laced liblace ncurses
@@ -18,10 +18,14 @@ liblace:
 ncurses: liblace
 	$(MAKE) -C tui/ncurses
 
-# Build the GTK4 frontend (depends on liblace)
-gtk: liblace
-	@if [ -d gui/gtk ]; then $(MAKE) -C gui/gtk; \
-	else echo "GTK frontend not present (gui/gtk does not exist yet)"; exit 1; fi
+# Build the GTK4/libadwaita frontend (gui/gtk; needs gtk4, libadwaita-1,
+# gtksourceview-5). Not part of `all`: the TUI has no GTK dependency.
+gtk: liblace laced
+	$(MAKE) -C gui/gtk
+
+# GTK unit tests (pure helpers: SQL builders, row keys, the row model)
+test-gtk:
+	$(MAKE) -C gui/gtk test
 
 # Unit tests (tests/): liblace, then the TUI's SQL scanning and builders.
 # `make clean && make SANITIZE=1 test` runs them under ASan/UBSan.
@@ -78,9 +82,17 @@ install: all
 	install -m 755 tui/ncurses/build/lace $(DESTDIR)$(PREFIX)/bin/
 	$(MAKE) -C liblace install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 
+# Install the GTK frontend too (binary, desktop entry, icon)
+install-gtk: install gtk
+	$(MAKE) -C gui/gtk install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+
 # Run the ncurses frontend
 run: all
 	./tui/ncurses/build/lace
+
+# Run the GTK frontend
+run-gtk: gtk
+	./gui/gtk/build/lace-gtk
 
 # Help
 help:
@@ -91,7 +103,10 @@ help:
 	@echo "  laced     Build the daemon"
 	@echo "  liblace   Build the client library"
 	@echo "  ncurses   Build the ncurses frontend"
-	@echo "  gtk       Build the GTK4 frontend"
+	@echo "  gtk       Build the GTK4 frontend (gui/gtk/build/lace-gtk)"
+	@echo "  test-gtk  GTK frontend unit tests"
+	@echo "  install-gtk  Install everything plus the GTK frontend"
+	@echo "  run-gtk   Build and run the GTK frontend"
 	@echo "  test      Build and run the unit tests"
 	@echo "  test-tui  TUI tests in a real terminal (needs tmux)"
 	@echo "  test-integration  Integration tests on real databases (docker)"
