@@ -59,8 +59,10 @@ script="$script;query SELEC nope;run;expect-status Failed;shot query"
 script="$script;saved-add demo sqlite://$db;expect-saved 1;connect-saved demo;expect-recent 1;query SELECT 1;run;expect-history 1 SELECT 1"
 script="$script;close-connection;connect-saved demo;expect-history 1 SELECT 1;shot welcome-saved"
 # The session: a table tab with a filter and a sort, a query tab, written
-# to macos-session.json and reopened by the second run below
-script="$script;table people;filter name contains a;sort id desc;query SELECT 2;run;save-session;quit"
+# to macos-session.json by quitting as ⌘Q does (AppKit closes the windows
+# after applicationWillTerminate; those closes must not empty the file)
+# and reopened by the second run below
+script="$script;table people;filter name contains a;sort id desc;query SELECT 2;run;terminate"
 
 run_app() {
   HOME="$tmp/home" XDG_RUNTIME_DIR= LACED_LOG="$tmp/laced.log" \
@@ -74,7 +76,9 @@ if [ $status -eq 0 ]; then
   # the saved one with its two tabs, the table's filter and sort), and the
   # saved connection's history with it
   script2="restore-session;expect-connections 2;expect-tabs 2;expect-history 2 SELECT 2"
-  script2="$script2;close-tab;expect-tabs 1;expect-total 3;expect-cell 0 1 dave;shot restored;quit"
+  # Closing the last window keeps its session for the next launch
+  script2="$script2;close-tab;expect-tabs 1;expect-total 3;expect-cell 0 1 dave;shot restored"
+  script2="$script2;expect-session-windows 1;close-window;expect-session-windows 1;quit"
   run_app "$script2"
   status=$?
 fi

@@ -28,6 +28,10 @@ enum Session {
   static func save(except: WorkspaceWindowController? = nil) {
     let windows = LaceApp.shared.workspaces.filter { $0 !== except }.map(windowJSON)
     let root: [String: Any] = ["version": 1, "windows": windows]
+    if ScriptDriver.isRequested {
+      FileHandle.standardError.write(
+        Data("script: session saved, \(windows.count) windows\(except == nil ? "" : " (a window closing)")\n".utf8))
+    }
     do {
       try FileManager.default.createDirectory(
         at: Prefs.configDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

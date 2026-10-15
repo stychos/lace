@@ -14,6 +14,8 @@ final class LaceApp {
   static let shared = LaceApp()
 
   var prefs = Prefs.load()
+  /// Set once the app is quitting: windows closing then are not the user's doing
+  var isTerminating = false
   /// connections.json and recent.json, shared with the TUI and the GTK frontend
   let saved = SavedConnectionStore()
   let recents = RecentConnections()

@@ -60,9 +60,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     return false
   }
 
+  /// A window the user closes leaves the session, except the last one: the
+  /// app stays open without windows, and the next launch (or Dock click)
+  /// brings that workspace back. Windows closing because the app quits
+  /// change nothing: the session was written with all of them.
   func windowWillClose(_ notification: Notification) {
-    if !ScriptDriver.isRequested {
-      Session.save(except: self)
+    if !LaceApp.shared.isTerminating {
+      if LaceApp.shared.workspaces.count > 1 {
+        Session.save(except: self)
+      } else {
+        Session.save()
+      }
     }
     workspace.closeAllConnections()
     LaceApp.shared.workspaceClosed(self)

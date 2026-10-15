@@ -42,8 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return true
   }
 
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    LaceApp.shared.isTerminating = true
+    return .terminateNow
+  }
+
+  /// AppKit closes the windows after this, so the session is written here,
+  /// with every window, and the closes that follow leave it alone. With no
+  /// window open the file keeps the last window's session (see
+  /// windowWillClose).
   func applicationWillTerminate(_ notification: Notification) {
-    if !ScriptDriver.isRequested {
+    if !LaceApp.shared.workspaces.isEmpty {
       Session.save()
     }
     for workspace in LaceApp.shared.workspaces {

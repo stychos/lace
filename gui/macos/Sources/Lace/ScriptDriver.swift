@@ -39,6 +39,9 @@
 //   shot NAME                NAME.png of the window's content into $LACE_MACOS_SHOTS
 //                            (NAME-sheet.png of an open sheet or the preferences)
 //   quit                     exit 0, or 1 when an expectation failed
+//   terminate                quit through NSApplication, as ⌘Q does (1 on failures)
+//   close-window             close the workspace window, as the close button does
+//   expect-session-windows N macos-session.json holds N windows
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -337,6 +340,24 @@ final class ScriptDriver {
         try? await Task.sleep(for: .milliseconds(100))
       case "shot":
         shot(arg)
+      case "terminate":
+        // Through NSApplication, as ⌘Q does (the session is saved then)
+        log("\(checks) checks, \(failures) failed (terminating)")
+        if failures > 0 {
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      case "close-window":
+        workspace.view.window?.performClose(nil)
+        try? await Task.sleep(for: .milliseconds(200))
+      case "expect-session-windows":
+        var n = -1
+        if let data = try? Data(contentsOf: Session.path),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+          n = (root["windows"] as? [Any])?.count ?? -1
+        }
+        check(n == Int(arg), "expect-session-windows \(arg): got \(n)")
       case "quit":
         log("\(checks) checks, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
