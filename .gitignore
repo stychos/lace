@@ -3,3 +3,4 @@
 !/.github/
 !/.clang-format
 build/
+.build/

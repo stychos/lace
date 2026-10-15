@@ -13,7 +13,7 @@
 #ifndef LACE_GTK_JOBS_H
 #define LACE_GTK_JOBS_H
 
-#include "sql/row_key.h"
+#include <lace.h>
 #include <glib-object.h>
 #include <lace.h>
 
@@ -55,8 +55,8 @@ struct _LaceJob {
   char *table;
   char *where;
   gboolean approximate; /* COUNT: a catalog estimate is acceptable */
-  RowKey key;
-  RowSnapshot snapshot;
+  LaceRowKey key;
+  LaceRowSnapshot snapshot;
   char *column;
   LaceValue value;
   char **columns;
@@ -90,11 +90,11 @@ LaceJob *lace_job_tables(void);
 LaceJob *lace_job_table_count(const char *table, const char *where,
                               gboolean approximate);
 LaceJob *lace_job_count_sql(const char *sql); /* SELECT COUNT(*) ... */
-LaceJob *lace_job_update(const char *table, const RowKey *key,
-                         const RowSnapshot *snapshot, const char *column,
+LaceJob *lace_job_update(const char *table, const LaceRowKey *key,
+                         const LaceRowSnapshot *snapshot, const char *column,
                          const LaceValue *value);
-LaceJob *lace_job_delete(const char *table, const RowKey *key,
-                         const RowSnapshot *snapshot);
+LaceJob *lace_job_delete(const char *table, const LaceRowKey *key,
+                         const LaceRowSnapshot *snapshot);
 LaceJob *lace_job_insert(const char *table, const char *const *columns,
                          const LaceValue *values, size_t n);
 LaceJob *lace_job_disconnect(void);

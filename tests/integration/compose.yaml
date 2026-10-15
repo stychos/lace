@@ -1,0 +1,87 @@
+# Database servers for the integration tests (tests/integration/run.py).
+#
+# Every port is published on 127.0.0.1 with an ephemeral host port, so
+# several runs (and anything else on the machine) never collide; run.py asks
+# `docker compose port` where each one landed. Nothing here depends on how
+# or where the container engine runs.
+
+name: lace-it
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lt
+      POSTGRES_PASSWORD: ltpw
+      POSTGRES_DB: lt
+    ports:
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lt -d lt"]
+      interval: 1s
+      timeout: 3s
+      retries: 120
+
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpw
+      MARIADB_USER: lt
+      MARIADB_PASSWORD: ltpw
+      MARIADB_DATABASE: lt
+    ports:
+      - "127.0.0.1::3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 1s
+      timeout: 3s
+      retries: 180
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_USER: lt
+      MYSQL_PASSWORD: ltpw
+      MYSQL_DATABASE: lt
+    ports:
+      - "127.0.0.1::3306"
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      # Through TCP as the test user: the entrypoint's temporary server
+      # listens only on the socket, so this passes once the real one is up
+      test: ["CMD", "mysql", "-h127.0.0.1", "-ult", "-pltpw", "-e", "SELECT 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 180
+
+  # SSH jump host for tunnelled connections: it reaches the databases by
+  # service name on the compose network (postgres:5432, ...)
+  sshd:
+    # A fixed name: built once and reused by every run (a per-project
+    # name would leave one image behind per run)
+    image: lace-it-sshd:1
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:3.20
+        RUN apk add --no-cache openssh \
+         && ssh-keygen -A \
+         && adduser -D tunnel \
+         && echo 'tunnel:tunnelpw' | chpasswd \
+         && sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
+                   -e 's/^#\?AllowTcpForwarding.*/AllowTcpForwarding yes/' \
+                   /etc/ssh/sshd_config
+        CMD ["/usr/sbin/sshd", "-D", "-e"]
+    ports:
+      - "127.0.0.1::22"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "22"]
+      interval: 1s
+      timeout: 3s
+      retries: 60

@@ -218,15 +218,18 @@ bool laced_session_connect(LacedSession *session, const char *connstr,
     size_t n = cs->num_options;
     const char **keys = safe_calloc(n + 1, sizeof(char *));
     const char **vals = safe_calloc(n + 1, sizeof(char *));
+    size_t k = 0;
     for (size_t i = 0; i < n; i++) {
-      keys[i] = cs->option_keys[i];
-      vals[i] = cs->option_values[i];
+      if (str_eq(cs->option_keys[i], "ssh_key"))
+        continue; /* ssh's, not the database driver's */
+      keys[k] = cs->option_keys[i];
+      vals[k++] = cs->option_values[i];
     }
-    keys[n] = "lace_socket";
-    vals[n] = ssh_tunnel_socket_path(tunnel);
+    keys[k] = "lace_socket";
+    vals[k] = ssh_tunnel_socket_path(tunnel);
     db_connstr = connstr_build(cs->driver, cs->user, cs->password, "localhost",
                                cs->port > 0 ? cs->port : connstr_get_port(cs),
-                               cs->database, keys, vals, n + 1);
+                               cs->database, keys, vals, k + 1);
     free(keys);
     free(vals);
     connstr_free(cs);

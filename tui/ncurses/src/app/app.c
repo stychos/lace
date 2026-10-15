@@ -382,6 +382,8 @@ static int run_tui_mode(AppConfig *config) {
   }
 
   bool session_restored = false;
+  /* Session restore and saved workspaces ask for missing passwords */
+  session_set_password_callback(tui_password_callback, &state);
 
   if (config->connstr) {
     /* Explicit connection string provided - use it */
@@ -395,9 +397,6 @@ static int run_tui_mode(AppConfig *config) {
     Session *session = session_load(&session_err);
 
     if (session) {
-      /* Register password callback for session restore */
-      session_set_password_callback(tui_password_callback, &state);
-
       char *restore_err = NULL;
       if (session_restore(&state, session, &restore_err)) {
         session_restored = true;

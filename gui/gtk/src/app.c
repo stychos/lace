@@ -300,7 +300,7 @@ static void act_about(GSimpleAction *a, GVariant *p, gpointer data) {
                                    version ? "\nDaemon: " : "", version ? version : "");
   adw_show_about_dialog(GTK_WIDGET(win),
                         "application-name", "Lace",
-                        "application-icon", "io.github.stychos.lace",
+                        "application-icon", "dev.hexed.lace",
                         "developer-name", "iloveyou",
                         "version", "0.1.0",
                         "website", "https://github.com/stychos/lace",
@@ -318,9 +318,9 @@ static void lace_app_startup(GApplication *gapp) {
   g_app = app;
 
   gtk_icon_theme_add_resource_path(gtk_icon_theme_get_for_display(gdk_display_get_default()),
-                                   "/io/github/stychos/lace/icons");
+                                   "/dev/hexed/lace/icons");
   GtkCssProvider *css = gtk_css_provider_new();
-  gtk_css_provider_load_from_resource(css, "/io/github/stychos/lace/style.css");
+  gtk_css_provider_load_from_resource(css, "/dev/hexed/lace/style.css");
   gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(css),
                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   g_object_unref(css);
@@ -478,6 +478,6 @@ static void lace_app_class_init(LaceAppClass *klass) {
 static void lace_app_init(LaceApp *app) { (void)app; }
 
 LaceApp *lace_app_new(void) {
-  return g_object_new(LACE_TYPE_APP, "application-id", "io.github.stychos.lace",
+  return g_object_new(LACE_TYPE_APP, "application-id", "dev.hexed.lace",
                       "flags", G_APPLICATION_HANDLES_COMMAND_LINE, NULL);
 }

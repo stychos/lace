@@ -16,7 +16,7 @@
 #define LACE_GTK_DATA_GRID_H
 
 #include "model/row_model.h"
-#include "sql/sql_builder.h"
+#include <lace.h>
 #include <adwaita.h>
 
 G_BEGIN_DECLS
@@ -43,8 +43,8 @@ void lace_data_grid_set_row_numbers(LaceDataGrid *g, gboolean show);
 
 /* Sorting as the headers show it (names, primary first). get: caller frees
  * the array and each column with g_free. set: reflect a restored sort. */
-SortSpec *lace_data_grid_get_sorts(LaceDataGrid *g, gsize *n);
-void lace_data_grid_set_sorts(LaceDataGrid *g, const SortSpec *sorts, gsize n);
+LaceSortSpec *lace_data_grid_get_sorts(LaceDataGrid *g, gsize *n);
+void lace_data_grid_set_sorts(LaceDataGrid *g, const LaceSortSpec *sorts, gsize n);
 
 /* Selected row positions, ascending (caller g_frees) */
 gsize *lace_data_grid_get_selected_rows(LaceDataGrid *g, gsize *n);

@@ -73,12 +73,12 @@ LaceJob *lace_job_count_sql(const char *sql) {
   return job;
 }
 
-LaceJob *lace_job_update(const char *table, const RowKey *key,
-                         const RowSnapshot *snapshot, const char *column,
+LaceJob *lace_job_update(const char *table, const LaceRowKey *key,
+                         const LaceRowSnapshot *snapshot, const char *column,
                          const LaceValue *value) {
   LaceJob *job = job_new(LACE_JOB_UPDATE);
   job->table = str_dup(table);
-  row_key_copy(&job->key, key);
+  lace_row_key_copy(&job->key, key);
   if (snapshot) {
     job->snapshot.count = snapshot->count;
     job->snapshot.names = safe_calloc(snapshot->count + 1, sizeof(char *));
@@ -94,8 +94,8 @@ LaceJob *lace_job_update(const char *table, const RowKey *key,
   return job;
 }
 
-LaceJob *lace_job_delete(const char *table, const RowKey *key,
-                         const RowSnapshot *snapshot) {
+LaceJob *lace_job_delete(const char *table, const LaceRowKey *key,
+                         const LaceRowSnapshot *snapshot) {
   LaceJob *job = lace_job_update(table, key, snapshot, "", NULL);
   job->kind = LACE_JOB_DELETE;
   free(job->column);
@@ -133,8 +133,8 @@ void lace_job_unref(LaceJob *job) {
   str_secure_free(job->sql);
   free(job->table);
   free(job->where);
-  row_key_free(&job->key);
-  row_snapshot_free(&job->snapshot);
+  lace_row_key_free(&job->key);
+  lace_row_snapshot_free(&job->snapshot);
   free(job->column);
   lace_value_free(&job->value);
   for (size_t i = 0; i < job->num_values; i++) {

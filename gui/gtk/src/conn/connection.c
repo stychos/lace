@@ -8,7 +8,7 @@
 
 #include "connection.h"
 #include "core/history.h"
-#include "sql/sql_builder.h"
+#include <lace.h>
 #include <config/saved_connection.h>
 #include <gtk/gtk.h>
 #include <util/connstr.h>
@@ -137,7 +137,7 @@ static int run_once(LaceConnection *c, LaceJob *job, int conn_id) {
       job->count_approximate = approx;
     } else {
       char *sql = job->sql ? str_dup(job->sql)
-                           : sql_table_count(c->driver, job->table, job->where);
+                           : lace_sql_table_count(c->driver, job->table, job->where);
       LaceResult *r = NULL;
       rc = lace_exec(client, conn_id, sql, &r);
       free(sql);
@@ -150,13 +150,13 @@ static int run_once(LaceConnection *c, LaceJob *job, int conn_id) {
   case LACE_JOB_UPDATE:
   case LACE_JOB_DELETE: {
     char *why = NULL;
-    if (!row_key_verify(client, conn_id, job->table, &job->key, &job->snapshot,
+    if (!lace_row_key_verify(client, conn_id, job->table, &job->key, &job->snapshot,
                         &why)) {
       job_fail_msg(job, LACE_ERR_ROW_NOT_FOUND, why ? why : "row check failed");
       free(why);
       return job->code;
     }
-    LacePkValue *pk = row_key_to_pk(&job->key);
+    LacePkValue *pk = lace_row_key_to_pk(&job->key);
     if (job->kind == LACE_JOB_UPDATE)
       rc = lace_update(client, conn_id, job->table, pk, job->key.count,
                        job->column, &job->value);

@@ -46,7 +46,29 @@ typedef struct ConnectionManager {
   ConnectionItem root; /* Root folder */
   bool modified;       /* Unsaved changes flag */
   char *file_path;     /* Path to connections.json */
+  /* connections.json could not be loaded: what is shown is not what the
+   * file holds, so connmgr_save() refuses (it would erase the file) */
+  bool read_only;
+  /* The file as loaded (size, mtime): a save refuses if another lace
+   * process changed it since, instead of overwriting its changes */
+  long long loaded_size;
+  long long loaded_mtime_ns;
 } ConnectionManager;
+
+/* The tree as listed under a filter (NULL or "": the visible items):
+ * names holding the text (ASCII case folded), the folders above them, and
+ * everything inside a folder whose name matches; folders listed open */
+size_t connmgr_count_filtered(ConnectionManager *mgr, const char *filter);
+ConnectionItem *connmgr_get_filtered_item(ConnectionManager *mgr, const char *filter,
+                                          size_t index);
+
+/* Visit every connection in the tree, collapsed folders included */
+void connmgr_for_each_connection(ConnectionManager *mgr,
+                                 void (*fn)(ConnectionItem *item, void *ctx),
+                                 void *ctx);
+
+/* True for an id that is safe in file names (history/<id>.json) */
+bool connmgr_id_valid(const char *id);
 
 /* ============================================================================
  * Lifecycle
@@ -58,6 +80,9 @@ ConnectionManager *connmgr_new(void);
 
 /* Load connection manager from disk (or create empty if file doesn't exist) */
 ConnectionManager *connmgr_load(char **error);
+
+/* Load from a given file (connmgr_load() uses the config directory's) */
+ConnectionManager *connmgr_load_file(const char *path, char **error);
 
 /* Save connection manager to disk */
 bool connmgr_save(ConnectionManager *mgr, char **error);

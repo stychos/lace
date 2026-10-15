@@ -178,7 +178,7 @@ static GtkWidget *build_welcome(LaceWindow *w) {
   gtk_widget_set_margin_top(box, 36);
   gtk_widget_set_margin_bottom(box, 36);
 
-  GtkWidget *icon = gtk_image_new_from_icon_name("io.github.stychos.lace");
+  GtkWidget *icon = gtk_image_new_from_icon_name("dev.hexed.lace");
   gtk_widget_add_css_class(icon, "welcome-icon");
   gtk_image_set_pixel_size(GTK_IMAGE(icon), 96);
   gtk_box_append(GTK_BOX(box), icon);
@@ -579,7 +579,7 @@ LaceWindow *lace_window_new(LaceApp *app, const char *name) {
             : g_window_counter == 1 ? g_strdup("Workspace")
                                     : g_strdup_printf("Workspace %u", g_window_counter);
   gtk_window_set_default_size(GTK_WINDOW(w), 1200, 760);
-  gtk_window_set_icon_name(GTK_WINDOW(w), "io.github.stychos.lace");
+  gtk_window_set_icon_name(GTK_WINDOW(w), "dev.hexed.lace");
 
   w->toast_overlay = adw_toast_overlay_new();
   GtkWidget *tv = adw_toolbar_view_new();

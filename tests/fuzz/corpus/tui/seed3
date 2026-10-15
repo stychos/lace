@@ -1,0 +1,1 @@
+ÉSELECT * FROM "Sales".orders WHERE x FOR UPDATE

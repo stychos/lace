@@ -1,7 +1,7 @@
 # Lace - Database Viewer and Manager
 # Top-level Makefile
 
-.PHONY: all laced liblace ncurses gtk test test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
+.PHONY: all laced liblace ncurses gtk macos test test-gtk test-macos smoke-macos dist-macos test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
 
 # Default target
 all: laced liblace ncurses
@@ -23,9 +23,27 @@ ncurses: liblace
 gtk: liblace laced
 	$(MAKE) -C gui/gtk
 
-# GTK unit tests (pure helpers: SQL builders, row keys, the row model)
+# GTK unit tests (the row model; the SQL builders are liblace's now)
 test-gtk:
 	$(MAKE) -C gui/gtk test
+
+# Build the macOS frontend (gui/macos: a Swift package; needs the Command
+# Line Tools, no Xcode). Not part of `all`. Output: gui/macos/build/Lace.app
+macos: liblace laced
+	$(MAKE) -C gui/macos
+
+# macOS frontend checks: LaceKit against a private stdio daemon and SQLite
+test-macos: liblace laced
+	$(MAKE) -C gui/macos test
+
+# The real app driven by a script (gui/macos/Tests/smoke.sh); a window shows briefly
+smoke-macos: liblace laced
+	$(MAKE) -C gui/macos smoke
+
+# A shippable bundle and DMG (gui/macos/build/dist, Lace-<version>.dmg):
+# release build, laced's libraries bundled, signed (CODESIGN_IDENTITY)
+dist-macos:
+	$(MAKE) -C gui/macos dist
 
 # Unit tests (tests/): liblace, then the TUI's SQL scanning and builders.
 # `make clean && make SANITIZE=1 test` runs them under ASan/UBSan.
@@ -67,6 +85,7 @@ clean:
 	$(MAKE) -C liblace clean
 	$(MAKE) -C tui/ncurses clean
 	-$(MAKE) -C gui/gtk clean 2>/dev/null || true
+	-$(MAKE) -C gui/macos clean 2>/dev/null || true
 
 # Full clean
 distclean: clean
@@ -94,6 +113,10 @@ run: all
 run-gtk: gtk
 	./gui/gtk/build/lace-gtk
 
+# Run the macOS frontend
+run-macos: macos
+	./gui/macos/build/Lace.app/Contents/MacOS/Lace
+
 # Help
 help:
 	@echo "Lace - Database Viewer and Manager"
@@ -105,6 +128,10 @@ help:
 	@echo "  ncurses   Build the ncurses frontend"
 	@echo "  gtk       Build the GTK4 frontend (gui/gtk/build/lace-gtk)"
 	@echo "  test-gtk  GTK frontend unit tests"
+	@echo "  macos     Build the macOS frontend (gui/macos/build/Lace.app)"
+	@echo "  test-macos  macOS frontend checks (LaceKit)"
+	@echo "  smoke-macos  Drive the macOS app with a script against a temporary SQLite file"
+	@echo "  dist-macos  Shippable Lace.app and DMG (gui/macos/build/dist)"
 	@echo "  install-gtk  Install everything plus the GTK frontend"
 	@echo "  run-gtk   Build and run the GTK frontend"
 	@echo "  test      Build and run the unit tests"

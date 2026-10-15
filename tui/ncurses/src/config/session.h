@@ -136,6 +136,18 @@ void session_free(Session *session);
 /* Restore session into TuiState/AppState */
 bool session_restore(struct TuiState *state, Session *session, char **error);
 
+/* One open workspace as JSON (what session.json holds for it), for a saved
+ * workspace. Tabs whose connection is not a saved one cannot be opened
+ * again and are left out (*skipped counts them); NULL if none is left. */
+struct cJSON *session_workspace_to_json(struct TuiState *state, size_t ws_idx,
+                                        size_t *skipped);
+
+/* Open a workspace from session_workspace_to_json() as a new workspace
+ * (named name, if given) and make it current. Connections already open are
+ * reused; a missing password is asked for. */
+bool session_open_workspace_json(struct TuiState *state, struct cJSON *json,
+                                 const char *name, char **error);
+
 /* Get session file path */
 char *session_get_path(void);
 

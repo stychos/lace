@@ -47,7 +47,9 @@ struct _LaceRowModel {
   gsize total;
   gboolean total_known;
   gboolean total_approximate;
-  gsize extent; /* Highest loaded end */
+  gsize seen;   /* Rows actually loaded: the floor of any count */
+  gsize extent; /* Rows the view may scroll to while the total is unknown:
+                   what was seen plus one page after a full page */
   gsize n_items; /* What the view sees */
   gsize reveal_target;
   guint reveal_source;
@@ -292,6 +294,7 @@ void lace_row_model_reset(LaceRowModel *m) {
   m->total = 0;
   m->total_known = FALSE;
   m->total_approximate = FALSE;
+  m->seen = 0;
   m->extent = 0;
   /* Every item is stale: drop them all and start over */
   gsize old = m->n_items;
@@ -314,12 +317,17 @@ const LaceColumn *lace_row_model_get_column(LaceRowModel *m, gsize col) {
 void lace_row_model_set_total(LaceRowModel *m, gsize total, gboolean known,
                               gboolean approximate) {
   if (known) {
-    /* What was seen is the floor of any estimate */
-    if (total < m->extent)
-      total = m->extent;
+    /* What was seen is the floor of any estimate. Not the extent: that
+     * holds a page of room to scroll into while the count runs, and a
+     * count below it (a table of 1500 rows after a full first page of
+     * 1000) is right, the room is not. */
+    if (total < m->seen)
+      total = m->seen;
     m->total = total;
     m->total_known = TRUE;
     m->total_approximate = approximate;
+    if (m->extent > m->total)
+      m->extent = m->total;
   } else {
     m->total_known = FALSE;
     m->total_approximate = FALSE;
@@ -398,20 +406,21 @@ void lace_row_model_page_loaded(LaceRowModel *m, guint64 generation,
 
   gsize start = page * m->page_size;
   gsize end = start + result->num_rows;
+  if (end > m->seen)
+    m->seen = end;
   if (end > m->extent)
     m->extent = end;
   if (result->num_rows < m->page_size) {
-    /* A short page: the table ends here */
-    gsize total = end;
-    if (m->total_known && m->total > total && !m->total_approximate &&
-        m->total <= m->extent)
-      total = m->total;
-    m->total = total;
+    /* A short page: the table ends here, whatever a count said */
+    m->total = end;
     m->total_known = TRUE;
     m->total_approximate = FALSE;
   } else if (!m->total_known) {
     /* Full page while counting: let the view scroll one page further */
     m->extent = end + m->page_size;
+  } else if (m->total_approximate && end >= m->total) {
+    /* An estimate that undercounted: there is more */
+    m->total = end + m->page_size;
   }
   if (m->total_known && m->extent > m->total)
     m->extent = m->total;
@@ -492,6 +501,7 @@ void lace_row_model_rows_removed(LaceRowModel *m, gsize from, gsize count) {
     count = m->total;
   if (m->total_known)
     m->total -= count;
+  m->seen = m->seen >= count ? m->seen - count : 0;
   if (m->extent >= count)
     m->extent -= count;
   else

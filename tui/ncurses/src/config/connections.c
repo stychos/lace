@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <sys/stat.h>
 
 #define CONNECTIONS_FILE "connections.json"
@@ -118,6 +120,7 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
   conn->ssh_host = NULL;
   conn->ssh_user = NULL;
   conn->ssh_password = NULL;
+  conn->ssh_key = NULL;
   conn->ssh_port = json_get_int(json, "ssh_port", 0);
   conn->save_ssh_password = json_get_bool(json, "save_ssh_password", false);
 
@@ -154,6 +157,9 @@ static bool parse_connection(cJSON *json, SavedConnection *conn) {
     conn->ssh_password = json_dup_string_or(json, "ssh_password", "");
     if (!conn->ssh_password)
       goto cleanup;
+    conn->ssh_key = json_dup_string_or(json, "ssh_key", "");
+    if (!conn->ssh_key)
+      goto cleanup;
   }
 
   return true;
@@ -171,83 +177,118 @@ cleanup:
   FREE_NULL(conn->ssh_user);
   str_secure_free(conn->ssh_password);
   conn->ssh_password = NULL;
+  FREE_NULL(conn->ssh_key);
   return false;
 }
 
-static bool parse_item(cJSON *json, ConnectionItem *item,
-                       ConnectionItem *parent);
+typedef enum { PARSE_OK, PARSE_SKIP, PARSE_FAIL } ParseResult;
 
-static bool parse_folder(cJSON *json, ConnectionFolder *folder) {
-  folder->name = json_dup_string_or(json, "name", "");
-  folder->expanded = json_get_bool(json, "expanded", true);
-  folder->children = NULL;
-  folder->num_children = 0;
-  folder->children_capacity = 0;
+static ParseResult parse_item(cJSON *json, ConnectionItem *item,
+                              ConnectionItem *parent, int depth);
 
-  if (!folder->name)
-    return false;
-
-  cJSON *children = json_get_array(json, "children");
-  if (children) {
-    size_t count = (size_t)json_array_size(children);
-    if (count > 0) {
-      folder_ensure_capacity(folder, count);
-
-      /* Note: item->parent is set in parse_item, but we need a way to
-       * pass the parent. We'll handle this in the caller. */
-    }
-  }
-
-  return true;
-}
-
-static bool parse_item(cJSON *json, ConnectionItem *item,
-                       ConnectionItem *parent) {
+static ParseResult parse_item(cJSON *json, ConnectionItem *item,
+                              ConnectionItem *parent, int depth) {
   const char *type_str = json_get_string(json, "type", "");
-
   item->parent = parent;
 
   if (str_eq(type_str, "folder")) {
+    /* The tree code stops at MAX_FOLDER_DEPTH: deeper items could be
+     * neither shown nor found, so such a file is refused */
+    if (depth > MAX_FOLDER_DEPTH)
+      return PARSE_FAIL;
     item->type = CONN_ITEM_FOLDER;
-    if (!parse_folder(json, &item->folder))
-      return false;
-
-    /* Parse children */
+    item->folder.name = json_dup_string_or(json, "name", "");
+    item->folder.expanded = json_get_bool(json, "expanded", true);
+    item->folder.children = NULL;
+    item->folder.num_children = 0;
+    item->folder.children_capacity = 0;
+    if (!item->folder.name)
+      return PARSE_FAIL;
     cJSON *children = json_get_array(json, "children");
-    if (children) {
-      size_t count = (size_t)json_array_size(children);
-      if (count > 0) {
-        folder_ensure_capacity(&item->folder, count);
-
-        cJSON *child;
-        cJSON_ArrayForEach(child, children) {
-          if (item->folder.num_children >= count)
-            break; /* Safety check: don't exceed allocated capacity */
-          ConnectionItem *child_item =
-              &item->folder.children[item->folder.num_children];
-          if (!parse_item(child, child_item, item)) {
-            /* Cleanup already parsed children */
-            for (size_t i = 0; i < item->folder.num_children; i++) {
-              if (connmgr_is_folder(&item->folder.children[i]))
-                connmgr_free_folder(&item->folder.children[i].folder);
-              else
-                connmgr_free_connection(&item->folder.children[i].connection);
-            }
-            return false;
-          }
-          item->folder.num_children++;
+    size_t count = children ? (size_t)json_array_size(children) : 0;
+    if (count > 0) {
+      folder_ensure_capacity(&item->folder, count);
+      cJSON *child;
+      cJSON_ArrayForEach(child, children) {
+        if (item->folder.num_children >= count)
+          break;
+        ConnectionItem *child_item =
+            &item->folder.children[item->folder.num_children];
+        ParseResult r = parse_item(child, child_item, item, depth + 1);
+        if (r == PARSE_FAIL) {
+          connmgr_free_folder(&item->folder); /* Name, children, array */
+          memset(&item->folder, 0, sizeof(item->folder));
+          return PARSE_FAIL;
         }
+        if (r == PARSE_OK)
+          item->folder.num_children++;
       }
     }
-  } else if (str_eq(type_str, "connection")) {
-    item->type = CONN_ITEM_CONNECTION;
-    if (!parse_connection(json, &item->connection))
-      return false;
-  } else {
-    return false;
+    return PARSE_OK;
   }
+  if (str_eq(type_str, "connection")) {
+    item->type = CONN_ITEM_CONNECTION;
+    return parse_connection(json, &item->connection) ? PARSE_OK : PARSE_FAIL;
+  }
+  /* An item of a kind this version does not know (a newer lace, a hand
+   * edit): left out of the tree, the rest still loads */
+  return PARSE_SKIP;
+}
 
+bool connmgr_id_valid(const char *id) {
+  if (!id || !id[0] || strlen(id) > 64)
+    return false;
+  for (const char *c = id; *c; c++) {
+    if (!isalnum((unsigned char)*c) && *c != '-')
+      return false;
+  }
   return true;
+}
+
+static void for_each_connection(ConnectionItem *item, int depth,
+                                void (*fn)(ConnectionItem *, void *), void *ctx) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return;
+  if (item->type == CONN_ITEM_CONNECTION) {
+    fn(item, ctx);
+    return;
+  }
+  for (size_t i = 0; i < item->folder.num_children; i++)
+    for_each_connection(&item->folder.children[i], depth + 1, fn, ctx);
+}
+
+void connmgr_for_each_connection(ConnectionManager *mgr,
+                                 void (*fn)(ConnectionItem *item, void *ctx),
+                                 void *ctx) {
+  if (mgr && fn)
+    for_each_connection(&mgr->root, 0, fn, ctx);
+}
+
+/* Missing, unsafe or repeated ids get a new one (and the file is saved
+ * with it): an id names the history file and finds the connection again
+ * when a session is restored */
+typedef struct {
+  char **seen;
+  size_t n, cap;
+  bool changed;
+} IdCheck;
+
+static void repair_id(ConnectionItem *item, void *ctx) {
+  IdCheck *c = ctx;
+  SavedConnection *conn = &item->connection;
+  bool dup = false;
+  for (size_t i = 0; i < c->n && !dup; i++)
+    dup = conn->id && str_eq(c->seen[i], conn->id);
+  if (dup || !connmgr_id_valid(conn->id)) {
+    free(conn->id);
+    conn->id = lace_generate_uuid();
+    c->changed = true;
+  }
+  if (c->n == c->cap) {
+    c->cap = c->cap ? c->cap * 2 : 16;
+    c->seen = safe_reallocarray(c->seen, c->cap, sizeof(char *));
+  }
+  c->seen[c->n++] = conn->id;
 }
 
 /* ============================================================================
@@ -281,6 +322,7 @@ static cJSON *serialize_connection(const SavedConnection *conn) {
                  (conn->save_ssh_password && conn->ssh_password) ? conn->ssh_password : "");
     JSON_ADD_INT(json, "ssh_port", conn->ssh_port);
     JSON_ADD_BOOL(json, "save_ssh_password", conn->save_ssh_password);
+    JSON_ADD_STR(json, "ssh_key", conn->ssh_key ? conn->ssh_key : "");
   }
 
   return json;
@@ -340,18 +382,41 @@ ConnectionManager *connmgr_new(void) {
   return mgr;
 }
 
+/* Size and modification time of path (0, 0 if it does not exist) */
+static void file_signature(const char *path, long long *size, long long *mtime_ns) {
+  struct stat st;
+  *size = 0;
+  *mtime_ns = 0;
+  if (path && stat(path, &st) == 0) {
+    *size = (long long)st.st_size;
+#ifdef __APPLE__
+    *mtime_ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+    *mtime_ns = (long long)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+  }
+}
+
 ConnectionManager *connmgr_load(char **error) {
   char *path = get_connections_path();
   if (!path) {
     err_setf(error, "Failed to get config directory");
     return NULL;
   }
+  ConnectionManager *mgr = connmgr_load_file(path, error);
+  free(path);
+  return mgr;
+}
+
+ConnectionManager *connmgr_load_file(const char *file, char **error) {
+  char *path = str_dup(file);
 
   /* Check if file exists */
   if (!platform_file_exists(path)) {
     /* No file yet - return empty manager */
     ConnectionManager *mgr = connmgr_new();
-    free(path);
+    free(mgr->file_path);
+    mgr->file_path = path;
     return mgr;
   }
 
@@ -389,24 +454,43 @@ ConnectionManager *connmgr_load(char **error) {
   /* Parse root */
   cJSON *root = json_get_object(json, "root");
   if (root) {
-    if (!parse_item(root, &mgr->root, NULL)) {
+    /* The root must be a folder: everything else reads it as one */
+    if (!str_eq(json_get_string(root, "type", ""), "folder") ||
+        parse_item(root, &mgr->root, NULL, 0) != PARSE_OK) {
       cJSON_Delete(json);
       free(mgr->file_path);
       free(mgr);
-      err_setf(error, "Failed to parse root folder");
+      err_setf(error, "connections.json is not a valid connection list");
       return NULL;
     }
   } else {
     init_folder_item(&mgr->root, "Connections");
   }
-
   cJSON_Delete(json);
+
+  IdCheck ids = {0};
+  connmgr_for_each_connection(mgr, repair_id, &ids);
+  free(ids.seen);
+  mgr->modified = ids.changed;
+  file_signature(mgr->file_path, &mgr->loaded_size, &mgr->loaded_mtime_ns);
   return mgr;
 }
 
 bool connmgr_save(ConnectionManager *mgr, char **error) {
   if (!mgr || !mgr->file_path) {
     err_setf(error, "Invalid connection manager");
+    return false;
+  }
+  if (mgr->read_only) {
+    err_setf(error, "connections.json could not be read, so it is not "
+                    "overwritten: fix or move the file, then reopen");
+    return false;
+  }
+  long long size, mtime;
+  file_signature(mgr->file_path, &size, &mtime);
+  if (size != mgr->loaded_size || mtime != mgr->loaded_mtime_ns) {
+    err_setf(error, "connections.json was changed by another lace meanwhile: "
+                    "reopen the connection window to see it");
     return false;
   }
 
@@ -458,6 +542,7 @@ bool connmgr_save(ConnectionManager *mgr, char **error) {
   }
 
   mgr->modified = false;
+  file_signature(mgr->file_path, &mgr->loaded_size, &mgr->loaded_mtime_ns);
   return true;
 }
 
@@ -474,6 +559,7 @@ void connmgr_free_connection(SavedConnection *conn) {
   free(conn->ssh_host);
   free(conn->ssh_user);
   str_secure_free(conn->ssh_password);
+  free(conn->ssh_key);
 }
 
 void connmgr_free_folder(ConnectionFolder *folder) {
@@ -531,6 +617,7 @@ SavedConnection *connmgr_new_connection(void) {
   conn->ssh_password = str_dup("");
   conn->ssh_port = 0;
   conn->save_ssh_password = false;
+  conn->ssh_key = str_dup("");
 
   return conn;
 }
@@ -897,6 +984,86 @@ ConnectionItem *connmgr_get_visible_item(ConnectionManager *mgr,
   return NULL;
 }
 
+/* ---- Filtered view: items whose names hold the filter text ---- */
+
+static bool name_has(const char *name, const char *filter) {
+  if (!name)
+    return false;
+  size_t n = strlen(filter);
+  for (const char *p = name; *p; p++) {
+    if (strncasecmp(p, filter, n) == 0)
+      return true; /* ASCII case folded; other text matches as is */
+  }
+  return n == 0;
+}
+
+/* Does item, or anything below it, match? */
+static bool subtree_matches(ConnectionItem *item, const char *filter, int depth) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return false;
+  if (name_has(connmgr_item_name(item), filter))
+    return true;
+  if (item->type == CONN_ITEM_FOLDER) {
+    for (size_t i = 0; i < item->folder.num_children; i++)
+      if (subtree_matches(&item->folder.children[i], filter, depth + 1))
+        return true;
+  }
+  return false;
+}
+
+/* Walk the filtered list: an item is listed if it or something below it
+ * matches, or a folder above it matched (its whole content shows); folders
+ * are shown open. Returns the item at target (counting in *idx). */
+static ConnectionItem *walk_filtered(ConnectionItem *item, const char *filter,
+                                     bool inside_match, size_t *idx,
+                                     size_t target, int depth) {
+  if (depth > MAX_FOLDER_DEPTH)
+    return NULL;
+  bool self = name_has(connmgr_item_name(item), filter);
+  if (!inside_match && !subtree_matches(item, filter, depth))
+    return NULL;
+  if (*idx == target)
+    return item;
+  (*idx)++;
+  if (item->type == CONN_ITEM_FOLDER) {
+    for (size_t i = 0; i < item->folder.num_children; i++) {
+      ConnectionItem *found =
+          walk_filtered(&item->folder.children[i], filter, inside_match || self,
+                        idx, target, depth + 1);
+      if (found)
+        return found;
+    }
+  }
+  return NULL;
+}
+
+size_t connmgr_count_filtered(ConnectionManager *mgr, const char *filter) {
+  if (!mgr)
+    return 0;
+  if (!filter || !filter[0])
+    return connmgr_count_visible(mgr);
+  size_t idx = 0;
+  for (size_t i = 0; i < mgr->root.folder.num_children; i++)
+    walk_filtered(&mgr->root.folder.children[i], filter, false, &idx, SIZE_MAX, 0);
+  return idx;
+}
+
+ConnectionItem *connmgr_get_filtered_item(ConnectionManager *mgr, const char *filter,
+                                          size_t target) {
+  if (!mgr)
+    return NULL;
+  if (!filter || !filter[0])
+    return connmgr_get_visible_item(mgr, target);
+  size_t idx = 0;
+  for (size_t i = 0; i < mgr->root.folder.num_children; i++) {
+    ConnectionItem *found =
+        walk_filtered(&mgr->root.folder.children[i], filter, false, &idx, target, 0);
+    if (found)
+      return found;
+  }
+  return NULL;
+}
+
 int connmgr_get_item_depth(ConnectionItem *item) {
   int depth = 0;
   ConnectionItem *p = item ? item->parent : NULL;
@@ -958,12 +1125,17 @@ SavedConnection *connmgr_parse_connstr(const char *url, char **error) {
 
   /* SSH tunnel fields */
   conn->ssh = cs->ssh;
+  free(conn->ssh_host); /* The new connection's empty defaults */
   conn->ssh_host = str_dup(cs->ssh_host ? cs->ssh_host : "");
+  free(conn->ssh_user);
   conn->ssh_user = str_dup(cs->ssh_user ? cs->ssh_user : "");
   str_secure_free(conn->ssh_password);
   conn->ssh_password = str_dup(cs->ssh_password ? cs->ssh_password : "");
   conn->ssh_port = cs->ssh_port;
   conn->save_ssh_password = (cs->ssh_password && cs->ssh_password[0]);
+  free(conn->ssh_key);
+  const char *key = connstr_get_option(cs, "ssh_key");
+  conn->ssh_key = str_dup(key ? key : "");
 
   /* Generate a default name from the connection */
   free(conn->name);

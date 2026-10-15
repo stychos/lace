@@ -7,8 +7,7 @@
  */
 
 #include "edit_ops.h"
-#include "sql/row_key.h"
-#include "sql/sql_builder.h"
+#include <lace.h>
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
@@ -76,7 +75,7 @@ void lace_edit_cell(LaceEditContext *ctx, gsize row, gsize col,
   LaceValue value;
   bool unchanged;
   char *err = NULL;
-  if (!sql_edit_value(orig, type, set_null ? NULL : text, &value, &unchanged, &err)) {
+  if (!lace_edit_value(orig, type, set_null ? NULL : text, &value, &unchanged, &err)) {
     lace_error_dialog(ctx->widget, "Not updated", err ? err : "invalid value");
     free(err);
     return;
@@ -85,15 +84,15 @@ void lace_edit_cell(LaceEditContext *ctx, gsize row, gsize col,
     lace_value_free(&value);
     return;
   }
-  RowKey key;
+  LaceRowKey key;
   const char *why = NULL;
-  if (row_key_build(&key, page, in_page, ctx->schema, ctx->unique_names, &why) != ROW_KEY_OK) {
+  if (lace_row_key_build(&key, page, in_page, ctx->schema, ctx->unique_names, &why) != LACE_ROW_KEY_OK) {
     lace_error_dialog(ctx->widget, "Not updated", why ? why : "the row cannot be addressed");
     lace_value_free(&value);
     return;
   }
-  RowSnapshot snap;
-  row_snapshot_build(&snap, page, in_page, ctx->snapshot_all ? SIZE_MAX : col, ctx->schema);
+  LaceRowSnapshot snap;
+  lace_row_snapshot_build(&snap, page, in_page, ctx->snapshot_all ? SIZE_MAX : col, ctx->schema);
   EditReq *req = g_new0(EditReq, 1);
   req->ctx = ctx;
   req->row = row;
@@ -101,8 +100,8 @@ void lace_edit_cell(LaceEditContext *ctx, gsize row, gsize col,
   req->value = value;
   req->gen = lace_row_model_get_generation(ctx->model);
   LaceJob *job = lace_job_update(ctx->table, &key, &snap, mc->name, &value);
-  row_key_free(&key);
-  row_snapshot_free(&snap);
+  lace_row_key_free(&key);
+  lace_row_snapshot_free(&snap);
   lace_connection_submit_full(ctx->conn, job, ctx->owner, update_done, req, edit_req_free);
 }
 
@@ -140,18 +139,18 @@ static void delete_now(LaceEditContext *ctx, const gsize *rows, gsize n) {
     LaceResult *page = lace_row_model_row_result(ctx->model, rows[i], &in_page);
     if (!page)
       continue;
-    RowKey key;
+    LaceRowKey key;
     const char *why = NULL;
-    if (row_key_build(&key, page, in_page, ctx->schema, ctx->unique_names, &why) != ROW_KEY_OK) {
+    if (lace_row_key_build(&key, page, in_page, ctx->schema, ctx->unique_names, &why) != LACE_ROW_KEY_OK) {
       if (!ctx->error)
         ctx->error = g_strdup(why ? why : "the row cannot be addressed");
       continue;
     }
-    RowSnapshot snap;
-    row_snapshot_build(&snap, page, in_page, SIZE_MAX, ctx->schema);
+    LaceRowSnapshot snap;
+    lace_row_snapshot_build(&snap, page, in_page, SIZE_MAX, ctx->schema);
     LaceJob *job = lace_job_delete(ctx->table, &key, &snap);
-    row_key_free(&key);
-    row_snapshot_free(&snap);
+    lace_row_key_free(&key);
+    lace_row_snapshot_free(&snap);
     ctx->pending++;
     lace_connection_submit(ctx->conn, job, ctx->owner, delete_done, ctx);
   }

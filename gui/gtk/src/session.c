@@ -8,7 +8,7 @@
 
 #include "session.h"
 #include "platform/platform.h"
-#include "sql/sql_builder.h"
+#include <lace.h>
 #include "util.h"
 #include "views/query_view.h"
 #include "views/table_view.h"
@@ -39,13 +39,13 @@ static cJSON *tab_json(GtkWidget *view) {
     cJSON_AddStringToObject(t, "type", "table");
     cJSON_AddStringToObject(t, "table", lace_table_view_get_table(tv));
     gsize n;
-    const Filter *f = lace_table_view_get_filters(tv, &n);
+    const LaceFilter *f = lace_table_view_get_filters(tv, &n);
     cJSON *filters = cJSON_AddArrayToObject(t, "filters");
     for (gsize i = 0; i < n; i++) {
       cJSON *fj = cJSON_CreateObject();
       if (f[i].column)
         cJSON_AddStringToObject(fj, "column", f[i].column);
-      cJSON_AddStringToObject(fj, "op", filter_op_key(f[i].op));
+      cJSON_AddStringToObject(fj, "op", lace_filter_op_key(f[i].op));
       JSON_ADD_STR(fj, "value", f[i].value);
       if (f[i].value2)
         cJSON_AddStringToObject(fj, "value2", f[i].value2);
@@ -53,7 +53,7 @@ static cJSON *tab_json(GtkWidget *view) {
     }
     JSON_ADD_STR(t, "search", lace_table_view_get_search(tv));
     gsize ns;
-    SortSpec *sorts = lace_table_view_get_sorts(tv, &ns);
+    LaceSortSpec *sorts = lace_table_view_get_sorts(tv, &ns);
     cJSON *sj = cJSON_AddArrayToObject(t, "sorts");
     for (gsize i = 0; i < ns; i++) {
       cJSON *s = cJSON_CreateObject();
@@ -178,19 +178,19 @@ static void restore_tabs(LaceConnectionPage *cp, cJSON *conn_json) {
       /* Filters, search, sorts */
       cJSON *filters = json_get_array(t, "filters");
       int nf = json_array_size(filters);
-      Filter *f = g_new0(Filter, nf + 1);
+      LaceFilter *f = g_new0(LaceFilter, nf + 1);
       int k = 0;
       cJSON *fj;
       cJSON_ArrayForEach(fj, filters) {
         f[k].column = g_strdup(json_get_string(fj, "column", NULL));
-        f[k].op = filter_op_from_key(json_get_string(fj, "op", "eq"));
+        f[k].op = lace_filter_op_from_key(json_get_string(fj, "op", "eq"));
         f[k].value = g_strdup(json_get_string(fj, "value", ""));
         f[k].value2 = g_strdup(json_get_string(fj, "value2", NULL));
         k++;
       }
       cJSON *sorts = json_get_array(t, "sorts");
       int ns = json_array_size(sorts);
-      SortSpec *s = g_new0(SortSpec, ns + 1);
+      LaceSortSpec *s = g_new0(LaceSortSpec, ns + 1);
       int m = 0;
       cJSON *sj;
       cJSON_ArrayForEach(sj, sorts) {

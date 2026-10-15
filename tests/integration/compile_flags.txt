@@ -1,0 +1,4 @@
+-std=c11
+-D_GNU_SOURCE
+-I../../liblace/include
+-I../../tui/ncurses/src

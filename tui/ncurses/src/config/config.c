@@ -119,6 +119,8 @@ static const char *def_row_save[] = {"F2"};
 
 /* Connection Move */
 static const char *def_conn_move[] = {"SPACE"};
+static const char *def_conn_duplicate[] = {"d"};
+static const char *def_conn_filter[] = {"/"};
 
 /* Modal Editor */
 static const char *def_editor_save[] = {"F2"};
@@ -208,7 +210,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                               HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_header)},
     [HOTKEY_TOGGLE_STATUS] = {"toggle_status", "Toggle status bar",
                               HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_status)},
-    [HOTKEY_CONNECT_DIALOG] = {"connect_dialog", "Connect dialog",
+    [HOTKEY_CONNECT_DIALOG] = {"connect_dialog", "Workspaces",
                                HOTKEY_CAT_GENERAL,
                                DEF_KEYS(def_connect_dialog)},
     [HOTKEY_TOGGLE_HISTORY] = {"toggle_history", "Query history",
@@ -276,6 +278,10 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                             DEF_KEYS(def_conn_rename)},
     [HOTKEY_CONN_MOVE] = {"conn_move", "Move item", HOTKEY_CAT_CONNECT,
                           DEF_KEYS(def_conn_move)},
+    [HOTKEY_CONN_DUPLICATE] = {"conn_duplicate", "Duplicate connection",
+                               HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_duplicate)},
+    [HOTKEY_CONN_FILTER] = {"conn_filter", "Filter connections",
+                            HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_filter)},
 
     /* Row Selection (Table category) */
     [HOTKEY_TOGGLE_SELECTION] = {"toggle_selection", "Toggle selection",

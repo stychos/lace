@@ -639,6 +639,8 @@ void tui_show_connect_dialog(TuiState *state) {
   ConnectResult result = connect_view_show(state);
 
   if (result.mode == CONNECT_MODE_QUIT) {
+    if (result.conn)
+      db_disconnect(result.conn);
     str_secure_free(result.connstr); /* Connection string may contain password */
     free(result.saved_conn_id);
     state->running = false;
@@ -647,6 +649,8 @@ void tui_show_connect_dialog(TuiState *state) {
   }
 
   if (result.mode == CONNECT_MODE_CANCELLED || !result.connstr) {
+    if (result.conn)
+      db_disconnect(result.conn);
     str_secure_free(result.connstr); /* Connection string may contain password */
     free(result.saved_conn_id);
     tui_refresh(state);
@@ -656,7 +660,9 @@ void tui_show_connect_dialog(TuiState *state) {
   if (result.mode == CONNECT_MODE_NEW_WORKSPACE) {
     /* Create a NEW workspace and connect (keep existing workspaces) */
     char *err = NULL;
-    DbConnection *conn = tui_connect_with_progress(state, result.connstr);
+    /* The dialog has connected already: never a second time */
+    DbConnection *conn = result.conn ? result.conn
+                                     : tui_connect_with_progress(state, result.connstr);
     if (!conn) {
       /* Error already shown */
       str_secure_free(result.connstr); /* Connection string may contain password */
@@ -772,10 +778,11 @@ void tui_show_connect_dialog(TuiState *state) {
   } else if (result.mode == CONNECT_MODE_NEW_TAB) {
     /* Add connection to pool and create new tab in current workspace */
     char *err = NULL;
-    DbConnection *conn = db_connect(state->app->client, result.connstr, &err);
+    /* The dialog has connected already: never a second time */
+    DbConnection *conn = result.conn ? result.conn
+                                     : tui_connect_with_progress(state, result.connstr);
     if (!conn) {
-      tui_set_error(state, "Connection failed: %s",
-                    err ? err : "Unknown error");
+      /* Error already shown by tui_connect_with_progress */
       free(err);
       str_secure_free(result.connstr); /* Connection string may contain password */
       free(result.saved_conn_id);
@@ -878,7 +885,7 @@ void tui_show_connect_dialog(TuiState *state) {
     }
   }
 
-  free(result.connstr);
+  str_secure_free(result.connstr); /* May hold a password typed in the dialog */
   tui_refresh(state);
 }
 

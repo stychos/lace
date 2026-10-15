@@ -335,6 +335,35 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
  * ============================================================================
  */
 
+char *tui_connstr_display(const char *connstr) {
+  ConnString *cs = connstr ? connstr_parse(connstr, NULL) : NULL;
+  if (!cs)
+    return NULL;
+  char *where;
+  if (cs->driver && str_eq(cs->driver, "sqlite")) {
+    where = str_printf("sqlite: %s", cs->database ? cs->database : "");
+  } else {
+    bool v6 = cs->host && strchr(cs->host, ':');
+    char *port = cs->port > 0 ? str_printf(":%d", cs->port) : str_dup("");
+    where = str_printf("%s://%s%s%s%s%s%s/%s", cs->driver ? cs->driver : "",
+                       cs->user && cs->user[0] ? cs->user : "",
+                       cs->user && cs->user[0] ? "@" : "", v6 ? "[" : "",
+                       cs->host && cs->host[0] ? cs->host : "localhost",
+                       v6 ? "]" : "", port, cs->database ? cs->database : "");
+    free(port);
+    if (cs->ssh) {
+      char *via = str_printf("%s  via ssh %s%s%s", where,
+                             cs->ssh_user && cs->ssh_user[0] ? cs->ssh_user : "",
+                             cs->ssh_user && cs->ssh_user[0] ? "@" : "",
+                             cs->ssh_host ? cs->ssh_host : "");
+      free(where);
+      where = via;
+    }
+  }
+  connstr_free(cs);
+  return where;
+}
+
 void tui_draw_header(TuiState *state) {
   if (!state || !state->header_win || !state->header_visible)
     return;
@@ -342,33 +371,15 @@ void tui_draw_header(TuiState *state) {
   werase(state->header_win);
   wbkgd(state->header_win, COLOR_PAIR(COLOR_HEADER));
 
-  /* Draw connection info: driver://host:port/database */
-  if (TUI_CONN(state)) {
-    int x = 1;
-
-    /* Driver name */
-    if (TUI_CONN(state)->driver && TUI_CONN(state)->driver->name) {
-      mvwprintw(state->header_win, 0, x, "%s://", TUI_CONN(state)->driver->name);
-      x += (int)strlen(TUI_CONN(state)->driver->name) + 3;
-    }
-
-    /* Host (for network databases) or just database path (for SQLite) */
-    if (TUI_CONN(state)->host && TUI_CONN(state)->host[0]) {
-      mvwprintw(state->header_win, 0, x, "%s", TUI_CONN(state)->host);
-      x += (int)strlen(TUI_CONN(state)->host);
-      if (TUI_CONN(state)->port > 0) {
-        int port_len = snprintf(NULL, 0, ":%d", TUI_CONN(state)->port);
-        mvwprintw(state->header_win, 0, x, ":%d", TUI_CONN(state)->port);
-        x += port_len;
-      }
-      mvwprintw(state->header_win, 0, x, "/");
-      x += 1;
-    }
-
-    /* Database name */
-    if (TUI_CONN(state)->database) {
-      mvwprintw(state->header_win, 0, x, "%s", TUI_CONN(state)->database);
-    }
+  /* What the user connected to, from the connection string they used (the
+   * daemon's view of an SSH tunnel is a local socket path): never a
+   * password, fitted to the left two thirds of the line */
+  Connection *app_conn = TUI_TAB_CONNECTION(state);
+  char *where = app_conn ? tui_connstr_display(app_conn->connstr) : NULL;
+  if (where) {
+    int max_x = getmaxx(state->header_win);
+    tui_print_clip(state->header_win, 0, 1, max_x * 2 / 3, where);
+    free(where);
   }
 
   /* Right side: combined connection/workspace indicator */

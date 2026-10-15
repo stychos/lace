@@ -186,7 +186,7 @@ static void page_done(LaceJob *job, gpointer data) {
 static void fetch_page(LaceRowModel *m, gsize page, gpointer data) {
   LaceTableView *v = data;
   gsize size = lace_row_model_get_page_size(m);
-  char *sql = sql_table_page(lace_connection_get_driver(v->conn), v->table, v->where,
+  char *sql = lace_sql_table_page(lace_connection_get_driver(v->conn), v->table, v->where,
                              v->order_by, size, page * size);
   if (!sql)
     return;
@@ -205,19 +205,19 @@ static void rebuild_clauses(LaceTableView *v) {
   v->where = NULL;
   v->order_by = NULL;
   gsize nf = 0;
-  const Filter *f = lace_filter_bar_get_filters(v->filters, &nf);
-  char *w = sql_build_where(f, nf, lace_filter_bar_get_search(v->filters), v->schema,
+  const LaceFilter *f = lace_filter_bar_get_filters(v->filters, &nf);
+  char *w = lace_filter_build_where(f, nf, lace_filter_bar_get_search(v->filters), v->schema,
                             lace_connection_get_driver(v->conn));
   v->where = w ? g_strdup(w) : NULL;
   free(w);
   /* A restored sort waits for the columns before the headers show it:
    * until then it is the order to load with */
-  SortSpec *pending = g_object_get_data(G_OBJECT(v), "pending-sorts");
+  LaceSortSpec *pending = g_object_get_data(G_OBJECT(v), "pending-sorts");
   gsize ns = 0;
-  SortSpec *sorts = pending ? NULL : lace_data_grid_get_sorts(v->grid, &ns);
+  LaceSortSpec *sorts = pending ? NULL : lace_data_grid_get_sorts(v->grid, &ns);
   if (pending)
     ns = GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(v), "pending-sorts-n"));
-  char *o = sql_build_order_by(pending ? pending : sorts, ns, lace_connection_get_driver(v->conn));
+  char *o = lace_sort_build_order_by(pending ? pending : sorts, ns, lace_connection_get_driver(v->conn));
   v->order_by = o ? g_strdup(o) : NULL;
   free(o);
   for (gsize i = 0; sorts && i < ns; i++)
@@ -341,9 +341,9 @@ static void on_filter_column(LaceDataGrid *g, const char *column, const char *va
   (void)g;
   gtk_revealer_set_reveal_child(GTK_REVEALER(v->filter_revealer), TRUE);
   if (value && *value)
-    lace_filter_bar_add(v->filters, column, FILTER_EQ, value);
+    lace_filter_bar_add(v->filters, column, LACE_FILTER_EQ, value);
   else if (!value)
-    lace_filter_bar_add(v->filters, column, FILTER_NULL, NULL);
+    lace_filter_bar_add(v->filters, column, LACE_FILTER_NULL, NULL);
   else
     lace_filter_bar_open_add(v->filters, column);
 }
@@ -414,7 +414,7 @@ const char *lace_table_view_get_table(LaceTableView *v) { return v->table; }
 LaceConnection *lace_table_view_get_connection(LaceTableView *v) { return v->conn; }
 LaceDataGrid *lace_table_view_get_grid(LaceTableView *v) { return v->grid; }
 
-const Filter *lace_table_view_get_filters(LaceTableView *v, gsize *n) {
+const LaceFilter *lace_table_view_get_filters(LaceTableView *v, gsize *n) {
   return lace_filter_bar_get_filters(v->filters, n);
 }
 
@@ -422,7 +422,7 @@ const char *lace_table_view_get_search(LaceTableView *v) {
   return lace_filter_bar_get_search(v->filters);
 }
 
-SortSpec *lace_table_view_get_sorts(LaceTableView *v, gsize *n) {
+LaceSortSpec *lace_table_view_get_sorts(LaceTableView *v, gsize *n) {
   return lace_data_grid_get_sorts(v->grid, n);
 }
 
@@ -430,8 +430,8 @@ gboolean lace_table_view_filters_visible(LaceTableView *v) {
   return gtk_revealer_get_reveal_child(GTK_REVEALER(v->filter_revealer));
 }
 
-void lace_table_view_restore(LaceTableView *v, const Filter *filters, gsize n,
-                             const char *search, const SortSpec *sorts,
+void lace_table_view_restore(LaceTableView *v, const LaceFilter *filters, gsize n,
+                             const char *search, const LaceSortSpec *sorts,
                              gsize num_sorts, gboolean filters_visible) {
   v->restoring = TRUE;
   lace_filter_bar_set_filters(v->filters, filters, n, search);
@@ -440,7 +440,7 @@ void lace_table_view_restore(LaceTableView *v, const Filter *filters, gsize n,
   /* Sorts need the columns, which arrive with the first page: keep them
    * and apply once the grid has columns */
   if (num_sorts > 0) {
-    SortSpec *copy = g_new0(SortSpec, num_sorts);
+    LaceSortSpec *copy = g_new0(LaceSortSpec, num_sorts);
     for (gsize i = 0; i < num_sorts; i++) {
       copy[i].column = g_strdup(sorts[i].column);
       copy[i].desc = sorts[i].desc;
@@ -459,7 +459,7 @@ void lace_table_view_restore(LaceTableView *v, const Filter *filters, gsize n,
 static void on_columns_changed(LaceRowModel *m, LaceTableView *v) {
   if (lace_row_model_n_columns(m) == 0)
     return;
-  SortSpec *pending = g_object_get_data(G_OBJECT(v), "pending-sorts");
+  LaceSortSpec *pending = g_object_get_data(G_OBJECT(v), "pending-sorts");
   if (!pending)
     return;
   gsize n = GPOINTER_TO_SIZE(g_object_get_data(G_OBJECT(v), "pending-sorts-n"));

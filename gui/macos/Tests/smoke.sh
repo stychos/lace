@@ -1,0 +1,87 @@
+#!/bin/sh
+# Lace macOS frontend
+# Smoke test: drives the built app with LACE_MACOS_SCRIPT (Sources/Lace/
+# ScriptDriver.swift) against a private stdio daemon and a temporary SQLite
+# file, in a private HOME so nothing touches the user's files. The window
+# appears briefly (accessory activation policy: no Dock icon, no focus).
+#
+# Usage: Tests/smoke.sh APP_BINARY [LACED]
+# Exit 1 when an expectation failed; the temporary directory is kept then.
+#
+# (c) iloveyou, 2025. MIT License.
+# https://github.com/stychos/lace
+
+set -u
+app=${1:?app binary}
+laced=${2:-}
+if [ -n "$laced" ]; then
+  export LACE_TEST_LACED="$laced"
+fi
+
+# A short path: a Unix socket path must fit sun_path, and $TMPDIR on macOS is long
+tmp=$(mktemp -d /tmp/lace-smoke.XXXXXX) || exit 1
+mkdir -p "$tmp/home/Library/Application Support/lace" "$tmp/shots"
+printf '{"daemon_spawn_mode": 1, "confirm_delete": false, "approximate_counts": false, "page_size": 100}\n' \
+  > "$tmp/home/Library/Application Support/lace/macos.json"
+
+db="$tmp/smoke.sqlite"
+script="connect sqlite://$db?create=1"
+script="$script;query CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL, note TEXT)\\; INSERT INTO people (name, score, note) VALUES ('alice', 1.5, NULL), ('bob', 2.5, 'x'), ('carol', NULL, 'y')"
+script="$script;run-all;expect-status 2 statements;expect-recent 1 smoke.sqlite"
+# Keyset paging (page size 100): a jump reads by OFFSET, the pages next to
+# a loaded one by key, forward and backward, under a sort too; the cell
+# values prove both kinds of page agree on positions
+script="$script;query CREATE TABLE big (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)\; WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 350) INSERT INTO big (n) SELECT x * 10 FROM c;run-all"
+script="$script;table big;expect-total 350;expect-paging offset;expect-cell 0 1 10"
+script="$script;expect-cell 300 1 3010;expect-paging offset;expect-cell 250 1 2510;expect-paging keyset-backward;expect-cell 101 1 1020;expect-paging keyset"
+script="$script;sort n desc;expect-cell 0 1 3500;expect-cell 150 1 2000;expect-paging keyset;expect-cell 349 1 10;expect-paging offset"
+# Query results of a plain SELECT are editable (verified by key)
+script="$script;query SELECT * FROM people ORDER BY id;run;expect-total 3;expect-cell 1 1 bob"
+script="$script;cell 1 1;edit bobby;expect-cell 1 1 bobby"
+# The table tab: edits, NULL, sort, filter, delete
+script="$script;table people;expect-total 3;expect-cell 1 1 bobby;expect-cell 2 2 NULL"
+script="$script;cell 0 3;edit hello;expect-cell 0 3 hello;cell 0 3;null;expect-cell 0 3 NULL"
+script="$script;sort name desc;expect-cell 0 1 carol;sort id"
+script="$script;filter score gt 2;expect-total 1;expect-cell 0 1 bobby;shot grid"
+script="$script;cell 0 0;delete;expect-total 0"
+# Add row: typed values by type, NULL explicit, Empty explicit; the filter
+# (score > 2) still applies to the reload
+script="$script;add-row name=dave score=3.25 note=null;expect-total 1;expect-cell 0 1 dave;expect-cell 0 3 NULL"
+script="$script;add-row name=empty score=4;expect-total 2;expect-cell 1 2 4"
+# Every statement that ran and every verified write is in the history
+script="$script;expect-history 11 INSERT INTO"
+# Counts, several statements, an error
+script="$script;query SELECT count(*) AS n FROM people;run;expect-cell 0 0 4"
+script="$script;query SELECT 1\\; SELECT 2;run-all;expect-cell 0 0 2"
+script="$script;query SELEC nope;run;expect-status Failed;shot query"
+# A saved connection (connections.json in the private HOME): its history is
+# kept in history/<id>.json and comes back on the next connect
+script="$script;saved-add demo sqlite://$db;expect-saved 1;connect-saved demo;expect-recent 1;query SELECT 1;run;expect-history 1 SELECT 1"
+script="$script;close-connection;connect-saved demo;expect-history 1 SELECT 1;shot welcome-saved"
+# The session: a table tab with a filter and a sort, a query tab, written
+# to macos-session.json and reopened by the second run below
+script="$script;table people;filter name contains a;sort id desc;query SELECT 2;run;save-session;quit"
+
+run_app() {
+  HOME="$tmp/home" XDG_RUNTIME_DIR= LACED_LOG="$tmp/laced.log" \
+    LACE_MACOS_SHOTS="$tmp/shots" LACE_MACOS_SCRIPT="$1" \
+    "$app" 2>>"$tmp/script.log"
+}
+run_app "$script"
+status=$?
+if [ $status -eq 0 ]; then
+  # Second run: the session comes back (the first, unsaved connection and
+  # the saved one with its two tabs, the table's filter and sort), and the
+  # saved connection's history with it
+  script2="restore-session;expect-connections 2;expect-tabs 2;expect-history 2 SELECT 2"
+  script2="$script2;close-tab;expect-tabs 1;expect-total 3;expect-cell 0 1 dave;shot restored;quit"
+  run_app "$script2"
+  status=$?
+fi
+grep '^script:' "$tmp/script.log" | grep -v '^script: shot .* window'
+if [ $status -ne 0 ]; then
+  echo "smoke: FAILED, kept $tmp (script.log, laced.log, shots/)"
+  exit 1
+fi
+rm -rf "$tmp"
+echo "smoke: OK"

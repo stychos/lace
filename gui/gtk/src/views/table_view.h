@@ -35,12 +35,12 @@ void lace_table_view_show_structure(LaceTableView *v);
 void lace_table_view_focus_grid(LaceTableView *v);
 
 /* Session: filters, search and sorts (sorts: caller frees) */
-const Filter *lace_table_view_get_filters(LaceTableView *v, gsize *n);
+const LaceFilter *lace_table_view_get_filters(LaceTableView *v, gsize *n);
 const char *lace_table_view_get_search(LaceTableView *v);
-SortSpec *lace_table_view_get_sorts(LaceTableView *v, gsize *n);
+LaceSortSpec *lace_table_view_get_sorts(LaceTableView *v, gsize *n);
 gboolean lace_table_view_filters_visible(LaceTableView *v);
-void lace_table_view_restore(LaceTableView *v, const Filter *filters, gsize n,
-                             const char *search, const SortSpec *sorts,
+void lace_table_view_restore(LaceTableView *v, const LaceFilter *filters, gsize n,
+                             const char *search, const LaceSortSpec *sorts,
                              gsize num_sorts, gboolean filters_visible);
 
 /* Signal: touched () when the user filtered, sorted or edited the view */

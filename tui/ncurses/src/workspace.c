@@ -397,8 +397,9 @@ void tab_close(TuiState *state) {
   }
 }
 
-/* Close the current workspace and switch to another or show connect dialog */
-void workspace_close(TuiState *state) {
+/* Close the current workspace; with none left, show the Workspaces window
+ * when show_window is set */
+static void workspace_close_current(TuiState *state, bool show_window) {
   if (!state || !state->app)
     return;
 
@@ -464,7 +465,35 @@ void workspace_close(TuiState *state) {
     }
     werase(state->main_win);
     wrefresh(state->main_win);
-    tui_refresh(state);
-    tui_show_connect_dialog(state);
+    if (show_window) {
+      tui_refresh(state);
+      tui_show_connect_dialog(state);
+    }
   }
+}
+
+void workspace_close(TuiState *state) { workspace_close_current(state, true); }
+
+void tui_workspace_switch(TuiState *state, size_t index) {
+  if (!state || !state->app || index >= state->app->num_workspaces)
+    return;
+  if (index != state->app->current_workspace) {
+    tui_sync_to_workspace(state);
+    app_switch_workspace(state->app, index);
+  }
+  tui_sync_from_app(state);
+  tui_recreate_windows(state);
+  if (TUI_WORKSPACE(state) && TUI_WORKSPACE(state)->num_tabs > 0)
+    tab_restore(state);
+}
+
+void tui_workspace_close_at(TuiState *state, size_t index) {
+  if (!state || !state->app || index >= state->app->num_workspaces)
+    return;
+  size_t back = state->app->current_workspace;
+  tui_workspace_switch(state, index);
+  workspace_close_current(state, false);
+  /* Back to the workspace that was current, where it moved to */
+  if (back != index && state->app->num_workspaces > 0)
+    tui_workspace_switch(state, back > index ? back - 1 : back);
 }

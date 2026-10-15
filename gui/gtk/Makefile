@@ -31,7 +31,7 @@ SRC_DIR = src
 RES_DIR = resources
 TUI_SRC = ../../tui/ncurses/src
 
-SRC_SUBDIRS = . sql conn model views
+SRC_SUBDIRS = . conn model views
 SRC_DIRS = $(addprefix $(SRC_DIR)/,$(SRC_SUBDIRS))
 SRCS := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
@@ -101,21 +101,15 @@ release: clean all
 run: all
 	$(TARGET)
 
-# Unit tests: the pure helpers (SQL builders, row keys, the row model), no
-# display needed
-TEST_SQL = $(BUILD_DIR)/test_sql
+# Unit tests: the row model (GLib only, no display). The SQL builders and
+# row keys it once tested live in liblace now (tests/test_liblace.c).
 TEST_MODEL = $(BUILD_DIR)/test_model
-PURE_OBJS = $(filter $(BUILD_DIR)/src/sql/%.o,$(OBJS))
 MODEL_OBJS = $(filter $(BUILD_DIR)/src/model/%.o,$(OBJS))
-
-$(TEST_SQL): tests/test_sql.c tests/test.h $(PURE_OBJS) ../../liblace/build/liblace.a
-	$(CC) $(CFLAGS) -Itests $< $(PURE_OBJS) -o $@ $(LDFLAGS) $(LIBS)
 
 $(TEST_MODEL): tests/test_model.c tests/test.h $(MODEL_OBJS) ../../liblace/build/liblace.a
 	$(CC) $(CFLAGS) -Itests $< $(MODEL_OBJS) -o $@ $(LDFLAGS) $(LIBS)
 
-test: $(TEST_SQL) $(TEST_MODEL)
-	./$(TEST_SQL)
+test: $(TEST_MODEL)
 	./$(TEST_MODEL)
 
 # Install the binary, the desktop entry and the icon (PREFIX, DESTDIR as
@@ -126,8 +120,8 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/share/applications \
 	  $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
 	install -m 755 $(TARGET) $(DESTDIR)$(PREFIX)/bin/lace-gtk
-	install -m 644 $(RES_DIR)/io.github.stychos.lace.desktop $(DESTDIR)$(PREFIX)/share/applications/
-	install -m 644 $(RES_DIR)/icons/scalable/apps/io.github.stychos.lace.svg \
+	install -m 644 $(RES_DIR)/dev.hexed.lace.desktop $(DESTDIR)$(PREFIX)/share/applications/
+	install -m 644 $(RES_DIR)/icons/scalable/apps/dev.hexed.lace.svg \
 	  $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/
 
 check-deps:

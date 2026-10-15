@@ -120,28 +120,30 @@ char *session_get_path(void) {
 }
 
 /* Find saved connection by connection string */
+typedef struct {
+  const char *connstr;
+  const char *found;
+} ConnstrMatch;
+
+static void match_connstr(ConnectionItem *item, void *ctx) {
+  ConnstrMatch *m = ctx;
+  if (m->found)
+    return;
+  char *saved = connmgr_build_connstr(&item->connection);
+  if (saved && str_eq(saved, m->connstr))
+    m->found = item->connection.id;
+  str_secure_free(saved); /* May contain a password */
+}
+
+/* The saved connection that builds connstr, in any folder (collapsed ones
+ * too), or NULL */
 static const char *find_connection_id_by_connstr(ConnectionManager *mgr,
                                                  const char *connstr) {
   if (!mgr || !connstr)
     return NULL;
-
-  /* Iterate through all saved connections to find matching connstr */
-  size_t visible_count = connmgr_count_visible(mgr);
-  for (size_t i = 0; i < visible_count; i++) {
-    ConnectionItem *item = connmgr_get_visible_item(mgr, i);
-    if (item && connmgr_is_connection(item)) {
-      char *saved_connstr = connmgr_build_connstr(&item->connection);
-      if (saved_connstr) {
-        bool match = str_eq(saved_connstr, connstr);
-        str_secure_free(saved_connstr); /* Connection string may contain password */
-        if (match) {
-          return item->connection.id;
-        }
-      }
-    }
-  }
-
-  return NULL;
+  ConnstrMatch m = {connstr, NULL};
+  connmgr_for_each_connection(mgr, match_connstr, &m);
+  return m.found;
 }
 
 /* ============================================================================
@@ -1195,35 +1197,13 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
   return true;
 }
 
-bool session_restore(struct TuiState *state, Session *session, char **error) {
-
-  if (!state || !session) {
-    err_setf(error, "Invalid arguments");
-    return false;
-  }
-
-  if (session->num_workspaces == 0) {
-    return false; /* Nothing to restore - show connect dialog */
-  }
-
-  /* Load connection manager */
-  ConnectionManager *connmgr = connmgr_load(NULL);
-  if (!connmgr) {
-    err_setf(error, "Failed to load saved connections");
-    return false;
-  }
-
-  /* Restore settings */
-  state->app->header_visible = session->header_visible;
-  state->app->status_visible = session->status_visible;
-  state->header_visible = session->header_visible;
-  state->status_visible = session->status_visible;
-  state->sidebar_visible = session->sidebar_visible;
-
+/* Restore session's workspaces after the ones open now; the last one
+ * restored at or before session->current_workspace becomes current. The
+ * number of workspaces restored. */
+static size_t restore_workspaces(TuiState *state, Session *session,
+                                 ConnectionManager *connmgr) {
   size_t restored_workspaces = 0;
-
-  /* Restore each workspace */
-  size_t current_workspace = 0;
+  size_t current_workspace = state->app->current_workspace;
   for (size_t ws_i = 0; ws_i < session->num_workspaces; ws_i++) {
     SessionWorkspace *sws = &session->workspaces[ws_i];
 
@@ -1276,25 +1256,21 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
 
     if (restored_tabs > 0) {
       ws->current_tab = current_tab;
-      restored_workspaces++;
-      if (ws_i <= session->current_workspace)
+      if (ws_i <= session->current_workspace || restored_workspaces == 0)
         current_workspace = ws_idx;
+      restored_workspaces++;
     } else {
       /* No tabs restored - remove the empty workspace */
       app_close_workspace(state->app, ws_idx);
     }
   }
+  if (restored_workspaces > 0)
+    state->app->current_workspace = current_workspace;
+  return restored_workspaces;
+}
 
-  connmgr_free(connmgr);
-
-  if (restored_workspaces == 0) {
-    err_setf(error, "No workspaces could be restored");
-    return false;
-  }
-
-  /* The saved current workspace, or the last restored one before it */
-  state->app->current_workspace = current_workspace;
-
+/* After workspaces were restored: the screen follows the current one */
+static void restore_finish(TuiState *state) {
   /* Sync TUI state from restored app state */
   tui_sync_from_app(state);
 
@@ -1312,6 +1288,121 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     }
     state->sidebar_focused = true;
   }
+}
 
+bool session_restore(struct TuiState *state, Session *session, char **error) {
+
+  if (!state || !session) {
+    err_setf(error, "Invalid arguments");
+    return false;
+  }
+
+  if (session->num_workspaces == 0) {
+    return false; /* Nothing to restore - show connect dialog */
+  }
+
+  /* Load connection manager */
+  ConnectionManager *connmgr = connmgr_load(NULL);
+  if (!connmgr) {
+    err_setf(error, "Failed to load saved connections");
+    return false;
+  }
+
+  /* Restore settings */
+  state->app->header_visible = session->header_visible;
+  state->app->status_visible = session->status_visible;
+  state->header_visible = session->header_visible;
+  state->status_visible = session->status_visible;
+  state->sidebar_visible = session->sidebar_visible;
+
+  size_t restored = restore_workspaces(state, session, connmgr);
+  connmgr_free(connmgr);
+
+  if (restored == 0) {
+    err_setf(error, "No workspaces could be restored");
+    return false;
+  }
+  restore_finish(state);
+  return true;
+}
+
+/* ============================================================================
+ * Saved Workspaces
+ * ============================================================================
+ */
+
+cJSON *session_workspace_to_json(struct TuiState *state, size_t ws_idx,
+                                 size_t *skipped) {
+  *skipped = 0;
+  if (!state || !state->app || ws_idx >= state->app->num_workspaces)
+    return NULL;
+  if (ws_idx == state->app->current_workspace)
+    tui_sync_to_workspace(state);
+  ConnectionManager *connmgr = connmgr_load(NULL);
+  cJSON *json = serialize_workspace(state, ws_idx, connmgr);
+  if (connmgr)
+    connmgr_free(connmgr);
+  cJSON *tabs = json ? json_get_array(json, "tabs") : NULL;
+  if (!tabs) {
+    cJSON_Delete(json);
+    return NULL;
+  }
+  /* A tab is opened again by its saved connection: one without (a typed
+   * URL) cannot be */
+  int kept = 0;
+  for (int i = json_array_size(tabs) - 1; i >= 0; i--) {
+    const char *id = json_get_string(json_get_array_item(tabs, i), "connection_id", "");
+    if (!id[0]) {
+      cJSON_DeleteItemFromArray(tabs, i);
+      (*skipped)++;
+    } else {
+      kept++;
+    }
+  }
+  if (kept == 0) {
+    cJSON_Delete(json);
+    return NULL;
+  }
+  cJSON_DeleteItemFromObject(json, "current_tab");
+  JSON_ADD_NUM(json, "current_tab", 0);
+  return json;
+}
+
+bool session_open_workspace_json(struct TuiState *state, cJSON *json,
+                                 const char *name, char **error) {
+  if (!state || !state->app || !json) {
+    err_setf(error, "Invalid arguments");
+    return false;
+  }
+  SessionWorkspace sws;
+  if (!parse_workspace(json, &sws) || sws.num_tabs == 0) {
+    session_workspace_free(&sws);
+    err_setf(error, "The saved workspace has no tabs");
+    return false;
+  }
+  if (name && name[0]) {
+    free(sws.name);
+    sws.name = str_dup(name);
+  }
+  ConnectionManager *connmgr = connmgr_load(NULL);
+  if (!connmgr) {
+    session_workspace_free(&sws);
+    err_setf(error, "Failed to load saved connections");
+    return false;
+  }
+  if (state->app->num_workspaces > 0)
+    tui_sync_to_workspace(state);
+  Session session = {0};
+  session.workspaces = &sws;
+  session.num_workspaces = 1;
+  session.current_workspace = 0;
+  size_t restored = restore_workspaces(state, &session, connmgr);
+  connmgr_free(connmgr);
+  session_workspace_free(&sws);
+  if (restored == 0) {
+    err_setf(error, "None of its connections could be opened");
+    return false;
+  }
+  restore_finish(state);
   return true;
 }

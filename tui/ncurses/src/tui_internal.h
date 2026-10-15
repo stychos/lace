@@ -434,6 +434,13 @@ void tab_close(TuiState *state);
 
 void workspace_close(TuiState *state);
 
+/* Make workspace index current (the screen follows) */
+void tui_workspace_switch(TuiState *state, size_t index);
+
+/* Close workspace index; the current one stays current. With none left,
+ * nothing more happens (the caller is the Workspaces window). */
+void tui_workspace_close_at(TuiState *state, size_t index);
+
 /* ============================================================================
  * Sidebar functions (sidebar.c)
  * ============================================================================

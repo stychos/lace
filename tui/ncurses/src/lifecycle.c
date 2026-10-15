@@ -17,6 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <unistd.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -157,6 +159,15 @@ bool tui_init(TuiState *state, AppState *app) {
   cbreak();
   noecho();
   keypad(stdscr, TRUE);
+  /* Ctrl+S and Ctrl+Q are keys here, not terminal flow control (with IXON
+   * on, Ctrl+S froze the output and never reached us). endwin() restores
+   * the modes initscr() saved. */
+  struct termios tio;
+  if (tcgetattr(STDIN_FILENO, &tio) == 0) {
+    tio.c_iflag &= ~(tcflag_t)IXON;
+    tcsetattr(STDIN_FILENO, TCSANOW, &tio);
+    def_prog_mode(); /* Kept as the program mode across suspend/resume */
+  }
   curs_set(0); /* Hide cursor */
 
   /* Define Ctrl+Home and Ctrl+End key sequences */

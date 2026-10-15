@@ -396,6 +396,11 @@ void tab_restore(TuiState *state);
  */
 
 void tui_draw_header(TuiState *state);
+
+/* What a connection string points at, for people: "sqlite: /path" or
+ * "driver://user@host:port/db  via ssh user@host"; never a password. NULL
+ * if it does not parse. Caller frees. */
+char *tui_connstr_display(const char *connstr);
 void tui_draw_table(TuiState *state);
 void tui_draw_connection_tab(TuiState *state);
 void tui_draw_status(TuiState *state);

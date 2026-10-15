@@ -46,6 +46,12 @@ LDFLAGS  += $(shell pkg-config --libs-only-L mariadb 2>/dev/null || echo "-L/opt
 # Extra compiler flags, e.g. `make EXTRA_CFLAGS=-Werror` (CI)
 CFLAGS += $(EXTRA_CFLAGS)
 
+# macOS: room in the Mach-O header for install_name_tool, so the app bundle
+# can point laced at libraries copied next to it (gui/macos/scripts/bundle-libs.sh)
+ifeq ($(shell uname -s),Darwin)
+    LDFLAGS += -Wl,-headerpad_max_install_names
+endif
+
 # make SANITIZE=1 builds with AddressSanitizer + UndefinedBehaviorSanitizer.
 # Run `make clean` first so sanitized and plain objects do not mix.
 ifeq ($(SANITIZE),1)

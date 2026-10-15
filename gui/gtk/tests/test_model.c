@@ -143,6 +143,44 @@ int main(void) {
   lace_row_model_set_total(m, 100, TRUE, TRUE);
   CHECK(lace_row_model_get_total(m) == 510);
 
+  /* An exact count below the room to scroll into (one page past a full
+   * page while the count ran) wins: a table of 15 rows is 15 rows, and
+   * the short page that follows ends it there whatever the count said */
+  lace_row_model_reset(m);
+  gen = lace_row_model_get_generation(m);
+  lace_row_model_request(m, 0);
+  lace_row_model_page_loaded(m, gen, 0, page_result(0, 10));
+  settle();
+  CHECK(g_list_model_get_n_items(G_LIST_MODEL(m)) == 20);
+  lace_row_model_set_total(m, 15, TRUE, FALSE);
+  settle();
+  CHECK(lace_row_model_get_total(m) == 15);
+  CHECK(g_list_model_get_n_items(G_LIST_MODEL(m)) == 15);
+  lace_row_model_page_loaded(m, gen, 1, page_result(10, 3));
+  settle();
+  CHECK(lace_row_model_get_total(m) == 13);
+  CHECK(g_list_model_get_n_items(G_LIST_MODEL(m)) == 13);
+  /* A full page at an estimate's end extends the estimate by a page */
+  lace_row_model_reset(m);
+  gen = lace_row_model_get_generation(m);
+  lace_row_model_request(m, 0);
+  lace_row_model_page_loaded(m, gen, 0, page_result(0, 10));
+  lace_row_model_set_total(m, 5, TRUE, TRUE);
+  CHECK(lace_row_model_get_total(m) == 10);
+  lace_row_model_page_loaded(m, gen, 1, page_result(10, 10));
+  CHECK(lace_row_model_get_total(m) == 30);
+  CHECK(lace_row_model_total_approximate(m));
+  /* Back to the state the checks below expect */
+  lace_row_model_reset(m);
+  gen = lace_row_model_get_generation(m);
+  lace_row_model_request(m, 0);
+  lace_row_model_page_loaded(m, gen, 0, page_result(0, 10));
+  lace_row_model_set_total(m, 1000, TRUE, TRUE);
+  settle();
+  lace_row_model_page_loaded(m, gen, 50, page_result(500, 10));
+  lace_row_model_set_total(m, 100, TRUE, TRUE);
+  CHECK(lace_row_model_get_total(m) == 510);
+
   /* LRU: loading many pages evicts the least recently used one */
   for (gsize p = 1; p < 40; p++)
     lace_row_model_page_loaded(m, gen, p, page_result(p * 10, 10));

@@ -13,6 +13,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include "../os/os.h"
 #include <time.h>
 
 /* ==========================================================================
@@ -20,24 +22,22 @@
  * ========================================================================== */
 
 char *lace_generate_uuid(void) {
-  static bool seeded = false;
-  if (!seeded) {
-    srand((unsigned int)time(NULL) ^ (unsigned int)((size_t)&seeded));
-    seeded = true;
+  /* A version 4 UUID from the system's random source: rand() was neither
+   * thread-safe nor random enough, and reseeded the program's own rand() */
+  uint8_t b[16];
+  if (!lace_os_random(b, sizeof(b))) {
+    /* No random source: time and address still make a usable id */
+    uint64_t t = (uint64_t)time(NULL) ^ (uint64_t)(uintptr_t)b;
+    for (size_t i = 0; i < sizeof(b); i++)
+      b[i] = (uint8_t)(t >> ((i % 8) * 8)) ^ (uint8_t)(i * 37);
   }
-
-  /* Generate UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-   * where y is one of: 8, 9, a, b */
+  b[6] = (uint8_t)((b[6] & 0x0F) | 0x40); /* Version 4 */
+  b[8] = (uint8_t)((b[8] & 0x3F) | 0x80); /* RFC 4122 variant */
   char uuid[37];
   snprintf(uuid, sizeof(uuid),
-           "%08x-%04x-4%03x-%x%03x-%012llx",
-           (unsigned int)(rand() & 0xFFFFFFFF),
-           (unsigned int)(rand() & 0xFFFF),
-           (unsigned int)(rand() & 0x0FFF),
-           (unsigned int)(8 + (rand() & 0x3)),
-           (unsigned int)(rand() & 0x0FFF),
-           (unsigned long long)(((unsigned long long)rand() << 32) | rand()) & 0xFFFFFFFFFFFFULL);
-
+           "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+           b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10],
+           b[11], b[12], b[13], b[14], b[15]);
   return str_dup(uuid);
 }
 
@@ -105,6 +105,8 @@ LaceSavedConnection *lace_saved_conn_from_connstr(const char *connstr_str,
   conn->ssh_password = cs->ssh_password ? str_dup(cs->ssh_password) : NULL;
   conn->ssh_port = cs->ssh_port;
   conn->save_ssh_password = (cs->ssh_password != NULL);
+  const char *key = connstr_get_option(cs, "ssh_key");
+  conn->ssh_key = key ? str_dup(key) : NULL;
 
   /* Generate default name from database path/name */
   if (conn->database) {
@@ -141,6 +143,7 @@ void lace_saved_conn_free(LaceSavedConnection *conn) {
   free(conn->ssh_host);
   free(conn->ssh_user);
   str_secure_free(conn->ssh_password);
+  free(conn->ssh_key);
   free(conn);
 }
 
@@ -168,6 +171,7 @@ LaceSavedConnection *lace_saved_conn_copy(const LaceSavedConnection *conn) {
   copy->ssh_password = conn->ssh_password ? str_dup(conn->ssh_password) : NULL;
   copy->ssh_port = conn->ssh_port;
   copy->save_ssh_password = conn->save_ssh_password;
+  copy->ssh_key = conn->ssh_key ? str_dup(conn->ssh_key) : NULL;
 
   return copy;
 }
@@ -200,6 +204,23 @@ static bool append_userinfo(StringBuilder *sb, const char *user,
   return true;
 }
 
+/* host[:port] for a URL: an IPv6 address goes in brackets. A host holding
+ * '/', '?', '#', '@' or whitespace would change what the URL means (a path,
+ * options, a user): refused (false), never written. */
+static bool append_host(StringBuilder *sb, const char *host, int port) {
+  if (host && host[0]) {
+    for (const char *c = host; *c; c++) {
+      if (strchr("/?#@ \t\r\n", *c))
+        return false;
+    }
+    bool v6 = strchr(host, ':') && host[0] != '[';
+    sb_printf(sb, v6 ? "[%s]" : "%s", host);
+  }
+  if (port > 0)
+    sb_printf(sb, ":%d", port);
+  return true;
+}
+
 char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
                                     const char *db_password,
                                     const char *ssh_password) {
@@ -221,16 +242,10 @@ char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
     /* SSH tunnel format: driver+ssh://[sshuser[:sshpass]@]sshhost[:sshport]/[dbuser[:dbpass]@]dbhost[:dbport]/dbname */
     sb_printf(sb, "%s+ssh://", conn->driver);
     ok = append_userinfo(sb, conn->ssh_user, ssh_password);
-    if (conn->ssh_host && conn->ssh_host[0])
-      sb_append(sb, conn->ssh_host);
-    if (conn->ssh_port > 0)
-      sb_printf(sb, ":%d", conn->ssh_port);
+    ok = ok && append_host(sb, conn->ssh_host, conn->ssh_port);
     sb_append_char(sb, '/');
     ok = ok && append_userinfo(sb, conn->user, db_password);
-    if (conn->host && conn->host[0])
-      sb_append(sb, conn->host);
-    if (conn->port > 0)
-      sb_printf(sb, ":%d", conn->port);
+    ok = ok && append_host(sb, conn->host, conn->port);
     sb_append_char(sb, '/');
     if (conn->database && conn->database[0]) {
       char *db = str_url_encode(conn->database);
@@ -242,13 +257,12 @@ char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
   } else {
     /* Standard format: driver://[user[:password]@]host[:port]/database */
     sb_printf(sb, "%s://", conn->driver);
-    ok = append_userinfo(sb, conn->user, db_password);
     bool is_sqlite = str_eq(conn->driver, "sqlite");
-    if (!is_sqlite && conn->host && conn->host[0]) {
-      sb_append(sb, conn->host);
-      if (conn->port > 0) {
-        sb_printf(sb, ":%d", conn->port);
-      }
+    /* SQLite has no user or host: everything after :// is the path (a user
+     * left over from another driver would become part of it) */
+    if (!is_sqlite) {
+      ok = append_userinfo(sb, conn->user, db_password);
+      ok = ok && append_host(sb, conn->host, conn->port);
       sb_append_char(sb, '/');
     }
     if (conn->database && conn->database[0]) {
@@ -260,6 +274,15 @@ char *lace_saved_conn_build_connstr(const LaceSavedConnection *conn,
         sb_append(sb, db);
       free(db);
     }
+  }
+
+  /* The key file for the tunnel, as an option the daemon reads */
+  if (ok && conn->ssh && conn->ssh_key && conn->ssh_key[0]) {
+    char *key = str_url_encode(conn->ssh_key);
+    ok = key != NULL;
+    if (key)
+      sb_printf(sb, "?ssh_key=%s", key);
+    free(key);
   }
 
   if (!ok) {

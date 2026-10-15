@@ -35,6 +35,8 @@
 #include "types.h"
 #include "error.h"
 #include "keyset.h"
+#include "sql_builder.h"
+#include "row_key.h"
 
 LACE_BEGIN_DECLS
 

@@ -1,0 +1,7 @@
+// liblace's public headers as one Clang module for Swift. liblace is not
+// installed but built in the tree, so CLace.h reaches its headers by a path
+// relative to this directory.
+module CLace [system] {
+  header "CLace.h"
+  export *
+}

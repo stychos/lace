@@ -128,7 +128,27 @@ static bool connstr_postprocess_ssh(ConnString *cs, char **err) {
   slash = strchr(p, '/');
   const char *host_end = slash ? slash : (p + strlen(p));
 
-  if (host_end > p) {
+  /* [IPv6]:port, as in the main part of the URL */
+  const char *close = *p == '[' ? memchr(p, ']', (size_t)(host_end - p)) : NULL;
+  if (close) {
+    cs->host = str_ndup(p + 1, (size_t)(close - p - 1));
+    if (close[1] == ':' && close + 2 < host_end) {
+      char *port_str = str_ndup(close + 2, (size_t)(host_end - close - 2));
+      char *endptr;
+      errno = 0;
+      long port_val = port_str ? strtol(port_str, &endptr, 10) : 0;
+      if (port_str && errno == 0 && *endptr == '\0' && port_val > 0 &&
+          port_val <= 65535) {
+        cs->port = (int)port_val;
+      }
+      free(port_str);
+    }
+    if (!cs->host) {
+      free(db_part);
+      err_setf(err, "Out of memory");
+      return false;
+    }
+  } else if (host_end > p) {
     /* Find last colon for port */
     const char *colon = NULL;
     for (const char *c = host_end - 1; c >= p; c--) {

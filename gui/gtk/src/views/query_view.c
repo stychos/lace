@@ -9,8 +9,7 @@
 #include "query_view.h"
 #include "edit_ops.h"
 #include "history_dialog.h"
-#include "sql/row_key.h"
-#include "sql/sql_builder.h"
+#include <lace.h>
 #include "util.h"
 #include <gtksourceview/gtksource.h>
 #include <stdlib.h>
@@ -261,7 +260,7 @@ static void start_count(LaceQueryView *v) {
   if (v->count_pending || !v->base_sql)
     return;
   v->count_pending = TRUE;
-  char *sql = sql_count_of_statement(v->base_sql);
+  char *sql = lace_sql_count_of_statement(v->base_sql);
   LaceJob *job = lace_job_count_sql(sql);
   free(sql);
   job->tag = GSIZE_TO_POINTER(lace_row_model_get_generation(v->model));
@@ -285,13 +284,13 @@ static void set_editable_state(LaceQueryView *v) {
     } else if (lace_row_model_get_total(v->model) > 0 && lace_row_model_row_loaded(v->model, 0)) {
       gsize in_page;
       LaceResult *page = lace_row_model_row_result(v->model, 0, &in_page);
-      RowKey key;
+      LaceRowKey key;
       const char *reason = NULL;
-      RowKeyStatus st = row_key_build(&key, page, in_page, v->schema, TRUE, &reason);
-      if (st == ROW_KEY_OK) {
+      LaceRowKeyStatus st = lace_row_key_build(&key, page, in_page, v->schema, TRUE, &reason);
+      if (st == LACE_ROW_KEY_OK) {
         editable = TRUE;
-        row_key_free(&key);
-      } else if (st == ROW_KEY_BAD) {
+        lace_row_key_free(&key);
+      } else if (st == LACE_ROW_KEY_BAD) {
         editable = TRUE; /* Other rows may be fine; refused per row */
       } else {
         why = "every primary key column must appear once in the results";
@@ -323,7 +322,7 @@ static void detect_source_table(LaceQueryView *v, const char *sql) {
   g_clear_pointer(&v->source_table, g_free);
   lace_data_grid_set_schema(v->grid, NULL);
   g_clear_pointer(&v->schema, lace_schema_free);
-  char *t = sql_simple_select_table(sql, lace_connection_get_driver(v->conn));
+  char *t = lace_sql_simple_select_table(sql, lace_connection_get_driver(v->conn));
   if (t) {
     v->source_table = g_strdup(t);
     free(t);
@@ -396,7 +395,7 @@ static void fetch_page(LaceRowModel *m, gsize page, gpointer data) {
   if (!v->paged || !v->base_sql)
     return;
   gsize size = lace_row_model_get_page_size(m);
-  char *sql = sql_page_of_statement(v->base_sql, v->wrap, size, page * size);
+  char *sql = lace_sql_page_of_statement(v->base_sql, v->wrap, size, page * size);
   PageReq *req = g_new0(PageReq, 1);
   req->view = v;
   req->gen = lace_row_model_get_generation(m);
@@ -417,7 +416,7 @@ static void start_paged(LaceQueryView *v, const char *base, gboolean wrap) {
   lace_row_model_reset(v->model);
   lace_row_model_set_page_size(v->model, (gsize)v->prefs->page_size);
   gsize size = lace_row_model_get_page_size(v->model);
-  char *sql = sql_page_of_statement(base, wrap, size, 0);
+  char *sql = lace_sql_page_of_statement(base, wrap, size, 0);
   PageReq *req = g_new0(PageReq, 1);
   req->view = v;
   req->gen = lace_row_model_get_generation(v->model);
@@ -581,13 +580,13 @@ static void run_next(LaceQueryView *v) {
   }
   const char *sql = g_ptr_array_index(s->statements, s->index++);
   gboolean last = s->index == s->statements->len;
-  SqlShape shape;
-  sql_shape(sql, lace_connection_get_driver(v->conn), &shape);
+  LaceSqlShape shape;
+  lace_sql_shape(sql, lace_connection_get_driver(v->conn), &shape);
   /* Only the last statement's rows are shown, and only a plain read is
    * paged; everything else runs once, as written */
-  if (last && sql_shape_pageable(&shape)) {
+  if (last && lace_sql_shape_pageable(&shape)) {
     char *base = g_strndup(sql, shape.end);
-    start_paged(v, base, sql_shape_needs_wrap(&shape));
+    start_paged(v, base, lace_sql_shape_needs_wrap(&shape));
     g_free(base);
     return;
   }
@@ -623,11 +622,11 @@ void lace_query_view_run(LaceQueryView *v, LaceRunMode mode) {
     gsize byte_cursor = strlen(prefix);
     g_free(prefix);
     gsize start, end;
-    if (sql_statement_at(text, byte_cursor, driver, &start, &end))
+    if (lace_sql_statement_at(text, byte_cursor, driver, &start, &end))
       g_ptr_array_add(stmts, g_strndup(text + start, end - start));
   } else {
     gsize start, end, next = 0;
-    while (sql_next_statement(text, next, driver, &start, &end, &next))
+    while (lace_sql_next_statement(text, next, driver, &start, &end, &next))
       g_ptr_array_add(stmts, g_strndup(text + start, end - start));
   }
   g_free(text);

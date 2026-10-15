@@ -102,7 +102,7 @@ static void cell_update(GtkWidget *cell) {
     gtk_widget_add_css_class(cell, "null");
     return;
   }
-  char *text = sql_display_text(v, CELL_MAX_CHARS);
+  char *text = lace_value_display_text(v, CELL_MAX_CHARS);
   gtk_inscription_set_text(GTK_INSCRIPTION(label), text);
   free(text);
 }
@@ -215,7 +215,7 @@ static void cell_setup(GtkSignalListItemFactory *f, GtkListItem *li, LaceDataGri
     const LaceColumn *c = model_column(g, col);
     if (c) {
       gtk_widget_add_css_class(cell, lace_type_css_class(c->type));
-      if (sql_type_is_numeric(c->type))
+      if (lace_type_is_numeric(c->type))
         gtk_inscription_set_xalign(GTK_INSCRIPTION(cell), 1.0f);
     }
     if (g->is_pk && col < g->num_columns && g->is_pk[col])
@@ -491,7 +491,7 @@ static void fit_column(LaceDataGrid *g, gsize col) {
     }
     checked++;
     const LaceValue *v = lace_row_model_get_cell(g->model, r, col);
-    char *text = sql_display_text(v, MAX_COL_CHARS + 1);
+    char *text = lace_value_display_text(v, MAX_COL_CHARS + 1);
     int len = utf8_chars(text);
     free(text);
     if (len > chars)
@@ -1014,14 +1014,14 @@ void lace_data_grid_set_row_numbers(LaceDataGrid *g, gboolean show) {
     rebuild_columns(g);
 }
 
-SortSpec *lace_data_grid_get_sorts(LaceDataGrid *g, gsize *n) {
+LaceSortSpec *lace_data_grid_get_sorts(LaceDataGrid *g, gsize *n) {
   *n = 0;
   GtkSorter *sorter = gtk_column_view_get_sorter(GTK_COLUMN_VIEW(g->view));
   if (!GTK_IS_COLUMN_VIEW_SORTER(sorter))
     return NULL;
   GtkColumnViewSorter *cs = GTK_COLUMN_VIEW_SORTER(sorter);
   guint count = gtk_column_view_sorter_get_n_sort_columns(cs);
-  SortSpec *out = g_new0(SortSpec, count + 1);
+  LaceSortSpec *out = g_new0(LaceSortSpec, count + 1);
   for (guint i = 0; i < count; i++) {
     GtkSortType order;
     GtkColumnViewColumn *column = gtk_column_view_sorter_get_nth_sort_column(cs, i, &order);
@@ -1038,14 +1038,14 @@ SortSpec *lace_data_grid_get_sorts(LaceDataGrid *g, gsize *n) {
   return out;
 }
 
-void lace_data_grid_set_sorts(LaceDataGrid *g, const SortSpec *sorts, gsize n) {
+void lace_data_grid_set_sorts(LaceDataGrid *g, const LaceSortSpec *sorts, gsize n) {
   if (!g->sortable)
     return;
   g->suppress_sort = TRUE;
   gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(g->view), NULL, GTK_SORT_ASCENDING);
   /* The last call becomes the primary sort: apply in reverse */
   for (gsize i = n; i > 0; i--) {
-    const SortSpec *s = &sorts[i - 1];
+    const LaceSortSpec *s = &sorts[i - 1];
     for (gsize c = 0; c < g->columns->len; c++) {
       const LaceColumn *col = model_column(g, c);
       if (col && col->name && s->column && strcmp(col->name, s->column) == 0) {

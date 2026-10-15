@@ -67,7 +67,7 @@ DEPS = $(OBJS:.o=.d)
 # Library version: bump MAJOR on any incompatible change to the public
 # headers (it is the SONAME / install name), MINOR for additions
 VERSION_MAJOR = 0
-VERSION_MINOR = 1
+VERSION_MINOR = 2
 VERSION_PATCH = 0
 VERSION = $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_PATCH)
 

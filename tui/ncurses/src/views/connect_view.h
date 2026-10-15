@@ -9,6 +9,7 @@
 #ifndef LACE_CONNECT_VIEW_H
 #define LACE_CONNECT_VIEW_H
 
+#include "../db_compat.h"
 #include "../tui.h"
 
 /* Connection open mode */
@@ -21,9 +22,11 @@ typedef enum {
 
 /* Connection dialog result */
 typedef struct {
-  char *connstr;       /* Connection string (caller must free) */
+  char *connstr;       /* Connection string (caller must str_secure_free) */
   char *saved_conn_id; /* Saved connection ID (caller must free, may be NULL) */
   ConnectMode mode;    /* How to open the connection */
+  DbConnection *conn;  /* Already open (the dialog connected): the caller
+                          adds it, never connects a second time */
 } ConnectResult;
 
 /* Show connection dialog and return connection result */

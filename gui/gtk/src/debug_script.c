@@ -148,9 +148,9 @@ static gboolean step(gpointer data) {
     GtkWidget *v = current_view(s->app);
     if (LACE_IS_TABLE_VIEW(v)) {
       gsize n;
-      const Filter *f = lace_table_view_get_filters(LACE_TABLE_VIEW(v), &n);
+      const LaceFilter *f = lace_table_view_get_filters(LACE_TABLE_VIEW(v), &n);
       gsize ns;
-      SortSpec *sorts = lace_table_view_get_sorts(LACE_TABLE_VIEW(v), &ns);
+      LaceSortSpec *sorts = lace_table_view_get_sorts(LACE_TABLE_VIEW(v), &ns);
       lace_table_view_restore(LACE_TABLE_VIEW(v), f, n, arg, sorts, ns, TRUE);
       for (gsize i = 0; i < ns; i++)
         g_free(sorts[i].column);
@@ -160,7 +160,7 @@ static gboolean step(gpointer data) {
     GtkWidget *v = current_view(s->app);
     char **parts = g_strsplit(arg, " ", 2);
     if (LACE_IS_TABLE_VIEW(v) && parts[0]) {
-      SortSpec spec = {parts[0], parts[1] && g_str_equal(parts[1], "desc")};
+      LaceSortSpec spec = {parts[0], parts[1] && g_str_equal(parts[1], "desc")};
       lace_data_grid_set_sorts(lace_table_view_get_grid(LACE_TABLE_VIEW(v)), &spec, 1);
       g_signal_emit_by_name(lace_table_view_get_grid(LACE_TABLE_VIEW(v)), "sort-changed");
     }

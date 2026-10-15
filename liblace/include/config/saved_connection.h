@@ -41,6 +41,8 @@ typedef struct {
   char *ssh_password;  /* SSH password (NULL = key auth) */
   int ssh_port;        /* SSH port (0 = default 22) */
   bool save_ssh_password;
+  char *ssh_key;       /* Private key file for ssh -i (NULL/"": ssh's own
+                          choice: ~/.ssh/config, the agent, default keys) */
 } LaceSavedConnection;
 
 /* ==========================================================================

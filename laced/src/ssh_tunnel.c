@@ -53,11 +53,15 @@ struct SshTunnel {
   /* What ssh_tunnel_restart() needs to start ssh again */
   char *ssh_host;
   char *ssh_user;
+  char *ssh_key;      /* Identity file for -i (NULL: ssh's own choice) */
   char *ssh_password; /* Secure-freed */
   int ssh_port;       /* 0: from ~/.ssh/config */
   char *remote_host;
   int remote_port;
+  int err_fd; /* Read end of ssh's stderr (-1: none): why it failed */
 };
+
+static void close_ssh_stderr(SshTunnel *tunnel);
 
 /* Set when the daemon shuts down: tunnel setups stop waiting */
 static _Atomic bool g_abort = false;
@@ -232,15 +236,57 @@ static int wait_for_tunnel_ready(pid_t pid, const char *path, int timeout_ms,
 
 static void tunnel_free(SshTunnel *tunnel) {
   cleanup_askpass_files(tunnel);
+  close_ssh_stderr(tunnel);
   if (tunnel->socket_dir)
     remove_tunnel_dir(tunnel->socket_dir); /* Socket, owner file */
   free(tunnel->socket_path);
   free(tunnel->socket_dir);
   free(tunnel->ssh_host);
   free(tunnel->ssh_user);
+  free(tunnel->ssh_key);
   str_secure_free(tunnel->ssh_password);
   free(tunnel->remote_host);
   free(tunnel);
+}
+
+/* Read what ssh wrote to stderr so far (non-blocking); keeps the last
+ * complete line in last (NUL-terminated, control characters dropped) */
+static void drain_ssh_stderr(SshTunnel *tunnel, char *last, size_t last_size) {
+  if (!tunnel || tunnel->err_fd < 0)
+    return;
+  char buf[1024];
+  char line[512];
+  size_t len = 0;
+  if (last && last_size)
+    last[0] = '\0';
+  for (;;) {
+    ssize_t n = read(tunnel->err_fd, buf, sizeof(buf));
+    if (n <= 0)
+      break; /* EOF, EAGAIN or error */
+    for (ssize_t i = 0; i < n; i++) {
+      char c = buf[i];
+      if (c == '\n' || c == '\r') {
+        if (len > 0 && last && last_size) {
+          line[len] = '\0';
+          snprintf(last, last_size, "%s", line);
+        }
+        len = 0;
+      } else if ((unsigned char)c >= ' ' && len + 1 < sizeof(line)) {
+        line[len++] = c;
+      }
+    }
+  }
+  if (len > 0 && last && last_size) {
+    line[len] = '\0';
+    snprintf(last, last_size, "%s", line);
+  }
+}
+
+static void close_ssh_stderr(SshTunnel *tunnel) {
+  if (tunnel && tunnel->err_fd >= 0) {
+    close(tunnel->err_fd);
+    tunnel->err_fd = -1;
+  }
 }
 
 /* Start ssh for tunnel->socket_path and wait until it forwards */
@@ -256,9 +302,11 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
   }
 
   /* ssh -L forward spec: "socketpath:remotehost:remoteport" */
-  char forward_spec[640];
-  snprintf(forward_spec, sizeof(forward_spec), "%s:%s:%d", tunnel->socket_path,
-           tunnel->remote_host, tunnel->remote_port);
+  /* An IPv6 database host goes in brackets (ssh splits the spec at ':');
+   * the whole spec is built before fork, never cut short */
+  bool v6 = strchr(tunnel->remote_host, ':') != NULL;
+  char *forward_spec = str_printf(v6 ? "%s:[%s]:%d" : "%s:%s:%d", tunnel->socket_path,
+                                  tunnel->remote_host, tunnel->remote_port);
 
   char ssh_port_str[16];
   snprintf(ssh_port_str, sizeof(ssh_port_str), "%d",
@@ -296,7 +344,7 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
    * answering (about 45 s), so a dead tunnel is noticed and restarted.
    */
   const char *ssh_config = getenv("LACED_SSH_CONFIG");
-  const char *argv[40]; /* At most 33 used: keep room when adding options */
+  const char *argv[40]; /* At most 37 used: keep room when adding options */
   int argc = 0;
   argv[argc++] = "ssh";
   argv[argc++] = "-N";
@@ -336,6 +384,14 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
     argv[argc++] = "-p";
     argv[argc++] = ssh_port_str;
   }
+  if (tunnel->ssh_key && *tunnel->ssh_key) {
+    /* That key, not every key the agent holds first (servers stop after a
+     * few attempts) */
+    argv[argc++] = "-i";
+    argv[argc++] = tunnel->ssh_key;
+    argv[argc++] = "-o";
+    argv[argc++] = "IdentitiesOnly=yes";
+  }
   if (tunnel->ssh_user && *tunnel->ssh_user) {
     argv[argc++] = "-l";
     argv[argc++] = tunnel->ssh_user;
@@ -343,13 +399,32 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
   argv[argc++] = "--"; /* The host is never an option, whatever it says */
   argv[argc++] = tunnel->ssh_host;
   argv[argc] = NULL;
-  _Static_assert(sizeof(argv) / sizeof(argv[0]) >= 33, "ssh argv too small");
+  _Static_assert(sizeof(argv) / sizeof(argv[0]) >= 37, "ssh argv too small");
 
   long max_fd = sysconf(_SC_OPEN_MAX); /* For the child's fd cleanup */
   if (max_fd < 0 || max_fd > 65536)
     max_fd = 65536;
 
+  /* ssh's stderr into a pipe: "Permission denied", "Could not resolve
+   * hostname" say more than its exit code. Read end non-blocking, and
+   * drained while ssh runs so it never blocks on a full pipe. */
+  close_ssh_stderr(tunnel);
+  int errp[2] = {-1, -1};
+  if (pipe(errp) == 0) {
+    fcntl(errp[0], F_SETFD, FD_CLOEXEC);
+    fcntl(errp[0], F_SETFL, fcntl(errp[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(errp[1], F_SETFD, FD_CLOEXEC);
+  }
+
   pid_t pid = fork();
+  if (pid != 0) {
+    free(forward_spec); /* The child has its own copy until exec */
+    if (errp[1] >= 0)
+      close(errp[1]);
+    tunnel->err_fd = pid > 0 ? errp[0] : -1;
+    if (pid < 0 && errp[0] >= 0)
+      close(errp[0]);
+  }
   if (pid < 0) {
     err_setf(err, "fork() failed: %s", strerror(errno));
     free(child_env);
@@ -369,7 +444,7 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
     if (devnull >= 0) {
       dup2(devnull, STDIN_FILENO);
       dup2(devnull, STDOUT_FILENO);
-      dup2(devnull, STDERR_FILENO);
+      dup2(errp[1] >= 0 ? errp[1] : devnull, STDERR_FILENO);
       if (devnull > STDERR_FILENO)
         close(devnull);
     }
@@ -404,7 +479,12 @@ static bool tunnel_spawn(SshTunnel *tunnel, char **err) {
       if (exit_code == 127) {
         err_set(err, "SSH command not found. Is openssh-client installed?");
       } else if (exit_code == 255) {
-        err_set(err, "SSH connection failed (authentication or host error)");
+        char why[256];
+        drain_ssh_stderr(tunnel, why, sizeof(why));
+        if (why[0])
+          err_setf(err, "SSH connection failed: %s", why);
+        else
+          err_set(err, "SSH connection failed (authentication or host error)");
       } else {
         err_setf(err, "SSH tunnel process exited with code %d", exit_code);
       }
@@ -444,6 +524,7 @@ SshTunnel *ssh_tunnel_create(const ConnString *cs, char **err) {
   }
 
   SshTunnel *tunnel = safe_calloc(1, sizeof(SshTunnel));
+  tunnel->err_fd = -1;
   tunnel->socket_dir = make_socket_dir();
   if (!tunnel->socket_dir) {
     err_set(err, "Cannot create a private directory for the SSH tunnel");
@@ -471,6 +552,19 @@ SshTunnel *ssh_tunnel_create(const ConnString *cs, char **err) {
   }
   tunnel->ssh_host = str_dup(cs->ssh_host);
   tunnel->ssh_user = cs->ssh_user ? str_dup(cs->ssh_user) : NULL;
+  /* ~/ means the daemon user's home, as in ssh_config */
+  const char *key = connstr_get_option(cs, "ssh_key");
+  if (key && key[0]) {
+    const char *home = getenv("HOME");
+    tunnel->ssh_key = key[0] == '~' && key[1] == '/' && home
+                          ? str_printf("%s%s", home, key + 1)
+                          : str_dup(key);
+    if (access(tunnel->ssh_key, R_OK) != 0) {
+      err_setf(err, "SSH key %s: %s", tunnel->ssh_key, strerror(errno));
+      tunnel_free(tunnel);
+      return NULL;
+    }
+  }
   tunnel->ssh_password = cs->ssh_password ? str_dup(cs->ssh_password) : NULL;
   tunnel->ssh_port = cs->ssh_port;
   tunnel->remote_host = str_dup(cs->host ? cs->host : "localhost");
@@ -535,6 +629,7 @@ void ssh_tunnel_destroy(SshTunnel *tunnel) {
 bool ssh_tunnel_is_alive(SshTunnel *tunnel) {
   if (!tunnel || tunnel->pid <= 0)
     return false;
+  drain_ssh_stderr(tunnel, NULL, 0); /* Keep ssh from blocking on it */
 
   /* Reap if it exited (kill(pid, 0) succeeds on a zombie) */
   int status;

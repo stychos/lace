@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
-  <gresource prefix="/io/github/stychos/lace">
+  <gresource prefix="/dev/hexed/lace">
     <file compressed="true">style.css</file>
-    <file preprocess="xml-stripblanks">icons/scalable/apps/io.github.stychos.lace.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/apps/dev.hexed.lace.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/lace-sqlite-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/lace-postgres-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/lace-mysql-symbolic.svg</file>

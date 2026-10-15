@@ -17,7 +17,7 @@ struct _LaceFilterBar {
   GtkWidget *add_button;
   GtkWidget *clear_button;
   GPtrArray *chips;    /* GtkWidget*, parallel to filters */
-  GArray *filters;     /* Filter */
+  GArray *filters;     /* LaceFilter */
   const LaceSchema *schema;
   char *search_text;
 
@@ -49,15 +49,15 @@ static void emit_changed(LaceFilterBar *bar) {
   g_signal_emit(bar, signals[SIG_CHANGED], 0);
 }
 
-static char *chip_text(const Filter *f) {
-  if (!f->column || f->op == FILTER_RAW)
+static char *chip_text(const LaceFilter *f) {
+  if (!f->column || f->op == LACE_FILTER_RAW)
     return g_strdup_printf("SQL: %s", f->value ? f->value : "");
-  if (!filter_op_needs_value(f->op))
-    return g_strdup_printf("%s %s", f->column, filter_op_label(f->op));
-  if (filter_op_two_values(f->op))
-    return g_strdup_printf("%s %s %s and %s", f->column, filter_op_label(f->op),
+  if (!lace_filter_op_needs_value(f->op))
+    return g_strdup_printf("%s %s", f->column, lace_filter_op_label(f->op));
+  if (lace_filter_op_two_values(f->op))
+    return g_strdup_printf("%s %s %s and %s", f->column, lace_filter_op_label(f->op),
                            f->value ? f->value : "", f->value2 ? f->value2 : "");
-  return g_strdup_printf("%s %s %s", f->column, filter_op_label(f->op), f->value ? f->value : "");
+  return g_strdup_printf("%s %s %s", f->column, lace_filter_op_label(f->op), f->value ? f->value : "");
 }
 
 static void on_chip_clicked(GtkButton *b, LaceFilterBar *bar) {
@@ -69,7 +69,7 @@ static void on_chip_remove(GtkButton *b, LaceFilterBar *bar) {
   int index = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(b), "index"));
   if (index < 0 || (guint)index >= bar->filters->len)
     return;
-  filter_clear(&g_array_index(bar->filters, Filter, index));
+  lace_filter_clear(&g_array_index(bar->filters, LaceFilter, index));
   g_array_remove_index(bar->filters, index);
   rebuild_chips(bar);
   emit_changed(bar);
@@ -80,7 +80,7 @@ static void rebuild_chips(LaceFilterBar *bar) {
     adw_wrap_box_remove(ADW_WRAP_BOX(bar->box), g_ptr_array_index(bar->chips, i));
   g_ptr_array_set_size(bar->chips, 0);
   for (guint i = 0; i < bar->filters->len; i++) {
-    const Filter *f = &g_array_index(bar->filters, Filter, i);
+    const LaceFilter *f = &g_array_index(bar->filters, LaceFilter, i);
     GtkWidget *chip = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_add_css_class(chip, "chip");
     gtk_widget_add_css_class(chip, "linked");
@@ -119,8 +119,8 @@ static void sync_editor_fields(LaceFilterBar *bar) {
   gtk_widget_set_visible(bar->grid_fields, !raw);
   gtk_widget_set_visible(bar->raw_entry, raw);
   guint op = gtk_drop_down_get_selected(GTK_DROP_DOWN(bar->op_drop));
-  gtk_widget_set_visible(bar->value_entry, filter_op_needs_value((FilterOp)op));
-  gtk_widget_set_visible(bar->value2_entry, filter_op_two_values((FilterOp)op));
+  gtk_widget_set_visible(bar->value_entry, lace_filter_op_needs_value((LaceFilterOp)op));
+  gtk_widget_set_visible(bar->value2_entry, lace_filter_op_two_values((LaceFilterOp)op));
 }
 
 static void on_editor_field_changed(GObject *o, GParamSpec *p, LaceFilterBar *bar) {
@@ -136,30 +136,30 @@ static void on_raw_toggled(GtkCheckButton *c, LaceFilterBar *bar) {
 
 static void on_apply(GtkButton *b, LaceFilterBar *bar) {
   (void)b;
-  Filter f = {0};
+  LaceFilter f = {0};
   gboolean raw = gtk_check_button_get_active(GTK_CHECK_BUTTON(bar->raw_check));
   if (raw) {
     const char *t = gtk_editable_get_text(GTK_EDITABLE(bar->raw_entry));
     if (!t || !*t)
       return;
-    f.op = FILTER_RAW;
+    f.op = LACE_FILTER_RAW;
     f.value = g_strdup(t);
   } else {
     guint ci = gtk_drop_down_get_selected(GTK_DROP_DOWN(bar->column_drop));
     if (!bar->schema || ci >= bar->schema->num_columns)
       return;
     f.column = g_strdup(bar->schema->columns[ci].name);
-    f.op = (FilterOp)gtk_drop_down_get_selected(GTK_DROP_DOWN(bar->op_drop));
+    f.op = (LaceFilterOp)gtk_drop_down_get_selected(GTK_DROP_DOWN(bar->op_drop));
     f.value = g_strdup(gtk_editable_get_text(GTK_EDITABLE(bar->value_entry)));
     f.value2 = g_strdup(gtk_editable_get_text(GTK_EDITABLE(bar->value2_entry)));
-    if (filter_op_needs_value(f.op) && !*f.value) {
-      filter_clear(&f);
+    if (lace_filter_op_needs_value(f.op) && !*f.value) {
+      lace_filter_clear(&f);
       return;
     }
   }
   if (bar->editing >= 0 && (guint)bar->editing < bar->filters->len) {
-    filter_clear(&g_array_index(bar->filters, Filter, bar->editing));
-    g_array_index(bar->filters, Filter, bar->editing) = f;
+    lace_filter_clear(&g_array_index(bar->filters, LaceFilter, bar->editing));
+    g_array_index(bar->filters, LaceFilter, bar->editing) = f;
   } else {
     g_array_append_val(bar->filters, f);
   }
@@ -171,7 +171,7 @@ static void on_apply(GtkButton *b, LaceFilterBar *bar) {
 static void on_remove(GtkButton *b, LaceFilterBar *bar) {
   (void)b;
   if (bar->editing >= 0 && (guint)bar->editing < bar->filters->len) {
-    filter_clear(&g_array_index(bar->filters, Filter, bar->editing));
+    lace_filter_clear(&g_array_index(bar->filters, LaceFilter, bar->editing));
     g_array_remove_index(bar->filters, bar->editing);
   }
   gtk_popover_popdown(GTK_POPOVER(bar->popover));
@@ -207,12 +207,12 @@ static void build_popover(LaceFilterBar *bar) {
   GtkExpression *expr = gtk_property_expression_new(GTK_TYPE_STRING_OBJECT, NULL, "string");
   gtk_drop_down_set_expression(GTK_DROP_DOWN(bar->column_drop), expr);
   gtk_expression_unref(expr);
-  const char *ops[FILTER_OP_COUNT + 1];
+  const char *ops[LACE_FILTER_OP_COUNT + 1];
   int n = 0;
-  for (int i = 0; i < FILTER_OP_COUNT; i++) {
-    if (i == FILTER_RAW)
+  for (int i = 0; i < LACE_FILTER_OP_COUNT; i++) {
+    if (i == LACE_FILTER_RAW)
       continue;
-    ops[n++] = filter_op_label((FilterOp)i);
+    ops[n++] = lace_filter_op_label((LaceFilterOp)i);
   }
   ops[n] = NULL;
   bar->op_drop = gtk_drop_down_new_from_strings(ops);
@@ -259,16 +259,16 @@ static void build_popover(LaceFilterBar *bar) {
   gtk_widget_add_controller(bar->popover, keys);
 }
 
-static guint op_to_index(FilterOp op) { return op > FILTER_RAW ? 0 : (guint)op; }
+static guint op_to_index(LaceFilterOp op) { return op > LACE_FILTER_RAW ? 0 : (guint)op; }
 
 static void open_editor(LaceFilterBar *bar, int index, GtkWidget *anchor) {
   bar->editing = index;
   GtkStringList *names = column_names(bar);
   gtk_drop_down_set_model(GTK_DROP_DOWN(bar->column_drop), G_LIST_MODEL(names));
   g_object_unref(names);
-  const Filter *f = index >= 0 && (guint)index < bar->filters->len
-                        ? &g_array_index(bar->filters, Filter, index) : NULL;
-  gboolean raw = f && (f->op == FILTER_RAW || !f->column);
+  const LaceFilter *f = index >= 0 && (guint)index < bar->filters->len
+                        ? &g_array_index(bar->filters, LaceFilter, index) : NULL;
+  gboolean raw = f && (f->op == LACE_FILTER_RAW || !f->column);
   gtk_check_button_set_active(GTK_CHECK_BUTTON(bar->raw_check), raw);
   gtk_editable_set_text(GTK_EDITABLE(bar->raw_entry), raw && f->value ? f->value : "");
   gtk_editable_set_text(GTK_EDITABLE(bar->value_entry), f && !raw && f->value ? f->value : "");
@@ -348,9 +348,9 @@ void lace_filter_bar_set_schema(LaceFilterBar *bar, const LaceSchema *schema) {
   gtk_widget_set_sensitive(bar->add_button, schema != NULL);
 }
 
-const Filter *lace_filter_bar_get_filters(LaceFilterBar *bar, gsize *n) {
+const LaceFilter *lace_filter_bar_get_filters(LaceFilterBar *bar, gsize *n) {
   *n = bar->filters->len;
-  return bar->filters->len ? &g_array_index(bar->filters, Filter, 0) : NULL;
+  return bar->filters->len ? &g_array_index(bar->filters, LaceFilter, 0) : NULL;
 }
 
 const char *lace_filter_bar_get_search(LaceFilterBar *bar) {
@@ -361,13 +361,13 @@ gboolean lace_filter_bar_is_empty(LaceFilterBar *bar) {
   return bar->filters->len == 0 && (!bar->search_text || !*bar->search_text);
 }
 
-void lace_filter_bar_set_filters(LaceFilterBar *bar, const Filter *filters,
+void lace_filter_bar_set_filters(LaceFilterBar *bar, const LaceFilter *filters,
                                  gsize n, const char *search) {
   for (guint i = 0; i < bar->filters->len; i++)
-    filter_clear(&g_array_index(bar->filters, Filter, i));
+    lace_filter_clear(&g_array_index(bar->filters, LaceFilter, i));
   g_array_set_size(bar->filters, 0);
   for (gsize i = 0; i < n; i++) {
-    Filter f = {0};
+    LaceFilter f = {0};
     f.column = filters[i].column ? g_strdup(filters[i].column) : NULL;
     f.op = filters[i].op;
     f.value = filters[i].value ? g_strdup(filters[i].value) : NULL;
@@ -387,11 +387,11 @@ void lace_filter_bar_clear(LaceFilterBar *bar) {
   lace_filter_bar_set_filters(bar, NULL, 0, "");
 }
 
-void lace_filter_bar_add(LaceFilterBar *bar, const char *column, FilterOp op,
+void lace_filter_bar_add(LaceFilterBar *bar, const char *column, LaceFilterOp op,
                          const char *value) {
-  Filter f = {0};
+  LaceFilter f = {0};
   f.column = g_strdup(column);
-  f.op = value ? op : FILTER_NULL;
+  f.op = value ? op : LACE_FILTER_NULL;
   f.value = g_strdup(value ? value : "");
   g_array_append_val(bar->filters, f);
   rebuild_chips(bar);
@@ -421,7 +421,7 @@ static void lace_filter_bar_dispose(GObject *obj) {
   g_clear_pointer(&bar->box, gtk_widget_unparent);
   if (bar->filters) {
     for (guint i = 0; i < bar->filters->len; i++)
-      filter_clear(&g_array_index(bar->filters, Filter, i));
+      lace_filter_clear(&g_array_index(bar->filters, LaceFilter, i));
     g_clear_pointer(&bar->filters, g_array_unref);
   }
   g_clear_pointer(&bar->chips, g_ptr_array_unref);
@@ -438,7 +438,7 @@ static void lace_filter_bar_class_init(LaceFilterBarClass *klass) {
 }
 
 static void lace_filter_bar_init(LaceFilterBar *bar) {
-  bar->filters = g_array_new(FALSE, TRUE, sizeof(Filter));
+  bar->filters = g_array_new(FALSE, TRUE, sizeof(LaceFilter));
   bar->chips = g_ptr_array_new();
   bar->editing = -1;
 

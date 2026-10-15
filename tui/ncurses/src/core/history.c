@@ -10,6 +10,7 @@
  */
 
 #include "history.h"
+#include "../config/connections.h"
 #include "../platform/platform.h"
 #include "util/json_helpers.h"
 #include "../../liblace/include/util/mem.h"
@@ -30,7 +31,9 @@
  */
 
 char *history_get_file_path(const char *connection_id) {
-  if (!connection_id || !connection_id[0])
+  /* The id becomes a file name: only letters, digits and '-' (an id from a
+   * hand-edited connections.json must not reach outside history/) */
+  if (!connmgr_id_valid(connection_id))
     return NULL;
 
   const char *data_dir = platform_get_data_dir();
