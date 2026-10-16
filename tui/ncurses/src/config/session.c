@@ -15,6 +15,8 @@
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include "connections.h"
+#include "recent.h"
+#include "workspace_json.h"
 #include <cjson/cJSON.h>
 #include <errno.h>
 #include <math.h>
@@ -164,6 +166,7 @@ static void session_tab_free(SessionTab *tab) {
     return;
 
   free(tab->connection_id);
+  str_secure_free(tab->connstr);
   free(tab->table_name);
   free(tab->query_text);
 
@@ -198,6 +201,7 @@ void session_free(Session *session) {
     session_workspace_free(&session->workspaces[i]);
   }
   free(session->workspaces);
+  free(session->warning);
   free(session);
 }
 
@@ -294,6 +298,14 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
     conn_id = find_connection_id_by_connstr(connmgr, conn->connstr);
   }
   JSON_ADD_STR(json, "connection_id", conn_id);
+  /* A connection opened by URL has no saved id: its string, without
+   * passwords, lets every frontend reopen it */
+  if ((!conn_id || !conn_id[0]) && conn && conn->connstr) {
+    char *bare = recent_strip_passwords(conn->connstr);
+    if (bare)
+      JSON_ADD_STR(json, "connstr", bare);
+    str_secure_free(bare);
+  }
 
   /* Table name (for TABLE tabs) */
   if (tab->type == TAB_TYPE_TABLE && tab->table_name) {
@@ -407,23 +419,18 @@ bool session_save(struct TuiState *state, char **error) {
     return false;
   }
 
-  /* Don't save if no connections - delete session file if it exists */
-  if (state->app->num_connections == 0) {
-    char *path = session_get_path();
-    if (path) {
-      unlink(path); /* Delete old session file */
-      free(path);
-    }
-    return true;
-  }
+  /* No connections: no workspaces to write, but the file is still shared
+   * (other frontends' members are kept; it goes only when nothing is left) */
+  bool empty = state->app->num_connections == 0;
 
   /* Don't save if no workspaces */
-  if (state->app->num_workspaces == 0) {
+  if (!empty && state->app->num_workspaces == 0) {
     return true;
   }
 
   /* Sync current workspace state before saving */
-  tui_sync_to_workspace(state);
+  if (!empty)
+    tui_sync_to_workspace(state);
 
   /* Load connection manager to map connections to saved connection IDs */
   ConnectionManager *connmgr = connmgr_load(NULL);
@@ -464,7 +471,7 @@ bool session_save(struct TuiState *state, char **error) {
 
   /* Workspaces */
   cJSON *workspaces = cJSON_CreateArray();
-  for (size_t i = 0; i < state->app->num_workspaces; i++) {
+  for (size_t i = 0; !empty && i < state->app->num_workspaces; i++) {
     cJSON *ws = serialize_workspace(state, i, connmgr);
     if (ws) {
       cJSON_AddItemToArray(workspaces, ws);
@@ -472,21 +479,81 @@ bool session_save(struct TuiState *state, char **error) {
   }
   cJSON_AddItemToObject(json, "workspaces", workspaces);
 
-  JSON_ADD_NUM(json, "current_workspace", state->app->current_workspace);
+  JSON_ADD_NUM(json, "current_workspace", empty ? 0 : state->app->current_workspace);
 
   if (connmgr)
     connmgr_free(connmgr);
 
-  /* Write to file */
+  /* Version 2: the nested shape every frontend shares, other frontends'
+   * sections kept (rule 1 of the shared config spec) */
+  char *cerr = NULL;
+  cJSON *v2 = session_json_to_v2(json, &cerr);
+  cJSON_Delete(json);
+  if (!v2) {
+    err_setf(error, "Cannot serialize the session: %s", cerr ? cerr : "?");
+    free(cerr);
+    return false;
+  }
+  free(cerr); /* A workspace this TUI wrote that does not convert: left out */
+
   char *path = session_get_path();
   if (!path) {
-    cJSON_Delete(json);
+    cJSON_Delete(v2);
     err_setf(error, "Failed to get session path");
     return false;
   }
 
-  char *content = cJSON_Print(json);
-  cJSON_Delete(json);
+  bool foreign = false; /* Members of other frontends kept */
+  if (platform_file_exists(path)) {
+    char *cur = platform_read_file(path, 10 * 1024 * 1024);
+    if (!cur) {
+      /* What cannot be read cannot be kept: never replace it */
+      err_setf(error, "Failed to read %s: %s; not overwritten", path,
+               strerror(errno));
+      free(path);
+      cJSON_Delete(v2);
+      return false;
+    }
+    if (cur[0]) {
+      cJSON *old = cJSON_Parse(cur);
+      if (!old) {
+        /* Never overwrite what we cannot read: it may be another
+         * frontend's data or a file being edited */
+        const char *err_ptr = cJSON_GetErrorPtr();
+        long off = err_ptr ? (long)(err_ptr - cur) : -1L;
+        str_secure_free(cur);
+        err_setf(error,
+                 "%s is not valid JSON (near byte %ld); not overwritten",
+                 path, off);
+        free(path);
+        cJSON_Delete(v2);
+        return false;
+      }
+      cJSON *m;
+      cJSON_ArrayForEach(m, old) {
+        if (!m->string || cJSON_GetObjectItem(v2, m->string))
+          continue;
+        if (str_eq(m->string, "settings") ||
+            str_eq(m->string, "current_workspace"))
+          continue; /* Version 1 members: ours, now in other places */
+        cJSON_AddItemToObject(v2, m->string, cJSON_Duplicate(m, true));
+        foreign = true;
+      }
+      cJSON_Delete(old);
+    }
+    str_secure_free(cur);
+  }
+
+  /* Nothing to restore and nothing of anyone else's: no file, as before */
+  if (empty && !foreign) {
+    cJSON_Delete(v2);
+    unlink(path);
+    free(path);
+    return true;
+  }
+
+  char *content = cJSON_Print(v2);
+  cJSON_Delete(v2);
 
   if (!content) {
     free(path);
@@ -562,6 +629,7 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
 
   tab->connection_id = json_dup_string_or(json, "connection_id", "");
   tab->table_name = json_dup_string_or(json, "table_name", "");
+  tab->connstr = json_dup_string(json, "connstr");
 
   /* Cursor/scroll - safely convert to size_t */
   cJSON *cursor = json_get_array(json, "cursor");
@@ -625,7 +693,9 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   parse_tab_ui(ui, &tab->ui);
 
   /* Require non-empty connection_id for valid tab */
-  return tab->connection_id != NULL && tab->connection_id[0] != '\0';
+  return tab->connection_id != NULL &&
+         (tab->connection_id[0] != '\0' ||
+          (tab->connstr != NULL && tab->connstr[0] != '\0'));
 }
 
 static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
@@ -696,8 +766,27 @@ Session *session_load(char **error) {
   }
   str_secure_free(content); /* Content may contain connection strings */
 
+  /* Version 2 (the nested shape every frontend shares) is read through the
+   * flat shape the parser below knows */
+  /* A workspace that does not convert is skipped (the warning says which);
+   * the others are restored */
+  char *warning = NULL;
+  if (json_get_int(json, "version", 1) >= 2) {
+    char *cerr = NULL;
+    cJSON *v1 = session_json_to_v1(json, &cerr);
+    cJSON_Delete(json);
+    if (!v1) {
+      err_setf(error, "session.json: %s", cerr ? cerr : "cannot convert");
+      free(cerr);
+      return NULL;
+    }
+    json = v1;
+    warning = cerr;
+  }
+
   /* Create session */
   Session *session = safe_calloc(1, sizeof(Session));
+  session->warning = warning;
 
   /* Parse settings */
   cJSON *settings = json_get_object(json, "settings");
@@ -767,24 +856,46 @@ static bool is_auth_error(const char *err) {
  * ============================================================================
  */
 
+/* A password-less connection string another frontend stored, with typed
+ * passwords added (NULL keeps what the string holds). Goes through the saved
+ * connection model like the Workspaces window, so an SSH tunnel and its key
+ * are kept. Free with str_secure_free(). */
+char *session_connstr_with_password(const char *connstr, const char *password,
+                                    const char *ssh_password) {
+  if (!connstr)
+    return NULL;
+  LaceSavedConnection *model = lace_saved_conn_from_connstr(connstr, NULL);
+  if (!model)
+    return NULL;
+  char *out = lace_saved_conn_build_connstr(model, password, ssh_password);
+  lace_saved_conn_free(model);
+  return out;
+}
+
 /* Find or create connection by saved connection ID */
 static size_t restore_connection(TuiState *state, const char *conn_id,
-                                 ConnectionManager *connmgr, char **error) {
-
-  if (!conn_id || !conn_id[0]) {
+                                 const char *url, ConnectionManager *connmgr,
+                                 char **error) {
+  bool by_id = conn_id && conn_id[0];
+  if (!by_id && (!url || !url[0])) {
     err_setf(error, "Empty connection ID");
     return (size_t)-1;
   }
 
-  /* Find saved connection by ID */
-  ConnectionItem *item = connmgr_find_by_id(connmgr, conn_id);
-  if (!item || !connmgr_is_connection(item)) {
-    err_setf(error, "Connection not found: %s", conn_id);
-    return (size_t)-1;
+  /* A saved connection by its id; else the password-less string another
+   * frontend stored (no saved connection to take a password from) */
+  ConnectionItem *item = NULL;
+  char *connstr = NULL;
+  if (by_id) {
+    item = connmgr_find_by_id(connmgr, conn_id);
+    if (!item || !connmgr_is_connection(item)) {
+      err_setf(error, "Connection not found: %s", conn_id);
+      return (size_t)-1;
+    }
+    connstr = connmgr_build_connstr(&item->connection);
+  } else {
+    connstr = str_dup(url);
   }
-
-  /* Build connection string */
-  char *connstr = connmgr_build_connstr(&item->connection);
   if (!connstr) {
     err_setf(error, "Failed to build connection string");
     return (size_t)-1;
@@ -796,7 +907,7 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
    * further tab used to reconnect without a password and fail. */
   for (size_t i = 0; i < state->app->num_connections; i++) {
     Connection *conn = &state->app->connections[i];
-    if (conn->active && ((conn->saved_conn_id &&
+    if (conn->active && ((by_id && conn->saved_conn_id &&
                           str_eq(conn->saved_conn_id, conn_id)) ||
                          (conn->connstr && str_eq(conn->connstr, connstr)))) {
       str_secure_free(connstr); /* Connection string may contain password */
@@ -806,7 +917,7 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
 
   /* Need to establish new connection */
   char *conn_err = NULL;
-  SavedConnection *saved = &item->connection;
+  SavedConnection *saved = item ? &item->connection : NULL;
 
   DbConnection *db_conn = db_connect(state->app->client, connstr, &conn_err);
 
@@ -816,7 +927,9 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
    * - Other errors: fail immediately
    */
   bool is_network_db =
-      saved->driver && saved->driver[0] && strcmp(saved->driver, "sqlite") != 0;
+      saved ? (saved->driver && saved->driver[0] &&
+               strcmp(saved->driver, "sqlite") != 0)
+            : strncmp(connstr, "sqlite:", 7) != 0;
 
   while (!db_conn && is_network_db && is_auth_error(conn_err)) {
     /* Auth error - prompt for password via callback */
@@ -827,7 +940,8 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
 
     char title[128];
     snprintf(title, sizeof(title), "Password for %s",
-             saved->name && saved->name[0] ? saved->name : "connection");
+             saved && saved->name && saved->name[0] ? saved->name
+                                                    : "connection");
 
     char *password = s_password_callback(s_password_callback_data, title,
                                          "Enter password:", conn_err);
@@ -844,7 +958,8 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
     /* Same builder as the first attempt, so an SSH tunnel is kept (a plain
      * rebuild connected straight to the database host, often "localhost":
      * a different database) */
-    connstr = lace_saved_conn_build_connstr(saved, password, NULL);
+    connstr = saved ? lace_saved_conn_build_connstr(saved, password, NULL)
+                    : session_connstr_with_password(url, password, NULL);
 
     str_secure_free(password);
 
@@ -877,10 +992,11 @@ static size_t restore_connection(TuiState *state, const char *conn_id,
   }
 
   /* Store saved connection ID for session persistence */
-  conn->saved_conn_id = str_dup(conn_id);
+  if (by_id)
+    conn->saved_conn_id = str_dup(conn_id);
 
   /* Load history from file if persistent mode is enabled */
-  if (state->app->config &&
+  if (by_id && state->app->config &&
       state->app->config->general.history_mode == HISTORY_MODE_PERSISTENT &&
       conn->history) {
     /* Set connection ID in history */
@@ -1236,7 +1352,8 @@ static size_t restore_workspaces(TuiState *state, Session *session,
       /* Get or create connection */
       char *conn_err = NULL;
       size_t conn_idx =
-          restore_connection(state, stab->connection_id, connmgr, &conn_err);
+          restore_connection(state, stab->connection_id, stab->connstr, connmgr,
+                             &conn_err);
 
       if (conn_idx == (size_t)-1) {
         /* Connection failed - skip this tab */
@@ -1279,9 +1396,11 @@ static void restore_finish(TuiState *state) {
    * need to recreate them with the actual restored settings. */
   tui_recreate_windows(state);
 
-  /* If current tab has a table error, show and focus sidebar */
+  /* If current tab has a table error, or is a connection tab (which has
+   * only the sidebar to pick a table from), show and focus sidebar */
   Tab *current_tab = app_current_tab(state->app);
-  if (current_tab && current_tab->table_error) {
+  if (current_tab && (current_tab->table_error ||
+                      current_tab->type == TAB_TYPE_CONNECTION)) {
     if (!state->sidebar_visible) {
       state->sidebar_visible = true;
       tui_recreate_windows(state);
@@ -1319,10 +1438,15 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   connmgr_free(connmgr);
 
   if (restored == 0) {
-    err_setf(error, "No workspaces could be restored");
+    if (session->warning)
+      err_setf(error, "No workspaces could be restored (%s)", session->warning);
+    else
+      err_setf(error, "No workspaces could be restored");
     return false;
   }
   restore_finish(state);
+  if (session->warning)
+    tui_set_error(state, "Session: %s", session->warning);
   return true;
 }
 
@@ -1347,12 +1471,14 @@ cJSON *session_workspace_to_json(struct TuiState *state, size_t ws_idx,
     cJSON_Delete(json);
     return NULL;
   }
-  /* A tab is opened again by its saved connection: one without (a typed
-   * URL) cannot be */
+  /* A tab is opened again by its saved connection or the password-less
+   * string of one opened by URL; one with neither cannot be */
   int kept = 0;
   for (int i = json_array_size(tabs) - 1; i >= 0; i--) {
-    const char *id = json_get_string(json_get_array_item(tabs, i), "connection_id", "");
-    if (!id[0]) {
+    cJSON *tj = json_get_array_item(tabs, i);
+    const char *id = json_get_string(tj, "connection_id", "");
+    const char *cs = json_get_string(tj, "connstr", "");
+    if (!id[0] && !cs[0]) {
       cJSON_DeleteItemFromArray(tabs, i);
       (*skipped)++;
     } else {
@@ -1365,7 +1491,10 @@ cJSON *session_workspace_to_json(struct TuiState *state, size_t ws_idx,
   }
   cJSON_DeleteItemFromObject(json, "current_tab");
   JSON_ADD_NUM(json, "current_tab", 0);
-  return json;
+  /* Stored in the nested shape every frontend shares */
+  cJSON *nested = workspace_json_to_nested(json, NULL);
+  cJSON_Delete(json);
+  return nested;
 }
 
 bool session_open_workspace_json(struct TuiState *state, cJSON *json,
@@ -1375,7 +1504,14 @@ bool session_open_workspace_json(struct TuiState *state, cJSON *json,
     return false;
   }
   SessionWorkspace sws;
-  if (!parse_workspace(json, &sws) || sws.num_tabs == 0) {
+  cJSON *flat = workspace_json_shape(json) == WORKSPACE_JSON_NESTED
+                    ? workspace_json_to_flat(json, error)
+                    : cJSON_Duplicate(json, true);
+  if (!flat)
+    return false;
+  bool parsed = parse_workspace(flat, &sws);
+  cJSON_Delete(flat);
+  if (!parsed || sws.num_tabs == 0) {
     session_workspace_free(&sws);
     err_setf(error, "The saved workspace has no tabs");
     return false;

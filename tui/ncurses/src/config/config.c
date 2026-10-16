@@ -37,6 +37,7 @@ typedef struct {
   HotkeyCategory category;
   const char **default_keys;
   size_t num_default_keys;
+  unsigned frontends; /* CONFIG_FE_* mask */
 } ActionMeta;
 
 /* Default key bindings */
@@ -138,192 +139,231 @@ static const char *def_history_delete[] = {"x", "DELETE"};
 static const char *def_history_clear[] = {"c"};
 static const char *def_history_close[] = {"ESCAPE", "q"};
 
+static const char *def_palette[] = {"CTRL+P"};
+static const char *def_close_view[] = {"CTRL+W"};
+static const char *def_next_conn_tab[] = {"CTRL+PGDN"};
+static const char *def_prev_conn_tab[] = {"CTRL+PGUP"};
+static const char *def_conn_tab_1[] = {"ALT+1"};
+static const char *def_conn_tab_2[] = {"ALT+2"};
+static const char *def_conn_tab_3[] = {"ALT+3"};
+static const char *def_conn_tab_4[] = {"ALT+4"};
+static const char *def_conn_tab_5[] = {"ALT+5"};
+static const char *def_conn_tab_6[] = {"ALT+6"};
+static const char *def_conn_tab_7[] = {"ALT+7"};
+static const char *def_conn_tab_8[] = {"ALT+8"};
+static const char *def_conn_tab_9[] = {"ALT+9"};
+static const char *def_view_switcher[] = {"CTRL+E"};
+static const char *def_toggle_log[] = {"CTRL+`", "F8"};
+static const char *def_column_narrower[] = {"ALT+LEFT"};
+static const char *def_column_wider[] = {"ALT+RIGHT"};
+static const char *def_split_up[] = {"CTRL+UP"};
+static const char *def_split_down[] = {"CTRL+DOWN"};
+
 #define DEF_KEYS(arr) arr, sizeof(arr) / sizeof(arr[0])
 
 static const ActionMeta action_meta[HOTKEY_COUNT] = {
     /* Navigation */
     [HOTKEY_MOVE_UP] = {"move_up", "Move up", HOTKEY_CAT_NAVIGATION,
-                        DEF_KEYS(def_move_up)},
+                        DEF_KEYS(def_move_up), CONFIG_FE_ALL},
     [HOTKEY_MOVE_DOWN] = {"move_down", "Move down", HOTKEY_CAT_NAVIGATION,
-                          DEF_KEYS(def_move_down)},
+                          DEF_KEYS(def_move_down), CONFIG_FE_ALL},
     [HOTKEY_MOVE_LEFT] = {"move_left", "Move left", HOTKEY_CAT_NAVIGATION,
-                          DEF_KEYS(def_move_left)},
+                          DEF_KEYS(def_move_left), CONFIG_FE_ALL},
     [HOTKEY_MOVE_RIGHT] = {"move_right", "Move right", HOTKEY_CAT_NAVIGATION,
-                           DEF_KEYS(def_move_right)},
+                           DEF_KEYS(def_move_right), CONFIG_FE_ALL},
     [HOTKEY_PAGE_UP] = {"page_up", "Page up", HOTKEY_CAT_NAVIGATION,
-                        DEF_KEYS(def_page_up)},
+                        DEF_KEYS(def_page_up), CONFIG_FE_ALL},
     [HOTKEY_PAGE_DOWN] = {"page_down", "Page down", HOTKEY_CAT_NAVIGATION,
-                          DEF_KEYS(def_page_down)},
+                          DEF_KEYS(def_page_down), CONFIG_FE_ALL},
     [HOTKEY_FIRST_ROW] = {"first_row", "First row", HOTKEY_CAT_NAVIGATION,
-                          DEF_KEYS(def_first_row)},
+                          DEF_KEYS(def_first_row), CONFIG_FE_ALL},
     [HOTKEY_LAST_ROW] = {"last_row", "Last row", HOTKEY_CAT_NAVIGATION,
-                         DEF_KEYS(def_last_row)},
+                         DEF_KEYS(def_last_row), CONFIG_FE_ALL},
     [HOTKEY_GOTO_ROW] = {"goto_row", "Go to row", HOTKEY_CAT_NAVIGATION,
-                         DEF_KEYS(def_goto_row)},
+                         DEF_KEYS(def_goto_row), CONFIG_FE_ALL},
     [HOTKEY_FIRST_COL] = {"first_col", "First column", HOTKEY_CAT_NAVIGATION,
-                          DEF_KEYS(def_first_col)},
+                          DEF_KEYS(def_first_col), CONFIG_FE_ALL},
     [HOTKEY_LAST_COL] = {"last_col", "Last column", HOTKEY_CAT_NAVIGATION,
-                         DEF_KEYS(def_last_col)},
+                         DEF_KEYS(def_last_col), CONFIG_FE_ALL},
 
     /* Table Viewer */
     [HOTKEY_EDIT_INLINE] = {"edit_inline", "Edit inline", HOTKEY_CAT_TABLE,
-                            DEF_KEYS(def_edit_inline)},
+                            DEF_KEYS(def_edit_inline), CONFIG_FE_ALL},
     [HOTKEY_EDIT_MODAL] = {"edit_modal", "Edit modal", HOTKEY_CAT_TABLE,
-                           DEF_KEYS(def_edit_modal)},
+                           DEF_KEYS(def_edit_modal), CONFIG_FE_ALL},
     [HOTKEY_SET_NULL] = {"set_null", "Set NULL", HOTKEY_CAT_TABLE,
-                         DEF_KEYS(def_set_null)},
+                         DEF_KEYS(def_set_null), CONFIG_FE_ALL},
     [HOTKEY_SET_EMPTY] = {"set_empty", "Set empty", HOTKEY_CAT_TABLE,
-                          DEF_KEYS(def_set_empty)},
+                          DEF_KEYS(def_set_empty), CONFIG_FE_ALL},
     [HOTKEY_DELETE_ROW] = {"delete_row", "Delete row", HOTKEY_CAT_TABLE,
-                           DEF_KEYS(def_delete_row)},
+                           DEF_KEYS(def_delete_row), CONFIG_FE_ALL},
     [HOTKEY_TOGGLE_FILTERS] = {"toggle_filters", "Toggle filters",
-                               HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_filters)},
+                               HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_filters), CONFIG_FE_ALL},
     [HOTKEY_TOGGLE_SIDEBAR] = {"toggle_sidebar", "Toggle sidebar",
-                               HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_sidebar)},
+                               HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_sidebar), CONFIG_FE_ALL},
     [HOTKEY_SHOW_SCHEMA] = {"show_schema", "Show schema", HOTKEY_CAT_TABLE,
-                            DEF_KEYS(def_show_schema)},
+                            DEF_KEYS(def_show_schema), CONFIG_FE_ALL},
     [HOTKEY_REFRESH] = {"refresh", "Refresh", HOTKEY_CAT_TABLE,
-                        DEF_KEYS(def_refresh)},
+                        DEF_KEYS(def_refresh), CONFIG_FE_ALL},
     [HOTKEY_CYCLE_SORT] = {"cycle_sort", "Cycle sort", HOTKEY_CAT_TABLE,
-                           DEF_KEYS(def_cycle_sort)},
+                           DEF_KEYS(def_cycle_sort), CONFIG_FE_ALL},
     [HOTKEY_CELL_COPY] = {"cell_copy", "Copy cell", HOTKEY_CAT_TABLE,
-                          DEF_KEYS(def_cell_copy)},
+                          DEF_KEYS(def_cell_copy), CONFIG_FE_ALL},
     [HOTKEY_CELL_PASTE] = {"cell_paste", "Paste cell", HOTKEY_CAT_TABLE,
-                           DEF_KEYS(def_cell_paste)},
+                           DEF_KEYS(def_cell_paste), CONFIG_FE_ALL},
 
     /* General */
     [HOTKEY_PREV_TAB] = {"prev_tab", "Previous tab", HOTKEY_CAT_GENERAL,
-                         DEF_KEYS(def_prev_tab)},
+                         DEF_KEYS(def_prev_tab), CONFIG_FE_ALL},
     [HOTKEY_NEXT_TAB] = {"next_tab", "Next tab", HOTKEY_CAT_GENERAL,
-                         DEF_KEYS(def_next_tab)},
+                         DEF_KEYS(def_next_tab), CONFIG_FE_ALL},
     [HOTKEY_CLOSE_TAB] = {"close_tab", "Close tab", HOTKEY_CAT_GENERAL,
-                          DEF_KEYS(def_close_tab)},
+                          DEF_KEYS(def_close_tab), CONFIG_FE_ALL},
     [HOTKEY_NEW_TAB] = {"new_tab", "New tab", HOTKEY_CAT_GENERAL,
-                        DEF_KEYS(def_new_tab)},
+                        DEF_KEYS(def_new_tab), CONFIG_FE_ALL},
     [HOTKEY_PREV_WORKSPACE] = {"prev_workspace", "Previous workspace",
                                HOTKEY_CAT_GENERAL,
-                               DEF_KEYS(def_prev_workspace)},
+                               DEF_KEYS(def_prev_workspace), CONFIG_FE_ALL},
     [HOTKEY_NEXT_WORKSPACE] = {"next_workspace", "Next workspace",
                                HOTKEY_CAT_GENERAL,
-                               DEF_KEYS(def_next_workspace)},
+                               DEF_KEYS(def_next_workspace), CONFIG_FE_ALL},
     [HOTKEY_TOGGLE_HEADER] = {"toggle_header", "Toggle header",
-                              HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_header)},
+                              HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_header), CONFIG_FE_NCURSES},
     [HOTKEY_TOGGLE_STATUS] = {"toggle_status", "Toggle status bar",
-                              HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_status)},
+                              HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_status), CONFIG_FE_NCURSES},
     [HOTKEY_CONNECT_DIALOG] = {"connect_dialog", "Workspaces",
                                HOTKEY_CAT_GENERAL,
-                               DEF_KEYS(def_connect_dialog)},
+                               DEF_KEYS(def_connect_dialog), CONFIG_FE_ALL},
     [HOTKEY_TOGGLE_HISTORY] = {"toggle_history", "Query history",
                                HOTKEY_CAT_GENERAL,
-                               DEF_KEYS(def_toggle_history)},
-    [HOTKEY_HELP] = {"help", "Hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help)},
-    [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit)},
+                               DEF_KEYS(def_toggle_history), CONFIG_FE_ALL},
+    [HOTKEY_HELP] = {"help", "Hotkeys", HOTKEY_CAT_GENERAL, DEF_KEYS(def_help), CONFIG_FE_ALL},
+    [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit), CONFIG_FE_ALL},
     [HOTKEY_CONFIG] = {"config", "Configuration", HOTKEY_CAT_GENERAL,
-                       DEF_KEYS(def_config)},
+                       DEF_KEYS(def_config), CONFIG_FE_ALL},
     [HOTKEY_CUT_LINE] = {"cut_line", "Cut line to buffer", HOTKEY_CAT_GENERAL,
-                         DEF_KEYS(def_cut_line)},
+                         DEF_KEYS(def_cut_line), CONFIG_FE_ALL},
     [HOTKEY_PASTE] = {"paste", "Paste from buffer", HOTKEY_CAT_GENERAL,
-                      DEF_KEYS(def_paste)},
+                      DEF_KEYS(def_paste), CONFIG_FE_ALL},
 
     /* Query Tab */
     [HOTKEY_OPEN_QUERY] = {"open_query", "Open query tab", HOTKEY_CAT_QUERY,
-                           DEF_KEYS(def_open_query)},
+                           DEF_KEYS(def_open_query), CONFIG_FE_ALL},
     [HOTKEY_EXECUTE_QUERY] = {"execute_query", "Execute query",
-                              HOTKEY_CAT_QUERY, DEF_KEYS(def_execute_query)},
+                              HOTKEY_CAT_QUERY, DEF_KEYS(def_execute_query), CONFIG_FE_ALL},
     [HOTKEY_EXECUTE_ALL] = {"execute_all", "Execute all", HOTKEY_CAT_QUERY,
-                            DEF_KEYS(def_execute_all)},
+                            DEF_KEYS(def_execute_all), CONFIG_FE_ALL},
     [HOTKEY_EXECUTE_TRANSACTION] = {"execute_transaction",
                                     "Execute in transaction", HOTKEY_CAT_QUERY,
-                                    DEF_KEYS(def_execute_transaction)},
+                                    DEF_KEYS(def_execute_transaction), CONFIG_FE_ALL},
     [HOTKEY_QUERY_SWITCH_FOCUS] = {"query_switch_focus",
                                    "Switch editor/results", HOTKEY_CAT_QUERY,
-                                   NULL, 0}, /* Unbound by default */
+                                   NULL, 0, CONFIG_FE_NCURSES}, /* Unbound by default */
     [HOTKEY_QUERY_FOCUS_EDITOR] = {"query_focus_editor", "Focus query editor",
                                    HOTKEY_CAT_QUERY,
-                                   DEF_KEYS(def_query_focus_editor)},
+                                   DEF_KEYS(def_query_focus_editor), CONFIG_FE_NCURSES},
     [HOTKEY_QUERY_UNFOCUS] = {"query_unfocus", "Leave editor/results",
-                              HOTKEY_CAT_QUERY, DEF_KEYS(def_query_unfocus)},
+                              HOTKEY_CAT_QUERY, DEF_KEYS(def_query_unfocus), CONFIG_FE_NCURSES},
 
     /* Filters Panel */
     [HOTKEY_ADD_FILTER] = {"add_filter", "Add filter", HOTKEY_CAT_FILTERS,
-                           DEF_KEYS(def_add_filter)},
+                           DEF_KEYS(def_add_filter), CONFIG_FE_ALL},
     [HOTKEY_REMOVE_FILTER] = {"remove_filter", "Remove filter",
-                              HOTKEY_CAT_FILTERS, DEF_KEYS(def_remove_filter)},
+                              HOTKEY_CAT_FILTERS, DEF_KEYS(def_remove_filter), CONFIG_FE_ALL},
     [HOTKEY_CLEAR_FILTERS] = {"clear_filters", "Clear filters",
-                              HOTKEY_CAT_FILTERS, DEF_KEYS(def_clear_filters)},
+                              HOTKEY_CAT_FILTERS, DEF_KEYS(def_clear_filters), CONFIG_FE_ALL},
     [HOTKEY_FILTERS_SWITCH_FOCUS] = {"filters_switch_focus", "Switch to table",
                                      HOTKEY_CAT_FILTERS,
-                                     NULL, 0 /* Unbound: Tab moves between panels */},
+                                     NULL, 0 /* Unbound: Tab moves between panels */, CONFIG_FE_NCURSES},
 
     /* Sidebar */
     [HOTKEY_SIDEBAR_FILTER] = {"sidebar_filter", "Filter tables",
                                HOTKEY_CAT_SIDEBAR,
-                               DEF_KEYS(def_sidebar_filter)},
+                               DEF_KEYS(def_sidebar_filter), CONFIG_FE_ALL},
 
     /* Connection Dialog */
     [HOTKEY_CONN_TEST] = {"conn_test", "Test connection", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_test)},
+                          DEF_KEYS(def_conn_test), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_SAVE] = {"conn_save", "Save to list", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_save)},
+                          DEF_KEYS(def_conn_save), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_NEW] = {"conn_new", "New connection", HOTKEY_CAT_CONNECT,
-                         DEF_KEYS(def_conn_new)},
+                         DEF_KEYS(def_conn_new), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_NEW_FOLDER] = {"conn_new_folder", "New folder",
                                 HOTKEY_CAT_CONNECT,
-                                DEF_KEYS(def_conn_new_folder)},
+                                DEF_KEYS(def_conn_new_folder), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_EDIT] = {"conn_edit", "Edit", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_edit)},
+                          DEF_KEYS(def_conn_edit), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_DELETE] = {"conn_delete", "Delete", HOTKEY_CAT_CONNECT,
-                            DEF_KEYS(def_conn_delete)},
+                            DEF_KEYS(def_conn_delete), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_RENAME] = {"conn_rename", "Rename", HOTKEY_CAT_CONNECT,
-                            DEF_KEYS(def_conn_rename)},
+                            DEF_KEYS(def_conn_rename), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_MOVE] = {"conn_move", "Move item", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_move)},
+                          DEF_KEYS(def_conn_move), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_DUPLICATE] = {"conn_duplicate", "Duplicate connection",
-                               HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_duplicate)},
+                               HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_duplicate), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_FILTER] = {"conn_filter", "Filter connections",
-                            HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_filter)},
+                            HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_filter), CONFIG_FE_NCURSES},
 
     /* Row Selection (Table category) */
     [HOTKEY_TOGGLE_SELECTION] = {"toggle_selection", "Toggle selection",
                                  HOTKEY_CAT_TABLE,
-                                 DEF_KEYS(def_toggle_selection)},
+                                 DEF_KEYS(def_toggle_selection), CONFIG_FE_ALL},
     [HOTKEY_CLEAR_SELECTIONS] = {"clear_selections", "Clear selections",
                                  HOTKEY_CAT_TABLE,
-                                 DEF_KEYS(def_clear_selections)},
+                                 DEF_KEYS(def_clear_selections), CONFIG_FE_ALL},
 
     /* Row Add (Table category) */
     [HOTKEY_ROW_ADD] = {"row_add", "Add new row", HOTKEY_CAT_TABLE,
-                        DEF_KEYS(def_row_add)},
+                        DEF_KEYS(def_row_add), CONFIG_FE_ALL},
     [HOTKEY_ROW_SAVE] = {"row_save", "Save new row", HOTKEY_CAT_TABLE,
-                         DEF_KEYS(def_row_save)},
+                         DEF_KEYS(def_row_save), CONFIG_FE_ALL},
 
     /* Modal Editor */
     [HOTKEY_EDITOR_SAVE] = {"editor_save", "Save", HOTKEY_CAT_EDITOR,
-                            DEF_KEYS(def_editor_save)},
+                            DEF_KEYS(def_editor_save), CONFIG_FE_ALL},
     [HOTKEY_EDITOR_NULL] = {"editor_null", "Set NULL", HOTKEY_CAT_EDITOR,
-                            DEF_KEYS(def_editor_null)},
+                            DEF_KEYS(def_editor_null), CONFIG_FE_ALL},
     [HOTKEY_EDITOR_EMPTY] = {"editor_empty", "Set empty", HOTKEY_CAT_EDITOR,
-                             DEF_KEYS(def_editor_empty)},
+                             DEF_KEYS(def_editor_empty), CONFIG_FE_ALL},
     [HOTKEY_EDITOR_CANCEL] = {"editor_cancel", "Cancel", HOTKEY_CAT_EDITOR,
-                              DEF_KEYS(def_editor_cancel)},
+                              DEF_KEYS(def_editor_cancel), CONFIG_FE_ALL},
 
     /* Config Editor */
     [HOTKEY_CONFIG_RESET] = {"config_reset", "Reset hotkey", HOTKEY_CAT_GENERAL,
-                             DEF_KEYS(def_config_reset)},
+                             DEF_KEYS(def_config_reset), CONFIG_FE_NCURSES},
     [HOTKEY_CONFIG_RESET_ALL] = {"config_reset_all", "Reset all hotkeys",
                                  HOTKEY_CAT_GENERAL,
-                                 DEF_KEYS(def_config_reset_all)},
+                                 DEF_KEYS(def_config_reset_all), CONFIG_FE_NCURSES},
 
     /* History Dialog */
     [HOTKEY_HISTORY_COPY] = {"history_copy", "Copy to clipboard",
-                             HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_copy)},
+                             HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_copy), CONFIG_FE_NCURSES},
     [HOTKEY_HISTORY_DELETE] = {"history_delete", "Delete entry",
                                HOTKEY_CAT_HISTORY,
-                               DEF_KEYS(def_history_delete)},
+                               DEF_KEYS(def_history_delete), CONFIG_FE_NCURSES},
     [HOTKEY_HISTORY_CLEAR] = {"history_clear", "Clear all", HOTKEY_CAT_HISTORY,
-                              DEF_KEYS(def_history_clear)},
+                              DEF_KEYS(def_history_clear), CONFIG_FE_NCURSES},
     [HOTKEY_HISTORY_CLOSE] = {"history_close", "Close dialog",
-                              HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close)},
+                              HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close), CONFIG_FE_NCURSES},
+    [HOTKEY_PALETTE] = {"palette", "Command palette", HOTKEY_CAT_GENERAL, DEF_KEYS(def_palette), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CLOSE_VIEW] = {"close_view", "Close view or tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_close_view), CONFIG_FE_NOTCURSES},
+    [HOTKEY_NEXT_CONN_TAB] = {"next_conn_tab", "Next connection tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_next_conn_tab), CONFIG_FE_NOTCURSES},
+    [HOTKEY_PREV_CONN_TAB] = {"prev_conn_tab", "Previous connection tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_conn_tab), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_1] = {"conn_tab_1", "Connection tab 1", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_1), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_2] = {"conn_tab_2", "Connection tab 2", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_2), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_3] = {"conn_tab_3", "Connection tab 3", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_3), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_4] = {"conn_tab_4", "Connection tab 4", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_4), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_5] = {"conn_tab_5", "Connection tab 5", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_5), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_6] = {"conn_tab_6", "Connection tab 6", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_6), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_7] = {"conn_tab_7", "Connection tab 7", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_7), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_8] = {"conn_tab_8", "Connection tab 8", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_8), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Connection tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_NOTCURSES},
+    [HOTKEY_VIEW_SWITCHER] = {"view_switcher", "Switch view", HOTKEY_CAT_GENERAL, DEF_KEYS(def_view_switcher), CONFIG_FE_NOTCURSES},
+    [HOTKEY_TOGGLE_LOG] = {"toggle_log", "Toggle log", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_log), CONFIG_FE_NOTCURSES},
+    [HOTKEY_COLUMN_NARROWER] = {"column_narrower", "Narrow column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_narrower), CONFIG_FE_NOTCURSES},
+    [HOTKEY_COLUMN_WIDER] = {"column_wider", "Widen column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_wider), CONFIG_FE_NOTCURSES},
+    [HOTKEY_SPLIT_UP] = {"split_up", "Editor smaller", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_up), CONFIG_FE_NOTCURSES},
+    [HOTKEY_SPLIT_DOWN] = {"split_down", "Editor larger", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_down), CONFIG_FE_NOTCURSES},
 };
 
 /* Category names for display */
@@ -429,10 +469,20 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
   *mods = UI_MOD_NONE;
   *key_code = 0;
 
-  /* Check for CTRL+ prefix */
-  if (strncmp(str, "CTRL+", 5) == 0) {
-    *mods |= UI_MOD_CTRL;
-    str += 5;
+  /* Modifier prefixes in any order ("SHIFT+TAB" is a table name) */
+  for (;;) {
+    if (strncmp(str, "CTRL+", 5) == 0) {
+      *mods |= UI_MOD_CTRL;
+      str += 5;
+    } else if (strncmp(str, "ALT+", 4) == 0) {
+      *mods |= UI_MOD_ALT;
+      str += 4;
+    } else if (strncmp(str, "SHIFT+", 6) == 0 && strcmp(str, "SHIFT+TAB") != 0) {
+      *mods |= UI_MOD_SHIFT;
+      str += 6;
+    } else {
+      break;
+    }
   }
 
   /* Try lookup table first */
@@ -456,9 +506,14 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
   if (strlen(str) == 1) {
     char c = str[0];
     /* Convert to uppercase for CTRL combinations */
-    if ((*mods & UI_MOD_CTRL) && c >= 'a' && c <= 'z') {
+    if ((*mods & (UI_MOD_CTRL | UI_MOD_SHIFT)) && c >= 'a' && c <= 'z') {
       c = (char)(c - ('a' - 'A'));
     }
+    /* Shift alone on a character is its case; with Ctrl or Alt it stays a
+     * modifier (Ctrl+Shift+P is not Ctrl+P) */
+    if ((*mods & UI_MOD_SHIFT) && !(*mods & (UI_MOD_CTRL | UI_MOD_ALT)) &&
+        ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
+      *mods &= ~UI_MOD_SHIFT;
     *key_code = (unsigned char)c;
     return true;
   }
@@ -519,9 +574,13 @@ static const char *lookup_key_display(int code) {
 
 /* Convert key code and mods to display string */
 static char *key_to_display(int key_code, UiKeyMod mods) {
-  char prefix[16] = "";
+  char prefix[24] = "";
   if (mods & UI_MOD_CTRL)
-    snprintf(prefix, sizeof(prefix), "Ctrl+");
+    strcat(prefix, "Ctrl+");
+  if (mods & UI_MOD_ALT)
+    strcat(prefix, "Alt+");
+  if (mods & UI_MOD_SHIFT)
+    strcat(prefix, "Shift+");
 
   /* Try lookup table first */
   const char *name = lookup_key_display(key_code);
@@ -556,6 +615,12 @@ Config *config_get_defaults(void) {
   config->general.daemon_spawn_mode = SPAWN_MODE_UNIX; /* Default: Unix socket */
   config->general.daemon_idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
   config->general.pagination_strategy = LACE_PAGINATION_KEYSET;
+  config->general.approximate_counts = true;
+  config->general.page_size = CONFIG_PAGE_SIZE_DEFAULT;
+  config->general.row_numbers = CONFIG_ROW_NUMBERS_AUTO;
+  config->general.color_scheme = 0;
+  config->extra = cJSON_CreateObject();
+  config->frontend = CONFIG_FE_NCURSES; /* The notcurses frontend sets its own */
 
   /* Hotkeys - copy from defaults */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
@@ -587,7 +652,37 @@ void config_free(Config *config) {
     hotkey_binding_free(&config->hotkeys[i]);
   }
 
+  cJSON_Delete(config->extra);
+  for (size_t i = 0; i < config->num_touched; i++)
+    free(config->extra_touched[i]);
+  free(config->extra_touched);
   free(config);
+}
+
+cJSON *config_section(Config *config, const char *name) {
+  if (!config || !name || !name[0])
+    return NULL;
+  if (!config->extra)
+    config->extra = cJSON_CreateObject();
+  bool known = false;
+  for (size_t i = 0; i < config->num_touched; i++)
+    if (strcmp(config->extra_touched[i], name) == 0)
+      known = true;
+  if (!known) {
+    char *dup = str_dup(name);
+    if (dup) {
+      config->extra_touched = safe_realloc(
+          config->extra_touched, (config->num_touched + 1) * sizeof(char *));
+      config->extra_touched[config->num_touched++] = dup;
+    }
+  }
+  cJSON *s = cJSON_GetObjectItem(config->extra, name);
+  if (!cJSON_IsObject(s)) {
+    if (s)
+      cJSON_DeleteItemFromObject(config->extra, name);
+    s = cJSON_AddObjectToObject(config->extra, name);
+  }
+  return s;
 }
 
 /* ============================================================================
@@ -602,6 +697,15 @@ Config *config_copy(const Config *config) {
   Config *copy = safe_calloc(1, sizeof(Config));
 
   copy->general = config->general;
+  copy->frontend = config->frontend;
+  copy->extra = config->extra ? cJSON_Duplicate(config->extra, true)
+                              : cJSON_CreateObject();
+  if (config->num_touched) {
+    copy->extra_touched = safe_calloc(config->num_touched, sizeof(char *));
+    for (size_t i = 0; i < config->num_touched; i++)
+      copy->extra_touched[i] = str_dup(config->extra_touched[i]);
+    copy->num_touched = config->num_touched;
+  }
 
   for (int i = 0; i < HOTKEY_COUNT; i++) {
     if (!hotkey_binding_copy(&copy->hotkeys[i], &config->hotkeys[i])) {
@@ -680,8 +784,10 @@ static bool parse_hotkeys(cJSON *json, Config *config) {
  * ============================================================================
  */
 
-Config *config_load(char **error) {
-  char *path = config_get_path();
+Config *config_load(char **error) { return config_load_file(NULL, error); }
+
+Config *config_load_file(const char *path_in, char **error) {
+  char *path = path_in ? str_dup(path_in) : config_get_path();
   if (!path) {
     /* No config directory, return defaults */
     return config_get_defaults();
@@ -706,12 +812,23 @@ Config *config_load(char **error) {
   free(path);
 
   cJSON *json = cJSON_Parse(content);
-  str_secure_free(content);
 
   if (!json) {
-    err_setf(error, "JSON parse error");
+    const char *at = cJSON_GetErrorPtr();
+    if (at)
+      err_setf(error, "JSON parse error near byte %ld", (long)(at - content));
+    else
+      err_setf(error, "JSON parse error");
+    str_secure_free(content);
     return config_get_defaults();
   }
+  if (!cJSON_IsObject(json)) {
+    cJSON_Delete(json);
+    str_secure_free(content);
+    err_setf(error, "Config file is not a JSON object");
+    return config_get_defaults();
+  }
+  str_secure_free(content);
 
   /* Start with defaults */
   Config *config = config_get_defaults();
@@ -766,6 +883,18 @@ Config *config_load(char **error) {
       config->general.pagination_strategy =
           val == LACE_PAGINATION_OFFSET ? LACE_PAGINATION_OFFSET
                                         : LACE_PAGINATION_KEYSET;
+
+    config->general.approximate_counts =
+        json_get_bool(general, "approximate_counts", config->general.approximate_counts);
+    val = json_get_int(general, "page_size", config->general.page_size);
+    if (val >= CONFIG_PAGE_SIZE_MIN && val <= CONFIG_PAGE_SIZE_MAX)
+      config->general.page_size = val;
+    val = json_get_int(general, "row_numbers", config->general.row_numbers);
+    if (val >= CONFIG_ROW_NUMBERS_NEVER && val <= CONFIG_ROW_NUMBERS_ALWAYS)
+      config->general.row_numbers = val;
+    val = json_get_int(general, "color_scheme", config->general.color_scheme);
+    if (val >= 0 && val <= 2)
+      config->general.color_scheme = val;
   }
 
   /* Parse hotkeys */
@@ -774,7 +903,11 @@ Config *config_load(char **error) {
     parse_hotkeys(hotkeys, config);
   }
 
-  cJSON_Delete(json);
+  /* Every other top-level member belongs to another frontend: keep it */
+  cJSON_DeleteItemFromObject(json, "general");
+  cJSON_DeleteItemFromObject(json, "hotkeys");
+  cJSON_Delete(config->extra);
+  config->extra = json; /* adopted */
   return config;
 }
 
@@ -784,6 +917,10 @@ Config *config_load(char **error) {
  */
 
 bool config_save(const Config *config, char **error) {
+  return config_save_file(config, NULL, error);
+}
+
+bool config_save_file(const Config *config, const char *path_in, char **error) {
   if (!config) {
     err_setf(error, "Invalid config");
     return false;
@@ -799,24 +936,72 @@ bool config_save(const Config *config, char **error) {
     return false;
   }
 
-  const char *config_dir = platform_get_config_dir();
-  if (!config_dir) {
-    err_setf(error, "Failed to get config directory");
-    return false;
-  }
-
-  if (!platform_dir_exists(config_dir)) {
-    if (!platform_mkdir(config_dir)) {
-      err_setf(error, "Failed to create config directory");
+  if (!path_in) {
+    const char *config_dir = platform_get_config_dir();
+    if (!config_dir) {
+      err_setf(error, "Failed to get config directory");
       return false;
+    }
+
+    if (!platform_dir_exists(config_dir)) {
+      if (!platform_mkdir(config_dir)) {
+        err_setf(error, "Failed to create config directory");
+        return false;
+      }
     }
   }
 
-  cJSON *json = cJSON_CreateObject();
-  if (!json) {
-    err_setf(error, "Out of memory");
+  char *path = path_in ? str_dup(path_in) : config_get_path();
+  if (!path) {
+    err_setf(error, "Failed to get config path");
     return false;
   }
+
+  /* Start from the file on disk so sections another frontend changed since we
+   * loaded survive; only sections touched through config_section() are
+   * written from memory. A file that exists but does not parse is never
+   * overwritten. */
+  cJSON *json = NULL;
+  if (platform_file_exists(path)) {
+    char *cur = platform_read_file(path, 1024 * 1024);
+    if (!cur) {
+      err_setf(error, "Failed to read %s: %s", path, strerror(errno));
+      free(path);
+      return false;
+    }
+    if (cur[0]) {
+      json = cJSON_Parse(cur);
+      if (!json) {
+        const char *at = cJSON_GetErrorPtr();
+        err_setf(error, "%s: JSON parse error near byte %ld", path,
+                 at ? (long)(at - cur) : 0L);
+      } else if (!cJSON_IsObject(json)) {
+        cJSON_Delete(json);
+        json = NULL;
+        err_setf(error, "%s: not a JSON object", path);
+      }
+      if (!json) {
+        str_secure_free(cur);
+        free(path);
+        return false;
+      }
+    }
+    str_secure_free(cur);
+  }
+  if (!json) {
+    json = config->extra ? cJSON_Duplicate(config->extra, true)
+                         : cJSON_CreateObject();
+  } else {
+    for (size_t i = 0; i < config->num_touched; i++) {
+      const char *name = config->extra_touched[i];
+      cJSON *sec = config->extra ? cJSON_GetObjectItem(config->extra, name) : NULL;
+      cJSON_DeleteItemFromObject(json, name);
+      if (sec)
+        cJSON_AddItemToObject(json, name, cJSON_Duplicate(sec, true));
+    }
+  }
+  cJSON_DeleteItemFromObject(json, "general");
+  cJSON_DeleteItemFromObject(json, "hotkeys");
 
   /* General settings */
   cJSON *general = cJSON_CreateObject();
@@ -834,19 +1019,16 @@ bool config_save(const Config *config, char **error) {
   JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);
   JSON_ADD_INT(general, "daemon_idle_timeout", config->general.daemon_idle_timeout);
   JSON_ADD_INT(general, "pagination_strategy", config->general.pagination_strategy);
+  JSON_ADD_BOOL(general, "approximate_counts", config->general.approximate_counts);
+  JSON_ADD_INT(general, "page_size", config->general.page_size);
+  JSON_ADD_INT(general, "row_numbers", config->general.row_numbers);
+  JSON_ADD_INT(general, "color_scheme", config->general.color_scheme);
   cJSON_AddItemToObject(json, "general", general);
 
   /* Hotkeys */
   cJSON *hotkeys = serialize_hotkeys(config);
   if (hotkeys) {
     cJSON_AddItemToObject(json, "hotkeys", hotkeys);
-  }
-
-  char *path = config_get_path();
-  if (!path) {
-    cJSON_Delete(json);
-    err_setf(error, "Failed to get config path");
-    return false;
   }
 
   char *content = cJSON_Print(json);
@@ -904,8 +1086,27 @@ bool config_validate(const Config *config, char **error) {
     return false;
   }
 
-  /* Check for hotkey conflicts */
+  /* The shared general ranges (load clamps them; this catches callers) */
+  const GeneralConfig *g = &config->general;
+  if (g->page_size < CONFIG_PAGE_SIZE_MIN || g->page_size > CONFIG_PAGE_SIZE_MAX) {
+    err_setf(error, "Page size %d is out of range (%d..%d)", g->page_size,
+             CONFIG_PAGE_SIZE_MIN, CONFIG_PAGE_SIZE_MAX);
+    return false;
+  }
+  if (g->row_numbers < CONFIG_ROW_NUMBERS_NEVER ||
+      g->row_numbers > CONFIG_ROW_NUMBERS_ALWAYS) {
+    err_setf(error, "Row numbers %d is out of range (0..2)", g->row_numbers);
+    return false;
+  }
+  if (g->color_scheme < 0 || g->color_scheme > 2) {
+    err_setf(error, "Color scheme %d is out of range (0..2)", g->color_scheme);
+    return false;
+  }
+
+  /* Check for hotkey conflicts among this frontend's actions */
   for (int i = 0; i < HOTKEY_COUNT; i++) {
+    if (!(action_meta[i].frontends & config->frontend))
+      continue;
     const HotkeyBinding *binding = &config->hotkeys[i];
     for (size_t j = 0; j < binding->num_keys; j++) {
       HotkeyAction conflict =
@@ -973,15 +1174,19 @@ bool hotkey_matches(const Config *config, const UiEvent *event,
 
     if (key_match) {
       /* Check modifiers */
-      bool ctrl_match =
-          ((mods & UI_MOD_CTRL) != 0) == ((event->key.mods & UI_MOD_CTRL) != 0);
-      if (ctrl_match) {
+      UiKeyMod mask = UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT;
+      if ((mods & mask) == (event->key.mods & mask))
         return true;
-      }
     }
   }
 
   return false;
+}
+
+unsigned hotkey_action_frontends(HotkeyAction action) {
+  if (action < 0 || action >= HOTKEY_COUNT)
+    return 0;
+  return action_meta[action].frontends;
 }
 
 char *hotkey_get_display(const Config *config, HotkeyAction action) {
@@ -1027,12 +1232,20 @@ HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
   if (!parse_key_string(key, &key_code, &mods))
     return HOTKEY_COUNT;
 
+  /* An action the running frontend does not have conflicts with nothing */
+  if (!(action_meta[action].frontends & config->frontend))
+    return HOTKEY_COUNT;
+
   /* Only check for conflicts within the same category */
   HotkeyCategory category = action_meta[action].category;
 
   for (HotkeyAction i = 0; i < HOTKEY_COUNT; i++) {
     if (i == action)
       continue; /* Skip self */
+
+    /* Skip actions the running frontend does not have */
+    if (!(action_meta[i].frontends & config->frontend))
+      continue;
 
     /* Skip if different category - same key allowed in different contexts */
     if (action_meta[i].category != category)

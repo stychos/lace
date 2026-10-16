@@ -8,8 +8,7 @@
 
 #include "text_input.h"
 #include "../core/utf8.h"
-#include "../render_helpers.h"
-#include "../tui_internal.h"
+#include "../core/ui_event.h"
 #include "../../../liblace/include/util/mem.h"
 #include "../../../liblace/include/util/str.h"
 #include <stdlib.h>
@@ -149,74 +148,48 @@ bool text_input_handle_key(TextInput *in, const UiEvent *event) {
   if (!event || event->type != UI_EVENT_KEY)
     return false;
 
-  if (render_event_is_special(event, UI_KEY_LEFT)) {
+  if (ui_event_is_special(event, UI_KEY_LEFT)) {
     in->cursor = utf8_prev(in->buf, in->cursor);
     return true;
   }
-  if (render_event_is_special(event, UI_KEY_RIGHT)) {
+  if (ui_event_is_special(event, UI_KEY_RIGHT)) {
     in->cursor = utf8_next(in->buf, in->len, in->cursor);
     return true;
   }
-  if (render_event_is_special(event, UI_KEY_HOME) ||
-      render_event_is_ctrl(event, 'A')) {
+  if (ui_event_is_special(event, UI_KEY_HOME) ||
+      ui_event_is_ctrl(event, 'A')) {
     in->cursor = 0;
     return true;
   }
-  if (render_event_is_special(event, UI_KEY_END) ||
-      render_event_is_ctrl(event, 'E')) {
+  if (ui_event_is_special(event, UI_KEY_END) ||
+      ui_event_is_ctrl(event, 'E')) {
     in->cursor = in->len;
     return true;
   }
-  if (render_event_is_special(event, UI_KEY_BACKSPACE)) {
+  if (ui_event_is_special(event, UI_KEY_BACKSPACE)) {
     if (in->cursor > 0)
       delete_range(in, utf8_prev(in->buf, in->cursor), in->cursor);
     return true;
   }
-  if (render_event_is_special(event, UI_KEY_DELETE) ||
-      render_event_is_ctrl(event, 'D')) {
+  if (ui_event_is_special(event, UI_KEY_DELETE) ||
+      ui_event_is_ctrl(event, 'D')) {
     if (in->cursor < in->len)
       delete_range(in, in->cursor, utf8_next(in->buf, in->len, in->cursor));
     return true;
   }
-  if (render_event_is_ctrl(event, 'U')) {
+  if (ui_event_is_ctrl(event, 'U')) {
     delete_range(in, 0, in->cursor);
     return true;
   }
-  if (render_event_is_ctrl(event, 'K')) {
+  if (ui_event_is_ctrl(event, 'K')) {
     delete_range(in, in->cursor, in->len);
     return true;
   }
 
-  int key_char = render_event_get_char(event);
-  if (render_event_is_char(event) && utf8_is_text_key(key_char)) {
+  int key_char = ui_event_get_char(event);
+  if (ui_event_is_char(event) && utf8_is_text_key(key_char)) {
     insert_byte(in, (unsigned char)key_char);
     return true;
   }
   return false;
-}
-
-int text_input_draw(WINDOW *win, const TextInput *in, int y, int x, int width,
-                    attr_t attr, bool focused) {
-  const char *text = in->buf;
-  size_t cursor = in->cursor;
-  char *mask = NULL;
-  if (in->secret) {
-    /* One '*' per character: the length shows, the text does not */
-    size_t chars = utf8_count(in->buf, in->len);
-    mask = safe_malloc(chars + 1);
-    memset(mask, '*', chars);
-    mask[chars] = '\0';
-    text = mask;
-    cursor = utf8_count(in->buf, in->cursor);
-  }
-  int cursor_x = -1;
-  if (focused) {
-    cursor_x = tui_draw_edit_field(win, y, x, width, text, cursor, attr);
-  } else {
-    wattron(win, attr);
-    tui_print_fit(win, y, x, width, text);
-    wattroff(win, attr);
-  }
-  free(mask);
-  return cursor_x;
 }

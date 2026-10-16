@@ -412,6 +412,8 @@ static size_t build_hotkey_display_list(HotkeyDisplayItem *items,
       /* Skip config reset actions - they're not user-configurable */
       if (a == HOTKEY_CONFIG_RESET || a == HOTKEY_CONFIG_RESET_ALL)
         continue;
+      if (!(hotkey_action_frontends(a) & CONFIG_FE_NCURSES))
+        continue;
 
       if (hotkey_get_category(a) == cat && count < max_items) {
         items[count].is_header = false;

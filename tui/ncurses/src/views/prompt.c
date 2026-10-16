@@ -8,6 +8,7 @@
 
 #include "prompt.h"
 #include "text_input.h"
+#include "text_input_draw.h"
 #include "../render_helpers.h"
 #include "../tui_internal.h"
 #include "../../../liblace/include/util/str.h"

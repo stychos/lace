@@ -53,9 +53,10 @@ def test_session_restore(home):
         t.wait_status("Row 123/500")
         assert t.quit() == 0
     session = home.read("session.json")
-    tab = session["workspaces"][0]["tabs"][0]
-    assert tab["connection_id"] == SAVED_ID and tab["table_name"] == "big"
-    assert tab["sort"][0]["column"] == "v"
+    conn = session["workspaces"][0]["connections"][0]
+    tab = conn["tabs"][0]
+    assert conn["saved_id"] == SAVED_ID and tab["table"] == "big"
+    assert tab["sorts"][0]["column"] == "v"
     with Tui(home, []) as t:
         t.wait_status("Row 123/500")
         t.wait("▼")

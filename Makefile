@@ -1,7 +1,7 @@
 # Lace - Database Viewer and Manager
 # Top-level Makefile
 
-.PHONY: all laced liblace ncurses gtk macos test test-gtk test-macos smoke-macos dist-macos test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
+.PHONY: all laced liblace ncurses notcurses test-notcurses install-notcurses run-notcurses gtk macos test test-gtk test-macos smoke-macos dist-macos test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
 
 # Default target
 all: laced liblace ncurses
@@ -17,6 +17,16 @@ liblace:
 # Build the ncurses frontend (depends on liblace)
 ncurses: liblace
 	$(MAKE) -C tui/ncurses
+
+# Build the notcurses frontend (tui/notcurses; needs notcurses-core). Not part
+# of `all`.
+notcurses: liblace laced
+	$(MAKE) -C tui/notcurses
+
+# notcurses unit tests, then its tests in a real terminal (needs tmux)
+test-notcurses: notcurses
+	$(MAKE) -C tui/notcurses test
+	python3 tests/notcurses/run.py $(TUI_ARGS)
 
 # Build the GTK4/libadwaita frontend (gui/gtk; needs gtk4, libadwaita-1,
 # gtksourceview-5). Not part of `all`: the TUI has no GTK dependency.
@@ -84,6 +94,7 @@ clean:
 	$(MAKE) -C laced clean
 	$(MAKE) -C liblace clean
 	$(MAKE) -C tui/ncurses clean
+	-$(MAKE) -C tui/notcurses clean 2>/dev/null || true
 	-$(MAKE) -C gui/gtk clean 2>/dev/null || true
 	-$(MAKE) -C gui/macos clean 2>/dev/null || true
 
@@ -104,6 +115,14 @@ install: all
 # Install the GTK frontend too (binary, desktop entry, icon)
 install-gtk: install gtk
 	$(MAKE) -C gui/gtk install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+
+# Install the notcurses frontend too
+install-notcurses: install notcurses
+	$(MAKE) -C tui/notcurses install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+
+# Run the notcurses frontend
+run-notcurses: notcurses
+	./tui/notcurses/build/lace-nc
 
 # Run the ncurses frontend
 run: all
@@ -126,6 +145,10 @@ help:
 	@echo "  laced     Build the daemon"
 	@echo "  liblace   Build the client library"
 	@echo "  ncurses   Build the ncurses frontend"
+	@echo "  notcurses Build the notcurses frontend (tui/notcurses/build/lace-nc)"
+	@echo "  test-notcurses  notcurses unit tests and terminal tests (needs tmux)"
+	@echo "  install-notcurses  Install everything plus the notcurses frontend"
+	@echo "  run-notcurses  Build and run the notcurses frontend"
 	@echo "  gtk       Build the GTK4 frontend (gui/gtk/build/lace-gtk)"
 	@echo "  test-gtk  GTK frontend unit tests"
 	@echo "  macos     Build the macOS frontend (gui/macos/build/Lace.app)"

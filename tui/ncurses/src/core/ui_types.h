@@ -153,6 +153,7 @@ typedef struct UiEvent {
       int key;         /* Character code or UiKeyCode */
       UiKeyMod mods;   /* Modifier keys */
       bool is_special; /* true if key is UiKeyCode, false for character */
+      char text[8];    /* the whole UTF-8 character (notcurses frontend; zero in ncurses) */
     } key;
 
     /* Mouse event */

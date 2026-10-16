@@ -43,6 +43,8 @@ static const FilterOpDef FILTER_OPS[] = {
     [FILTER_OP_IS_NULL] = {"is null", NULL, false},
     [FILTER_OP_IS_NOT_NULL] = {"is not null", NULL, false},
     [FILTER_OP_RAW] = {"RAW", NULL, true},
+    [FILTER_OP_STARTS] = {"starts with", NULL, true},
+    [FILTER_OP_ENDS] = {"ends with", NULL, true},
 };
 
 /* ============================================================================
@@ -398,6 +400,19 @@ char *filters_build_where(TableFilters *f, TableSchema *schema,
     case FILTER_OP_CONTAINS: {
       /* % and _ in the value stay wildcards */
       char *lit = sql_pattern_literal(driver, "%", cf->value, "%");
+      ok = lit && sb_printf(sb, "%s LIKE %s", escaped_col, lit);
+      free(lit);
+      break;
+    }
+
+    case FILTER_OP_STARTS: {
+      char *lit = sql_pattern_literal(driver, "", cf->value, "%");
+      ok = lit && sb_printf(sb, "%s LIKE %s", escaped_col, lit);
+      free(lit);
+      break;
+    }
+    case FILTER_OP_ENDS: {
+      char *lit = sql_pattern_literal(driver, "%", cf->value, "");
       ok = lit && sb_printf(sb, "%s LIKE %s", escaped_col, lit);
       free(lit);
       break;

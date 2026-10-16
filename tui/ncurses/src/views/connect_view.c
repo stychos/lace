@@ -17,6 +17,7 @@
  */
 
 #include "connect_internal.h"
+#include "text_input_draw.h"
 #include "../async/async.h"
 #include "../config/session.h"
 #include "util/json_helpers.h"

@@ -49,6 +49,7 @@ typedef struct {
 typedef struct {
   int type;            /* TabType enum value */
   char *connection_id; /* UUID from saved connections */
+  char *connstr;       /* Password-less; a connection a GUI opened by URL (no saved id), may be NULL */
   char *table_name;    /* For TABLE tabs */
 
   /* Cursor/scroll state */
@@ -94,6 +95,10 @@ typedef struct {
   SessionWorkspace *workspaces;
   size_t num_workspaces;
   size_t current_workspace;
+
+  /* Workspaces of the file that could not be read (a newer frontend's
+   * operator or tab type), shown after restoring; NULL if none */
+  char *warning;
 } Session;
 
 /* ============================================================================
@@ -130,6 +135,11 @@ Session *session_load(char **error);
 /* Save current session to disk */
 bool session_save(struct TuiState *state, char **error);
 
+/* A stored password-less connection string with typed passwords added (NULL
+ * keeps the string's own); SSH tunnel and key kept. str_secure_free() it. */
+char *session_connstr_with_password(const char *connstr, const char *password,
+                                    const char *ssh_password);
+
 /* Free session structure */
 void session_free(Session *session);
 
@@ -137,8 +147,9 @@ void session_free(Session *session);
 bool session_restore(struct TuiState *state, Session *session, char **error);
 
 /* One open workspace as JSON (what session.json holds for it), for a saved
- * workspace. Tabs whose connection is not a saved one cannot be opened
- * again and are left out (*skipped counts them); NULL if none is left. */
+ * workspace. Tabs whose connection has neither a saved id nor a connection
+ * string cannot be opened again and are left out (*skipped counts them);
+ * NULL if none is left. */
 struct cJSON *session_workspace_to_json(struct TuiState *state, size_t ws_idx,
                                         size_t *skipped);
 

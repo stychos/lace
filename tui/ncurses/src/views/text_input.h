@@ -10,7 +10,6 @@
 #define LACE_TEXT_INPUT_H
 
 #include "../core/ui_types.h"
-#include <ncurses.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -58,11 +57,5 @@ void text_input_insert(TextInput *in, const char *text);
 
 /* Handle an editing key. Returns true if it was one (consumed). */
 bool text_input_handle_key(TextInput *in, const UiEvent *event);
-
-/* Draw width columns at (y, x) with attr. Focused: scrolled so the cursor
- * shows, which is drawn in reverse video; returns its screen column (-1 if
- * not visible). Unfocused: the start of the text, no cursor; returns -1. */
-int text_input_draw(WINDOW *win, const TextInput *in, int y, int x, int width,
-                    attr_t attr, bool focused);
 
 #endif /* LACE_TEXT_INPUT_H */

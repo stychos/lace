@@ -18,6 +18,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 LACE = os.path.join(ROOT, "tui", "ncurses", "build", "lace")
+LACE_NC = os.path.join(ROOT, "tui", "notcurses", "build", "lace-nc")
 LACED_DIR = os.path.join(ROOT, "laced", "build")
 
 
@@ -92,7 +93,7 @@ def sqlite_exec(path, sql, args=()):
 class Tui:
     """One lace TUI in a private tmux server"""
 
-    def __init__(self, home, args, cols=120, rows=30, env=None):
+    def __init__(self, home, args, cols=120, rows=30, env=None, binary=None):
         self.home = home
         self.server = f"lace-tui-{os.getpid()}-{int(time.time() * 1000) % 100000000}"
         self.cols, self.rows = cols, rows
@@ -104,7 +105,7 @@ class Tui:
              "LACED_LOG": home.file("laced.log")}
         e.update(env or {})
         exports = " ".join(f"{k}={shquote(v)}" for k, v in e.items())
-        argv = " ".join(shquote(a) for a in [LACE, *args])
+        argv = " ".join(shquote(a) for a in [binary or LACE, *args])
         # The shell stays after the TUI so its exit status can be read
         cmd = f"env {exports} {argv}; echo __LACE_EXIT__=$?; sleep 3600"
         self.tmux("new-session", "-d", "-s", "t", "-x", str(cols), "-y",

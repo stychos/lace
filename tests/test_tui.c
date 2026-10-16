@@ -10,9 +10,16 @@
 #include "query_internal.h"
 #include "core/app_state.h"
 #include "views/text_input.h"
+#include "core/connstr_display.h"
 #include "row_key.h"
 #include "config/connections.h"
 #include "config/recent.h"
+#include "config/config.h"
+#include "config/workspace_json.h"
+#include "config/session.h"
+#include "platform/platform.h"
+#include "util/json_helpers.h"
+#include <cjson/cJSON.h>
 #include "app/app.h"
 #include <getopt.h>
 #include <locale.h>
@@ -150,6 +157,14 @@ static void test_filters_where(void) {
                  "`name` = _utf8mb4 X'785c27204f5220313d31202d2d20'");
   CHECK_STR_FREE(where_for("postgres", FILTER_OP_CONTAINS, "o'k", NULL),
                  "\"name\" LIKE '%o''k%'");
+  CHECK_STR_FREE(where_for("postgres", FILTER_OP_STARTS, "o'k", NULL),
+                 "\"name\" LIKE 'o''k%'");
+  CHECK_STR_FREE(where_for("mysql", FILTER_OP_ENDS, "ab", NULL),
+                 "`name` LIKE '%ab'");
+  /* The new operators sit after RAW so version-1 session integers hold */
+  CHECK_SIZE(FILTER_OP_STARTS, 15);
+  CHECK_SIZE(FILTER_OP_ENDS, 16);
+  CHECK_SIZE(FILTER_OP_COUNT, 17);
   CHECK_STR_FREE(where_for("sqlite", FILTER_OP_REGEX, "ab", NULL),
                  "\"name\" GLOB '*ab*'");
   CHECK_STR_FREE(where_for("mysql", FILTER_OP_BETWEEN, "a", "z"),
@@ -207,6 +222,14 @@ static void type_text(TextInput *in, const char *s) {
 }
 
 static void press(TextInput *in, UiEvent e) { text_input_handle_key(in, &e); }
+
+static void test_connstr_display(void) {
+  CHECK_STR_FREE(connstr_display("sqlite:///tmp/a.db"), "sqlite: /tmp/a.db");
+  CHECK_STR_FREE(connstr_display("postgres://u:secret@h:5433/d"),
+                 "postgres://u@h:5433/d");
+  CHECK_STR_FREE(connstr_display("mysql+ssh://su:sp@sh:22/u:p@dbh:3306/d"),
+                 "mysql://u@dbh:3306/d  via ssh su@sh");
+}
 
 static void test_text_input(void) {
   TextInput in;
@@ -529,8 +552,552 @@ static void test_recent_passwords(void) {
   recent_free(&l);
 }
 
+static void test_config_file(void) {
+  char dir[] = "/tmp/lace-cfg-XXXXXX";
+  CHECK(mkdtemp(dir) != NULL);
+  char *p = str_printf("%s/config.json", dir);
+  /* A file another frontend wrote: its own section, an unknown general key,
+   * and bindings this TUI cannot receive */
+  const char *text =
+      "{\"general\":{\"delete_confirmation\":false,\"row_numbers\":2,"
+      "\"page_size\":500,\"future_key\":1},"
+      "\"hotkeys\":{\"palette\":[\"CTRL+SHIFT+P\"],\"quit\":[\"q\"]},"
+      "\"notcurses\":{\"clipboard_osc52\":false},\"gtk\":{}}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  char *err = NULL;
+  Config *c = config_load_file(p, &err);
+  CHECK(c && !err);
+  CHECK(!c->general.delete_confirmation);
+  CHECK(c->general.row_numbers == 2);
+  CHECK(c->general.page_size == 500);
+  CHECK(c->general.approximate_counts); /* default */
+  /* Sections this TUI does not own are kept, by name */
+  cJSON *nc = config_section(c, "notcurses");
+  CHECK(nc && !json_get_bool(nc, "clipboard_osc52", true));
+  /* Change one owned value, save, reload: the others survive */
+  c->general.quit_confirmation = true;
+  CHECK(config_save_file(c, p, &err));
+  config_free(c);
+  c = config_load_file(p, &err);
+  CHECK(c && !err && c->general.quit_confirmation && c->general.row_numbers == 2);
+  CHECK(cJSON_GetObjectItem(c->extra, "gtk") != NULL);
+  CHECK(!json_get_bool(config_section(c, "notcurses"), "clipboard_osc52", true));
+  /* The file on disk also still has the other section verbatim */
+  char *back = platform_read_file(p, 1 << 20);
+  CHECK(back && strstr(back, "\"clipboard_osc52\"") && strstr(back, "\"gtk\""));
+  /* An unknown key inside an owned section is dropped (owner's struct is the truth) */
+  CHECK(back && !strstr(back, "future_key"));
+  free(back);
+  /* A section created on demand is written */
+  cJSON_AddBoolToObject(config_section(c, "notcurses"), "new_flag", true);
+  CHECK(config_save_file(c, p, &err));
+  back = platform_read_file(p, 1 << 20);
+  CHECK(back && strstr(back, "new_flag"));
+  free(back);
+  config_free(c);
+  /* config_copy carries extra */
+  c = config_load_file(p, &err);
+  Config *d = config_copy(c);
+  CHECK(d && cJSON_GetObjectItem(d->extra, "notcurses") != NULL);
+  config_free(d);
+  config_free(c);
+  CHECK(!err);
+
+  /* An untouched foreign section comes from the file as it is at save time */
+  text = "{\"general\":{},\"gtk\":{\"x\":1},\"notcurses\":{\"y\":1}}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_load_file(p, &err);
+  CHECK(c && !err);
+  c->general.show_header = false;
+  cJSON_AddNumberToObject(config_section(c, "notcurses"), "z", 3);
+  text = "{\"general\":{},\"gtk\":{\"x\":2},\"notcurses\":{\"y\":2}}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  CHECK(config_save_file(c, p, &err) && !err);
+  config_free(c);
+  c = config_load_file(p, &err);
+  CHECK(c && !err && !c->general.show_header);
+  CHECK(cJSON_GetObjectItem(cJSON_GetObjectItem(c->extra, "gtk"), "x")->valueint == 2);
+  cJSON *ncs = cJSON_GetObjectItem(c->extra, "notcurses");
+  CHECK(ncs && cJSON_GetObjectItem(ncs, "z") && cJSON_GetObjectItem(ncs, "y")->valueint == 1);
+  config_free(c);
+
+  /* A non-object member named like a section is replaced by an object */
+  text = "{\"notcurses\":5}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_load_file(p, &err);
+  CHECK(c && !err);
+  cJSON *sec = config_section(c, "notcurses");
+  CHECK(cJSON_IsObject(sec) && cJSON_GetArraySize(sec) == 0);
+  CHECK(config_save_file(c, p, &err) && !err);
+  back = platform_read_file(p, 1 << 20);
+  CHECK(back && !strstr(back, ": 5"));
+  free(back);
+  config_free(c);
+
+  /* A corrupt file is never overwritten by a save */
+  text = "{\"general\": {\"show_header\": tru";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_get_defaults();
+  CHECK(!config_save_file(c, p, &err));
+  CHECK(err && strstr(err, "byte"));
+  free(err);
+  err = NULL;
+  back = platform_read_file(p, 1 << 20);
+  CHECK(back && strcmp(back, text) == 0);
+  free(back);
+  config_free(c);
+  c = config_load_file(p, &err);
+  CHECK(c && err && strstr(err, "byte") && c->general.show_header);
+  config_free(c);
+  free(err);
+  err = NULL;
+
+  /* A non-object root: load gives defaults and an error; save refuses */
+  text = "[1,2]";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_load_file(p, &err);
+  CHECK(c && err && cJSON_IsObject(c->extra) && cJSON_GetArraySize(c->extra) == 0);
+  free(err);
+  err = NULL;
+  CHECK(!config_save_file(c, p, &err) && err);
+  back = platform_read_file(p, 1 << 20);
+  CHECK(back && strcmp(back, text) == 0);
+  free(back);
+  config_free(c);
+  free(err);
+  unlink(p);
+  rmdir(dir);
+  free(p);
+}
+
+static UiEvent key_ev(int key, bool special, UiKeyMod mods) {
+  UiEvent e = {0};
+  e.type = UI_EVENT_KEY;
+  e.key.key = key;
+  e.key.is_special = special;
+  e.key.mods = mods;
+  return e;
+}
+
+static void test_hotkey_parse(void) {
+  Config *c = config_get_defaults();
+  CHECK(hotkey_add_key(c, HOTKEY_CONN_TAB_3, "ALT+3"));
+  UiEvent e = key_ev('3', false, UI_MOD_ALT);
+  CHECK(hotkey_matches(c, &e, HOTKEY_CONN_TAB_3));
+  e = key_ev('3', false, UI_MOD_NONE);
+  CHECK(!hotkey_matches(c, &e, HOTKEY_CONN_TAB_3));
+  CHECK(hotkey_add_key(c, HOTKEY_NEXT_CONN_TAB, "CTRL+PGDN"));
+  e = key_ev(UI_KEY_PAGEDOWN, true, UI_MOD_CTRL);
+  CHECK(hotkey_matches(c, &e, HOTKEY_NEXT_CONN_TAB));
+  e = key_ev(UI_KEY_PAGEDOWN, true, UI_MOD_NONE);
+  CHECK(!hotkey_matches(c, &e, HOTKEY_NEXT_CONN_TAB));
+  CHECK(hotkey_matches(c, &e, HOTKEY_PAGE_DOWN));
+  CHECK(hotkey_add_key(c, HOTKEY_EDITOR_SAVE, "SHIFT+ENTER"));
+  e = key_ev(UI_KEY_ENTER, true, UI_MOD_SHIFT);
+  CHECK(hotkey_matches(c, &e, HOTKEY_EDITOR_SAVE));
+  CHECK(hotkey_add_key(c, HOTKEY_CLEAR_FILTERS, "SHIFT+y"));
+  e = key_ev('Y', false, UI_MOD_NONE);
+  CHECK(hotkey_matches(c, &e, HOTKEY_CLEAR_FILTERS));
+  CHECK(hotkey_add_key(c, HOTKEY_VIEW_SWITCHER, "SHIFT+CTRL+P"));
+  e = key_ev('P', false, UI_MOD_CTRL | UI_MOD_SHIFT);
+  CHECK(hotkey_matches(c, &e, HOTKEY_VIEW_SWITCHER));
+  e = key_ev('P', false, UI_MOD_CTRL);
+  CHECK(!hotkey_matches(c, &e, HOTKEY_VIEW_SWITCHER));
+  e = key_ev('G', false, UI_MOD_CTRL);
+  CHECK(hotkey_matches(c, &e, HOTKEY_GOTO_ROW));
+  CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_CONN_TAB_3), "Alt+3");
+  CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_NEXT_CONN_TAB), "Ctrl+PgDn");
+  CHECK(hotkey_action_frontends(HOTKEY_QUIT) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_frontends(HOTKEY_PALETTE) == CONFIG_FE_NOTCURSES);
+  CHECK(hotkey_action_frontends(HOTKEY_SIDEBAR_FILTER) == CONFIG_FE_ALL); /* the notcurses sidebar's search key */
+  CHECK(hotkey_action_frontends(HOTKEY_TOGGLE_HEADER) == CONFIG_FE_NCURSES);
+  CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_QUIT), "q, Ctrl+X, F10");
+  CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_TOGGLE_LOG), "Ctrl+`, F8");
+  config_free(c);
+}
+
+static void test_hotkey_frontend_mask(void) {
+  char *err = NULL;
+  Config *c = config_get_defaults();
+  CHECK(c->frontend == CONFIG_FE_NCURSES);
+  CHECK(config_validate(c, &err) && !err);
+  /* close_view (notcurses only, CTRL+W) is not this frontend's */
+  CHECK(hotkey_add_key(c, HOTKEY_CLOSE_TAB, "CTRL+W"));
+  CHECK(config_validate(c, &err) && !err);
+  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_TAB, "CTRL+W") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_VIEW, "CTRL+W") == HOTKEY_COUNT);
+  Config *d = config_copy(c);
+  CHECK(d && d->frontend == CONFIG_FE_NCURSES);
+  config_free(d);
+  /* In the notcurses frontend both exist: a conflict */
+  c->frontend = CONFIG_FE_NOTCURSES;
+  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_TAB, "CTRL+W") == HOTKEY_CLOSE_VIEW);
+  CHECK(!config_validate(c, &err) && err && strstr(err, "CTRL+W"));
+  free(err);
+  err = NULL;
+  config_free(c);
+  /* ALT+3 is not 3 */
+  c = config_get_defaults();
+  c->frontend = CONFIG_FE_NOTCURSES;
+  CHECK(hotkey_add_key(c, HOTKEY_QUIT, "3"));
+  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "3") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_CONN_TAB_3, "ALT+3") == HOTKEY_COUNT);
+  config_free(c);
+  /* The shared general ranges */
+  c = config_get_defaults();
+  c->general.page_size = CONFIG_PAGE_SIZE_MIN - 1;
+  CHECK(!config_validate(c, &err) && err);
+  free(err);
+  err = NULL;
+  c->general.page_size = CONFIG_PAGE_SIZE_MAX;
+  CHECK(config_validate(c, &err) && !err);
+  c->general.page_size = CONFIG_PAGE_SIZE_MAX + 1;
+  CHECK(!config_validate(c, NULL));
+  c->general.page_size = CONFIG_PAGE_SIZE_DEFAULT;
+  c->general.row_numbers = 3;
+  CHECK(!config_validate(c, NULL));
+  c->general.row_numbers = CONFIG_ROW_NUMBERS_ALWAYS;
+  c->general.color_scheme = -1;
+  CHECK(!config_validate(c, NULL));
+  c->general.color_scheme = 2;
+  CHECK(config_validate(c, NULL));
+  config_free(c);
+}
+
+static int json_to_int(cJSON *n) { return cJSON_IsNumber(n) ? (int)n->valuedouble : -1; }
+
+static const char *FLAT_WS =
+    "{\"name\":\"W\",\"current_tab\":2,\"tabs\":["
+    "{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t1\","
+    " \"cursor\":[5,1],\"scroll\":[3,0],"
+    " \"sort\":[{\"column\":\"id\",\"direction\":2}],"
+    " \"filters\":[{\"column\":\"s\",\"op\":7,\"value\":\"x\"},"
+    "             {\"column\":\"\",\"raw\":true,\"op\":14,\"value\":\"a > 1\"},"
+    "             {\"column\":\"n\",\"op\":9,\"value\":\"1\",\"value2\":\"9\"}],"
+    " \"ui\":{\"filters_visible\":true,\"filters_focused\":true}},"
+    "{\"type\":\"QUERY\",\"connection_id\":\"B\",\"query_text\":\"SELECT 1\","
+    " \"query_cursor\":3,\"query_scroll_line\":1,\"query_scroll_col\":2,"
+    " \"ui\":{\"query_focus_results\":true}},"
+    "{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t2\",\"ui\":{}},"
+    "{\"type\":\"TABLE\",\"connection_id\":\"\",\"table_name\":\"lost\",\"ui\":{}}"
+    "]}";
+
+static void test_workspace_json(void) {
+  char *err = NULL;
+  cJSON *flat = cJSON_Parse(FLAT_WS);
+  CHECK(flat && workspace_json_shape(flat) == WORKSPACE_JSON_FLAT);
+  cJSON *nested = workspace_json_to_nested(flat, &err);
+  CHECK(nested && !err);
+  CHECK(workspace_json_shape(nested) == WORKSPACE_JSON_NESTED);
+  CHECK_STR(json_get_string(nested, "name", ""), "W");
+  cJSON *conns = json_get_array(nested, "connections");
+  CHECK_SIZE(json_array_size(conns), 2); /* A and B; the tab without an id is dropped */
+  cJSON *a = json_get_array_item(conns, 0);
+  CHECK_STR(json_get_string(a, "saved_id", ""), "A");
+  cJSON *atabs = json_get_array(a, "tabs");
+  CHECK_SIZE(json_array_size(atabs), 2);
+  cJSON *t1 = json_get_array_item(atabs, 0);
+  CHECK_STR(json_get_string(t1, "type", ""), "table");
+  CHECK_STR(json_get_string(t1, "table", ""), "t1");
+  CHECK_SIZE(json_get_int(t1, "order", -1), 0);
+  CHECK(json_get_bool(t1, "filters_visible", false));
+  CHECK(json_get_bool(json_get_object(t1, "ncurses"), "filters_focused", false));
+  CHECK(!json_get_bool(json_get_object(t1, "ncurses"), "query_focus_results", true));
+  cJSON *sorts = json_get_array(t1, "sorts");
+  CHECK(json_get_bool(json_get_array_item(sorts, 0), "desc", false));
+  cJSON *filters = json_get_array(t1, "filters");
+  CHECK_STR(json_get_string(json_get_array_item(filters, 0), "op", ""), "contains");
+  CHECK_STR(json_get_string(json_get_array_item(filters, 1), "op", ""), "raw");
+  CHECK(cJSON_GetObjectItem(json_get_array_item(filters, 1), "column") == NULL);
+  CHECK_STR(json_get_string(json_get_array_item(filters, 2), "op", ""), "between");
+  CHECK_STR(json_get_string(json_get_array_item(filters, 2), "value2", ""), "9");
+  cJSON *cur = json_get_array(t1, "cursor");
+  CHECK_SIZE(json_to_int(json_get_array_item(cur, 0)), 5);
+  cJSON *t2 = json_get_array_item(atabs, 1);
+  CHECK_SIZE(json_get_int(t2, "order", -1), 2);
+  /* current_tab 2 was t2 of A: A is current, and t2 within it */
+  CHECK_SIZE(json_get_int(nested, "current", -1), 0);
+  CHECK_SIZE(json_get_int(a, "current", -1), 1);
+  cJSON *b = json_get_array_item(conns, 1);
+  cJSON *q = json_get_array_item(json_get_array(b, "tabs"), 0);
+  CHECK_STR(json_get_string(q, "type", ""), "query");
+  CHECK_STR(json_get_string(q, "text", ""), "SELECT 1");
+  CHECK_SIZE(json_get_int(q, "cursor", -1), 3);
+  CHECK_SIZE(json_get_int(q, "order", -1), 1);
+  CHECK(json_get_bool(json_get_object(q, "ncurses"), "query_focus_results", false));
+
+  /* Back to flat: interleaving restored by order, current tab the same */
+  cJSON *back = workspace_json_to_flat(nested, &err);
+  CHECK(back && !err);
+  cJSON *tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 3);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connection_id", ""), "A");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "connection_id", ""), "B");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "type", ""), "QUERY");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "query_text", ""), "SELECT 1");
+  CHECK_SIZE(json_get_int(json_get_array_item(tabs, 1), "query_scroll_col", -1), 2);
+  CHECK(json_get_bool(json_get_object(json_get_array_item(tabs, 0), "ui"), "filters_focused", false));
+  CHECK(json_get_bool(json_get_object(json_get_array_item(tabs, 0), "ui"), "filters_visible", false));
+  CHECK(json_get_bool(json_get_object(json_get_array_item(tabs, 1), "ui"), "query_focus_results", false));
+  CHECK(!json_get_bool(json_get_object(json_get_array_item(tabs, 2), "ui"), "filters_focused", true));
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 2), "table_name", ""), "t2");
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 2);
+  cJSON *f0 = json_get_array_item(json_get_array(json_get_array_item(tabs, 0), "filters"), 0);
+  CHECK_SIZE(json_get_int(f0, "op", -1), FILTER_OP_CONTAINS);
+  cJSON *f1 = json_get_array_item(json_get_array(json_get_array_item(tabs, 0), "filters"), 1);
+  CHECK(json_get_bool(f1, "raw", false) && json_get_int(f1, "op", -1) == FILTER_OP_RAW);
+  cJSON *s0 = json_get_array_item(json_get_array(json_get_array_item(tabs, 0), "sort"), 0);
+  CHECK_SIZE(json_get_int(s0, "direction", -1), 2);
+  cJSON_Delete(back);
+
+  /* A GUI-written workspace: no order, a connstr-only connection, the new ops */
+  cJSON *gui = cJSON_Parse(
+      "{\"name\":\"G\",\"connections\":[{\"connstr\":\"sqlite:///x.db\",\"name\":\"x\","
+      "\"tabs\":[{\"type\":\"table\",\"table\":\"t\",\"filters\":[{\"column\":\"s\",\"op\":\"starts\",\"value\":\"a\"}],\"sorts\":[]}],"
+      "\"current\":0},{\"saved_id\":\"B\",\"tabs\":[{\"type\":\"query\",\"text\":\"x\"}],\"current\":0}],\"current\":1}");
+  back = workspace_json_to_flat(gui, &err);
+  CHECK(back && !err);
+  tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 2);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connection_id", ""), "");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connstr", ""), "sqlite:///x.db");
+  CHECK_SIZE(json_get_int(json_get_array_item(json_get_array(json_get_array_item(tabs, 0), "filters"), 0), "op", -1), FILTER_OP_STARTS);
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 1);
+  cJSON_Delete(back);
+  cJSON_Delete(gui);
+
+  /* An op key nobody knows fails the conversion with a message */
+  cJSON *bad = cJSON_Parse("{\"connections\":[{\"saved_id\":\"A\",\"tabs\":[{\"type\":\"table\",\"table\":\"t\","
+                           "\"filters\":[{\"column\":\"s\",\"op\":\"someday\",\"value\":\"a\"}]}]}]}");
+  back = workspace_json_to_flat(bad, &err);
+  CHECK(!back && err && strstr(err, "someday"));
+  free(err); err = NULL;
+  cJSON_Delete(bad);
+
+  /* A CONNECTION tab as the current tab makes its connection current */
+  cJSON *ct = cJSON_Parse(
+      "{\"name\":\"C\",\"current_tab\":2,\"tabs\":["
+      "{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\",\"ui\":{}},"
+      "{\"type\":\"TABLE\",\"connection_id\":\"B\",\"table_name\":\"u\",\"ui\":{}},"
+      "{\"type\":\"CONNECTION\",\"connection_id\":\"B\"}]}");
+  cJSON *cn = workspace_json_to_nested(ct, &err);
+  CHECK(cn && !err);
+  CHECK_SIZE(json_get_int(cn, "current", -1), 1);
+  /* B's CONNECTION tab is no view: B holds only its table tab, and the
+   * connection tab's position */
+  cJSON *cb = json_get_array_item(json_get_array(cn, "connections"), 1);
+  CHECK_SIZE(json_array_size(json_get_array(cb, "tabs")), 1);
+  CHECK_SIZE(json_get_int(cb, "order", -1), 2);
+  cJSON_Delete(cn);
+  cJSON_Delete(ct);
+
+  /* An unknown operator integer fails, with or without an error slot */
+  cJSON *op99 = cJSON_Parse(
+      "{\"tabs\":[{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\","
+      "\"filters\":[{\"column\":\"s\",\"op\":99,\"value\":\"a\"}]}]}");
+  CHECK(!workspace_json_to_nested(op99, &err) && err && strstr(err, "99"));
+  free(err); err = NULL;
+  CHECK(!workspace_json_to_nested(op99, NULL));
+  cJSON_Delete(op99);
+
+  /* A sort without a direction is dropped */
+  cJSON *nosort = cJSON_Parse(
+      "{\"tabs\":[{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\","
+      "\"sort\":[{\"column\":\"id\",\"direction\":0}]}]}");
+  cJSON *ns = workspace_json_to_nested(nosort, &err);
+  CHECK(ns && !err);
+  CHECK_SIZE(json_array_size(json_get_array(json_get_array_item(json_get_array(
+                 json_get_array_item(json_get_array(ns, "connections"), 0), "tabs"), 0), "sorts")), 0);
+  cJSON_Delete(ns);
+  cJSON_Delete(nosort);
+
+  /* A connection with only a connection tab survives the round trip */
+  cJSON *only = cJSON_Parse(
+      "{\"name\":\"O\",\"current_tab\":1,\"tabs\":["
+      "{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\",\"ui\":{}},"
+      "{\"type\":\"CONNECTION\",\"connection_id\":\"B\"},"
+      "{\"type\":\"QUERY\",\"connection_id\":\"A\",\"query_text\":\"q\",\"ui\":{}}]}");
+  cJSON *on = workspace_json_to_nested(only, &err);
+  CHECK(on && !err);
+  cJSON *oconns = json_get_array(on, "connections");
+  CHECK_SIZE(json_array_size(oconns), 2);
+  cJSON *ob = json_get_array_item(oconns, 1);
+  CHECK_STR(json_get_string(ob, "saved_id", ""), "B");
+  CHECK(json_get_array(ob, "tabs") != NULL);
+  CHECK_SIZE(json_array_size(json_get_array(ob, "tabs")), 0);
+  CHECK_SIZE(json_get_int(ob, "order", -1), 1);
+  CHECK(cJSON_GetObjectItem(json_get_array_item(oconns, 0), "order") == NULL);
+  CHECK_SIZE(json_get_int(on, "current", -1), 1);
+  back = workspace_json_to_flat(on, &err);
+  CHECK(back && !err);
+  tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 3);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "type", ""), "TABLE");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "type", ""), "CONNECTION");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "connection_id", ""), "B");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 2), "type", ""), "QUERY");
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 1);
+  cJSON_Delete(back);
+  cJSON_Delete(on);
+  cJSON_Delete(only);
+
+  /* A GUI connection with no tabs and no order: a connection tab after the
+   * others; the current one */
+  cJSON *gnt = cJSON_Parse(
+      "{\"connections\":[{\"saved_id\":\"A\",\"tabs\":[{\"type\":\"table\",\"table\":\"t\"}]},"
+      "{\"connstr\":\"sqlite:///g.db\",\"tabs\":[]}],\"current\":1}");
+  back = workspace_json_to_flat(gnt, &err);
+  CHECK(back && !err);
+  tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 2);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "type", ""), "CONNECTION");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "connstr", ""), "sqlite:///g.db");
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 1);
+  cJSON_Delete(back);
+  cJSON_Delete(gnt);
+
+  /* Tabs of a connection opened by URL: grouped by connstr, and back */
+  cJSON *url = cJSON_Parse(
+      "{\"name\":\"U\",\"current_tab\":1,\"tabs\":["
+      "{\"type\":\"TABLE\",\"connection_id\":\"\",\"connstr\":\"sqlite:///u.db\",\"table_name\":\"t\",\"ui\":{}},"
+      "{\"type\":\"QUERY\",\"connstr\":\"sqlite:///v.db\",\"query_text\":\"q\",\"ui\":{}},"
+      "{\"type\":\"TABLE\",\"connection_id\":\"\",\"connstr\":\"sqlite:///u.db\",\"table_name\":\"w\",\"ui\":{}},"
+      "{\"type\":\"TABLE\",\"connection_id\":\"\",\"table_name\":\"gone\",\"ui\":{}}]}");
+  cJSON *un = workspace_json_to_nested(url, &err);
+  CHECK(un && !err);
+  cJSON *uconns = json_get_array(un, "connections");
+  CHECK_SIZE(json_array_size(uconns), 2);
+  cJSON *u0 = json_get_array_item(uconns, 0);
+  CHECK_STR(json_get_string(u0, "connstr", ""), "sqlite:///u.db");
+  CHECK(cJSON_GetObjectItem(u0, "saved_id") == NULL);
+  CHECK_SIZE(json_array_size(json_get_array(u0, "tabs")), 2);
+  CHECK_STR(json_get_string(json_get_array_item(uconns, 1), "connstr", ""), "sqlite:///v.db");
+  CHECK_SIZE(json_get_int(un, "current", -1), 1);
+  back = workspace_json_to_flat(un, &err);
+  CHECK(back && !err);
+  tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 3);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connstr", ""), "sqlite:///u.db");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "connstr", ""), "sqlite:///v.db");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 2), "table_name", ""), "w");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 2), "connection_id", "x"), "");
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 1);
+  cJSON_Delete(back);
+  cJSON_Delete(un);
+  cJSON_Delete(url);
+
+  /* An empty saved_id is no saved_id: the connstr applies */
+  cJSON *esid = cJSON_Parse(
+      "{\"connections\":[{\"saved_id\":\"\",\"connstr\":\"sqlite:///e.db\","
+      "\"tabs\":[{\"type\":\"query\",\"text\":\"x\"}]}]}");
+  back = workspace_json_to_flat(esid, &err);
+  CHECK(back && !err);
+  CHECK_STR(json_get_string(json_get_array_item(json_get_array(back, "tabs"), 0), "connstr", ""), "sqlite:///e.db");
+  cJSON_Delete(back);
+  cJSON_Delete(esid);
+
+  /* A workspace that does not convert is skipped, with a warning; the others stay */
+  cJSON *mixed = cJSON_Parse(
+      "{\"version\":2,\"current\":1,\"gtk\":{\"x\":1},\"workspaces\":["
+      "{\"name\":\"Good\",\"connections\":[{\"saved_id\":\"A\",\"tabs\":[{\"type\":\"table\",\"table\":\"t\"}]}]},"
+      "{\"name\":\"Bad\",\"connections\":[{\"saved_id\":\"A\",\"tabs\":[{\"type\":\"table\",\"table\":\"t\","
+      "\"filters\":[{\"column\":\"s\",\"op\":\"someday\",\"value\":\"a\"}]}]}]}]}");
+  cJSON *mv1 = session_json_to_v1(mixed, &err);
+  CHECK(mv1 != NULL);
+  CHECK_SIZE(json_array_size(json_get_array(mv1, "workspaces")), 1);
+  CHECK_SIZE(json_get_int(mv1, "current_workspace", -1), 0);
+  CHECK(err && strstr(err, "someday") && strstr(err, "Bad"));
+  CHECK(cJSON_GetObjectItem(mv1, "gtk") != NULL);
+  free(err); err = NULL;
+  cJSON_Delete(mv1);
+  mv1 = session_json_to_v1(mixed, NULL);
+  CHECK(mv1 && json_array_size(json_get_array(mv1, "workspaces")) == 1);
+  cJSON_Delete(mv1);
+  /* Every workspace bad: an error */
+  cJSON_DeleteItemFromArray(json_get_array(mixed, "workspaces"), 0);
+  CHECK(!session_json_to_v1(mixed, &err) && err && strstr(err, "someday"));
+  free(err); err = NULL;
+  cJSON_Delete(mixed);
+  /* No workspaces at all is no error */
+  cJSON *none = cJSON_Parse("{\"version\":2,\"workspaces\":[],\"gtk\":{}}");
+  cJSON *nv1 = session_json_to_v1(none, &err);
+  CHECK(nv1 && !err && json_array_size(json_get_array(nv1, "workspaces")) == 0);
+  cJSON_Delete(nv1);
+  cJSON_Delete(none);
+  /* The same for v1 -> v2; the current one later than the skipped one moves down */
+  char *mtext = str_printf(
+      "{\"current_workspace\":1,\"workspaces\":["
+      "{\"tabs\":[{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\","
+      "\"filters\":[{\"column\":\"s\",\"op\":99,\"value\":\"a\"}]}]},%s]}", FLAT_WS);
+  cJSON *mixed1 = cJSON_Parse(mtext);
+  free(mtext);
+  cJSON *mv2 = session_json_to_v2(mixed1, &err);
+  CHECK(mv2 && err && strstr(err, "99") && strstr(err, "Workspace 1"));
+  CHECK_SIZE(json_array_size(json_get_array(mv2, "workspaces")), 1);
+  CHECK_SIZE(json_get_int(mv2, "current", -1), 0);
+  CHECK_STR(json_get_string(json_get_array_item(json_get_array(mv2, "workspaces"), 0), "name", ""), "W");
+  free(err); err = NULL;
+  cJSON_Delete(mv2);
+  cJSON_Delete(mixed1);
+
+  /* Whole-session roots */
+  char *v1_text = str_printf("{\"settings\":{\"sidebar_visible\":false},\"workspaces\":[%s],\"current_workspace\":0}", FLAT_WS);
+  cJSON *v1 = cJSON_Parse(v1_text);
+  free(v1_text);
+  cJSON *v2 = session_json_to_v2(v1, &err);
+  CHECK(v2 && !err && json_get_int(v2, "version", 0) == 2);
+  CHECK(!json_get_bool(json_get_object(v2, "ncurses"), "sidebar_visible", true));
+  CHECK(cJSON_GetObjectItem(v2, "settings") == NULL);
+  CHECK_SIZE(json_get_int(v2, "current", -1), 0);
+  CHECK(workspace_json_shape(json_get_array_item(json_get_array(v2, "workspaces"), 0)) == WORKSPACE_JSON_NESTED);
+  cJSON_AddBoolToObject(v2, "other_frontend_flag", true);
+  cJSON *v1b = session_json_to_v1(v2, &err);
+  CHECK(v1b && !err);
+  CHECK(!json_get_bool(json_get_object(v1b, "settings"), "sidebar_visible", true));
+  CHECK_SIZE(json_get_int(v1b, "current_workspace", -1), 0);
+  CHECK(workspace_json_shape(json_get_array_item(json_get_array(v1b, "workspaces"), 0)) == WORKSPACE_JSON_FLAT);
+  /* to_v2 of a v2 root is a copy */
+  cJSON *v2b = session_json_to_v2(v2, &err);
+  CHECK(v2b && json_get_int(v2b, "version", 0) == 2 && json_get_bool(v2b, "other_frontend_flag", false));
+  cJSON_Delete(v2b);
+  cJSON_Delete(v1b);
+  cJSON_Delete(v2);
+  cJSON_Delete(v1);
+  cJSON_Delete(nested);
+  cJSON_Delete(flat);
+}
+
+static void test_session_connstr_password(void) {
+  /* A tunnelled string keeps its +ssh form, SSH host/user and key */
+  char *a = session_connstr_with_password(
+      "postgres+ssh://su@sh:22/u@dbh:5432/d?ssh_key=%2Fk%2Fid", "p", NULL);
+  CHECK(a != NULL);
+  if (a) {
+    CHECK(strncmp(a, "postgres+ssh://", 15) == 0);
+    CHECK(strstr(a, "su@sh:22") != NULL);
+    CHECK(strstr(a, "u:p@dbh:5432") != NULL);
+    CHECK(strstr(a, "ssh_key=%2Fk%2Fid") != NULL);
+    LaceSavedConnection *m = lace_saved_conn_from_connstr(
+        "postgres+ssh://su@sh:22/u@dbh:5432/d?ssh_key=%2Fk%2Fid", NULL);
+    char *want = m ? lace_saved_conn_build_connstr(m, "p", NULL) : NULL;
+    CHECK(want && strcmp(a, want) == 0);
+    str_secure_free(want);
+    lace_saved_conn_free(m);
+  }
+  str_secure_free(a);
+
+  char *b = session_connstr_with_password("postgres://u@h/d", "p", NULL);
+  CHECK(b != NULL);
+  if (b)
+    CHECK(strstr(b, "u:p@h") != NULL && strstr(b, "+ssh") == NULL);
+  str_secure_free(b);
+  CHECK(session_connstr_with_password(NULL, "p", NULL) == NULL);
+}
+
 int main(void) {
   test_recent_passwords();
+  test_session_connstr_password();
+  test_config_file();
   test_connection_tree();
   test_connections_file();
   test_argv_scrub();
@@ -547,6 +1114,10 @@ int main(void) {
   test_filters_where();
   test_order_by();
   test_text_input();
+  test_connstr_display();
   test_row_key();
+  test_hotkey_parse();
+  test_hotkey_frontend_mask();
+  test_workspace_json();
   return test_report("tui");
 }

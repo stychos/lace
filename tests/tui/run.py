@@ -8,7 +8,7 @@ screen is printed and the HOME (with the daemon log) is kept.
 Needs tmux; without it the tests are skipped.
 """
 
-import importlib
+import importlib.util
 import os
 import shutil
 import sys
@@ -21,12 +21,18 @@ sys.path.insert(0, HERE)
 import harness  # noqa: E402
 
 
-def collect(filters):
+def collect(test_dir, filters):
+    if test_dir not in sys.path:
+        sys.path.insert(0, test_dir)
     tests = []
-    for fname in sorted(os.listdir(HERE)):
+    for fname in sorted(os.listdir(test_dir)):
         if not (fname.startswith("test_") and fname.endswith(".py")):
             continue
-        mod = importlib.import_module(fname[:-3])
+        # By path: another suite's directory may hold a module of the same name
+        spec = importlib.util.spec_from_file_location(
+            f"{os.path.basename(test_dir)}_{fname[:-3]}", os.path.join(test_dir, fname))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
         for name in sorted(dir(mod)):
             fn = getattr(mod, name)
             if not (name.startswith("test_") and callable(fn)):
@@ -47,15 +53,16 @@ def collect(filters):
     return tests
 
 
-def main():
+def main(test_dir, filters):
     if not shutil.which("tmux"):
         print("tui: tmux not found, TUI tests skipped")
         return 0
-    for path in (harness.LACE, os.path.join(harness.LACED_DIR, "laced")):
+    binary = harness.LACE_NC if test_dir != HERE else harness.LACE
+    for path in (binary, os.path.join(harness.LACED_DIR, "laced")):
         if not os.path.exists(path):
             print(f"tui: {path} is missing: run `make` first")
             return 1
-    tests = collect(sys.argv[1:])
+    tests = collect(test_dir, filters)
     failed = 0
     for label, fn in tests:
         home = harness.Home()
@@ -81,4 +88,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(HERE, sys.argv[1:]))

@@ -306,7 +306,7 @@ def test_saved_workspace(home):
         t.wait('Saved "Mine"')
         layouts = home.read("workspaces.json")["workspaces"]
         assert layouts[0]["name"] == "Mine"
-        assert layouts[0]["workspace"]["tabs"][0]["table_name"] == "big"
+        assert layouts[0]["workspace"]["connections"][0]["tabs"][0]["table"] == "big"
         t.keys("Home", "x")  # Close the open workspace
         t.wait("Close Workspace")
         t.keys("y")

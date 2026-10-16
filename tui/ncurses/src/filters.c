@@ -13,6 +13,7 @@
 
 #include "config/config.h"
 #include "../../liblace/include/util/mem.h"
+#include "views/text_input_draw.h"
 #include "tui_internal.h"
 #include "views/list_picker.h"
 #include <ctype.h>
@@ -337,24 +338,37 @@ static ssize_t show_column_dropdown(TuiState *state, size_t current_col,
   return sel;
 }
 
-/* Number of operators to show (excludes RAW which is now a virtual column) */
-#define FILTER_OP_VISIBLE (FILTER_OP_COUNT - 1)
+/* Operators offered in the dropdown, in menu order: RAW is a virtual column */
+static const FilterOperator VISIBLE_OPS[] = {
+    FILTER_OP_EQ, FILTER_OP_NE, FILTER_OP_GT, FILTER_OP_GE, FILTER_OP_LT,
+    FILTER_OP_LE, FILTER_OP_IN, FILTER_OP_CONTAINS, FILTER_OP_STARTS,
+    FILTER_OP_ENDS, FILTER_OP_REGEX, FILTER_OP_BETWEEN, FILTER_OP_IS_EMPTY,
+    FILTER_OP_IS_NOT_EMPTY, FILTER_OP_IS_NULL, FILTER_OP_IS_NOT_NULL,
+};
+#define FILTER_OP_VISIBLE (sizeof(VISIBLE_OPS) / sizeof(VISIBLE_OPS[0]))
 
-/* Show operator dropdown and return selected index, or -1 if cancelled */
+/* Show operator dropdown and return the chosen FilterOperator (mapped back
+ * through VISIBLE_OPS), or -1 if cancelled */
 static int show_operator_dropdown(TuiState *state, FilterOperator current_op,
                                   size_t filter_row) {
   const char *labels[FILTER_OP_VISIBLE];
-  for (int i = 0; i < FILTER_OP_VISIBLE; i++)
-    labels[i] = filter_op_name((FilterOperator)i); /* RAW is not offered */
+  size_t initial = 0;
+  for (size_t i = 0; i < FILTER_OP_VISIBLE; i++) {
+    labels[i] = filter_op_name(VISIBLE_OPS[i]);
+    if (VISIBLE_OPS[i] == current_op)
+      initial = i;
+  }
 
   int main_y, main_x;
   getbegyx(state->main_win, main_y, main_x);
   int sel = tui_pick_from_list(state->app->config, "Operator", labels,
-                               FILTER_OP_VISIBLE, (size_t)current_op,
+                               FILTER_OP_VISIBLE, initial,
                                main_y + (int)filter_row + 2, main_x + 18, 18,
                                60, 16);
   tui_refresh(state);
-  return sel;
+  if (sel < 0 || (size_t)sel >= FILTER_OP_VISIBLE)
+    return -1;
+  return (int)VISIBLE_OPS[sel];
 }
 
 /* Handle filters panel input */

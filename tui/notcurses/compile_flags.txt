@@ -1,0 +1,9 @@
+-std=c11
+-D_GNU_SOURCE
+-Isrc
+-I../../tests
+-I../../liblace/include
+-I../../tui/ncurses/src
+-D_DEFAULT_SOURCE
+-D_XOPEN_SOURCE=600
+-I/usr/include/cjson

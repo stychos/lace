@@ -137,6 +137,28 @@ typedef enum {
   HOTKEY_HISTORY_CLEAR,
   HOTKEY_HISTORY_CLOSE,
 
+
+  /* notcurses frontend (HOTKEY_CAT_GENERAL / TABLE / QUERY); masked out of
+   * this TUI's dialogs */
+  HOTKEY_PALETTE,
+  HOTKEY_CLOSE_VIEW,
+  HOTKEY_NEXT_CONN_TAB,
+  HOTKEY_PREV_CONN_TAB,
+  HOTKEY_CONN_TAB_1,
+  HOTKEY_CONN_TAB_2,
+  HOTKEY_CONN_TAB_3,
+  HOTKEY_CONN_TAB_4,
+  HOTKEY_CONN_TAB_5,
+  HOTKEY_CONN_TAB_6,
+  HOTKEY_CONN_TAB_7,
+  HOTKEY_CONN_TAB_8,
+  HOTKEY_CONN_TAB_9,
+  HOTKEY_VIEW_SWITCHER,
+  HOTKEY_TOGGLE_LOG,
+  HOTKEY_COLUMN_NARROWER,
+  HOTKEY_COLUMN_WIDER,
+  HOTKEY_SPLIT_UP,
+  HOTKEY_SPLIT_DOWN,
   HOTKEY_COUNT
 } HotkeyAction;
 
@@ -169,7 +191,19 @@ typedef struct {
   int daemon_spawn_mode;       /* 0=unix socket, 1=stdio pipes */
   int daemon_idle_timeout;     /* Seconds before daemon shuts down with no clients (0=disabled) */
   int pagination_strategy;     /* LacePaginationStrategy */
+  /* Shared with the other frontends (see the shared config spec) */
+  bool approximate_counts;     /* Catalog estimates for big server tables */
+  int page_size;               /* Rows per page in the GUIs (100..100000); this TUI pages with TUI_PAGE_SIZE */
+  int row_numbers;             /* 0 never, 1 auto, 2 always */
+  int color_scheme;            /* 0 system, 1 light, 2 dark */
 } GeneralConfig;
+
+#define CONFIG_ROW_NUMBERS_NEVER 0
+#define CONFIG_ROW_NUMBERS_AUTO 1
+#define CONFIG_ROW_NUMBERS_ALWAYS 2
+#define CONFIG_PAGE_SIZE_MIN 100
+#define CONFIG_PAGE_SIZE_MAX 100000
+#define CONFIG_PAGE_SIZE_DEFAULT 1000
 
 /* Single hotkey binding (key string like "k", "CTRL+W", "F1") */
 typedef struct {
@@ -178,9 +212,17 @@ typedef struct {
 } HotkeyBinding;
 
 /* Full configuration */
+struct cJSON;
 typedef struct {
   GeneralConfig general;
   HotkeyBinding hotkeys[HOTKEY_COUNT];
+  struct cJSON *extra; /* Every top-level member of the file this TUI does not
+                          own (other frontends' sections); written back as is */
+  char **extra_touched; /* Sections taken through config_section(): saved from
+                           memory; the others are kept from the file on disk */
+  size_t num_touched;
+  unsigned frontend; /* CONFIG_FE_* of the frontend running: hotkey conflicts
+                        are checked among its actions only */
 } Config;
 
 /* ============================================================================
@@ -193,6 +235,13 @@ Config *config_load(char **error);
 
 /* Save config to disk */
 bool config_save(const Config *config, char **error);
+
+/* Same, from an explicit path (NULL: the default file) */
+Config *config_load_file(const char *path, char **error);
+bool config_save_file(const Config *config, const char *path, char **error);
+
+/* A frontend's own section in extra (owned object, created on demand) */
+struct cJSON *config_section(Config *config, const char *name);
 
 /* Free config structure */
 void config_free(Config *config);
@@ -245,6 +294,13 @@ bool hotkey_remove_key(Config *config, HotkeyAction action, size_t key_index);
 
 /* Get category for an action */
 HotkeyCategory hotkey_get_category(HotkeyAction action);
+
+/* Which frontends an action exists in (a configuration dialog shows only
+ * its own; bindings of the others are kept in the file untouched) */
+#define CONFIG_FE_NCURSES 1u
+#define CONFIG_FE_NOTCURSES 2u
+#define CONFIG_FE_ALL (CONFIG_FE_NCURSES | CONFIG_FE_NOTCURSES)
+unsigned hotkey_action_frontends(HotkeyAction action);
 
 /* Get category display name */
 const char *hotkey_category_name(HotkeyCategory category);

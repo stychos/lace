@@ -45,9 +45,12 @@ typedef enum {
   FILTER_OP_IS_NULL,      /* IS NULL */
   FILTER_OP_IS_NOT_NULL,  /* IS NOT NULL */
   FILTER_OP_RAW,          /* Raw SQL condition */
+  /* Appended after RAW: session.json version 1 stores the integer */
+  FILTER_OP_STARTS,       /* LIKE 'value%' */
+  FILTER_OP_ENDS,         /* LIKE '%value' */
 } FilterOperator;
 
-#define FILTER_OP_COUNT 15
+#define FILTER_OP_COUNT 17
 
 /* Single column filter */
 typedef struct {

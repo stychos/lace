@@ -8,6 +8,7 @@
  */
 
 #include "connect_internal.h"
+#include "text_input_draw.h"
 
 /* ============================================================================
  * Folder Picker Helper
