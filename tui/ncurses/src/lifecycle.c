@@ -156,15 +156,17 @@ bool tui_init(TuiState *state, AppState *app) {
   if (!getenv("ESCDELAY")) {
     set_escdelay(25);
   }
-  cbreak();
+  raw(); /* Ctrl+C, Ctrl+Z and Ctrl+\ are keys (1-26), not SIGINT, SIGTSTP and SIGQUIT */
   noecho();
   keypad(stdscr, TRUE);
   /* Ctrl+S and Ctrl+Q are keys here, not terminal flow control (with IXON
-   * on, Ctrl+S froze the output and never reached us). endwin() restores
-   * the modes initscr() saved. */
+   * on, Ctrl+S froze the output and never reached us), and Ctrl+V is a key,
+   * not the line discipline's "literal next". endwin() restores the modes
+   * initscr() saved. */
   struct termios tio;
   if (tcgetattr(STDIN_FILENO, &tio) == 0) {
     tio.c_iflag &= ~(tcflag_t)IXON;
+    tio.c_lflag &= ~(tcflag_t)IEXTEN;
     tcsetattr(STDIN_FILENO, TCSANOW, &tio);
     def_prog_mode(); /* Kept as the program mode across suspend/resume */
   }

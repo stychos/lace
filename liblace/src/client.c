@@ -2400,6 +2400,114 @@ int lace_count(lace_client_t *client, int conn_id, const char *table,
   return LACE_OK;
 }
 
+/* The ON DELETE rule as the catalogs spell it, in words */
+static const char *delete_rule_word(const char *rule) {
+  if (!rule || !*rule) return "NO ACTION";
+  if (!rule[1]) { /* PostgreSQL's confdeltype */
+    switch (rule[0]) {
+    case 'c': return "CASCADE";
+    case 'n': return "SET NULL";
+    case 'd': return "SET DEFAULT";
+    case 'r': return "RESTRICT";
+    default: return "NO ACTION";
+    }
+  }
+  return rule;
+}
+
+int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
+                          LaceDependent **deps, size_t *count) {
+  if (deps) *deps = NULL;
+  if (count) *count = 0;
+  if (!client || !table || !deps || !count) {
+    return lace_fail(LACE_ERR_INVALID_PARAMS, NULL);
+  }
+  if (!client->connected) {
+    return lace_fail(LACE_ERR_CONNECTION_CLOSED, NOT_CONNECTED_MSG);
+  }
+  LaceDriver driver;
+  int drv_err = get_connection_driver(client, conn_id, &driver);
+  if (drv_err != LACE_OK) {
+    return drv_err;
+  }
+  char *sql = NULL;
+  switch (driver) {
+  case LACE_DRIVER_SQLITE: {
+    /* pragma_foreign_key_list as a table-valued function (SQLite 3.16+):
+     * every table's foreign keys, kept where they point at ours */
+    char *lit = sql_string_literal(table, driver);
+    if (lit)
+      sql = str_printf("SELECT m.name, f.on_delete FROM sqlite_master m "
+                       "JOIN pragma_foreign_key_list(m.name) f "
+                       "WHERE m.type = 'table' AND f.\"table\" = %s COLLATE NOCASE",
+                       lit);
+    free(lit);
+    break;
+  }
+  case LACE_DRIVER_POSTGRES: {
+    /* to_regclass() as in lace_get_schema; the referencing table's name
+     * comes back the way the search_path spells it */
+    char *ident = lace_quote_table(driver, table);
+    char *lit = ident ? sql_string_literal(ident, driver) : NULL;
+    if (lit)
+      sql = str_printf("SELECT c.conrelid::regclass::text, c.confdeltype::text "
+                       "FROM pg_catalog.pg_constraint c "
+                       "WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s)",
+                       lit);
+    free(ident);
+    free(lit);
+    break;
+  }
+  case LACE_DRIVER_MYSQL:
+  case LACE_DRIVER_MARIADB: {
+    char *lit = sql_string_literal(table, driver);
+    if (lit)
+      sql = str_printf("SELECT TABLE_NAME, DELETE_RULE "
+                       "FROM information_schema.REFERENTIAL_CONSTRAINTS "
+                       "WHERE CONSTRAINT_SCHEMA = DATABASE() "
+                       "AND UNIQUE_CONSTRAINT_SCHEMA = DATABASE() "
+                       "AND REFERENCED_TABLE_NAME = %s",
+                       lit);
+    free(lit);
+    break;
+  }
+  default:
+    return lace_fail(LACE_ERR_INTERNAL_ERROR, NULL);
+  }
+  if (!sql)
+    return lace_fail(LACE_ERR_OUT_OF_MEMORY, NULL);
+  LaceResult *result = NULL;
+  int err = lace_exec(client, conn_id, sql, &result);
+  free(sql);
+  if (err != LACE_OK)
+    return err;
+  size_t n = result ? result->num_rows : 0;
+  LaceDependent *out = safe_calloc(n + 1, sizeof *out);
+  size_t k = 0;
+  for (size_t i = 0; result && result->rows && i < n; i++) {
+    const LaceRow *r = &result->rows[i];
+    if (r->num_cells < 2 || r->cells[0].is_null) continue;
+    char *name = lace_value_to_edit_text(&r->cells[0]);
+    char *rule = r->cells[1].is_null ? NULL : lace_value_to_edit_text(&r->cells[1]);
+    if (!name) {
+      free(rule);
+      continue;
+    }
+    out[k].table = name;
+    out[k].on_delete = str_dup(delete_rule_word(rule));
+    free(rule);
+    k++;
+  }
+  lace_result_free(result);
+  if (!k) {
+    free(out);
+    out = NULL;
+  }
+  *deps = out;
+  *count = k;
+  return LACE_OK;
+}
+
 int lace_exec(lace_client_t *client, int conn_id, const char *sql,
               LaceResult **result) {
   if (result) {

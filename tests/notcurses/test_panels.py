@@ -1,5 +1,13 @@
+import importlib.util
+import os
+
 from nc import Nc
-from test_table import make_db
+
+_spec = importlib.util.spec_from_file_location(
+    "nc_test_table", os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_table.py"))
+_tt = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_tt)
+make_db = _tt.make_db
 
 
 def test_sidebar_toggle_search_open(home):
@@ -77,3 +85,53 @@ def test_prefs_dialog_saves_to_config(home):
     cfg = home.read("config.json")
     assert cfg["general"]["delete_confirmation"] is False
     assert "notcurses" in cfg
+
+
+def row_with(s, text):
+    """The screen line holding text (the first one)"""
+    return [l for l in s.split("\n") if text in l][0]
+
+
+def test_hotkeys_editor_adds_removes_and_resets(home):
+    db = make_db(home, rows=5)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("big"); t.keys("Enter"); t.wait("1 of 5")
+        t.keys("?")
+        t.wait("Hotkeys")
+        t.wait("Previous tab")                 # the first action is selected (the category header is skipped)
+        t.keys("Enter")                        # Enter captures a key for it
+        t.wait("Press the key to add to Previous tab")
+        t.keys("F6")                           # Next tab's key, the same category: refused
+        t.wait("F6 is already bound to Next tab")
+        t.keys("Enter"); t.wait("Press the key"); t.keys("F12")
+        t.wait(lambda s: "F12" in row_with(s, "Previous tab"))
+        t.keys("j")                            # the lists take the vim keys too
+        t.keys("Enter"); t.wait("Press the key to add to Next tab")
+        t.keys("Escape")                       # cancels the capture only
+        t.wait(lambda s: "Press the key" not in s and "Next tab" in s)
+        t.keys("Escape")                       # closes the editor
+        t.wait("f filter")
+        t.keys("F12")                          # the new key works at once: Previous tab, with one view
+        t.wait_status("Only one tab")
+        t.keys("?"); t.wait("Hotkeys")
+        t.keys("-")                            # removes the last key
+        t.wait(lambda s: "F12" not in row_with(s, "Previous tab"))
+        t.keys("Enter"); t.wait("Press the key"); t.keys("F12")
+        t.wait(lambda s: "F12" in row_with(s, "Previous tab"))
+        t.keys("r")                            # the action's defaults
+        t.wait("Previous tab: default keys")
+        t.wait(lambda s: "F12" not in row_with(s, "Previous tab"))
+        t.keys("Enter"); t.wait("Press the key"); t.keys("F12")
+        t.wait(lambda s: "F12" in row_with(s, "Previous tab"))
+        t.keys("R")                            # every action's defaults, after a confirmation
+        t.wait("Give every action its default keys?")
+        t.keys("Escape")
+        t.wait(lambda s: "F12" in row_with(s, "Previous tab"))
+        t.keys("Escape")
+        t.keys(","); t.wait("Preferences")     # the editor opens from the preferences too
+        t.keys("End", "Enter")
+        t.wait("Press the key" if False else "Enter add key")
+        t.keys("Escape", "Escape")
+        t.keys("q"); assert t.quit() == 0
+    cfg = home.read("config.json")
+    assert cfg["hotkeys"]["prev_tab"] == ["[", "F7", "F12"]

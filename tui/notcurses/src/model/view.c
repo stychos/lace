@@ -145,6 +145,7 @@ void view_free(View *v) {
   str_secure_free(v->text);
   str_secure_free(v->base_sql);
   lace_result_free(v->once);
+  undo_stack_clear(&v->undo);
   free_col_names(v);
   free(v);
 }

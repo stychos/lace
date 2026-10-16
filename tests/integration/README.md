@@ -4,15 +4,18 @@ Tests that run lace against real databases: SQLite, PostgreSQL, MariaDB,
 MySQL, and PostgreSQL through an SSH tunnel.
 
 ```bash
-make test-integration                       # everything (needs the docker CLI)
+make test-integration                       # everything (needs podman or docker)
 make test-integration IT_ARGS="--slow"      # also the 1M-row limit tests
 make test-integration IT_ARGS="--only postgres,sshd -- tunnel"
 ```
 
-`run.py` starts the servers from `compose.yaml` with `docker compose`, using
-only the command line: it works with whatever engine or context the CLI is
-set up for (`LACE_TEST_DOCKER=podman` for another CLI). Ports are published
-on 127.0.0.1 with ephemeral host ports. Without a container engine only the
+`run.py` starts the servers from `compose.yaml` with `podman compose` (or
+`docker compose` when podman is not installed; `LACE_TEST_DOCKER` names the
+CLI to use), using only the command line: it works with whatever engine or
+context the CLI is set up for. podman needs a compose provider (podman-compose
+or docker-compose) and, for docker-compose, its user socket
+(`systemctl --user enable --now podman.socket`). Ports are published on
+127.0.0.1 with ephemeral host ports. Without a container engine only the
 SQLite tests run.
 
 The test binary itself knows nothing about containers. It takes one URL

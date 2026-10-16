@@ -33,6 +33,12 @@ def config_dir(home):
     return os.path.join(home, ".config", "lace")
 
 
+def socket_dir():
+    """Where tmux puts the sockets of named servers (`tmux -L`)"""
+    tmpdir = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(tmpdir, f"tmux-{os.getuid()}")
+
+
 class Home:
     """A private HOME with a config.json (stdio daemon by default)"""
 
@@ -44,6 +50,7 @@ class Home:
                     "quit_confirmation": False, "delete_confirmation": True}
         settings.update(general or {})
         self.write("config.json", {"general": settings})
+        self.tuis = []  # every Tui started in this HOME, closed by close_tuis()
 
     def write(self, name, data):
         with open(os.path.join(self.cfg_dir, name), "w") as f:
@@ -59,7 +66,15 @@ class Home:
     def file(self, name):
         return os.path.join(self.path, name)
 
+    def close_tuis(self):
+        """Kill the tmux server of every Tui started here that is still
+        running: a test that fails before its own close() must not leave
+        a server, its TUI and its daemon behind"""
+        for t in self.tuis:
+            t.close()
+
     def cleanup(self):
+        self.close_tuis()
         shutil.rmtree(self.path, ignore_errors=True)
 
 
@@ -111,6 +126,8 @@ class Tui:
         self.tmux("new-session", "-d", "-s", "t", "-x", str(cols), "-y",
                   str(rows), cmd)
         self.exited = None
+        self.closed = False
+        home.tuis.append(self)
 
     # -- tmux ---------------------------------------------------------------
 
@@ -124,7 +141,18 @@ class Tui:
         return r.stdout if capture else None
 
     def close(self):
+        """Kill the tmux server (and with it the TUI and its stdio daemon);
+        safe to call twice. tmux leaves the socket file behind, so it is
+        removed here"""
+        if self.closed:
+            return
+        self.closed = True
         self.tmux("kill-server")
+        sock = os.path.join(socket_dir(), self.server)
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
 
     def pid(self):
         """Process id of the lace process (the pane's shell runs it)"""

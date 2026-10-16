@@ -74,9 +74,71 @@ def test_modal_editor_null_and_empty(home):
         t.wait_status("Updated")
         assert sqlite_rows(db, "SELECT name IS NULL FROM big WHERE id = 1") == [(1,)]
         t.wait("NULL")
-        t.keys("d")                            # set empty, inline
+        t.keys("C-d")                          # set empty, inline
         t.wait_status("Updated")
         assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("",)]
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_cut_and_paste_cell(home):
+    t, db = open_big(home, 3)
+    with t:
+        t.keys("Right", "Right", "d")          # cut: the value goes to the clipboard, the cell is emptied
+        t.wait_status("Updated")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("",)]
+        t.keys("Down", "v")                    # ...and pastes into the next row
+        t.wait_status("Updated")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 2") == [("name1",)]
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_undo_reverts_edits_and_restores_deleted_rows(home):
+    t, db = open_big(home, 5)
+    with t:
+        t.keys("Right", "Right", "Enter", "End", "BSpace", "BSpace", "BSpace", "BSpace", "BSpace")
+        t.type("zz"); t.keys("Enter")          # name1 -> zz
+        t.wait_status("Updated")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("zz",)]
+        t.keys("u")                            # undo: a verified write back
+        t.wait_status("Undone: name back to name1")
+        t.wait(lambda s: "name1" in s)
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("name1",)]
+        t.keys("Down", "x", "y")               # delete row 2
+        t.wait_status("Deleted 1 row")
+        assert sqlite_rows(db, "SELECT count(*) FROM big WHERE id = 2") == [(0,)]
+        t.keys("C-z")                          # undo: the row comes back as it was
+        t.wait_status("Restored 1 row")
+        t.wait(at(2, 5))
+        assert sqlite_rows(db, "SELECT v, name FROM big WHERE id = 2") == [(2, "name2")]
+        t.keys("C-z")                          # every step is used once
+        t.wait_status("Nothing to undo")
+        t.keys("Enter", "End", "BSpace", "BSpace", "BSpace", "BSpace", "BSpace"); t.type("q1"); t.keys("Enter")
+        t.wait_status("Updated")               # (a text column: Enter on the name cell of row 2)
+        sqlite_exec(db, "UPDATE big SET name = 'elsewhere' WHERE id = 2")   # changed behind our back
+        t.keys("u")
+        t.wait_status("Not undone")            # the verification refuses: the cell no longer holds our value
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 2") == [("elsewhere",)]
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_undo_warns_about_cascaded_rows(home):
+    db = sqlite_db(home.file("t.sqlite"), """
+        CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER
+            REFERENCES parent(id) ON DELETE CASCADE);
+        INSERT INTO parent VALUES (1, 'one'), (2, 'two');
+        INSERT INTO child VALUES (10, 1), (11, 1), (20, 2);
+    """)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("parent"); t.keys("Down", "Enter")      # the tables are child, parent
+        t.wait("one")
+        t.keys("x", "y")
+        t.wait_status("Deleted 1 row")
+        assert sqlite_rows(db, "SELECT count(*) FROM child") == [(1,)]   # the cascade took them
+        t.keys("u")
+        t.wait_status("Restored 1 row; rows of child the database removed or changed with them are not restored")
+        assert sqlite_rows(db, "SELECT name FROM parent WHERE id = 1") == [("one",)]
+        assert sqlite_rows(db, "SELECT count(*) FROM child") == [(1,)]   # and they stay gone
         t.keys("q"); assert t.quit() == 0
 
 
@@ -228,6 +290,12 @@ def test_copy_paste(home):
         t.keys("Down", "v")                    # paste into row 2
         t.wait_status("Updated")
         assert sqlite_rows(db, "SELECT name FROM big WHERE id = 2") == [("name1",)]
+        t.keys("Down", "C-c")                  # Ctrl+C is the copy chord, not SIGINT...
+        t.wait_status("Copied")
+        t.keys("C-z")                          # ...and Ctrl+Z is a key nothing listens to, not SIGTSTP
+        t.keys("Up", "C-v")                    # Ctrl+V pastes name3 into row 2
+        t.wait_status("Updated")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 2") == [("name3",)]
         t.keys("q"); assert t.quit() == 0
 
 

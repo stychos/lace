@@ -36,6 +36,30 @@ static void test_row_counts(ItDb *db) {
   it_ex(db, "DROP TABLE it_mut");
 }
 
+/* A delete whose foreign keys cascade is one row: the children the database
+ * removes with it are not the statement's rows (SQLite's total_changes
+ * counted them, and the one-row check refused a delete that had happened) */
+static void test_cascade_delete(ItDb *db) {
+  it_ex(db, "DROP TABLE IF EXISTS it_casc_c");
+  it_ex(db, "DROP TABLE IF EXISTS it_casc_p");
+  if (!it_ex(db, "CREATE TABLE it_casc_p (id INTEGER PRIMARY KEY)") ||
+      !it_ex(db, "CREATE TABLE it_casc_c (id INTEGER PRIMARY KEY, p INTEGER, "
+                 "FOREIGN KEY (p) REFERENCES it_casc_p(id) ON DELETE CASCADE)"))
+    return;
+  it_ex(db, "INSERT INTO it_casc_p VALUES (1), (2)");
+  it_ex(db, "INSERT INTO it_casc_c VALUES (10, 1), (11, 1), (20, 2)");
+  LacePkValue pk = {"id", lace_value_int(1)};
+  CHECK_OK(db, lace_delete(db->client, db->conn, "it_casc_p", &pk, 1));
+  CHECK(it_scalar(db, "SELECT COUNT(*) FROM it_casc_c") == 1);
+  LaceResult *r = NULL;
+  CHECK_OK(db, lace_exec(db->client, db->conn, "DELETE FROM it_casc_p WHERE id = 2", &r));
+  CHECK(r && r->rows_affected == 1); /* not the child it took with it */
+  lace_result_free(r);
+  CHECK(it_scalar(db, "SELECT COUNT(*) FROM it_casc_c") == 0);
+  it_ex(db, "DROP TABLE it_casc_c");
+  it_ex(db, "DROP TABLE it_casc_p");
+}
+
 /* A "key" that matches several rows is reported */
 static void test_multiple_rows(ItDb *db) {
   it_ex(db, "DROP TABLE IF EXISTS it_nokey");
@@ -111,6 +135,7 @@ static void test_last_sql(ItDb *db) {
 const ItTest it_mutation_tests[] = {
     {"row_counts", test_row_counts, IT_ALL, false},
     {"multiple_rows", test_multiple_rows, IT_ALL, false},
+    {"cascade_delete", test_cascade_delete, IT_ALL, false},
     {"composite_and_null_keys", test_composite_and_null_keys, IT_ALL, false},
     {"omitted_refused", test_omitted_refused, IT_ALL, false},
     {"last_sql", test_last_sql, IT_ALL, false},

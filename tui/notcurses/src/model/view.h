@@ -4,6 +4,7 @@
 #ifndef NC_VIEW_H
 #define NC_VIEW_H
 
+#include "core/undo_stack.h"
 #include "config/config.h"
 #include "core/constants.h"
 #include "model/page_cache.h"
@@ -90,6 +91,7 @@ typedef struct View {
   LaceFilter *cp_filters;
   size_t cp_num_filters;
   size_t cp_cursor_row, cp_cursor_col, cp_scroll_row, cp_scroll_col;
+  UndoStack undo; /* the writes that succeeded, newest last (core/undo_stack.h, undo.c); runtime only */
   /* private: column names the widths were measured for */
   char **col_names;
   size_t num_col_names;

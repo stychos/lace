@@ -4,6 +4,7 @@
 #include "ui/filter_panel.h"
 #include "ui/tabstrip.h"
 #include "edit_ops.h"
+#include "undo.h"
 #include "core/utf8.h"
 #include "model/workspace.h"
 #include "util/mem.h"
@@ -302,7 +303,7 @@ static bool grid_edit_action(NcApp *app, View *v, HotkeyAction a) {
   const char *why = NULL;
   size_t row = v->cursor_row, col = v->cursor_col;
   uint64_t gen = page_cache_generation(v->cache);
-  if (a == HOTKEY_CELL_COPY) {
+  if (a == HOTKEY_CELL_COPY || a == HOTKEY_CELL_CUT) { /* a cut is a copy and then the empty write */
     const LaceValue *cell = page_cache_cell(v->cache, row, col);
     if (!cell) {
       app_set_status(app, true, "The row is not loaded yet");
@@ -315,8 +316,8 @@ static bool grid_edit_action(NcApp *app, View *v, HotkeyAction a) {
     char *text = lace_value_to_edit_text(cell);
     app_clipboard_set(app, text ? text : "");
     str_secure_free(text);
-    app_set_status(app, false, "Copied to clipboard");
-    return true;
+    app_set_status(app, false, a == HOTKEY_CELL_CUT ? "Cut to clipboard" : "Copied to clipboard");
+    if (a == HOTKEY_CELL_COPY) return true;
   }
   if (!edit_context_for_view(app, v, &ctx, &why)) {
     grid_edit_report(app, why);
@@ -329,6 +330,7 @@ static bool grid_edit_action(NcApp *app, View *v, HotkeyAction a) {
     if (!edit_cell(&ctx, row, col, NULL, true, false, gen, &why)) grid_edit_report(app, why);
     return true;
   case HOTKEY_SET_EMPTY:
+  case HOTKEY_CELL_CUT:
     if (!edit_cell(&ctx, row, col, "", false, true, gen, &why)) grid_edit_report(app, why);
     return true;
   case HOTKEY_CELL_PASTE:
@@ -394,9 +396,13 @@ bool grid_do_action(NcApp *app, View *v, HotkeyAction a) {
   case HOTKEY_SET_EMPTY:
   case HOTKEY_DELETE_ROW:
   case HOTKEY_CELL_COPY:
+  case HOTKEY_CELL_CUT:
   case HOTKEY_CELL_PASTE:
   case HOTKEY_ROW_ADD:
     return grid_edit_action(app, v, a);
+  case HOTKEY_UNDO:
+    undo_last(app, v);
+    return true;
   case HOTKEY_SHOW_SCHEMA:
     if (!v->schema) { app_set_status(app, false, "The structure is not loaded"); return true; }
     structure_open(app, v);

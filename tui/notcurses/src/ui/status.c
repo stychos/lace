@@ -39,7 +39,7 @@ static const Hint H_FILTERS[] = {{"+ add", HOTKEY_ADD_FILTER}, {"- remove", HOTK
                                  {"X clear", HOTKEY_CLEAR_FILTERS}, {"Enter edit", NOACT}, {"Tab next", NOACT},
                                  {"Esc table", NOACT}, {"f close", HOTKEY_TOGGLE_FILTERS}, {NULL, 0}};
 static const Hint H_SIDEBAR[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ search", HOTKEY_SIDEBAR_FILTER},
-                                 {"Enter open", NOACT}, {"Tab content", NOACT}, {"Esc back", NOACT},
+                                 {"Enter open", NOACT}, {"+ new tab", HOTKEY_NEW_TAB}, {"Tab content", NOACT}, {"Esc back", NOACT},
                                  {"t hide", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
 static const Hint H_NONE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"? keys", HOTKEY_HELP},
                               {"q quit", HOTKEY_QUIT}, {NULL, 0}};

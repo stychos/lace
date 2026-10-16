@@ -165,6 +165,16 @@ static ChangeFlags handle_cell_copy(AppState *app, const UICallbacks *ui) {
   return CHANGED_STATUS;
 }
 
+/* A cut is a copy followed by the empty write: the value stays in the clipboard */
+static ChangeFlags handle_cell_cut(AppState *app, const UICallbacks *ui) {
+  VALIDATE_TABLE_EDIT(app, ui);
+  (void)tab;
+
+  UI_CALL(ui, cell_copy);
+  UI_CALL(ui, set_cell_empty);
+  return CHANGED_DATA | CHANGED_STATUS;
+}
+
 static ChangeFlags handle_cell_paste(AppState *app, const UICallbacks *ui) {
   VALIDATE_TABLE_EDIT(app, ui);
   (void)tab;
@@ -504,6 +514,8 @@ ChangeFlags app_dispatch(AppState *app, const Action *action,
     return handle_cell_copy(app, ui);
   case ACTION_CELL_PASTE:
     return handle_cell_paste(app, ui);
+  case ACTION_CELL_CUT:
+    return handle_cell_cut(app, ui);
   case ACTION_ROW_DELETE:
     return handle_row_delete(app, ui);
   case ACTION_ROW_TOGGLE_SELECT:

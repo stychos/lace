@@ -15,6 +15,7 @@
 #include "views/editor_view.h"
 #include "views/text_input.h"
 #include "row_key.h"
+#include "core/undo_stack.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,6 +134,19 @@ static bool orders_by_column(const EditTarget *t, size_t col) {
   return false;
 }
 
+/* The TUI's RowKey (names borrowed) as liblace's (owned), the shape the
+ * undo stack keeps; an edited key column holds the new value afterwards */
+static void undo_key(const RowKey *pk, const char *column, const LaceValue *value, LaceRowKey *out) {
+  memset(out, 0, sizeof *out);
+  out->names = safe_calloc(pk->count + 1, sizeof *out->names);
+  out->values = safe_calloc(pk->count + 1, sizeof *out->values);
+  for (size_t i = 0; i < pk->count; i++) {
+    out->names[i] = str_dup(pk->col_names[i]);
+    out->values[i] = lace_value_copy(column && !strcmp(pk->col_names[i], column) ? value : &pk->values[i]);
+  }
+  out->count = pk->count;
+}
+
 bool tui_edit_write_cell(TuiState *state, const EditTarget *t, size_t row,
                          size_t col, const char *text, const char *done_msg) {
   DbValue *cell = target_cell(t, row, col);
@@ -181,6 +195,12 @@ bool tui_edit_write_cell(TuiState *state, const EditTarget *t, size_t row,
     bool ok = db_update_cell(t->conn, t->table, pk.col_names, pk.values,
                              pk.count, t->data->columns[col].name, &new_val,
                              &err);
+    if (ok && t->tab) { /* for `undo`: the row as it is now, the value it had */
+      LaceRowKey after = {0};
+      undo_key(&pk, t->data->columns[col].name, &new_val, &after);
+      undo_stack_push_cell(&t->tab->undo, t->table, &after, t->data->columns[col].name, cell, &new_val);
+      lace_row_key_free(&after);
+    }
     row_key_free(&pk);
     if (!ok) {
       tui_set_error(state, "Update failed: %s", err ? err : "unknown error");
@@ -244,9 +264,22 @@ bool tui_edit_delete_row(const EditTarget *t, size_t row, char **err) {
     row_key_free(&pk);
     return false;
   }
+  /* The row as it is on screen, for `undo` (a bulk delete's steps are
+   * merged by the caller) */
+  UndoRow urow;
+  bool omitted = false;
+  bool captured = t->tab && undo_row_capture(t->data, row, t->schema, &urow, &omitted);
   bool ok = db_delete_row(t->conn, t->table, pk.col_names, pk.values, pk.count,
                           err);
   row_key_free(&pk);
+  if (ok && captured) {
+    UndoRow *rows = safe_calloc(2, sizeof *rows);
+    rows[0] = urow;
+    undo_stack_push_delete(&t->tab->undo, t->table, rows, 1,
+                           omitted ? str_dup("a value of the row was too large to load") : NULL);
+  } else if (captured) {
+    undo_row_free(&urow);
+  }
   return ok;
 }
 
@@ -556,6 +589,7 @@ void tui_delete_row(TuiState *state) {
       free(err);
     }
     free(to_delete);
+    undo_stack_merge_last_deletes(&tab->undo, deleted_count); /* one undo step for the bulk */
     tab_clear_selections(tab);
   } else {
     char *err = NULL;

@@ -36,7 +36,7 @@ OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 SHARED_NAMES = config/config config/connections config/recent config/saved_workspaces \
                config/workspace_json core/history core/utf8 core/ui_event \
-               core/connstr_display views/text_input platform/posix/platform_posix
+               core/connstr_display core/undo_stack views/text_input platform/posix/platform_posix
 SHARED_OBJS = $(addprefix $(BUILD_DIR)/shared/,$(addsuffix .o,$(notdir $(SHARED_NAMES))))
 
 DEPS := $(OBJS:.o=.d) $(SHARED_OBJS:.o=.d)

@@ -92,6 +92,9 @@ void connect_open(NcApp *app); /* the picker overlay (ui/dialogs/connect.c) */
 /* Opening a table: switches to the open view of it (a preview of it is
  * pinned), else creates one and loads schema -> page 0 -> count */
 View *app_open_table(NcApp *app, const char *table);
+/* Open a table view behind the current one (the current view and the focus
+ * stay); a table already open is only reported */
+View *app_open_table_background(NcApp *app, const char *table);
 /* The same in the preview tab: an open view of the table is switched to as
  * it is; else the view replaces the tab's preview view, or becomes it */
 View *app_preview_table(NcApp *app, const char *table);

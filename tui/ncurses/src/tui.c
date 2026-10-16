@@ -226,6 +226,7 @@ static const SimpleHotkeyEntry simple_hotkey_table[] = {
     {HOTKEY_EDIT_MODAL, action_edit_start_modal},
     {HOTKEY_SET_NULL, action_cell_set_null},
     {HOTKEY_SET_EMPTY, action_cell_set_empty},
+    {HOTKEY_CELL_CUT, action_cell_cut},
     {HOTKEY_DELETE_ROW, action_row_delete},
     /* Tabs */
     {HOTKEY_NEXT_TAB, action_tab_next},
@@ -392,6 +393,7 @@ static bool handle_close_tab(TuiState *state, Action *action);
 static bool handle_refresh(TuiState *state, Action *action);
 static bool handle_cycle_sort(TuiState *state, Action *action);
 static bool handle_help(TuiState *state, Action *action);
+static bool handle_undo(TuiState *state, Action *action);
 
 static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     /* Application */
@@ -404,6 +406,7 @@ static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     {HOTKEY_CLOSE_TAB, FOCUS_ANY, handle_close_tab},
     /* Table Operations */
     {HOTKEY_REFRESH, FOCUS_ANY, handle_refresh},
+    {HOTKEY_UNDO, FOCUS_TABLE_ONLY, handle_undo},
     {HOTKEY_CYCLE_SORT, FOCUS_ANY, handle_cycle_sort},
     /* Help */
     {HOTKEY_HELP, FOCUS_ANY, handle_help},
@@ -603,6 +606,14 @@ static bool handle_refresh(TuiState *state, Action *action) {
   }
   (void)action;
   return false;
+}
+
+static bool handle_undo(TuiState *state, Action *action) {
+  Tab *tab = TUI_TAB(state);
+  (void)action;
+  if (!tab || tab->type != TAB_TYPE_TABLE) return false; /* query results take it themselves */
+  tui_undo(state);
+  return true;
 }
 
 static bool handle_cycle_sort(TuiState *state, Action *action) {

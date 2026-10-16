@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Run the lace integration tests against real database servers.
 
-The servers come from compose.yaml through the `docker` command line only
-(`docker compose up/port/down`): nothing here knows where or how the engine
+The servers come from compose.yaml through the engine's command line only
+(`podman compose up/port/down`, or docker's): nothing here knows where or how the engine
 runs, so it works wherever the CLI does (Docker Desktop, colima, a Linux
 daemon, a remote context with published ports reachable on 127.0.0.1).
-LACE_TEST_DOCKER names another compatible CLI (e.g. podman).
+podman is used when it is installed, else docker; LACE_TEST_DOCKER names
+the CLI to use instead.
 
 The test binary never talks to the engine: it gets one connection URL per
 database in LACE_IT_* environment variables and skips the databases that
@@ -52,7 +53,11 @@ def log(msg):
 
 
 def docker_cmd():
-    return os.environ.get("LACE_TEST_DOCKER", "docker")
+    """The container CLI: LACE_TEST_DOCKER, else podman when installed, else docker"""
+    chosen = os.environ.get("LACE_TEST_DOCKER")
+    if chosen:
+        return chosen
+    return "podman" if shutil.which("podman") else "docker"
 
 
 def compose(project, *args, capture=False):
@@ -160,10 +165,11 @@ def main():
 
     project = f"lace-it-{os.getpid()}"
     started = False
+    rc = 1 # until the tests ran: a failure before them keeps the files too
     try:
         if not args.no_docker:
             if not engine_available():
-                log(f"`{docker_cmd()}` is not available: SQLite only")
+                log(f"`{docker_cmd()}` is not available (podman or docker): SQLite only")
             else:
                 wanted = [s for s in args.only.split(",") if s] or list(SERVICES)
                 unknown = set(wanted) - set(SERVICES)

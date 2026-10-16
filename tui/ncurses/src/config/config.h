@@ -65,6 +65,8 @@ typedef enum {
   HOTKEY_CYCLE_SORT,
   HOTKEY_CELL_COPY,
   HOTKEY_CELL_PASTE,
+  HOTKEY_CELL_CUT, /* copy, then set empty */
+  HOTKEY_UNDO,     /* revert the view's last write */
 
   /* General (HOTKEY_CAT_GENERAL) */
   HOTKEY_PREV_TAB,
@@ -141,7 +143,6 @@ typedef enum {
   /* notcurses frontend (HOTKEY_CAT_GENERAL / TABLE / QUERY); masked out of
    * this TUI's dialogs */
   HOTKEY_PALETTE,
-  HOTKEY_CLOSE_VIEW,
   HOTKEY_NEXT_CONN_TAB,
   HOTKEY_PREV_CONN_TAB,
   HOTKEY_CONN_TAB_1,
@@ -275,6 +276,14 @@ bool hotkey_matches(const Config *config, const UiEvent *event,
 
 /* Get display string for action (e.g., "k, ↑") - caller frees */
 char *hotkey_get_display(const Config *config, HotkeyAction action);
+/* The config string ("CTRL+A", "F5", "SHIFT+TAB", "SPACE", "x") for a key event, as
+ * hotkey_add_key() takes it and hotkey_matches() matches the event again;
+ * NULL for a key that cannot be bound (a non-ASCII character). Freed by the caller. */
+char *hotkey_key_string(const UiEvent *event);
+/* The config string ("CTRL+A", "F5", "SHIFT+TAB", "SPACE", "x") for a key event, as
+ * hotkey_add_key() takes it and hotkey_matches() matches the event again;
+ * NULL for a key that cannot be bound (a non-ASCII character). Freed by the caller. */
+char *hotkey_key_string(const UiEvent *event);
 
 /* Get action name for display (e.g., "Move up") */
 const char *hotkey_action_name(HotkeyAction action);

@@ -1,5 +1,6 @@
 /* Preferences: the settings that matter, changed in place and saved at once */
 #include "config/config.h"
+#include "ui/dialogs/help.h"
 #include "ui/list.h"
 #include "ui/overlay.h"
 #include "ui/panels.h"
@@ -11,7 +12,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-typedef enum { P_BOOL, P_ENUM, P_NUM, P_SECT } Kind; /* P_SECT: a bool in the notcurses section */
+typedef enum { P_BOOL, P_ENUM, P_NUM, P_SECT, P_OPEN } Kind; /* P_SECT: a bool in the notcurses section;
+                                                        * P_OPEN: a row that opens another dialog */
 
 typedef struct {
   const char *name;
@@ -60,6 +62,7 @@ static const Pref PREFS[] = {
     {.name = "Tabs strip", .kind = P_SECT, .key = "tabs_strip", .dflt = true},
     {.name = "Filters strip", .kind = P_SECT, .key = "filters_strip", .dflt = true},
     {.name = "Clipboard OSC 52", .kind = P_SECT, .key = "clipboard_osc52", .dflt = true},
+    {.name = "Hotkeys\xe2\x80\xa6", .kind = P_OPEN},
 };
 #define NPREFS ((int)(sizeof PREFS / sizeof *PREFS))
 #define NAME_COLS 25
@@ -82,6 +85,7 @@ static char *value_text(Config *c, const Pref *p) {
     return str_printf("%d%s", v, p->unit);
   }
   case P_SECT: return str_dup(prefs_section_bool(c, p->key, p->dflt) ? "on" : "off");
+  case P_OPEN: break;
   }
   return str_dup("");
 }
@@ -101,6 +105,10 @@ static void fill(ListWidget *l, Config *c) {
  * palette */
 static bool apply(NcApp *app, const Pref *p, int dir) {
   Config *c = app->config;
+  if (p->kind == P_OPEN) { /* the hotkeys editor, which saves its own changes */
+    help_open(app);
+    return true;
+  }
   switch (p->kind) {
   case P_BOOL: {
     bool *b = p->field(c);
@@ -127,6 +135,7 @@ static bool apply(NcApp *app, const Pref *p, int dir) {
     cJSON_AddBoolToObject(sec, p->key, now);
     break;
   }
+  case P_OPEN: break;
   }
   if (p->field == f_scheme) screen_apply_theme(app);
   char *err = NULL;

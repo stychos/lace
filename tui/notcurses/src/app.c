@@ -7,6 +7,7 @@
 #include "ui/dialogs/help.h"
 #include "ui/grid.h"
 #include "ui/input.h"
+#include "ui/list.h"
 #include "ui/overlay.h"
 #include "ui/palette.h"
 #include "ui/panels.h"
@@ -69,6 +70,7 @@ NcApp *app_new(int argc, char **argv, char **error) {
 
   char *err = NULL;
   app->config = config_load(&err);
+  list_use_hotkeys(app->config); /* j, k, g, G in every list */
   if (!app->config) {
     if (error) *error = err ? err : str_dup("cannot load config");
     else free(err);
@@ -265,6 +267,41 @@ void app_quit(NcApp *app) {
   app->quit = true;
 }
 
+/* Go to a strip cell: its tab, and its view when it has one */
+static void switch_to_entry(NcApp *app, const StripEntry *e) {
+  app_switch_tab(app, e->tab);
+  if (e->view != SIZE_MAX) app_switch_view(app, e->view);
+}
+
+/* The tab keys walk the strip: every view of every connection tab (a tab
+ * without views counts as one cell), in the strip's order, wrapping at the
+ * ends */
+static bool cycle_strip(NcApp *app, NcWorkspace *ws, bool next) {
+  StripEntry *e;
+  size_t cur;
+  size_t n = tabstrip_entries(ws, &e, &cur);
+  if (n < 2) {
+    app_set_status(app, false, n ? "Only one tab" : "No tabs open");
+  } else {
+    size_t i = cur == SIZE_MAX ? (next ? n - 1 : 0) : next ? (cur + 1) % n : (cur + n - 1) % n;
+    switch_to_entry(app, &e[i]);
+  }
+  free(e);
+  return true;
+}
+
+/* The connection tab N (1..9) is the strip's Nth cell: what the user sees */
+static bool switch_to_strip_cell(NcApp *app, NcWorkspace *ws, size_t n) {
+  StripEntry *e;
+  size_t cur;
+  size_t count = tabstrip_entries(ws, &e, &cur);
+  bool ok = n < count;
+  if (ok) switch_to_entry(app, &e[n]);
+  else app_set_status(app, false, "No tab %zu", n + 1);
+  free(e);
+  return ok;
+}
+
 bool app_do_action(NcApp *app, HotkeyAction action) {
   NcWorkspace *ws = app_current_workspace(app);
   switch (action) {
@@ -280,34 +317,35 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
   case HOTKEY_CONNECT_DIALOG:
     connect_open(app);
     return true;
-  case HOTKEY_NEXT_CONN_TAB:
+  case HOTKEY_NEXT_CONN_TAB: /* the same walk as next_tab/prev_tab */
   case HOTKEY_PREV_CONN_TAB:
-    if (!ws || !ws->num_tabs) return false;
-    app_switch_tab(app, action == HOTKEY_NEXT_CONN_TAB ? (ws->current + 1) % ws->num_tabs
-                                                       : (ws->current + ws->num_tabs - 1) % ws->num_tabs);
-    return true;
+    if (!ws) return false;
+    return cycle_strip(app, ws, action == HOTKEY_NEXT_CONN_TAB);
   case HOTKEY_CONN_TAB_1: case HOTKEY_CONN_TAB_2: case HOTKEY_CONN_TAB_3:
   case HOTKEY_CONN_TAB_4: case HOTKEY_CONN_TAB_5: case HOTKEY_CONN_TAB_6:
   case HOTKEY_CONN_TAB_7: case HOTKEY_CONN_TAB_8: case HOTKEY_CONN_TAB_9:
-    if (!ws || (size_t)(action - HOTKEY_CONN_TAB_1) >= ws->num_tabs) return false;
-    app_switch_tab(app, (size_t)(action - HOTKEY_CONN_TAB_1));
-    return true;
+    if (!ws) return false;
+    return switch_to_strip_cell(app, ws, (size_t)(action - HOTKEY_CONN_TAB_1));
   case HOTKEY_PREV_TAB:
-  case HOTKEY_NEXT_TAB: {
+  case HOTKEY_NEXT_TAB:
+    if (!ws) return false;
+    return cycle_strip(app, ws, action == HOTKEY_NEXT_TAB);
+  case HOTKEY_CLOSE_TAB: { /* the current view; a tab without views closes itself */
     ConnTab *t = app_current_tab(app);
-    if (!t) return false;
-    if (t->num_views < 2) {
-      app_set_status(app, false, "Only one view");
-      return true;
-    }
-    app_switch_view(app, action == HOTKEY_NEXT_TAB ? (t->current + 1) % t->num_views
-                                                    : (t->current + t->num_views - 1) % t->num_views);
+    if (!t || !ws) return false;
+    if (t->num_views) app_close_view(app, t->current);
+    else app_close_tab(app, ws->current);
     return true;
   }
-  case HOTKEY_CLOSE_VIEW: {
+  case HOTKEY_NEW_TAB: { /* the sidebar's table, opened behind the current view */
     ConnTab *t = app_current_tab(app);
-    if (!t) return false;
-    app_close_view(app, t->current);
+    char *name = t ? sidebar_highlighted_table(t) : NULL;
+    if (!name) {
+      app_set_status(app, false, "Pick a table in the sidebar first");
+      return true;
+    }
+    app_open_table_background(app, name);
+    free(name);
     return true;
   }
   case HOTKEY_OPEN_QUERY:
@@ -381,8 +419,11 @@ bool app_action_applies(const NcApp *app, HotkeyAction action) {
     const View *v = t ? conntab_current_view(t) : NULL;
     return v && v->kind == VIEW_QUERY;
   }
+  case HOTKEY_NEW_TAB: /* the sidebar's highlighted table: only while the sidebar has the keys
+                        * (its keys are the add-row keys, which the grid takes otherwise) */
+    return t != NULL && t->conn != NULL && t->sidebar_focused && sidebar_width(app) > 0;
   case HOTKEY_PREV_TAB: case HOTKEY_NEXT_TAB:
-  case HOTKEY_CLOSE_VIEW: case HOTKEY_NEXT_CONN_TAB: case HOTKEY_PREV_CONN_TAB:
+  case HOTKEY_CLOSE_TAB: case HOTKEY_NEXT_CONN_TAB: case HOTKEY_PREV_CONN_TAB:
   case HOTKEY_CONN_TAB_1: case HOTKEY_CONN_TAB_2: case HOTKEY_CONN_TAB_3:
   case HOTKEY_CONN_TAB_4: case HOTKEY_CONN_TAB_5: case HOTKEY_CONN_TAB_6:
   case HOTKEY_CONN_TAB_7: case HOTKEY_CONN_TAB_8: case HOTKEY_CONN_TAB_9:

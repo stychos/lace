@@ -585,6 +585,16 @@ static void test_config_file(void) {
   /* The file on disk also still has the other section verbatim */
   char *back = platform_read_file(p, 1 << 20);
   CHECK(back && strstr(back, "\"clipboard_osc52\"") && strstr(back, "\"gtk\""));
+  /* Only the bindings that differ from the defaults are written: the two the
+   * file had (palette is not this frontend's but is kept), nothing else */
+  CHECK(back && strstr(back, "\"palette\"") && !strstr(back, "\"move_up\"") && !strstr(back, "\"refresh\""));
+  CHECK(back && strstr(back, "\"quit\":\t[\"q\"]")); /* not the default ["q","CTRL+X","F10"] */
+  /* An action the user emptied is written as [] so it stays unbound */
+  while (c->hotkeys[HOTKEY_REFRESH].num_keys) hotkey_remove_key(c, HOTKEY_REFRESH, 0);
+  CHECK(config_save_file(c, p, &err));
+  free(back);
+  back = platform_read_file(p, 1 << 20);
+  CHECK(back && strstr(back, "\"refresh\":\t[]"));
   /* An unknown key inside an owned section is dropped (owner's struct is the truth) */
   CHECK(back && !strstr(back, "future_key"));
   free(back);
@@ -716,23 +726,75 @@ static void test_hotkey_parse(void) {
   config_free(c);
 }
 
+static void test_hotkey_key_string(void) {
+  UiEvent e = key_ev('A', false, UI_MOD_CTRL);
+  CHECK_STR_FREE(hotkey_key_string(&e), "CTRL+A");
+  e = key_ev('P', false, UI_MOD_CTRL | UI_MOD_SHIFT);
+  CHECK_STR_FREE(hotkey_key_string(&e), "CTRL+SHIFT+P");
+  e = key_ev('X', false, UI_MOD_NONE); /* a capital is its own key */
+  CHECK_STR_FREE(hotkey_key_string(&e), "X");
+  e = key_ev('x', false, UI_MOD_SHIFT); /* Shift alone is the case, never a prefix */
+  CHECK_STR_FREE(hotkey_key_string(&e), "x");
+  e = key_ev(' ', false, UI_MOD_NONE);
+  CHECK_STR_FREE(hotkey_key_string(&e), "SPACE");
+  e = key_ev(',', false, UI_MOD_NONE);
+  CHECK_STR_FREE(hotkey_key_string(&e), "COMMA");
+  e = key_ev(UI_KEY_F5, true, UI_MOD_NONE);
+  CHECK_STR_FREE(hotkey_key_string(&e), "F5");
+  e = key_ev(UI_KEY_F12, true, UI_MOD_ALT);
+  CHECK_STR_FREE(hotkey_key_string(&e), "ALT+F12");
+  e = key_ev(UI_KEY_BTAB, true, UI_MOD_NONE);
+  CHECK_STR_FREE(hotkey_key_string(&e), "SHIFT+TAB");
+  e = key_ev(UI_KEY_LEFT, true, UI_MOD_ALT);
+  CHECK_STR_FREE(hotkey_key_string(&e), "ALT+LEFT");
+  e = key_ev(UI_KEY_PAGEDOWN, true, UI_MOD_CTRL);
+  CHECK_STR_FREE(hotkey_key_string(&e), "CTRL+PGDN");
+  e = key_ev(0xe9, false, UI_MOD_NONE); /* a non-ASCII character cannot be bound */
+  CHECK(hotkey_key_string(&e) == NULL);
+  e = key_ev('C', false, UI_MOD_SUPER); /* the Command key is CMD+ ("SUPER+" parses too) */
+  CHECK_STR_FREE(hotkey_key_string(&e), "CMD+C");
+  {
+    Config *c = config_get_defaults();
+    CHECK(hotkey_add_key(c, HOTKEY_TOGGLE_LOG, "SUPER+c"));
+    CHECK(hotkey_matches(c, &e, HOTKEY_TOGGLE_LOG));
+    e = key_ev('C', false, UI_MOD_CTRL);
+    CHECK(!hotkey_matches(c, &e, HOTKEY_TOGGLE_LOG)); /* Cmd is not Ctrl */
+    char *d = hotkey_get_display(c, HOTKEY_TOGGLE_LOG);
+    CHECK(d && strstr(d, "Cmd+C"));
+    free(d);
+    config_free(c);
+  }
+  /* what it names matches the event again */
+  Config *c = config_get_defaults();
+  const UiEvent evs[] = {key_ev('A', false, UI_MOD_CTRL), key_ev(UI_KEY_F12, true, UI_MOD_ALT),
+                         key_ev(UI_KEY_BTAB, true, UI_MOD_NONE), key_ev('{', false, UI_MOD_NONE),
+                         key_ev(' ', false, UI_MOD_NONE)};
+  for (size_t i = 0; i < sizeof evs / sizeof *evs; i++) {
+    char *k = hotkey_key_string(&evs[i]);
+    CHECK(k && hotkey_add_key(c, HOTKEY_TOGGLE_LOG, k));
+    CHECK(hotkey_matches(c, &evs[i], HOTKEY_TOGGLE_LOG));
+    free(k);
+  }
+  config_free(c);
+}
+
 static void test_hotkey_frontend_mask(void) {
   char *err = NULL;
   Config *c = config_get_defaults();
   CHECK(c->frontend == CONFIG_FE_NCURSES);
   CHECK(config_validate(c, &err) && !err);
-  /* close_view (notcurses only, CTRL+W) is not this frontend's */
-  CHECK(hotkey_add_key(c, HOTKEY_CLOSE_TAB, "CTRL+W"));
+  /* palette (notcurses only, CTRL+P) is not this frontend's */
+  CHECK(hotkey_add_key(c, HOTKEY_QUIT, "CTRL+P"));
   CHECK(config_validate(c, &err) && !err);
-  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_TAB, "CTRL+W") == HOTKEY_COUNT);
-  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_VIEW, "CTRL+W") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "CTRL+P") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_PALETTE, "CTRL+P") == HOTKEY_COUNT);
   Config *d = config_copy(c);
   CHECK(d && d->frontend == CONFIG_FE_NCURSES);
   config_free(d);
   /* In the notcurses frontend both exist: a conflict */
   c->frontend = CONFIG_FE_NOTCURSES;
-  CHECK(hotkey_find_conflict(c, HOTKEY_CLOSE_TAB, "CTRL+W") == HOTKEY_CLOSE_VIEW);
-  CHECK(!config_validate(c, &err) && err && strstr(err, "CTRL+W"));
+  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "CTRL+P") == HOTKEY_PALETTE);
+  CHECK(!config_validate(c, &err) && err && strstr(err, "CTRL+P"));
   free(err);
   err = NULL;
   config_free(c);
@@ -1118,6 +1180,7 @@ int main(void) {
   test_row_key();
   test_hotkey_parse();
   test_hotkey_frontend_mask();
+  test_hotkey_key_string();
   test_workspace_json();
   return test_report("tui");
 }

@@ -136,6 +136,9 @@ char **db_list_tables(DbConnection *conn, size_t *count, char **err);
 /* Get table schema */
 TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **err);
 
+/* The tables referencing table and their ON DELETE rules (lace_table_dependents) */
+bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **deps, size_t *n, char **err);
+
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err);
 

@@ -460,6 +460,15 @@ static void lace_fk_free(LaceForeignKey *fk) {
   memset(fk, 0, sizeof(LaceForeignKey));
 }
 
+void lace_dependents_free(LaceDependent *deps, size_t count) {
+  if (!deps) return;
+  for (size_t i = 0; i < count; i++) {
+    free(deps[i].table);
+    free(deps[i].on_delete);
+  }
+  free(deps);
+}
+
 void lace_schema_free(LaceSchema *schema) {
   if (!schema) return;
 

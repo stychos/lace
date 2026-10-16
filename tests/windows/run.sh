@@ -1,11 +1,11 @@
 #!/bin/sh
 # Windows check without Windows: cross-build liblace with MinGW-w64, run its
 # unit tests and a TCP smoke test against a Linux laced under Wine, all in a
-# container (amd64: Wine runs x86-64 Windows programs). Uses the docker CLI
-# only; LACE_TEST_DOCKER names another (e.g. podman).
+# container (amd64: Wine runs x86-64 Windows programs). Uses the container
+# CLI only: podman when installed, else docker; LACE_TEST_DOCKER names another.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-DOCKER=${LACE_TEST_DOCKER:-docker}
+DOCKER=${LACE_TEST_DOCKER:-$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)}
 exec "$DOCKER" run --rm --platform linux/amd64 -v "$ROOT":/repo:ro debian:bookworm sh -c '
 set -e
 apt-get update -qq >/dev/null

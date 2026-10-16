@@ -96,6 +96,12 @@ typedef struct {
   char *on_update;
 } LaceForeignKey;
 
+/* A table whose foreign key references another (lace_table_dependents) */
+typedef struct {
+  char *table;     /* table reference, as lace_list_tables gives it */
+  char *on_delete; /* CASCADE, SET NULL, SET DEFAULT, RESTRICT or NO ACTION */
+} LaceDependent;
+
 /* Complete table schema */
 typedef struct {
   char *name;

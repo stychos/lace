@@ -126,6 +126,7 @@ void query_count_stop(Tab *tab) {
 void tab_free_data(Tab *tab) {
   if (!tab)
     return;
+  undo_stack_clear(&tab->undo);
 
   /* Cancel any pending background operation first to prevent use-after-free */
   if (tab->bg_load_op) {

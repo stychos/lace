@@ -58,9 +58,9 @@ def test_password_prompt_on_refusal(home):
 def test_connection_tabs_and_workspaces(home):
     db = make_db(home, rows=10)
     with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db]) as t:
-        t.wait("t.sqlite")
-        t.keys("C-PageDown")        # second tab
         t.wait("t.sqlite 2")        # a repeated name gets its index in the header
+        t.keys("M-1")               # Alt+1: the strip's first cell, the first tab (without views, a cell of its own)
+        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite │ t.sqlite 2"))
         t.keys("}")                 # next workspace: none yet -> message
         t.wait_status("one workspace")
         t.keys("C-p"); t.type("new work"); t.keys("Enter")

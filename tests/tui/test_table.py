@@ -64,6 +64,75 @@ def test_goto_row(home):
         assert cursor_id(t) == 2500
 
 
+def test_ctrl_c_copies_instead_of_killing(home):
+    db = make_db(home, rows=3)
+    with Tui(home, ["-s", "sqlite://" + db]) as t:
+        t.open_table("big")
+        t.keys("Right", "Right", "C-c")       # Ctrl+C is the copy chord: ISIG is off, no SIGINT
+        t.wait_status("Copied to clipboard")
+        t.keys("C-z")                         # and Ctrl+Z is a key nobody listens to, not SIGTSTP
+        t.keys("Down", "C-v")                 # Ctrl+V pastes
+        t.wait_status("Cell updated")
+    assert sqlite_rows(db, "SELECT name FROM big WHERE id = 2") == [("name1",)]
+
+
+def test_undo_reverts_edits_and_restores_deleted_rows(home):
+    db = make_db(home, rows=5)
+    with Tui(home, ["-s", "sqlite://" + db]) as t:
+        t.open_table("big")
+        t.keys("Right", "Right", "Enter", "End", *["BSpace"] * 5)
+        t.type("zz"); t.keys("Enter")                   # name1 -> zz
+        t.wait_status("Cell updated")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("zz",)]
+        t.keys("u")                                     # undo: a verified write back
+        t.wait_status("Undone: name back to name1")
+        assert sqlite_rows(db, "SELECT name FROM big WHERE id = 1") == [("name1",)]
+        t.keys("Down", "x")                             # delete row 2
+        t.wait("Delete this row?"); t.keys("y")
+        t.wait_status("Row deleted")
+        t.keys("C-z")                                   # undo: the row comes back as it was
+        t.wait_status("Restored 1 row")
+        assert sqlite_rows(db, "SELECT v, name FROM big WHERE id = 2") == [(2, "name2")]
+        t.keys("Space", "Down", "Space", "x")            # a bulk delete is one step
+        t.wait("Delete 2 selected rows?"); t.keys("y")
+        t.wait_status("2 rows deleted")
+        t.keys("u")
+        t.wait_status("Restored 2 rows")
+        assert sqlite_rows(db, "SELECT count(*) FROM big") == [(5,)]
+        t.keys("u")                                     # every step is used once
+        t.wait_status("Nothing to undo")
+        t.keys("Down", "Enter", "End", *["BSpace"] * 5); t.type("q1"); t.keys("Enter")
+        t.wait_status("Cell updated")
+        sqlite_exec(db, "UPDATE big SET name = 'elsewhere' WHERE name = 'q1'")   # changed behind our back
+        t.keys("u")
+        t.wait_status("Not undone")                     # the verification refuses
+        assert sqlite_rows(db, "SELECT count(*) FROM big WHERE name = 'elsewhere'") == [(1,)]
+
+
+def make_cascade_db(home):
+    return sqlite_db(home.file("t.sqlite"), """
+        CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER
+            REFERENCES parent(id) ON DELETE CASCADE);
+        INSERT INTO parent VALUES (1, 'one'), (2, 'two');
+        INSERT INTO child VALUES (10, 1), (11, 1), (20, 2);
+    """)
+
+
+def test_undo_warns_about_cascaded_rows(home):
+    db = make_cascade_db(home)
+    with Tui(home, ["-s", "sqlite://" + db]) as t:
+        t.open_table("parent")
+        t.keys("x")
+        t.wait("Delete this row?"); t.keys("y")
+        t.wait_status("Row deleted")
+        assert sqlite_rows(db, "SELECT count(*) FROM child") == [(1,)]   # the cascade took them
+        t.keys("u")
+        t.wait_status("Restored 1 row; rows of child the database removed or changed with them are not restored")
+        assert sqlite_rows(db, "SELECT name FROM parent WHERE id = 1") == [("one",)]
+        assert sqlite_rows(db, "SELECT count(*) FROM child") == [(1,)]   # and they stay gone
+
+
 def test_edit_null_empty(home):
     db = make_db(home, rows=10)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
@@ -73,9 +142,9 @@ def test_edit_null_empty(home):
         t.type("edited")
         t.keys("Enter")
         t.wait_status("Cell updated")
-        t.keys("Down", "n")
+        t.keys("Down", "C-n")                  # the writes without a confirmation take a chord
         t.wait_status("Cell set to NULL")
-        t.keys("Down", "d")
+        t.keys("Down", "C-d")
         t.wait_status("Cell set to empty")
         # Opening a cell and confirming it unchanged writes nothing
         t.keys("Down", "Enter")

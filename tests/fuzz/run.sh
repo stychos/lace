@@ -1,7 +1,8 @@
 #!/bin/sh
 # Fuzz liblace's and the TUI's parsers with libFuzzer (ASan + UBSan) in a
 # container, so the host needs no LLVM with libFuzzer (Apple's clang has none).
-# Uses the docker CLI only; LACE_TEST_DOCKER names another (e.g. podman).
+# Uses the container CLI only: podman when installed, else docker;
+# LACE_TEST_DOCKER names another.
 #
 #   tests/fuzz/run.sh [seconds per target] [target...]   (default 60; all)
 #
@@ -11,7 +12,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-DOCKER=${LACE_TEST_DOCKER:-docker}
+DOCKER=${LACE_TEST_DOCKER:-$(command -v podman >/dev/null 2>&1 && echo podman || echo docker)}
 SECONDS_EACH=${1:-60}
 [ $# -gt 0 ] && shift
 TARGETS=${*:-"sql connstr values tui"}

@@ -84,6 +84,7 @@ typedef enum {
   ACTION_CELL_SET_EMPTY,    /* Set current cell to empty string */
   ACTION_CELL_COPY,         /* Copy current cell to clipboard */
   ACTION_CELL_PASTE,        /* Paste clipboard to current cell */
+  ACTION_CELL_CUT,          /* Copy the current cell, then set it empty */
   ACTION_ROW_DELETE,        /* Delete current row */
   ACTION_ROW_TOGGLE_SELECT, /* Toggle selection of current row */
   ACTION_ROWS_CLEAR_SELECT, /* Clear all row selections */
@@ -440,6 +441,10 @@ static inline Action action_cell_copy(void) {
 
 static inline Action action_cell_paste(void) {
   return (Action){.type = ACTION_CELL_PASTE};
+}
+
+static inline Action action_cell_cut(void) {
+  return (Action){.type = ACTION_CELL_CUT};
 }
 
 static inline Action action_row_delete(void) {

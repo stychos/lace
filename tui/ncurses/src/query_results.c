@@ -306,6 +306,7 @@ void query_result_delete_row(TuiState *state, Tab *tab) {
     }
 
     free(sorted);
+    undo_stack_merge_last_deletes(&tab->undo, deleted); /* one undo step for the bulk */
     tab_clear_selections(tab);
 
     clamp_result_cursor(tab);

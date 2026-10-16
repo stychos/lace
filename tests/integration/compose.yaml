@@ -2,8 +2,8 @@
 #
 # Every port is published on 127.0.0.1 with an ephemeral host port, so
 # several runs (and anything else on the machine) never collide; run.py asks
-# `docker compose port` where each one landed. Nothing here depends on how
-# or where the container engine runs.
+# `podman compose port` (or `docker compose port`) where each one landed.
+# Nothing here depends on how or where the container engine runs.
 
 name: lace-it
 
@@ -68,16 +68,7 @@ services:
     image: lace-it-sshd:1
     build:
       context: .
-      dockerfile_inline: |
-        FROM alpine:3.20
-        RUN apk add --no-cache openssh \
-         && ssh-keygen -A \
-         && adduser -D tunnel \
-         && echo 'tunnel:tunnelpw' | chpasswd \
-         && sed -i -e 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' \
-                   -e 's/^#\?AllowTcpForwarding.*/AllowTcpForwarding yes/' \
-                   /etc/ssh/sshd_config
-        CMD ["/usr/sbin/sshd", "-D", "-e"]
+      dockerfile: sshd.Dockerfile
     ports:
       - "127.0.0.1::22"
     healthcheck:

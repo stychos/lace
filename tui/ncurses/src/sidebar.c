@@ -186,6 +186,7 @@ void sidebar_open_table(TuiState *state, size_t actual_idx) {
     } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
       /* Connection tab active - convert to table tab */
       char **tables = TUI_TABLES(state);
+      undo_stack_clear(&tab->undo); /* another table: its own undo */
       free(tab->table_name);
       tab->table_name = tables ? str_dup(tables[actual_idx]) : NULL;
       tab->type = TAB_TYPE_TABLE;
@@ -197,6 +198,7 @@ void sidebar_open_table(TuiState *state, size_t actual_idx) {
                         str_eq(tab->table_name, TUI_TABLES(state)[actual_idx]))) {
       /* Replace current tab's table */
       char **tables = TUI_TABLES(state);
+      undo_stack_clear(&tab->undo); /* another table: its own undo */
       /* Copy new name first to avoid use-after-free if aliased */
       char *new_name = tables ? str_dup(tables[actual_idx]) : NULL;
 

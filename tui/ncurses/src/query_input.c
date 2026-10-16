@@ -38,6 +38,12 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
     return true;
   }
 
+  /* u, Ctrl+Z - revert the last write */
+  if (hotkey_matches(cfg, event, HOTKEY_UNDO)) {
+    tui_undo(state);
+    return true;
+  }
+
   /* Ctrl+N or n - set cell to NULL */
   if (hotkey_matches(cfg, event, HOTKEY_SET_NULL)) {
     query_result_set_cell_direct(state, tab, true);
@@ -46,6 +52,13 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
 
   /* Ctrl+D or d - set cell to empty string */
   if (hotkey_matches(cfg, event, HOTKEY_SET_EMPTY)) {
+    query_result_set_cell_direct(state, tab, false);
+    return true;
+  }
+
+  /* d - cut: copy the cell, then set it empty */
+  if (hotkey_matches(cfg, event, HOTKEY_CELL_CUT)) {
+    query_result_cell_copy(state, tab);
     query_result_set_cell_direct(state, tab, false);
     return true;
   }

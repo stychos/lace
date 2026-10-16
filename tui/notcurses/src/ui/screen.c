@@ -5,6 +5,7 @@
 #include <notcurses/notcurses.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 
 bool screen_init(NcApp *app, char **error) {
   notcurses_options o = {.flags = NCOPTION_SUPPRESS_BANNERS};
@@ -20,6 +21,17 @@ bool screen_init(NcApp *app, char **error) {
   app->cols = (int)c;
   screen_apply_theme(app);
   notcurses_mice_enable(app->nc, NCMICE_BUTTON_EVENT | NCMICE_DRAG_EVENT);
+  /* Ctrl+C, Ctrl+Z and Ctrl+\ are keys here, not SIGINT, SIGTSTP and SIGQUIT
+   * (a slipped Ctrl+C must not end the session; Ctrl+C copies), and Ctrl+V is
+   * a key, not the line discipline's "literal next". notcurses_stop() puts the
+   * terminal back as it found it. */
+  notcurses_linesigs_disable(app->nc);
+  struct termios tio;
+  int fd = notcurses_inputready_fd(app->nc);
+  if (fd >= 0 && tcgetattr(fd, &tio) == 0) {
+    tio.c_lflag &= ~(tcflag_t)IEXTEN;
+    tcsetattr(fd, TCSANOW, &tio);
+  }
   return true;
 }
 

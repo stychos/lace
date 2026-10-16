@@ -83,6 +83,13 @@ NcJob *nc_job_table_count(const char *table, const char *where, bool approximate
   return j;
 }
 
+NcJob *nc_job_dependents(const char *table) {
+  NcJob *j = job_new(NC_JOB_DEPENDENTS);
+  j->table = str_dup(table);
+  j->read_only = j->savepoint = true;
+  return j;
+}
+
 NcJob *nc_job_count_sql(const char *sql) {
   NcJob *j = job_new(NC_JOB_COUNT);
   j->sql = str_dup(sql);
@@ -159,6 +166,7 @@ void nc_job_unref(NcJob *j) {
   lace_result_free(j->result);
   lace_schema_free(j->schema);
   lace_tables_free(j->tables, j->num_tables);
+  lace_dependents_free(j->deps, j->num_deps);
   free(j->error);
   str_secure_free(j->last_sql);
   free(j);

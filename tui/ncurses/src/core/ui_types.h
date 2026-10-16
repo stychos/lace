@@ -122,6 +122,7 @@ typedef enum {
   UI_MOD_CTRL = (1 << 0),
   UI_MOD_ALT = (1 << 1),
   UI_MOD_SHIFT = (1 << 2),
+  UI_MOD_SUPER = (1 << 3), /* the Command (macOS) or Windows/Super key: "CMD+" in config.json */
 } UiKeyMod;
 
 /* Mouse button */

@@ -16,6 +16,7 @@
 #include "../db_compat.h"
 #include "constants.h"
 #include "history.h"
+#include "undo_stack.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -221,6 +222,11 @@ typedef struct {
 
   /* Data change tracking */
   bool needs_refresh; /* True if data was modified in another tab */
+
+  /* The writes that succeeded on this tab's table, newest last, for `undo`
+   * (undo.c; edit.c records them). Runtime only; cleared when the tab shows
+   * another table and when it closes. */
+  UndoStack undo;
 } Tab;
 
 /* ============================================================================

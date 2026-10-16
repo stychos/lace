@@ -77,8 +77,8 @@ static bool history_key(Overlay *o, NcApp *app, const UiEvent *ev) {
     overlay_pop_this(app, o);
     return true;
   }
-  if (ev->type == UI_EVENT_KEY && !ev->key.is_special && !ev->key.mods) {
-    if (ev->key.key == 'x') {
+  if (ev->type == UI_EVENT_KEY && !l->input_focused) { /* the shared history keys (both TUIs) */
+    if (hotkey_matches(app->config, ev, HOTKEY_HISTORY_DELETE)) {
       ListRow *r = list_selected(l);
       if (r) {
         size_t cur = l->cursor;
@@ -88,13 +88,19 @@ static bool history_key(Overlay *o, NcApp *app, const UiEvent *ev) {
       }
       return true;
     }
-    if (ev->key.key == 'C') {
+    if (hotkey_matches(app->config, ev, HOTKEY_HISTORY_CLEAR)) {
       confirm_open(app, "Clear history", "Remove every entry of this connection's history?", "Clear", true,
                    clear_done, NULL);
       return true;
     }
+    if (hotkey_matches(app->config, ev, HOTKEY_HISTORY_CLOSE)) {
+      overlay_pop_this(app, o);
+      return true;
+    }
   }
   ListAction a = ev->type == UI_EVENT_MOUSE ? list_mouse(l, ev, 0, o->rows) : list_key(l, ev);
+  if (ev->type == UI_EVENT_KEY && !l->input_focused && hotkey_matches(app->config, ev, HOTKEY_HISTORY_COPY))
+    a = LIST_ACTIVATE;
   if (a == LIST_CANCEL) {
     overlay_pop_this(app, o);
   } else if (a == LIST_ACTIVATE) {
@@ -132,7 +138,7 @@ void history_open(NcApp *app) {
   list_init(l, false);
   fill(l, t->conn);
   Overlay *o = overlay_new("History");
-  o->footer = "Enter copy/insert  x remove  C clear  Esc close";
+  o->footer = "Enter copy/insert  x remove  c clear  Esc close";
   o->data = l;
   o->free_data = history_free;
   o->draw = history_draw;

@@ -37,6 +37,7 @@ static unsigned modifiers_of(const struct ncinput *ni) {
   if (ni->modifiers & NCKEY_MOD_CTRL) m |= UI_MOD_CTRL;
   if (ni->modifiers & NCKEY_MOD_ALT) m |= UI_MOD_ALT;
   if (ni->modifiers & NCKEY_MOD_SHIFT) m |= UI_MOD_SHIFT;
+  if (ni->modifiers & NCKEY_MOD_SUPER) m |= UI_MOD_SUPER; /* Cmd on macOS, when the terminal forwards it */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
   if (ni->ctrl) m |= UI_MOD_CTRL;
@@ -96,16 +97,16 @@ bool input_translate(const struct ncinput *ni, uint32_t id, UiEvent *out) {
     out->key.mods = (UiKeyMod)(mods | UI_MOD_CTRL);
     return true;
   }
-  if (id >= 'a' && id <= 'z' && (mods & (UI_MOD_CTRL | UI_MOD_SHIFT)))
+  if (id >= 'a' && id <= 'z' && (mods & (UI_MOD_CTRL | UI_MOD_SHIFT | UI_MOD_SUPER)))
     id = id - 'a' + 'A';
-  /* On a character Shift is its case, unless Ctrl or Alt is held too: then
-   * it stays a modifier (Ctrl+Shift+P), the rule config.c's parser applies */
-  if ((mods & UI_MOD_SHIFT) && !(mods & (UI_MOD_CTRL | UI_MOD_ALT))) mods &= ~(unsigned)UI_MOD_SHIFT;
+  /* On a character Shift is its case, unless Ctrl, Alt or Cmd is held too:
+   * then it stays a modifier (Ctrl+Shift+P), the rule config.c's parser applies */
+  if ((mods & UI_MOD_SHIFT) && !(mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER))) mods &= ~(unsigned)UI_MOD_SHIFT;
   /* Under the kitty keyboard protocol the id is the key's base character
    * ('1' for Shift+1, '[' for '{') and the text the press produces, with
    * Shift and the layout applied, is only in eff_text: that is what was
    * typed, and what a character hotkey like '{' or '?' is bound to */
-  if (ni->eff_text[0] && !(mods & (UI_MOD_CTRL | UI_MOD_ALT))) {
+  if (ni->eff_text[0] && !(mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER))) {
     unsigned n = 0;
     while (n < NCINPUT_MAX_EFF_TEXT_CODEPOINTS && ni->eff_text[n]) n++;
     unsigned char utf8[sizeof out->key.text];

@@ -538,6 +538,8 @@ char *tui_clipboard_read(TuiState *state);
 
 /* Delete current row */
 void tui_delete_row(TuiState *state);
+/* Revert the current tab's last write (undo.c) */
+void tui_undo(TuiState *state);
 
 /* Where an edit writes: one row source, a table tab's window or a query
  * tab's results (EditTarget.query_result). Query results require every key

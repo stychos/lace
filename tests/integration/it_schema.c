@@ -134,10 +134,46 @@ static void test_pg_schemas(ItDb *db) {
   it_ex(db, "DROP SCHEMA \"ItSales\" CASCADE");
 }
 
+/* lace_table_dependents: the tables that reference one, with their ON
+ * DELETE rules (what a delete takes with it) */
+static void test_dependents(ItDb *db) {
+  it_ex(db, "DROP TABLE IF EXISTS it_dep_child");
+  it_ex(db, "DROP TABLE IF EXISTS it_dep_child2");
+  it_ex(db, "DROP TABLE IF EXISTS it_dep_leaf");
+  it_ex(db, "DROP TABLE IF EXISTS it_dep_parent");
+  if (!it_ex(db, "CREATE TABLE it_dep_parent (id INTEGER PRIMARY KEY)") ||
+      !it_ex(db, "CREATE TABLE it_dep_child (id INTEGER PRIMARY KEY, p INTEGER, "
+                 "FOREIGN KEY (p) REFERENCES it_dep_parent(id) ON DELETE CASCADE)") ||
+      !it_ex(db, "CREATE TABLE it_dep_child2 (id INTEGER PRIMARY KEY, p INTEGER, "
+                 "FOREIGN KEY (p) REFERENCES it_dep_parent(id) ON DELETE SET NULL)") ||
+      !it_ex(db, "CREATE TABLE it_dep_leaf (id INTEGER PRIMARY KEY)"))
+    return;
+  LaceDependent *deps = NULL;
+  size_t n = 0;
+  CHECK_OK(db, lace_table_dependents(db->client, db->conn, "it_dep_parent", &deps, &n));
+  CHECK(n == 2);
+  const char *cascade = NULL, *setnull = NULL;
+  for (size_t i = 0; i < n; i++) {
+    if (strstr(deps[i].table, "it_dep_child2")) setnull = deps[i].on_delete;
+    else if (strstr(deps[i].table, "it_dep_child")) cascade = deps[i].on_delete;
+  }
+  CHECK_STR(cascade, "CASCADE");
+  CHECK_STR(setnull, "SET NULL");
+  lace_dependents_free(deps, n);
+  /* A table nothing references */
+  CHECK_OK(db, lace_table_dependents(db->client, db->conn, "it_dep_leaf", &deps, &n));
+  CHECK(n == 0 && deps == NULL);
+  it_ex(db, "DROP TABLE it_dep_child");
+  it_ex(db, "DROP TABLE it_dep_child2");
+  it_ex(db, "DROP TABLE it_dep_leaf");
+  it_ex(db, "DROP TABLE it_dep_parent");
+}
+
 const ItTest it_schema_tests[] = {
     {"schema_columns", test_schema_columns, IT_ALL, false},
     {"composite_key", test_composite_key, IT_ALL, false},
     {"odd_names", test_odd_names, IT_ALL, false},
     {"pg_schemas", test_pg_schemas, IT_POSTGRES | IT_TUNNEL, false},
+    {"dependents", test_dependents, IT_ALL, false},
     {NULL, NULL, 0, false},
 };

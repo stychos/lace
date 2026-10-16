@@ -265,9 +265,14 @@ static ResultSet *sqlite_run_one(SqliteData *data, sqlite3_stmt *stmt, char **er
   sqlite3_finalize(stmt);
 
   if (num_cols == 0) {
-    /* total_changes: sqlite3_changes() keeps reporting the previous DML
-     * statement's count for statements that change nothing (DDL etc.) */
-    rs->rows_affected = sqlite3_total_changes(data->db) - changes_before;
+    /* The statement's own rows, as the other drivers count them:
+     * sqlite3_changes() leaves out what foreign-key actions and triggers
+     * did (a DELETE with ON DELETE CASCADE children is one row), which
+     * total_changes counts; but sqlite3_changes() keeps reporting the
+     * previous DML statement's count after one that changes nothing (DDL),
+     * so total_changes decides whether this statement changed anything */
+    int total = sqlite3_total_changes(data->db) - changes_before;
+    rs->rows_affected = total > 0 ? sqlite3_changes(data->db) : 0;
   }
   return rs;
 }

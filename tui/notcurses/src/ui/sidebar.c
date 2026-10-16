@@ -225,6 +225,29 @@ static void activate(NcApp *app, ConnTab *t, size_t item, bool keep) {
   free(items);
 }
 
+char *sidebar_highlighted_table(ConnTab *t) {
+  if (!t->conn) return NULL;
+  Item *items;
+  size_t nt = 0;
+  size_t n = build_items(t, &items, &nt);
+  char *name = NULL;
+  if (t->sidebar_cursor < n && !items[t->sidebar_cursor].query) {
+    size_t cnt = 0;
+    char **tables = nc_connection_tables(t->conn, &cnt);
+    if (items[t->sidebar_cursor].idx < cnt) name = str_dup(tables[items[t->sidebar_cursor].idx]);
+  }
+  free(items);
+  return name;
+}
+
+static size_t count_items(ConnTab *t) {
+  Item *items;
+  size_t nt = 0;
+  size_t n = build_items(t, &items, &nt);
+  free(items);
+  return n;
+}
+
 static void move(ConnTab *t, long delta) {
   Item *items;
   size_t nt = 0;
@@ -265,17 +288,20 @@ bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev) {
     default: break;
     }
   }
-  if (soft) {
-    if (hotkey_matches(app->config, ev, HOTKEY_MOVE_DOWN)) { move(t, 1); return true; }
-    if (hotkey_matches(app->config, ev, HOTKEY_MOVE_UP)) { move(t, -1); return true; }
-    return false;
-  }
-  if (!search_shown(t)) { /* no field: the keys are the hotkeys', but for the one that calls it */
-    if (hotkey_matches(app->config, ev, HOTKEY_SIDEBAR_FILTER)) {
+  if (soft || !search_shown(t)) { /* no field: the list takes the navigation hotkeys (j, k, g, G, ...) */
+    const Config *cfg = app->config;
+    if (hotkey_matches(cfg, ev, HOTKEY_MOVE_DOWN)) { move(t, 1); return true; }
+    if (hotkey_matches(cfg, ev, HOTKEY_MOVE_UP)) { move(t, -1); return true; }
+    if (hotkey_matches(cfg, ev, HOTKEY_PAGE_DOWN)) { move(t, page); return true; }
+    if (hotkey_matches(cfg, ev, HOTKEY_PAGE_UP)) { move(t, -page); return true; }
+    if (hotkey_matches(cfg, ev, HOTKEY_FIRST_ROW)) { t->sidebar_cursor = 0; return true; }
+    if (hotkey_matches(cfg, ev, HOTKEY_LAST_ROW)) { move(t, (long)count_items(t)); return true; }
+    if (soft) return false;
+    if (hotkey_matches(cfg, ev, HOTKEY_SIDEBAR_FILTER)) { /* the one key that calls the field */
       sidebar_show_search(t);
       return true;
     }
-    return false;
+    return false; /* the rest are the hotkeys' */
   }
   if (ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT)) return false; /* the hotkeys keep their keys */
   TextInput in;

@@ -48,30 +48,36 @@ static const char *def_move_left[] = {"h", "LEFT"};
 static const char *def_move_right[] = {"l", "RIGHT"};
 static const char *def_page_up[] = {"PGUP"};
 static const char *def_page_down[] = {"PGDN"};
-static const char *def_first_row[] = {"g", "a"};
-static const char *def_last_row[] = {"G", "z"};
-static const char *def_goto_row[] = {"CTRL+G", "F5"};
+static const char *def_first_row[] = {"g", "CTRL+HOME"};
+static const char *def_last_row[] = {"G", "CTRL+END"};
+static const char *def_goto_row[] = {"CTRL+G"};
 static const char *def_first_col[] = {"HOME"};
 static const char *def_last_col[] = {"END"};
 
 /* Table Viewer */
 static const char *def_edit_inline[] = {"ENTER"};
 static const char *def_edit_modal[] = {"e", "F4"};
-static const char *def_set_null[] = {"n", "CTRL+N"};
-static const char *def_set_empty[] = {"d", "CTRL+D"};
+/* Writes without a confirmation take a chord; the one plain key that writes a
+ * cell is the cut, whose value the clipboard keeps */
+static const char *def_set_null[] = {"CTRL+N"};
+static const char *def_set_empty[] = {"CTRL+D"};
 static const char *def_delete_row[] = {"x", "DELETE"};
 static const char *def_toggle_filters[] = {"f", "/"};
 static const char *def_toggle_sidebar[] = {"t", "F9"};
 static const char *def_show_schema[] = {"s", "F3"};
-static const char *def_refresh[] = {"r"};
+static const char *def_refresh[] = {"r", "F5"};
 static const char *def_cycle_sort[] = {"o"};
-static const char *def_cell_copy[] = {"c", "CTRL+K"};
-static const char *def_cell_paste[] = {"v", "CTRL+U"};
+/* Ctrl+C is a key (both TUIs turn ISIG off); CMD+ is Super, the Command key
+ * of a macOS terminal that forwards it (kitty keyboard protocol) */
+static const char *def_cell_copy[] = {"c", "CTRL+C", "CMD+C", "CTRL+K"};
+static const char *def_cell_paste[] = {"v", "CTRL+V", "CMD+V", "CTRL+U"};
+static const char *def_cell_cut[] = {"d", "CMD+X", "SHIFT+DELETE"};
+static const char *def_undo[] = {"u", "CTRL+Z", "CMD+Z"};
 
 /* General */
 static const char *def_prev_tab[] = {"[", "F7"};
 static const char *def_next_tab[] = {"]", "F6"};
-static const char *def_close_tab[] = {"-"};
+static const char *def_close_tab[] = {"-", "CTRL+W"};
 static const char *def_new_tab[] = {"+", "=", "INSERT"};
 static const char *def_prev_workspace[] = {"{"};
 static const char *def_next_workspace[] = {"}"};
@@ -80,7 +86,7 @@ static const char *def_toggle_status[] = {"b"};
 static const char *def_connect_dialog[] = {"w", "F2"};
 static const char *def_help[] = {"?", "F1"};
 static const char *def_quit[] = {"q", "CTRL+X", "F10"};
-static const char *def_config[] = {"COMMA", "F11"};
+static const char *def_config[] = {"COMMA"}; /* F11 is fullscreen in most terminals */
 static const char *def_toggle_history[] = {"i"};
 static const char *def_cut_line[] = {"CTRL+K"};
 static const char *def_paste[] = {"CTRL+U"};
@@ -99,7 +105,7 @@ static const char *def_remove_filter[] = {"-", "x", "DELETE"};
 static const char *def_clear_filters[] = {"X"}; /* Shift+X to clear all */
 
 /* Sidebar */
-static const char *def_sidebar_filter[] = {"/", "f"};
+static const char *def_sidebar_filter[] = {"/"};
 
 /* Connection Dialog */
 static const char *def_conn_test[] = {"CTRL+T"};
@@ -139,8 +145,7 @@ static const char *def_history_delete[] = {"x", "DELETE"};
 static const char *def_history_clear[] = {"c"};
 static const char *def_history_close[] = {"ESCAPE", "q"};
 
-static const char *def_palette[] = {"CTRL+P"};
-static const char *def_close_view[] = {"CTRL+W"};
+static const char *def_palette[] = {"CTRL+P", ":"};
 static const char *def_next_conn_tab[] = {"CTRL+PGDN"};
 static const char *def_prev_conn_tab[] = {"CTRL+PGUP"};
 static const char *def_conn_tab_1[] = {"ALT+1"};
@@ -154,8 +159,8 @@ static const char *def_conn_tab_8[] = {"ALT+8"};
 static const char *def_conn_tab_9[] = {"ALT+9"};
 static const char *def_view_switcher[] = {"CTRL+E"};
 static const char *def_toggle_log[] = {"CTRL+`", "F8"};
-static const char *def_column_narrower[] = {"ALT+LEFT"};
-static const char *def_column_wider[] = {"ALT+RIGHT"};
+static const char *def_column_narrower[] = {"ALT+LEFT", "<"};
+static const char *def_column_wider[] = {"ALT+RIGHT", ">"};
 static const char *def_split_up[] = {"CTRL+UP"};
 static const char *def_split_down[] = {"CTRL+DOWN"};
 
@@ -211,6 +216,10 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                           DEF_KEYS(def_cell_copy), CONFIG_FE_ALL},
     [HOTKEY_CELL_PASTE] = {"cell_paste", "Paste cell", HOTKEY_CAT_TABLE,
                            DEF_KEYS(def_cell_paste), CONFIG_FE_ALL},
+    [HOTKEY_CELL_CUT] = {"cell_cut", "Cut cell", HOTKEY_CAT_TABLE,
+                         DEF_KEYS(def_cell_cut), CONFIG_FE_ALL},
+    [HOTKEY_UNDO] = {"undo", "Undo last write", HOTKEY_CAT_TABLE,
+                     DEF_KEYS(def_undo), CONFIG_FE_ALL},
 
     /* General */
     [HOTKEY_PREV_TAB] = {"prev_tab", "Previous tab", HOTKEY_CAT_GENERAL,
@@ -219,7 +228,7 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                          DEF_KEYS(def_next_tab), CONFIG_FE_ALL},
     [HOTKEY_CLOSE_TAB] = {"close_tab", "Close tab", HOTKEY_CAT_GENERAL,
                           DEF_KEYS(def_close_tab), CONFIG_FE_ALL},
-    [HOTKEY_NEW_TAB] = {"new_tab", "New tab", HOTKEY_CAT_GENERAL,
+    [HOTKEY_NEW_TAB] = {"new_tab", "Open in new tab", HOTKEY_CAT_GENERAL,
                         DEF_KEYS(def_new_tab), CONFIG_FE_ALL},
     [HOTKEY_PREV_WORKSPACE] = {"prev_workspace", "Previous workspace",
                                HOTKEY_CAT_GENERAL,
@@ -241,9 +250,9 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_QUIT] = {"quit", "Quit", HOTKEY_CAT_GENERAL, DEF_KEYS(def_quit), CONFIG_FE_ALL},
     [HOTKEY_CONFIG] = {"config", "Configuration", HOTKEY_CAT_GENERAL,
                        DEF_KEYS(def_config), CONFIG_FE_ALL},
-    [HOTKEY_CUT_LINE] = {"cut_line", "Cut line to buffer", HOTKEY_CAT_GENERAL,
+    [HOTKEY_CUT_LINE] = {"cut_line", "Cut line to buffer", HOTKEY_CAT_EDITOR,
                          DEF_KEYS(def_cut_line), CONFIG_FE_ALL},
-    [HOTKEY_PASTE] = {"paste", "Paste from buffer", HOTKEY_CAT_GENERAL,
+    [HOTKEY_PASTE] = {"paste", "Paste from buffer", HOTKEY_CAT_EDITOR,
                       DEF_KEYS(def_paste), CONFIG_FE_ALL},
 
     /* Query Tab */
@@ -330,34 +339,33 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
 
     /* Config Editor */
     [HOTKEY_CONFIG_RESET] = {"config_reset", "Reset hotkey", HOTKEY_CAT_GENERAL,
-                             DEF_KEYS(def_config_reset), CONFIG_FE_NCURSES},
+                             DEF_KEYS(def_config_reset), CONFIG_FE_ALL},
     [HOTKEY_CONFIG_RESET_ALL] = {"config_reset_all", "Reset all hotkeys",
                                  HOTKEY_CAT_GENERAL,
-                                 DEF_KEYS(def_config_reset_all), CONFIG_FE_NCURSES},
+                                 DEF_KEYS(def_config_reset_all), CONFIG_FE_ALL},
 
     /* History Dialog */
     [HOTKEY_HISTORY_COPY] = {"history_copy", "Copy to clipboard",
-                             HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_copy), CONFIG_FE_NCURSES},
+                             HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_copy), CONFIG_FE_ALL},
     [HOTKEY_HISTORY_DELETE] = {"history_delete", "Delete entry",
                                HOTKEY_CAT_HISTORY,
-                               DEF_KEYS(def_history_delete), CONFIG_FE_NCURSES},
+                               DEF_KEYS(def_history_delete), CONFIG_FE_ALL},
     [HOTKEY_HISTORY_CLEAR] = {"history_clear", "Clear all", HOTKEY_CAT_HISTORY,
-                              DEF_KEYS(def_history_clear), CONFIG_FE_NCURSES},
+                              DEF_KEYS(def_history_clear), CONFIG_FE_ALL},
     [HOTKEY_HISTORY_CLOSE] = {"history_close", "Close dialog",
-                              HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close), CONFIG_FE_NCURSES},
+                              HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close), CONFIG_FE_ALL},
     [HOTKEY_PALETTE] = {"palette", "Command palette", HOTKEY_CAT_GENERAL, DEF_KEYS(def_palette), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CLOSE_VIEW] = {"close_view", "Close view or tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_close_view), CONFIG_FE_NOTCURSES},
-    [HOTKEY_NEXT_CONN_TAB] = {"next_conn_tab", "Next connection tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_next_conn_tab), CONFIG_FE_NOTCURSES},
-    [HOTKEY_PREV_CONN_TAB] = {"prev_conn_tab", "Previous connection tab", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_conn_tab), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_1] = {"conn_tab_1", "Connection tab 1", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_1), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_2] = {"conn_tab_2", "Connection tab 2", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_2), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_3] = {"conn_tab_3", "Connection tab 3", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_3), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_4] = {"conn_tab_4", "Connection tab 4", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_4), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_5] = {"conn_tab_5", "Connection tab 5", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_5), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_6] = {"conn_tab_6", "Connection tab 6", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_6), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_7] = {"conn_tab_7", "Connection tab 7", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_7), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_8] = {"conn_tab_8", "Connection tab 8", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_8), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Connection tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_NOTCURSES},
+    [HOTKEY_NEXT_CONN_TAB] = {"next_conn_tab", "Next tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_next_conn_tab), CONFIG_FE_NOTCURSES},
+    [HOTKEY_PREV_CONN_TAB] = {"prev_conn_tab", "Previous tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_conn_tab), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_1] = {"conn_tab_1", "Tab 1", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_1), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_2] = {"conn_tab_2", "Tab 2", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_2), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_3] = {"conn_tab_3", "Tab 3", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_3), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_4] = {"conn_tab_4", "Tab 4", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_4), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_5] = {"conn_tab_5", "Tab 5", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_5), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_6] = {"conn_tab_6", "Tab 6", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_6), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_7] = {"conn_tab_7", "Tab 7", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_7), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_8] = {"conn_tab_8", "Tab 8", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_8), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_NOTCURSES},
     [HOTKEY_VIEW_SWITCHER] = {"view_switcher", "Switch view", HOTKEY_CAT_GENERAL, DEF_KEYS(def_view_switcher), CONFIG_FE_NOTCURSES},
     [HOTKEY_TOGGLE_LOG] = {"toggle_log", "Toggle log", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_log), CONFIG_FE_NOTCURSES},
     [HOTKEY_COLUMN_NARROWER] = {"column_narrower", "Narrow column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_narrower), CONFIG_FE_NOTCURSES},
@@ -480,6 +488,12 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
     } else if (strncmp(str, "SHIFT+", 6) == 0 && strcmp(str, "SHIFT+TAB") != 0) {
       *mods |= UI_MOD_SHIFT;
       str += 6;
+    } else if (strncmp(str, "CMD+", 4) == 0) { /* Super: the Command key on macOS */
+      *mods |= UI_MOD_SUPER;
+      str += 4;
+    } else if (strncmp(str, "SUPER+", 6) == 0) {
+      *mods |= UI_MOD_SUPER;
+      str += 6;
     } else {
       break;
     }
@@ -506,12 +520,12 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
   if (strlen(str) == 1) {
     char c = str[0];
     /* Convert to uppercase for CTRL combinations */
-    if ((*mods & (UI_MOD_CTRL | UI_MOD_SHIFT)) && c >= 'a' && c <= 'z') {
+    if ((*mods & (UI_MOD_CTRL | UI_MOD_SHIFT | UI_MOD_SUPER)) && c >= 'a' && c <= 'z') {
       c = (char)(c - ('a' - 'A'));
     }
-    /* Shift alone on a character is its case; with Ctrl or Alt it stays a
-     * modifier (Ctrl+Shift+P is not Ctrl+P) */
-    if ((*mods & UI_MOD_SHIFT) && !(*mods & (UI_MOD_CTRL | UI_MOD_ALT)) &&
+    /* Shift alone on a character is its case; with Ctrl, Alt or Cmd it stays
+     * a modifier (Ctrl+Shift+P is not Ctrl+P) */
+    if ((*mods & UI_MOD_SHIFT) && !(*mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER)) &&
         ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')))
       *mods &= ~UI_MOD_SHIFT;
     *key_code = (unsigned char)c;
@@ -574,13 +588,15 @@ static const char *lookup_key_display(int code) {
 
 /* Convert key code and mods to display string */
 static char *key_to_display(int key_code, UiKeyMod mods) {
-  char prefix[24] = "";
+  char prefix[32] = "";
   if (mods & UI_MOD_CTRL)
     strcat(prefix, "Ctrl+");
   if (mods & UI_MOD_ALT)
     strcat(prefix, "Alt+");
   if (mods & UI_MOD_SHIFT)
     strcat(prefix, "Shift+");
+  if (mods & UI_MOD_SUPER)
+    strcat(prefix, "Cmd+");
 
   /* Try lookup table first */
   const char *name = lookup_key_display(key_code);
@@ -722,6 +738,17 @@ Config *config_copy(const Config *config) {
  * ============================================================================
  */
 
+/* Whether a binding is the action's default keys, in order */
+static bool binding_is_default(const HotkeyBinding *b, const ActionMeta *m) {
+  if (b->num_keys != m->num_default_keys) return false;
+  for (size_t j = 0; j < b->num_keys; j++)
+    if (strcmp(b->keys[j], m->default_keys[j]) != 0) return false;
+  return true;
+}
+
+/* Only the actions whose keys differ from the defaults are written, so a
+ * default that changes in a later version reaches every user, and the other
+ * frontends see what was chosen rather than everything */
 static cJSON *serialize_hotkeys(const Config *config) {
   cJSON *obj = cJSON_CreateObject();
   if (!obj)
@@ -730,6 +757,7 @@ static cJSON *serialize_hotkeys(const Config *config) {
   for (int i = 0; i < HOTKEY_COUNT; i++) {
     const HotkeyBinding *binding = &config->hotkeys[i];
     const char *key = action_meta[i].key;
+    if (binding_is_default(binding, &action_meta[i])) continue; /* the file holds only the user's changes */
 
     cJSON *arr = cJSON_CreateArray();
     if (arr) {
@@ -1174,7 +1202,7 @@ bool hotkey_matches(const Config *config, const UiEvent *event,
 
     if (key_match) {
       /* Check modifiers */
-      UiKeyMod mask = UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT;
+      UiKeyMod mask = UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT | UI_MOD_SUPER;
       if ((mods & mask) == (event->key.mods & mask))
         return true;
     }
@@ -1187,6 +1215,34 @@ unsigned hotkey_action_frontends(HotkeyAction action) {
   if (action < 0 || action >= HOTKEY_COUNT)
     return 0;
   return action_meta[action].frontends;
+}
+
+char *hotkey_key_string(const UiEvent *event) {
+  if (!event || event->type != UI_EVENT_KEY) return NULL;
+  const char *name = NULL;
+  char buf[8];
+  unsigned mods = event->key.mods;
+  if (event->key.is_special) {
+    int k = event->key.key;
+    if (k >= UI_KEY_F1 && k <= UI_KEY_F12) {
+      snprintf(buf, sizeof buf, "F%d", k - UI_KEY_F1 + 1);
+      name = buf;
+    } else {
+      for (size_t i = 0; i < KEY_NAME_TABLE_SIZE && !name; i++)
+        if (key_name_table[i].code == k && key_name_table[i].code >= UI_KEY_UP) name = key_name_table[i].name;
+    }
+    if (!name) return NULL;
+  } else {
+    int c = event->key.key;
+    if (c == ' ') name = "SPACE";
+    else if (c == ',') name = "COMMA";
+    else if (c > 32 && c < 127) { buf[0] = (char)c; buf[1] = '\0'; name = buf; }
+    else return NULL;
+    /* Shift on a character is its case, a prefix only with Ctrl, Alt or Cmd */
+    if (!(mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER))) mods &= ~(unsigned)UI_MOD_SHIFT;
+  }
+  return str_printf("%s%s%s%s%s", mods & UI_MOD_CTRL ? "CTRL+" : "", mods & UI_MOD_ALT ? "ALT+" : "",
+                    mods & UI_MOD_SHIFT ? "SHIFT+" : "", mods & UI_MOD_SUPER ? "CMD+" : "", name);
 }
 
 char *hotkey_get_display(const Config *config, HotkeyAction action) {

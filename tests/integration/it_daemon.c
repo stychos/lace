@@ -497,7 +497,20 @@ static void test_cancel_owner(ItDb *db) {
   usleep(500 * 1000);
   CHECK(lace_cancel_query(b, run.conn) != LACE_OK); /* Not B's statement */
   usleep(300 * 1000);
-  CHECK(lace_cancel_query(a, run.conn) == LACE_OK);
+  int rc = lace_cancel_query(a, run.conn);
+  CHECK(rc == LACE_OK);
+  if (rc != LACE_OK) { /* say why, and do not wait forever for a statement nothing stopped */
+    fprintf(stderr, "  [%s] cancel by the owner: %s\n", db->name,
+            lace_client_error(a) ? lace_client_error(a) : "?");
+    kill(d.pid, SIGKILL);
+    waitpid(d.pid, NULL, 0);
+    d.pid = 0;
+    pthread_join(th, NULL);
+    lace_client_destroy(a);
+    lace_client_destroy(b);
+    daemon_down(&d);
+    return;
+  }
   pthread_join(th, NULL);
   CHECK(run.rc == LACE_ERR_QUERY_CANCELLED);
   lace_client_destroy(a);

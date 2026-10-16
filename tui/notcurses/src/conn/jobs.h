@@ -9,7 +9,7 @@
  * with the results filled in. Read results only in the done callback. */
 typedef enum {
   NC_JOB_EXEC, NC_JOB_SCHEMA, NC_JOB_TABLES, NC_JOB_COUNT,
-  NC_JOB_UPDATE, NC_JOB_DELETE, NC_JOB_INSERT, NC_JOB_DISCONNECT,
+  NC_JOB_UPDATE, NC_JOB_DELETE, NC_JOB_INSERT, NC_JOB_DISCONNECT, NC_JOB_DEPENDENTS,
 } NcJobKind;
 
 /* Main-thread token: the done callback is skipped once it is released */
@@ -49,6 +49,8 @@ struct NcJob {
   LaceSchema *schema;
   char **tables;
   size_t num_tables;
+  LaceDependent *deps; /* NC_JOB_DEPENDENTS: the tables referencing job->table */
+  size_t num_deps;
   int64_t count;
   bool count_approximate;
   int64_t affected;
@@ -65,6 +67,7 @@ NcJob *nc_job_exec(const char *sql);
 NcJob *nc_job_read(const char *sql);
 NcJob *nc_job_schema(const char *table);
 NcJob *nc_job_tables(void);
+NcJob *nc_job_dependents(const char *table); /* lace_table_dependents(): a read */
 NcJob *nc_job_table_count(const char *table, const char *where, bool approximate);
 NcJob *nc_job_count_sql(const char *sql);
 NcJob *nc_job_update(const char *table, const LaceRowKey *key, const LaceRowSnapshot *snap,

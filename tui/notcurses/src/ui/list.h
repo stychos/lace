@@ -2,6 +2,7 @@
  * palette, the help overlay and (later) pickers. */
 #ifndef NC_LIST_H
 #define NC_LIST_H
+#include "config/config.h"
 #include "core/ui_types.h"
 #include "ui/theme.h"
 #include "views/text_input.h"
@@ -32,6 +33,10 @@ typedef struct {
 
 typedef enum { LIST_NONE, LIST_CHANGED, LIST_ACTIVATE, LIST_CANCEL } ListAction;
 
+/* The config whose navigation hotkeys (move_up/down, page_up/down,
+ * first/last_row: j, k, g, G, ...) every list takes besides the arrows while
+ * its input is not focused; set once at startup */
+void list_use_hotkeys(const Config *config);
 void list_init(ListWidget *l, bool has_input);
 void list_free(ListWidget *l);
 void list_set_rows(ListWidget *l, ListRow *rows, size_t n); /* adopts */

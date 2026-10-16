@@ -1,4 +1,5 @@
 #include "ui/palette.h"
+#include "ui/tabstrip.h"
 #include "conn/connection.h"
 #include "model/workspace.h"
 #include "ui/dialogs/confirm.h"
@@ -120,15 +121,20 @@ static void add_conn(ConnectionItem *item, void *ctx) {
 
 bool palette_lists_action(const NcApp *app, HotkeyAction a) {
   if (!(hotkey_action_frontends(a) & CONFIG_FE_NOTCURSES) || !app_action_applies(app, a)) return false;
-  /* Keys of an editor or a dialog, which only mean something there, and the
-   * ncurses TUI's tab keys, which this frontend does not run (close_view and
-   * the connection-tab actions are its own) */
-  if (a == HOTKEY_CUT_LINE || a == HOTKEY_PASTE || a == HOTKEY_ROW_SAVE ||
-      a == HOTKEY_NEW_TAB || a == HOTKEY_CLOSE_TAB || hotkey_get_category(a) == HOTKEY_CAT_EDITOR)
+  /* Keys of an editor or a dialog, which only mean something there */
+  HotkeyCategory cat = hotkey_get_category(a);
+  if (a == HOTKEY_ROW_SAVE || a == HOTKEY_CONFIG_RESET || a == HOTKEY_CONFIG_RESET_ALL ||
+      cat == HOTKEY_CAT_EDITOR || cat == HOTKEY_CAT_HISTORY || cat == HOTKEY_CAT_CONNECT)
     return false;
+  if (a == HOTKEY_NEXT_CONN_TAB || a == HOTKEY_PREV_CONN_TAB) return false; /* the same walk as next/prev_tab */
   const NcWorkspace *ws = app->num_workspaces ? app->workspaces[app->current_ws] : NULL;
-  if (a >= HOTKEY_CONN_TAB_1 && a <= HOTKEY_CONN_TAB_9) /* only the tabs that exist */
-    return ws && (size_t)(a - HOTKEY_CONN_TAB_1) < ws->num_tabs;
+  if (a >= HOTKEY_CONN_TAB_1 && a <= HOTKEY_CONN_TAB_9) { /* only the strip cells that exist */
+    StripEntry *e;
+    size_t cur;
+    size_t n = ws ? tabstrip_entries(ws, &e, &cur) : 0;
+    if (ws) free(e);
+    return (size_t)(a - HOTKEY_CONN_TAB_1) < n;
+  }
   if (a == HOTKEY_CLEAR_SELECTIONS) { /* only with something to clear */
     const ConnTab *t = ws ? workspace_current_tab(ws) : NULL;
     const View *v = t ? conntab_current_view(t) : NULL;

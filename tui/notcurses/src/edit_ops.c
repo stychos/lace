@@ -1,4 +1,5 @@
 #include "edit_ops.h"
+#include "undo.h"
 #include "model/workspace.h"
 #include "ui/dialogs/confirm.h"
 #include "ui/grid.h"
@@ -110,12 +111,29 @@ typedef struct {
   uint64_t uid, gen;
   size_t row, col;
   LaceValue value;
+  /* for the undo step: the row's key before the edit, the column, the old value */
+  char *table, *column;
+  LaceRowKey key;
+  LaceValue before;
 } EditReq;
 
 static void edit_req_free(void *p) {
   EditReq *rq = p;
   lace_value_free(&rq->value);
+  lace_value_free(&rq->before);
+  lace_row_key_free(&rq->key);
+  free(rq->table);
+  free(rq->column);
   free(rq);
+}
+
+/* The key of the row after the edit: an edited key column holds the new value */
+static void key_after_edit(LaceRowKey *key, const char *column, const LaceValue *value) {
+  for (size_t i = 0; i < key->count; i++)
+    if (!strcmp(key->names[i], column)) {
+      lace_value_free(&key->values[i]);
+      key->values[i] = lace_value_copy(value);
+    }
 }
 
 static void on_update(NcJob *job, void *data) {
@@ -130,6 +148,8 @@ static void on_update(NcJob *job, void *data) {
   }
   app_set_status(app, false, "Updated 1 row");
   if (!v) return;
+  key_after_edit(&rq->key, rq->column, &rq->value);
+  undo_stack_push_cell(&v->undo, rq->table, &rq->key, rq->column, &rq->before, &rq->value);
   if (rq->gen == page_cache_generation(v->cache)) {
     page_cache_set_cell(v->cache, rq->row, rq->col, rq->value);
     rq->value = lace_value_null(); /* adopted */
@@ -190,7 +210,6 @@ bool edit_cell(EditContext *ctx, size_t row, size_t col, const char *text, bool 
   LaceRowSnapshot snap = {0};
   lace_row_snapshot_build(&snap, res, in_page, ctx->snapshot_all ? SIZE_MAX : col, v->schema);
   NcJob *job = nc_job_update(ctx->table, &key, &snap, pcol->name, &out);
-  lace_row_key_free(&key);
   lace_row_snapshot_free(&snap);
   EditReq *rq = safe_calloc(1, sizeof *rq);
   rq->app = ctx->app;
@@ -199,6 +218,10 @@ bool edit_cell(EditContext *ctx, size_t row, size_t col, const char *text, bool 
   rq->row = row;
   rq->col = col;
   rq->value = out;
+  rq->table = str_dup(ctx->table);
+  rq->column = str_dup(pcol->name);
+  rq->key = key; /* adopted */
+  rq->before = lace_value_copy(orig);
   ConnTab *t = app_view_tab(ctx->app, v);
   nc_connection_submit_full(ctx->conn, job, t ? t->owner : NULL, on_update, rq, edit_req_free);
   return true;
@@ -223,18 +246,54 @@ typedef struct {
   int refs;            /* the jobs and the submitting loop */
   size_t pending, deleted, failed, min_row;
   char *first_error;
+  /* for the undo step: every row as it was on screen, and which ones went */
+  char *table;
+  UndoRow *rows;
+  bool *gone;
+  size_t num_rows;
+  bool omitted; /* a value too large to load: the rows cannot come back whole */
 } DelRun;
+
+typedef struct { DelRun *d; size_t idx; } DelJob; /* one DELETE: its row */
 
 static void del_unref(void *p) {
   DelRun *d = p;
   if (--d->refs > 0) return;
   free(d->first_error);
+  free(d->table);
+  for (size_t i = 0; i < d->num_rows; i++) undo_row_free(&d->rows[i]);
+  free(d->rows);
+  free(d->gone);
   free(d);
+}
+
+static void del_job_free(void *p) {
+  DelJob *j = p;
+  del_unref(j->d);
+  free(j);
+}
+
+/* The rows that went make one undo step, which brings them all back */
+static void del_record(DelRun *d, View *v) {
+  UndoRow *rows = safe_calloc(d->num_rows + 1, sizeof *rows);
+  size_t n = 0;
+  for (size_t i = 0; i < d->num_rows; i++)
+    if (d->gone[i]) {
+      rows[n++] = d->rows[i];
+      memset(&d->rows[i], 0, sizeof d->rows[i]); /* moved */
+    }
+  if (!n) {
+    free(rows);
+    return;
+  }
+  undo_stack_push_delete(&v->undo, d->table, rows, n,
+                         d->omitted ? str_dup("a value of the row was too large to load") : NULL);
 }
 
 static void del_finish(DelRun *d) {
   NcApp *app = d->app;
   View *v = app_find_view(app, d->uid);
+  if (v && d->deleted) del_record(d, v);
   if (v && d->deleted) {
     page_cache_rows_removed(v->cache, d->min_row, d->deleted);
     view_clear_selection(v);
@@ -252,13 +311,15 @@ static void del_finish(DelRun *d) {
 }
 
 static void on_delete(NcJob *job, void *data) {
-  DelRun *d = data;
+  DelJob *dj = data;
+  DelRun *d = dj->d;
   app_log_job(d->app, job, "delete");
   if (job->error) {
     d->failed++;
     if (!d->first_error) d->first_error = str_dup(job->error);
   } else {
     d->deleted++;
+    d->gone[dj->idx] = true;
   }
   if (--d->pending == 0) del_finish(d);
 }
@@ -286,6 +347,10 @@ static void run_delete(NcApp *app, uint64_t uid, uint64_t gen, const size_t *row
   d->uid = uid;
   d->refs = 1;
   d->min_row = SIZE_MAX;
+  d->table = str_dup(ctx.table);
+  d->rows = safe_calloc(n + 1, sizeof *d->rows);
+  d->gone = safe_calloc(n + 1, sizeof *d->gone);
+  d->num_rows = n;
   char *first_bad = NULL;
   size_t bad = 0;
   for (size_t i = 0; i < n; i++) {
@@ -299,15 +364,19 @@ static void run_delete(NcApp *app, uint64_t uid, uint64_t gen, const size_t *row
       lace_row_key_free(&key);
       continue;
     }
+    undo_row_capture(res, in_page, v->schema, &d->rows[i], &d->omitted); /* the row as it is, for the undo */
     LaceRowSnapshot snap = {0};
     lace_row_snapshot_build(&snap, res, in_page, SIZE_MAX, v->schema);
     NcJob *job = nc_job_delete(ctx.table, &key, &snap);
     lace_row_key_free(&key);
     lace_row_snapshot_free(&snap);
     if (rows[i] < d->min_row) d->min_row = rows[i];
+    DelJob *dj = safe_calloc(1, sizeof *dj);
+    dj->d = d;
+    dj->idx = i;
     d->pending++;
     d->refs++;
-    nc_connection_submit_full(ctx.conn, job, t ? t->owner : NULL, on_delete, d, del_unref);
+    nc_connection_submit_full(ctx.conn, job, t ? t->owner : NULL, on_delete, dj, del_job_free);
   }
   if (bad) {
     d->failed += bad;

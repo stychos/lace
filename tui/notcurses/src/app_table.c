@@ -308,6 +308,26 @@ static View *open_table(NcApp *app, const char *table, bool preview) {
 
 View *app_open_table(NcApp *app, const char *table) { return open_table(app, table, false); }
 
+View *app_open_table_background(NcApp *app, const char *table) {
+  ConnTab *t = app_current_tab(app);
+  if (!t || !t->conn || !table) return NULL;
+  size_t i = conntab_find_table_view(t, table);
+  if (i != SIZE_MAX) {
+    t->views[i]->preview = false; /* asked for by name: kept */
+    app_set_status(app, false, "%s is already open", table);
+    return t->views[i];
+  }
+  View *v = view_new_table(table);
+  size_t cur = t->current;
+  bool had_views = t->num_views > 0;
+  conntab_add_view(t, v);
+  if (had_views) t->current = cur; /* the new view waits behind the current one */
+  app_view_attach(app, v);
+  load_schema(app, v);
+  app_set_status(app, false, "Opened %s in a new tab", table);
+  return v;
+}
+
 View *app_preview_table(NcApp *app, const char *table) { return open_table(app, table, true); }
 
 bool app_cancel_running(NcApp *app) {

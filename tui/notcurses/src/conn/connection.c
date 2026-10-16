@@ -161,6 +161,9 @@ static int run_once(NcConnection *c, NcJob *job, int conn_id) {
     if (lace_last_sql()) job->last_sql = str_dup(lace_last_sql());
     job->affected = rc == LACE_OK ? 1 : 0;
     break;
+  case NC_JOB_DEPENDENTS:
+    rc = lace_table_dependents(client, conn_id, job->table, &job->deps, &job->num_deps);
+    break;
   case NC_JOB_DISCONNECT:
     rc = lace_disconnect(client, conn_id);
     break;

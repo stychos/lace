@@ -45,6 +45,78 @@ def test_tabs_strip_lists_views_and_clicks(home):
         t.keys("Escape", "q"); assert t.quit() == 0
 
 
+def test_tabs_strip_spans_connections(home):
+    db = make_db(home, rows=10)
+    with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db]) as t:   # the last tab opened is current
+        t.wait("big"); t.keys("Enter"); t.wait(at(1, 10))
+        t.wait(lambda s: strip(s).startswith(" t.sqlite │ big ×"))  # one flat row; a tab without views is a cell of its own
+        t.keys("]")                                                # ...which the tab keys reach
+        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite │"))
+        t.wait(lambda s: strip(s).startswith(" t.sqlite × │ big"))
+        t.keys("M-2")                                              # Alt+N: the strip's Nth cell
+        t.wait(lambda s: strip(s).startswith(" t.sqlite │ big ×"))
+        t.keys("M-1")
+        t.wait(lambda s: strip(s).startswith(" t.sqlite × │ big"))
+        t.wait("big"); t.keys("Enter"); t.wait(at(1, 10))
+        t.wait(lambda s: strip(s).startswith(" big × │ big"))
+        t.keys("]")                                                # the bracket keys cross the tabs
+        t.wait(lambda s: strip(s).startswith(" big │ big ×"))
+        t.wait(lambda s: "t.sqlite 2 ▸ big" in s.split("\n")[0])
+        t.keys("]")                                                # ...and wrap
+        t.wait(lambda s: strip(s).startswith(" big × │ big"))
+        t.keys("C-PageDown")                                       # the Ctrl keys walk the same row
+        t.wait(lambda s: strip(s).startswith(" big │ big ×"))
+        t.keys("C-PageUp")
+        t.wait(lambda s: strip(s).startswith(" big × │ big"))
+        t.click(strip(t).index("│") + 2, 1)                       # a click on the other tab's view
+        t.wait(lambda s: strip(s).startswith(" big │ big ×"))
+        t.keys("C-e")                                              # the switcher lists every tab's views
+        t.wait("Views")
+        t.wait(lambda s: s.count(" big") >= 2)
+        t.keys("Up", "Enter")                                      # the first tab's view
+        t.wait(lambda s: strip(s).startswith(" big × │ big"))
+        t.click(strip(t).index("│") + 2, 1, button=1)             # a middle click closes the other tab's
+        t.wait(lambda s: strip(s).startswith(" big ×") and "t.sqlite 2" not in s.split("\n")[0])   # only view: the tab goes
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_new_tab_and_close_tab_keys(home):
+    db = make_four_tables(home)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("last"); t.keys("Enter")                   # big is open and current
+        t.wait(lambda s: strip(s).startswith(" big ×"))
+        t.keys("Tab")                                     # the sidebar takes the keys
+        t.wait("+ new tab")
+        t.keys("j", "+")                                  # the next table opens behind the current view
+        t.wait_status("Opened last in a new tab")
+        t.wait(lambda s: strip(s).startswith(" big × │ last"))
+        t.keys("+")                                       # again: only reported
+        t.wait_status("last is already open")
+        t.keys("Escape")                                  # back to the grid
+        t.keys(":"); t.wait("Command palette"); t.keys("Escape")   # the vim-style palette key
+        t.keys("-")                                       # close tab: the current view goes
+        t.wait(lambda s: strip(s).startswith(" last ×"))
+        t.keys("C-w")                                     # the chord does the same; the last view closes the connection tab
+        t.wait("RECENT")
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_sidebar_takes_the_navigation_keys(home):
+    db = make_four_tables(home)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("last")
+        t.keys("j", "j", "Enter")                        # no view: the list (big, last, small, tiny) takes j/k
+        t.wait(lambda s: "\u25b8 small" in s.split("\n")[0])
+        t.keys("Tab")                                     # the focused sidebar takes them too
+        t.keys("k", "Enter")
+        t.wait(lambda s: "\u25b8 last" in s.split("\n")[0])
+        t.keys("Tab", "G", "Enter")                       # G: the last entry
+        t.wait(lambda s: "\u25b8 tiny" in s.split("\n")[0])
+        t.keys("Tab", "g", "Enter")                       # g: the first
+        t.wait(lambda s: "\u25b8 big" in s.split("\n")[0])
+        t.keys("q"); assert t.quit() == 0
+
+
 def make_four_tables(home):
     return sqlite_db(home.file("t.sqlite"), """
         CREATE TABLE big (id INTEGER PRIMARY KEY, v INTEGER, name TEXT);

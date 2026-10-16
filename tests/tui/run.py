@@ -4,7 +4,8 @@
     run.py [filter...]   run tests whose "module.name" contains a filter
 
 Each test gets a private HOME and a private tmux server; on failure the
-screen is printed and the HOME (with the daemon log) is kept.
+screen is printed and the HOME (with the daemon log) is kept, while the
+tmux server (with the TUI and its daemon) is always closed.
 Needs tmux; without it the tests are skipped.
 """
 
@@ -81,6 +82,7 @@ def main(test_dir, filters):
             home.cleanup()
         else:
             failed += 1
+            home.close_tuis()  # the HOME is kept, the TUI and its daemon are not
             print(f"       kept {home.path}")
         sys.stdout.flush()
     print(f"tui: {len(tests)} tests, {failed} failed")

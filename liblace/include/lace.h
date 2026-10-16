@@ -313,6 +313,20 @@ void lace_tables_free(char **tables, size_t count);
  */
 int lace_get_schema(lace_client_t *client, int conn_id, const char *table, LaceSchema **schema);
 
+/*
+ * The tables whose foreign keys reference `table`, with what their rows do
+ * when a referenced row is deleted (what a DELETE takes with it: CASCADE
+ * removes them, SET NULL and SET DEFAULT change them). One entry per
+ * constraint, so a table may appear twice.
+ *
+ * @param deps     Output: array (caller frees with lace_dependents_free), NULL when none
+ * @param count    Output: number of entries
+ * @return         LACE_OK on success, error code on failure
+ */
+int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
+                          LaceDependent **deps, size_t *count);
+void lace_dependents_free(LaceDependent *deps, size_t count);
+
 /* ==========================================================================
  * Data Queries
  * ========================================================================== */

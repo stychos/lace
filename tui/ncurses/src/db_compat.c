@@ -345,6 +345,31 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **e
   return schema;
 }
 
+bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **deps, size_t *n, char **err) {
+  if (deps) *deps = NULL;
+  if (n) *n = 0;
+  if (!conn || !table || !deps || !n) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  conn_refresh(conn);
+  if (!conn_guard(conn, NULL, err, NULL)) {
+    return false;
+  }
+  bool sp = read_savepoint_begin(conn);
+  int rc = lace_table_dependents(conn->client, conn->conn_id, table, deps, n);
+  if (rc != LACE_OK && conn_should_retry(conn, rc)) {
+    rc = lace_table_dependents(conn->client, conn->conn_id, table, deps, n);
+  }
+  if (rc != LACE_OK) {
+    if (err) *err = conn_error(conn);
+    read_savepoint_end(conn, sp, false);
+    return false;
+  }
+  read_savepoint_end(conn, sp, true);
+  return true;
+}
+
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
   if (!conn || !sql) {

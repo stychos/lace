@@ -11,6 +11,7 @@
 #include "core/utf8.h"
 #include "app.h"
 #include "edit_ops.h"
+#include "undo.h"
 #include "ui/textbuf.h"
 #include "ui/sqlhl.h"
 #include "ui/dialogs/connect.h"
@@ -58,6 +59,17 @@ static void test_input_translate(void) {
   CHECK(input_translate(&ni, ni.id, &e) && e.key.is_special && e.key.key == UI_KEY_PAGEDOWN && e.key.mods == UI_MOD_CTRL);
   ni = key(NCKEY_ENTER, NCKEY_MOD_SHIFT);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == UI_KEY_ENTER && e.key.mods == UI_MOD_SHIFT);
+  /* Super (Cmd on macOS) is a modifier like Ctrl: Cmd+c is 'C' + SUPER, bound as "CMD+C" */
+  ni = key('c', NCKEY_MOD_SUPER);
+  CHECK(input_translate(&ni, ni.id, &e) && e.key.key == 'C' && e.key.mods == UI_MOD_SUPER);
+  {
+    Config *c = config_get_defaults();
+    c->frontend = CONFIG_FE_NOTCURSES;
+    CHECK(hotkey_matches(c, &e, HOTKEY_CELL_COPY) && !hotkey_matches(c, &e, HOTKEY_CELL_PASTE));
+    ni = key('z', NCKEY_MOD_SUPER);
+    CHECK(input_translate(&ni, ni.id, &e) && hotkey_matches(c, &e, HOTKEY_UNDO));
+    config_free(c);
+  }
   /* Shift on a letter is its case, never a modifier */
   ni = key('x', NCKEY_MOD_SHIFT);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == 'X' && e.key.mods == UI_MOD_NONE);
@@ -1379,6 +1391,90 @@ static void test_log_ring(void) {
   free(app.log);
 }
 
+static void test_tabstrip_entries(void) {
+  NcWorkspace *w = workspace_new("W");
+  ConnTab *a = workspace_add_tab(w, NULL);
+  conntab_add_view(a, view_new_table("x"));
+  conntab_add_view(a, view_new_table("y"));
+  StripEntry *e;
+  size_t cur;
+  CHECK(tabstrip_entries(w, &e, &cur) == 2 && cur == 1 && e[0].tab == 0 && e[1].view == 1);
+  free(e);
+  ConnTab *b = workspace_add_tab(w, NULL); /* becomes current, no views: its own cell */
+  CHECK(tabstrip_entries(w, &e, &cur) == 3 && cur == 2 && e[2].tab == 1 && e[2].view == SIZE_MAX);
+  free(e);
+  conntab_add_view(b, view_new_query("SELECT 1"));
+  workspace_add_tab(w, NULL);              /* an empty tab is one cell */
+  w->current = 1;
+  /* one flat row: tab by tab, no group markers */
+  size_t n = tabstrip_entries(w, &e, &cur);
+  CHECK(n == 4 && cur == 2);
+  CHECK(e[0].tab == 0 && e[0].view == 0 && e[1].tab == 0 && e[1].view == 1 && e[2].tab == 1 && e[2].view == 0);
+  CHECK(e[3].tab == 2 && e[3].view == SIZE_MAX);
+  free(e);
+  w->current = 2; /* the current tab has no view: its cell is current */
+  CHECK(tabstrip_entries(w, &e, &cur) == 4 && cur == 3);
+  free(e);
+  workspace_free(w);
+}
+
+/* The undo stack: newest last, capped, cleared with the view */
+static void test_undo_stack(void) {
+  View *v = view_new_table("t");
+  LaceRowKey key = {0};
+  key.names = safe_calloc(1, sizeof *key.names);
+  key.values = safe_calloc(1, sizeof *key.values);
+  key.names[0] = str_dup("id");
+  key.values[0] = lace_value_int(1);
+  key.count = 1;
+  LaceValue before = lace_value_text("old"), after = lace_value_text("new");
+  for (int i = 0; i < UNDO_MAX + 5; i++) {
+    lace_value_free(&before);
+    char buf[16];
+    snprintf(buf, sizeof buf, "old%d", i);
+    before = lace_value_text(buf);
+    undo_stack_push_cell(&v->undo, "t", &key, "name", &before, &after);
+  }
+  UndoEntry *it = v->undo.items;
+  CHECK(v->undo.n == UNDO_MAX); /* the oldest five went */
+  CHECK(it[0].kind == UNDO_CELL && strcmp(it[0].before.text.data, "old5") == 0);
+  CHECK(strcmp(it[UNDO_MAX - 1].before.text.data, "old204") == 0);
+  CHECK(strcmp(it[0].column, "name") == 0 && it[0].key.count == 1 && it[0].key.values[0].int_val == 1);
+  /* a delete step takes its rows */
+  UndoRow *rows = safe_calloc(2, sizeof *rows);
+  rows[0].names = safe_calloc(2, sizeof *rows[0].names);
+  rows[0].values = safe_calloc(2, sizeof *rows[0].values);
+  rows[0].names[0] = str_dup("id");
+  rows[0].values[0] = lace_value_int(7);
+  rows[0].count = 1;
+  undo_stack_push_delete(&v->undo, "t", rows, 1, NULL);
+  it = v->undo.items;
+  CHECK(v->undo.n == UNDO_MAX && it[UNDO_MAX - 1].kind == UNDO_DELETE &&
+        it[UNDO_MAX - 1].num_rows == 1 && it[UNDO_MAX - 1].rows[0].values[0].int_val == 7);
+  /* a bulk delete recorded row by row becomes one step */
+  for (int i = 0; i < 2; i++) {
+    UndoRow *r = safe_calloc(2, sizeof *r);
+    r[0].names = safe_calloc(2, sizeof *r[0].names);
+    r[0].values = safe_calloc(2, sizeof *r[0].values);
+    r[0].names[0] = str_dup("id");
+    r[0].values[0] = lace_value_int(10 + i);
+    r[0].count = 1;
+    undo_stack_push_delete(&v->undo, "t", r, 1, i == 1 ? str_dup("too large") : NULL);
+  }
+  undo_stack_merge_last_deletes(&v->undo, 3);
+  it = v->undo.items;
+  CHECK(v->undo.n == UNDO_MAX - 2 && undo_stack_top(&v->undo)->num_rows == 3 &&
+        undo_stack_top(&v->undo)->rows[2].values[0].int_val == 11 && undo_stack_top(&v->undo)->not_restorable);
+  undo_stack_pop(&v->undo);
+  CHECK(v->undo.n == UNDO_MAX - 3 && undo_stack_top(&v->undo)->kind == UNDO_CELL);
+  undo_stack_clear(&v->undo);
+  CHECK(v->undo.n == 0 && v->undo.items == NULL);
+  lace_row_key_free(&key);
+  lace_value_free(&before);
+  lace_value_free(&after);
+  view_free(v); /* frees a stack too */
+}
+
 static void test_tabstrip_layout(void) {
   int w[] = {6, 9, 4, 12};
   int x0[4], x1[4];
@@ -1479,6 +1575,8 @@ int main(void) {
   test_textbuf_statement();
   test_log_ring();
   test_tabstrip_layout();
+  test_tabstrip_entries();
+  test_undo_stack();
   test_filter_panel_helpers();
   return test_report("nc");
 }

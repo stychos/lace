@@ -1,4 +1,5 @@
 #include "ui/list.h"
+#include "config/config.h"
 #include "ui/input.h"
 #include "core/utf8.h"
 #include "util/mem.h"
@@ -163,20 +164,37 @@ int list_detail_width(const ListWidget *l, int cols) {
 
 static ListAction after_move(bool moved) { return moved ? LIST_CHANGED : LIST_NONE; }
 
+static ListAction go_first(ListWidget *l) {
+  size_t keep = l->cursor;
+  cursor_first(l);
+  l->scroll = 0;
+  return after_move(keep != l->cursor);
+}
+
+static ListAction go_last(ListWidget *l) {
+  size_t pos = l->num_shown;
+  while (pos > 0 && !selectable(l, pos - 1)) pos--;
+  return pos ? after_move(move_to(l, pos - 1)) : LIST_NONE;
+}
+
+static const Config *g_hotkeys;
+
+void list_use_hotkeys(const Config *config) { g_hotkeys = config; }
+
 ListAction list_key(ListWidget *l, const UiEvent *ev) {
   if (ev->type != UI_EVENT_KEY) return LIST_NONE;
   size_t page = l->page > 1 ? (size_t)l->page - 1 : 1;
+  bool typing = l->has_input && l->input_focused;
   if (ev->key.is_special && !(ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT))) {
     switch (ev->key.key) {
     case UI_KEY_UP: return after_move(step(l, -1, 1));
     case UI_KEY_DOWN: return after_move(step(l, 1, 1));
     case UI_KEY_PAGEUP: return after_move(jump(l, -1, page));
     case UI_KEY_PAGEDOWN: return after_move(jump(l, 1, page));
-    case UI_KEY_HOME: if (l->has_input && l->input_focused) break;
-      { size_t keep = l->cursor; cursor_first(l); l->scroll = 0; return after_move(keep != l->cursor); }
-    case UI_KEY_END: if (l->has_input && l->input_focused) break;
-      { size_t pos = l->num_shown; while (pos > 0 && !selectable(l, pos - 1)) pos--;
-        return pos ? after_move(move_to(l, pos - 1)) : LIST_NONE; }
+    case UI_KEY_HOME: if (typing) break;
+      return go_first(l);
+    case UI_KEY_END: if (typing) break;
+      return go_last(l);
     case UI_KEY_ENTER: return list_selected(l) ? LIST_ACTIVATE : LIST_NONE;
     case UI_KEY_ESCAPE: return LIST_CANCEL;
     case UI_KEY_TAB:
@@ -186,7 +204,15 @@ ListAction list_key(ListWidget *l, const UiEvent *ev) {
     default: break;
     }
   }
-  if (l->has_input && l->input_focused) {
+  if (g_hotkeys && !typing) { /* the navigation hotkeys (j, k, g, G, ...) when letters are not typed */
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_MOVE_UP)) return after_move(step(l, -1, 1));
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_MOVE_DOWN)) return after_move(step(l, 1, 1));
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_PAGE_UP)) return after_move(jump(l, -1, page));
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_PAGE_DOWN)) return after_move(jump(l, 1, page));
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_FIRST_ROW)) return go_first(l);
+    if (hotkey_matches(g_hotkeys, ev, HOTKEY_LAST_ROW)) return go_last(l);
+  }
+  if (typing) {
     char *before = str_dup(l->input.buf ? l->input.buf : "");
     bool consumed = nc_text_input_key(&l->input, ev);
     bool changed = strcmp(before, l->input.buf ? l->input.buf : "") != 0;

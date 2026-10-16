@@ -14,7 +14,7 @@ Overlay *overlay_new(const char *title) {
 
 static void apply_layout(Overlay *o, NcApp *app) {
   if (o->layout) o->layout(o, app);
-  int max_rows = app->rows - 4, max_cols = app->cols - 4;
+  int max_rows = app->rows - 5, max_cols = app->cols - 4; /* the shadow below must not cover the status line */
   if (max_rows < 1) max_rows = 1;
   if (max_cols < 1) max_cols = 1;
   if (o->rows > max_rows) o->rows = max_rows;
