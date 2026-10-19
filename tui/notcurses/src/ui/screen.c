@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "model/workspace.h"
 #include "ui/overlay.h"
 #include "ui/tabstrip.h"
 #include "util/mem.h"
@@ -6,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <termios.h>
+#include <unistd.h>
 
 bool screen_init(NcApp *app, char **error) {
   notcurses_options o = {.flags = NCOPTION_SUPPRESS_BANNERS};
@@ -23,14 +25,20 @@ bool screen_init(NcApp *app, char **error) {
   notcurses_mice_enable(app->nc, NCMICE_BUTTON_EVENT | NCMICE_DRAG_EVENT);
   /* Ctrl+C, Ctrl+Z and Ctrl+\ are keys here, not SIGINT, SIGTSTP and SIGQUIT
    * (a slipped Ctrl+C must not end the session; Ctrl+C copies), and Ctrl+V is
-   * a key, not the line discipline's "literal next". notcurses_stop() puts the
-   * terminal back as it found it. */
+   * a key, not the line discipline's "literal next", and Ctrl+S / Ctrl+Q are
+   * keys, not flow control (Ctrl+S saves a connection). notcurses_stop() puts
+   * the terminal back as it found it. */
   notcurses_linesigs_disable(app->nc);
   struct termios tio;
   int fd = notcurses_inputready_fd(app->nc);
   if (fd >= 0 && tcgetattr(fd, &tio) == 0) {
     tio.c_lflag &= ~(tcflag_t)IEXTEN;
+    tio.c_iflag &= ~(tcflag_t)IXON;
     tcsetattr(fd, TCSANOW, &tio);
+  }
+  if (fd != STDIN_FILENO && isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &tio) == 0) {
+    tio.c_iflag &= ~(tcflag_t)IXON; /* the terminal itself, when input comes through another descriptor */
+    tcsetattr(STDIN_FILENO, TCSANOW, &tio);
   }
   return true;
 }
@@ -94,8 +102,15 @@ void screen_render(NcApp *app) {
   }
   header_draw(app);
   tabstrip_draw(app);
-  if (app_current_tab(app)) content_draw(app);
-  else welcome_draw(app);
+  ConnTab *t = app_current_tab(app);
+  if (t && !t->form) {
+    content_draw(app);
+  } else if (t) {
+    content_draw(app); /* the form */
+  } else {
+    nc_style(app->std, &app->theme, TC_DIM, TC_BG, 0); /* the session or the command line is still opening */
+    nc_put(app->std, 2, 1, app->cols - 2, "Connecting\xe2\x80\xa6");
+  }
   status_draw(app);
   overlay_render_all(app);
   notcurses_render(app->nc);

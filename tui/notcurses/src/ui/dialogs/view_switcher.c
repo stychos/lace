@@ -1,5 +1,6 @@
 #include "conn/connection.h"
 #include "model/workspace.h"
+#include "ui/form_tab.h"
 #include "ui/list.h"
 #include "ui/overlay.h"
 #include "ui/panels.h"
@@ -35,7 +36,7 @@ static size_t fill(ListWidget *l, const NcWorkspace *ws) {
     ConnTab *t = ws->tabs[e[i].tab];
     if (e[i].view == SIZE_MAX) { /* a tab without views: its own row */
       const char *name = t->conn ? nc_connection_name(t->conn) : NULL;
-      rows[i].text = str_printf("%s (no views)", name ? name : "connection");
+      rows[i].text = t->form ? str_dup(form_tab_label(t->form)) : str_printf("%s (no views)", name ? name : "connection");
       rows[i].kind = -1;
       rows[i].data = t;
       continue;

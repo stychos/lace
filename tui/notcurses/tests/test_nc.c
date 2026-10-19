@@ -14,7 +14,8 @@
 #include "undo.h"
 #include "ui/textbuf.h"
 #include "ui/sqlhl.h"
-#include "ui/dialogs/connect.h"
+#include "ui/conn_form.h"
+#include "ui/form_tab.h"
 #include "ui/header.h"
 #include "ui/input.h"
 #include "ui/list.h"
@@ -458,6 +459,55 @@ static void test_detach_cancels_running(void) {
   str_secure_free(url); unlink(db); free(db);
 }
 
+/* Which open connection a new request may share: a saved id by id, a typed
+ * URL by its password-less string */
+static void test_conn_key_matches(void) {
+  CHECK(nc_conn_key_matches("id1", "sqlite:///a", "id1", "sqlite:///b"));
+  CHECK(!nc_conn_key_matches("id1", "sqlite:///a", "id2", "sqlite:///a"));
+  CHECK(nc_conn_key_matches(NULL, "postgres://u:pw@h/db", "", "postgres://u@h/db"));
+  CHECK(!nc_conn_key_matches("id1", "postgres://u@h/db", NULL, "postgres://u@h/db"));
+  CHECK(!nc_conn_key_matches(NULL, "postgres://u@h/db", NULL, "postgres://u@h/other"));
+}
+
+/* Holders of a shared connection: the last release closes it */
+static void test_conn_registry(void) {
+  char home[64];
+  lace_client_t *cl = test_client(home, sizeof home);
+  CHECK(cl != NULL);
+  if (!cl) return;
+  char *db = str_printf("%s/r.sqlite", home);
+  char *url = str_printf("sqlite://%s?create=1", db);
+  int id = -1;
+  CHECK(lace_connect(cl, url, NULL, &id) == LACE_OK);
+  NcApp app = {0};
+  app.mainq = mainq_new();
+  NcConnection *c = nc_connection_new(cl, app.mainq, id, url, "sid", "t", LACE_HISTORY_MODE_SESSION, 10);
+  nc_connection_set_listener(c, app_conn_event, &app);
+  CHECK(app_conn_lookup(&app, "sid", url) == NULL);
+  app_conn_hold(&app, c);
+  app_conn_hold(&app, c);
+  CHECK(app_conn_holders(&app, c) == 2);
+  CHECK(app_conn_lookup(&app, "sid", NULL) == c);
+  CHECK(app_conn_lookup(&app, "other", url) == NULL);
+  app_conn_release(&app, c);
+  CHECK(app_conn_holders(&app, c) == 1 && app.num_closing == 0);
+  app_conn_release(&app, c);
+  CHECK(app_conn_lookup(&app, "sid", url) == NULL && app.num_conns == 0 && app.num_closing == 1);
+  for (int i = 0; i < 100 && app.num_closing; i++) {
+    struct pollfd p = {mainq_fd(app.mainq), POLLIN, 0};
+    if (poll(&p, 1, 100) > 0) mainq_drain(app.mainq);
+  }
+  CHECK(app.num_closing == 0);
+  mainq_drain(app.mainq);
+  free(app.closing);
+  free(app.conns);
+  for (size_t i = 0; i < app.num_log; i++) free(app.log[i].line);
+  free(app.log);
+  mainq_free(app.mainq);
+  lace_client_destroy(cl);
+  str_secure_free(url); unlink(db); free(db);
+}
+
 /* Esc while a script's COMMIT is in flight does not cancel the COMMIT: the
  * statement running on the connection keeps running until the flag clears */
 static void test_escape_spares_commit(void) {
@@ -483,6 +533,18 @@ static void test_escape_spares_commit(void) {
   usleep(100000);
   v->running = true;
   v->committing = true;
+  /* A second workspace's tab sharing the connection: its Esc spares the COMMIT too */
+  app.workspaces = safe_realloc(app.workspaces, 2 * sizeof *app.workspaces);
+  app.workspaces[1] = workspace_new("W2");
+  app.num_workspaces = 2;
+  workspace_add_tab(app.workspaces[1], c);
+  app.current_ws = 1;
+  CHECK(app_cancel_running(&app));
+  CHECK(!v->cancel_run);
+  usleep(200000);
+  mainq_drain(app.mainq);
+  CHECK(g.done == 0 && nc_connection_busy(c));
+  app.current_ws = 0;
   CHECK(app_cancel_running(&app)); /* Esc is consumed */
   CHECK(!v->cancel_run);
   CHECK(app.status && strstr(app.status, "COMMIT in progress"));
@@ -490,6 +552,7 @@ static void test_escape_spares_commit(void) {
   mainq_drain(app.mainq);
   CHECK(g.done == 0 && nc_connection_busy(c)); /* not cancelled */
   v->committing = false;
+  app.current_ws = 1; /* from the other tab: the script on the shared connection stops too */
   CHECK(app_cancel_running(&app));
   CHECK(v->cancel_run);
   drain_until(app.mainq, &g.done, 1);
@@ -499,6 +562,8 @@ static void test_escape_spares_commit(void) {
   t->conn = NULL;
   mainq_drain(app.mainq);
   lace_result_free(g.result);
+  app.workspaces[1]->tabs[0]->conn = NULL;
+  workspace_free(app.workspaces[1]);
   workspace_free(app.workspaces[0]);
   free(app.workspaces);
   free(app.status);
@@ -1016,6 +1081,24 @@ static void test_workspace_json(void) {
   CHECK(cJSON_GetObjectItem(json_get_array_item(json_get_array(json_get_array_item(json_get_array(j, "connections"), 0), "tabs"), 0), "cursor") == NULL);
   cJSON_Delete(j);
   CHECK(conntab_find_table_view(t, "orders") == 0 && conntab_find_table_view(t, "x") == SIZE_MAX);
+  /* A connection form: its place and nothing else */
+  ConnTab *ft = workspace_add_form(w, SIZE_MAX, false);
+  CHECK(ft && ft->form && !ft->conn && w->current == 0 && w->num_tabs == 2);
+  CHECK_STR(form_tab_label(ft->form), "New connection");
+  j = workspace_to_json(w, false);
+  cJSON *fj = json_get_array_item(json_get_array(j, "connections"), 1);
+  CHECK(json_get_bool(fj, "form", false) && json_get_int(fj, "order", -1) == 2);
+  CHECK(cJSON_GetArraySize(fj) == 2); /* no saved_id, connstr, tabs, name */
+  cJSON_Delete(j);
+  /* a form turned connected and back */
+  conntab_make_connected(ft, NULL);
+  CHECK(!ft->form && ft->sidebar);
+  conntab_add_view(ft, view_new_table("x"));
+  conntab_make_form(ft);
+  CHECK(ft->form && ft->num_views == 0);
+  workspace_remove_tab(w, 1);
+  CHECK(workspace_add_form(w, 0, true) == w->tabs[0] && w->current == 0 && w->tabs[1] == t);
+  workspace_remove_tab(w, 0);
   workspace_add_tab(w, NULL);
   workspace_remove_tab(w, 1); /* releases its owner (ASan checks) */
   CHECK(w->num_tabs == 1);
@@ -1267,6 +1350,109 @@ static void test_connect_helpers(void) {
   free(err);
 }
 
+
+/* The connection form's fields: filled from a saved connection, synced with
+ * the URI line both ways, dirty when they differ from what was filled */
+#define MASK "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2"
+static void test_conn_form_fill(void) {
+  ConnFields f;
+  conn_fields_init(&f);
+  text_input_set(&f.in[CF_PASS], "typed");
+  LaceSavedConnection *c = lace_saved_conn_from_connstr("postgres://app@db1:5432/shop", NULL);
+  CHECK(c != NULL);
+  if (!c) return;
+  free(c->name);
+  c->name = str_dup("shop on db1");
+  conn_fields_fill(&f, c);
+  CHECK_STR(f.in[CF_HOST].buf, "db1");
+  CHECK_STR(f.in[CF_NAME].buf, "shop on db1");
+  CHECK_STR(f.in[CF_PORT].buf, "5432");
+  CHECK(f.in[CF_PASS].len == 0); /* never kept from before */
+  CHECK(!conn_fields_dirty(&f));
+  CHECK(conn_fields_visible(&f, CF_HOST) && !conn_fields_visible(&f, CF_FILE));
+  CHECK(!conn_fields_visible(&f, CF_SSHHOST));
+  /* a saved password comes along only when it is saved */
+  c->save_password = true;
+  free(c->password);
+  c->password = str_dup("pw");
+  conn_fields_fill(&f, c);
+  CHECK_STR(f.in[CF_PASS].buf, "pw");
+  conn_fields_clear(&f);
+  CHECK(f.in[CF_HOST].len == 0 && f.in[CF_PASS].len == 0 && !conn_fields_dirty(&f));
+  lace_saved_conn_free(c);
+  conn_fields_free(&f);
+}
+
+static void test_conn_form_uri(void) {
+  ConnFields f;
+  conn_fields_init(&f);
+  CHECK(conn_fields_set_uri(&f, "postgres://app:s3cret@db1:5432/shop"));
+  CHECK_STR(f.in[CF_PASS].buf, "s3cret");
+  CHECK_STR(f.in[CF_DB].buf, "shop");
+  CHECK_STR_FREE(conn_fields_uri(&f), "postgres://app:" MASK "@db1:5432/shop");
+  char *cs = conn_fields_connstr(&f);
+  CHECK(cs && strstr(cs, "s3cret") != NULL);
+  str_secure_free(cs);
+  /* the masked line typed back keeps the password */
+  CHECK(conn_fields_set_uri(&f, "postgres://app:" MASK "@db2:5432/shop"));
+  CHECK_STR(f.in[CF_PASS].buf, "s3cret");
+  CHECK_STR(f.in[CF_HOST].buf, "db2");
+  /* a password typed into the line sets the field */
+  CHECK(conn_fields_set_uri(&f, "postgres://app:other@db2:5432/shop"));
+  CHECK_STR(f.in[CF_PASS].buf, "other");
+  /* a URI that parses while still being typed fills what it names (the form applies the line only when it is left) */
+  ConnFields g;
+  conn_fields_init(&g);
+  CHECK(conn_fields_set_uri(&g, "postgres://ap"));
+  CHECK_STR(g.in[CF_HOST].buf, "ap");
+  conn_fields_free(&g);
+  /* a half URI leaves the fields and says why */
+  CHECK(!conn_fields_set_uri(&f, "postgres:/"));
+  CHECK_STR(f.in[CF_HOST].buf, "db2");
+  CHECK(f.message != NULL && f.message_error);
+  /* ssh survives the round trip */
+  CHECK(conn_fields_set_uri(&f, "postgres+ssh://su@jump:22/app@db1:5432/shop"));
+  CHECK(f.chk[CF_SSH]);
+  CHECK_STR(f.in[CF_SSHHOST].buf, "jump");
+  CHECK_STR(f.in[CF_HOST].buf, "db1");
+  char *u = conn_fields_uri(&f);
+  CHECK(u && strncmp(u, "postgres+ssh://", 15) == 0);
+  free(u);
+  /* the name is the user's, never taken from a URI */
+  text_input_set(&f.in[CF_NAME], "mine");
+  CHECK(conn_fields_set_uri(&f, "mysql://root@localhost/x"));
+  CHECK_STR(f.in[CF_NAME].buf, "mine");
+  CHECK(!f.chk[CF_SSH]);
+  /* a bare file path is SQLite */
+  char path[] = "/tmp/lace-cf-XXXXXX";
+  int fd = mkstemp(path);
+  CHECK(fd >= 0);
+  if (fd >= 0) {
+    CHECK(write(fd, "SQLite format 3", 16) == 16);
+    close(fd);
+  }
+  CHECK(conn_fields_set_uri(&f, path));
+  CHECK(f.driver == 0);
+  CHECK_STR(f.in[CF_FILE].buf, path);
+  unlink(path);
+  conn_fields_free(&f);
+}
+
+static void test_conn_form_dirty(void) {
+  ConnFields f;
+  conn_fields_init(&f);
+  CHECK(!conn_fields_dirty(&f));
+  text_input_set(&f.in[CF_PASS], "x"); /* a typed password alone is an edit */
+  CHECK(conn_fields_dirty(&f));
+  conn_fields_mark_clean(&f);
+  CHECK(!conn_fields_dirty(&f));
+  f.chk[CF_SSH] = true;
+  CHECK(conn_fields_dirty(&f));
+  conn_fields_mark_clean(&f);
+  f.driver = 2;
+  CHECK(conn_fields_dirty(&f));
+  conn_fields_free(&f);
+}
 
 static void test_edit_decide(void) {
   LaceValue orig = lace_value_text("abc"); LaceValue out; char *err = NULL;
@@ -1562,12 +1748,17 @@ int main(void) {
   test_connection_free_running();
   test_connection_free_disconnects();
   test_detach_cancels_running();
+  test_conn_key_matches();
+  test_conn_registry();
   test_escape_spares_commit();
   test_palette_score();
   test_list_widget();
   test_text_input_key();
   test_header_format();
   test_connect_helpers();
+  test_conn_form_fill();
+  test_conn_form_uri();
+  test_conn_form_dirty();
   test_edit_decide();
   test_base64();
   test_textbuf();

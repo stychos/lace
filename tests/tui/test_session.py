@@ -70,6 +70,32 @@ def test_session_v2_from_gui(home):
         t.wait("SELECT 7")
 
 
+
+def test_session_v2_form_skipped(home):
+    """A connection form entry (written by later builds) is skipped quietly:
+    the saved connection after it restores, nothing is reported, and the
+    file is saved again as version 2 with that connection's tab"""
+    db = make_db(home, rows=5)
+    save_connection(home, db)
+    home.write("session.json", {"version": 2, "current": 0, "workspaces": [{
+        "name": "W", "current": 1, "connections": [
+            {"form": True, "order": 0},
+            {"saved_id": SAVED_ID, "name": "testdb", "sidebar": True, "current": 0,
+             "tabs": [{"type": "query", "text": "SELECT 7", "order": 1},
+                      {"type": "table", "table": "big", "order": 2}]}]}]})
+    with Tui(home, []) as t:
+        t.wait("SELECT 7")                   # the current tab, the query after the form
+        assert "name1" not in t.text()       # not the table tab
+        t.keys("]")
+        t.wait_status("Row 1/5")
+        status = t.status().lower()
+        assert "skip" not in status and "fail" not in status and "error" not in status
+        assert t.quit() == 0
+    s = home.read("session.json")
+    assert s["version"] == 2
+    conn = s["workspaces"][0]["connections"][0]
+    assert conn["saved_id"] == SAVED_ID and [x["type"] for x in conn["tabs"]] == ["query", "table"]
+
 BAD = '{"version": 2, "work'
 
 

@@ -1,4 +1,5 @@
 #include "model/workspace.h"
+#include "ui/form_tab.h"
 #include "util/mem.h"
 #include "util/str.h"
 #include <stdint.h>
@@ -17,6 +18,7 @@ static void conntab_free(ConnTab *t) {
   free(t->views);
   free(t->sidebar_search);
   if (t->owner) nc_owner_release(t->owner);
+  form_tab_free(t->form);
   free(t);
 }
 
@@ -28,15 +30,64 @@ void workspace_free(NcWorkspace *w) {
   free(w);
 }
 
-ConnTab *workspace_add_tab(NcWorkspace *w, NcConnection *c) {
+static uint64_t g_next_tab_uid = 1;
+
+ConnTab *workspace_insert_tab(NcWorkspace *w, size_t at, NcConnection *c, bool make_current) {
   ConnTab *t = safe_calloc(1, sizeof *t);
+  t->uid = g_next_tab_uid++;
   t->conn = c;
   t->owner = nc_owner_new();
   t->sidebar = true;
+  if (at > w->num_tabs) at = w->num_tabs;
   w->tabs = safe_realloc(w->tabs, (w->num_tabs + 1) * sizeof *w->tabs);
-  w->tabs[w->num_tabs] = t;
-  w->current = w->num_tabs++;
+  memmove(w->tabs + at + 1, w->tabs + at, (w->num_tabs - at) * sizeof *w->tabs);
+  w->tabs[at] = t;
+  w->num_tabs++;
+  if (make_current || w->num_tabs == 1) w->current = at;
+  else if (w->current >= at) w->current++;
   return t;
+}
+
+ConnTab *workspace_add_tab(NcWorkspace *w, NcConnection *c) {
+  return workspace_insert_tab(w, SIZE_MAX, c, true);
+}
+
+ConnTab *workspace_add_form(NcWorkspace *w, size_t at, bool make_current) {
+  ConnTab *t = workspace_insert_tab(w, at, NULL, make_current);
+  t->form = form_tab_new();
+  t->sidebar = false;
+  return t;
+}
+
+void conntab_make_form(ConnTab *t) {
+  for (size_t i = 0; i < t->num_views; i++) view_free(t->views[i]);
+  free(t->views);
+  t->views = NULL;
+  t->num_views = t->current = 0;
+  free(t->sidebar_search);
+  t->sidebar_search = NULL;
+  t->sidebar_cursor = t->sidebar_scroll = t->sidebar_search_pos = 0;
+  t->sidebar_focused = t->sidebar_search_visible = false;
+  t->sidebar_view_uid = 0;
+  t->sidebar = false;
+  if (t->owner) nc_owner_release(t->owner);
+  t->owner = nc_owner_new();
+  t->conn = NULL;
+  if (!t->form) t->form = form_tab_new();
+}
+
+void conntab_make_connected(ConnTab *t, NcConnection *c) {
+  form_tab_free(t->form);
+  t->form = NULL;
+  t->conn = c;
+  t->sidebar = true;
+  t->sidebar_focused = false;
+}
+
+size_t workspace_find_tab(const NcWorkspace *w, uint64_t uid) {
+  for (size_t i = 0; w && i < w->num_tabs; i++)
+    if (w->tabs[i]->uid == uid) return i;
+  return SIZE_MAX;
 }
 
 void workspace_remove_tab(NcWorkspace *w, size_t i) {
@@ -148,9 +199,18 @@ cJSON *workspace_to_json(const NcWorkspace *w, bool with_cursor) {
   cJSON *o = cJSON_CreateObject();
   cJSON_AddStringToObject(o, "name", w->name ? w->name : "");
   cJSON *conns = cJSON_AddArrayToObject(o, "connections");
+  size_t cells = 0; /* the tabs strip's cells before this tab: a form's "order" */
   for (size_t i = 0; i < w->num_tabs; i++) {
     const ConnTab *t = w->tabs[i];
     cJSON *c = cJSON_CreateObject();
+    size_t at = cells;
+    cells += t->num_views ? t->num_views : 1;
+    if (t->form) { /* nothing typed, highlighted or secret: it comes back empty */
+      cJSON_AddBoolToObject(c, "form", true);
+      cJSON_AddNumberToObject(c, "order", (double)at);
+      cJSON_AddItemToArray(conns, c);
+      continue;
+    }
     if (t->conn) {
       const char *sid = nc_connection_saved_id(t->conn);
       if (sid && *sid) cJSON_AddStringToObject(c, "saved_id", sid);

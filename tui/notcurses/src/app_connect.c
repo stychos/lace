@@ -27,7 +27,8 @@ typedef struct ConnectReq {
   char *connstr, *saved_id, *name;
   LaceSavedConnection *model; /* to rebuild the string with a password; may be NULL */
   char *db_pw, *ssh_pw;       /* typed at a retry */
-  bool as_tab, test_only;
+  NcDest dest;
+  bool test_only;
   ConnectDoneFn done;
   void *data;
   int conn_id, rc;
@@ -57,10 +58,10 @@ static void req_unlink(NcApp *app, ConnectReq *r) {
 }
 
 /* The done callback, once, and not while quitting */
-static void req_done(ConnectReq *r, NcConnection *c, const char *error) {
+static void req_done(ConnectReq *r, ConnTab *tab, const char *error) {
   ConnectDoneFn fn = r->done;
   r->done = NULL;
-  if (fn && !r->app->quit) fn(r->app, c, error, r->data);
+  if (fn && !r->app->quit) fn(r->app, tab, error, r->data);
 }
 
 /* The rule of the ncurses session restore, plus ssh's own refusal */
@@ -203,20 +204,20 @@ static void connect_succeeded(ConnectReq *r) {
                                       r->name, app->config->general.history_mode,
                                       app->config->general.history_max_size);
   nc_connection_set_listener(c, app_conn_event, app);
-  NcWorkspace *ws = app_current_workspace(app);
-  if (!r->as_tab && ws && ws->num_tabs) {
-    app_new_workspace(app, NULL);
-    ws = app_current_workspace(app);
-  }
-  workspace_add_tab(ws, c);
   nc_connection_refresh_tables(c);
+  ConnTab *tab = app_place_connection(app, c, r->dest);
+  if (!tab) { /* nobody holds it: closed again */
+    app_detach_connection(app, c);
+    req_done(r, NULL, "The tab was closed before the connection opened");
+    return;
+  }
   if (!r->saved_id && recent_add(&app->recent, r->connstr)) {
     char *err = NULL;
     if (!recent_save(&app->recent, &err)) app_log(app, true, "recent: %s", err ? err : "cannot save");
     free(err);
     cp_changed();
   }
-  req_done(r, c, NULL);
+  req_done(r, tab, NULL);
 }
 
 /* True: a password prompt took the request over */
@@ -265,24 +266,35 @@ static void connect_finished(void *arg) {
 }
 
 static ConnectReq *req_new(NcApp *app, const char *connstr, const char *saved_id, const char *name,
-                           bool as_tab, ConnectDoneFn done, void *data) {
+                           NcDest dest, ConnectDoneFn done, void *data) {
   ConnectReq *r = safe_calloc(1, sizeof *r);
   r->app = app;
   r->connstr = str_dup(connstr);
   r->saved_id = saved_id && *saved_id ? str_dup(saved_id) : NULL;
   r->name = name && *name ? str_dup(name) : NULL;
-  r->as_tab = as_tab;
+  r->dest = dest;
   r->done = done;
   r->data = data;
   return r;
 }
 
-void app_connect_url(NcApp *app, const char *connstr, const char *saved_id, const char *name,
-                     bool as_tab, ConnectDoneFn done, void *data) {
-  start_request(req_new(app, connstr, saved_id, name, as_tab, done, data));
+/* An open connection with the same key takes the request: placed at once */
+static bool share_open(NcApp *app, const char *saved_id, const char *connstr, NcDest dest, ConnectDoneFn done,
+                       void *data) {
+  NcConnection *c = app_conn_lookup(app, saved_id, connstr);
+  if (!c) return false;
+  ConnTab *tab = app_place_connection(app, c, dest);
+  if (done) done(app, tab, tab ? NULL : "The tab was closed before the connection opened", data);
+  return true;
 }
 
-void app_connect_saved(NcApp *app, const char *saved_id, bool as_tab, ConnectDoneFn done, void *data) {
+void app_connect_url(NcApp *app, const char *connstr, const char *saved_id, const char *name,
+                     NcDest dest, ConnectDoneFn done, void *data) {
+  if (share_open(app, saved_id, connstr, dest, done, data)) return;
+  start_request(req_new(app, connstr, saved_id, name, dest, done, data));
+}
+
+void app_connect_saved(NcApp *app, const char *saved_id, NcDest dest, ConnectDoneFn done, void *data) {
   ConnectionItem *it = app->connmgr && saved_id ? connmgr_find_by_id(app->connmgr, saved_id) : NULL;
   if (!it || !connmgr_is_connection(it)) {
     app_set_status(app, true, "Saved connection not found");
@@ -295,7 +307,11 @@ void app_connect_saved(NcApp *app, const char *saved_id, bool as_tab, ConnectDon
     if (done) done(app, NULL, "Cannot build the connection string", data);
     return;
   }
-  ConnectReq *r = req_new(app, cs, saved_id, it->connection.name, as_tab, done, data);
+  if (share_open(app, saved_id, cs, dest, done, data)) {
+    str_secure_free(cs);
+    return;
+  }
+  ConnectReq *r = req_new(app, cs, saved_id, it->connection.name, dest, done, data);
   r->model = lace_saved_conn_copy(&it->connection);
   str_secure_free(cs);
   start_request(r);
@@ -303,7 +319,7 @@ void app_connect_saved(NcApp *app, const char *saved_id, bool as_tab, ConnectDon
 
 void app_test_connection(NcApp *app, const char *connstr, const LaceSavedConnection *model,
                          ConnectDoneFn done, void *data) {
-  ConnectReq *r = req_new(app, connstr, NULL, NULL, true, done, data);
+  ConnectReq *r = req_new(app, connstr, NULL, NULL, (NcDest){NC_DEST_APPEND, 0, NULL}, done, data);
   r->test_only = true;
   if (model) r->model = lace_saved_conn_copy(model);
   start_request(r);
@@ -329,8 +345,8 @@ char *app_target_to_connstr(const char *text, char **error) {
   return NULL;
 }
 
-static void target_done(NcApp *app, NcConnection *c, const char *error, void *data) {
-  (void)c; (void)error; (void)data;
+static void target_done(NcApp *app, ConnTab *tab, const char *error, void *data) {
+  (void)tab; (void)error; (void)data;
   app_connect_targets(app);
 }
 
@@ -343,10 +359,13 @@ void app_connect_targets(NcApp *app) {
       free(err);
       continue;
     }
-    app_connect_url(app, cs, NULL, NULL, true, target_done, NULL);
+    app_connect_url(app, cs, NULL, NULL, (NcDest){NC_DEST_APPEND, 0, NULL}, target_done, NULL);
     str_secure_free(cs);
     return;
   }
+  /* The last one is done: a workspace none of them reached gets a form */
+  NcWorkspace *ws = app_current_workspace(app);
+  if (app->num_targets && ws && !ws->num_tabs) workspace_add_form(ws, SIZE_MAX, true);
 }
 
 static void free_closing(NcApp *app) {
@@ -379,148 +398,4 @@ void app_connect_cleanup(NcApp *app) {
     }
   }
   free_closing(app);
-}
-
-/* ==========================================================================
- * Tabs and workspaces
- * ========================================================================== */
-
-NcWorkspace *app_current_workspace(NcApp *app) {
-  return app->current_ws < app->num_workspaces ? app->workspaces[app->current_ws] : NULL;
-}
-
-ConnTab *app_current_tab(NcApp *app) { return workspace_current_tab(app_current_workspace(app)); }
-
-View *app_current_view(NcApp *app) { return conntab_current_view(app_current_tab(app)); }
-
-/* The connection leaves its tab and is closed on its worker; it is freed when
- * the disconnect has run (NC_CONN_EV_CLOSED) or at exit */
-void app_detach_connection(NcApp *app, NcConnection *c) {
-  if (!c) return;
-  app->closing = safe_realloc(app->closing, (app->num_closing + 1) * sizeof *app->closing);
-  app->closing[app->num_closing++] = c;
-  if (nc_connection_busy(c)) nc_connection_cancel(c); /* the disconnect queues behind a running statement */
-  nc_connection_close(c);
-}
-
-void app_conn_event(NcConnection *c, NcConnEvent ev, const char *msg, void *data) {
-  NcApp *app = data;
-  if (ev == NC_CONN_EV_TABLES) {
-    size_t n = 0;
-    nc_connection_tables(c, &n);
-    app_log(app, false, "list tables  \xe2\x86\x92 %zu", n);
-  } else if (ev == NC_CONN_EV_NOTICE && msg) {
-    app_set_status(app, false, "%s", msg);
-  } else if (ev == NC_CONN_EV_CLOSED) {
-    for (size_t i = 0; i < app->num_closing; i++) {
-      if (app->closing[i] != c) continue;
-      memmove(app->closing + i, app->closing + i + 1, (app->num_closing - i - 1) * sizeof *app->closing);
-      app->num_closing--;
-      nc_connection_free(c);
-      return;
-    }
-  }
-}
-
-void app_switch_tab(NcApp *app, size_t i) {
-  NcWorkspace *ws = app_current_workspace(app);
-  View *cur = app_current_view(app);
-  if (cur) cur->split_drag = false;
-  if (ws && i < ws->num_tabs) ws->current = i;
-}
-
-typedef struct { NcApp *app; NcConnection *conn; } TabClose;
-
-static void close_tab_now(NcApp *app, NcWorkspace *ws, size_t i) {
-  NcConnection *c = ws->tabs[i]->conn;
-  ws->tabs[i]->conn = NULL;
-  workspace_remove_tab(ws, i);
-  app_detach_connection(app, c);
-}
-
-static void close_tab_confirmed(NcApp *app, bool yes, void *data) {
-  TabClose *tc = data;
-  if (yes)
-    for (size_t w = 0; w < app->num_workspaces; w++)
-      for (size_t i = 0; i < app->workspaces[w]->num_tabs; i++)
-        if (app->workspaces[w]->tabs[i]->conn == tc->conn) {
-          close_tab_now(app, app->workspaces[w], i);
-          free(tc);
-          return;
-        }
-  free(tc);
-}
-
-void app_close_tab(NcApp *app, size_t i) {
-  NcWorkspace *ws = app_current_workspace(app);
-  if (!ws || i >= ws->num_tabs) return;
-  NcConnection *c = ws->tabs[i]->conn;
-  if (c && nc_connection_tx_state(c) != NC_TX_NONE) {
-    char *msg = str_printf("A transaction is open on %s. Close and roll back?", nc_connection_name(c));
-    TabClose *tc = safe_calloc(1, sizeof *tc);
-    tc->app = app;
-    tc->conn = c;
-    confirm_open(app, "Close connection", msg, "Close", true, close_tab_confirmed, tc);
-    free(msg);
-    return;
-  }
-  close_tab_now(app, ws, i);
-}
-
-void app_switch_workspace(NcApp *app, size_t i) {
-  if (i < app->num_workspaces) app->current_ws = i;
-}
-
-void app_new_workspace(NcApp *app, const char *name) {
-  char *n = name && *name ? str_dup(name) : str_printf("Workspace %zu", app->num_workspaces + 1);
-  app->workspaces = safe_realloc(app->workspaces, (app->num_workspaces + 1) * sizeof *app->workspaces);
-  app->workspaces[app->num_workspaces] = workspace_new(n);
-  app->current_ws = app->num_workspaces++;
-  free(n);
-}
-
-void app_rename_workspace(NcApp *app, size_t i, const char *name) {
-  if (i >= app->num_workspaces || !name || !*name) return;
-  free(app->workspaces[i]->name);
-  app->workspaces[i]->name = str_dup(name);
-}
-
-static void close_workspace_now(NcApp *app, NcWorkspace *w) {
-  size_t i = 0;
-  while (i < app->num_workspaces && app->workspaces[i] != w) i++;
-  if (i == app->num_workspaces) return;
-  for (size_t k = 0; k < w->num_tabs; k++) {
-    app_detach_connection(app, w->tabs[k]->conn);
-    w->tabs[k]->conn = NULL;
-  }
-  workspace_free(w);
-  memmove(app->workspaces + i, app->workspaces + i + 1, (app->num_workspaces - i - 1) * sizeof *app->workspaces);
-  app->num_workspaces--;
-  if (!app->num_workspaces) {
-    app->workspaces[0] = workspace_new("Workspace");
-    app->num_workspaces = 1;
-    app->current_ws = 0;
-  } else if (app->current_ws > i || app->current_ws >= app->num_workspaces) {
-    app->current_ws = app->current_ws ? app->current_ws - 1 : 0;
-  }
-}
-
-static void close_workspace_confirmed(NcApp *app, bool yes, void *data) {
-  if (yes) close_workspace_now(app, data);
-}
-
-void app_close_workspace(NcApp *app, size_t i) {
-  if (i >= app->num_workspaces) return;
-  NcWorkspace *w = app->workspaces[i];
-  for (size_t k = 0; k < w->num_tabs; k++) {
-    NcConnection *c = w->tabs[k]->conn;
-    if (c && nc_connection_tx_state(c) != NC_TX_NONE) {
-      char *msg = str_printf("A transaction is open on %s. Close the workspace and roll back?",
-                             nc_connection_name(c));
-      confirm_open(app, "Close workspace", msg, "Close", true, close_workspace_confirmed, w);
-      free(msg);
-      return;
-    }
-  }
-  close_workspace_now(app, w);
 }

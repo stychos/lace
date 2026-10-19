@@ -710,7 +710,16 @@ static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
     if (count > 0) {
       ws->tabs = safe_calloc(count, sizeof(SessionTab));
       cJSON *t;
+      size_t index = 0, current = ws->current_tab;
       cJSON_ArrayForEach(t, tabs) {
+        /* A connection form (later builds) is not a tab here yet: skipped,
+         * and the current tab index moves down past it */
+        if (str_eq(json_get_string(t, "type", ""), "FORM")) {
+          if (index++ < current && ws->current_tab > 0)
+            ws->current_tab--;
+          continue;
+        }
+        index++;
         if (parse_tab(t, &ws->tabs[ws->num_tabs])) {
           ws->num_tabs++;
         }

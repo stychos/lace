@@ -1,6 +1,7 @@
 #include "ui/header.h"
 #include "ui/tabstrip.h"
 #include "app.h"
+#include "ui/form_tab.h"
 #include "core/utf8.h"
 #include "model/workspace.h"
 #include "util/mem.h"
@@ -180,7 +181,8 @@ void header_draw(NcApp *app) {
   }
   const char **names = safe_calloc(ws->num_tabs, sizeof *names);
   for (size_t i = 0; i < ws->num_tabs; i++) {
-    names[i] = ws->tabs[i]->conn ? nc_connection_name(ws->tabs[i]->conn) : "?";
+    const ConnTab *ti = ws->tabs[i];
+    names[i] = ti->conn ? nc_connection_name(ti->conn) : ti->form ? form_tab_label(ti->form) : "?";
   }
   ConnTab *t = workspace_current_tab(ws);
   View *v = conntab_current_view(t);

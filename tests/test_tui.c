@@ -353,6 +353,69 @@ static ConnectionItem *child_named(ConnectionItem *folder, const char *name) {
 
 /* Items live by value in their folder's array: growing, shifting and moving
  * must leave every parent pointer right */
+/* The connection tab's actions: names, categories, frontends, no clash in their category */
+static void test_hotkeys_connection_tab(void) {
+  Config *c = config_get_defaults();
+  CHECK(hotkey_action_from_key("new_connection") == HOTKEY_NEW_CONNECTION);
+  CHECK_STR(hotkey_action_name(HOTKEY_CONN_OPEN), "Open here");
+  CHECK(hotkey_get_category(HOTKEY_CONN_OPEN_BACKGROUND) == HOTKEY_CAT_CONNECT);
+  CHECK(hotkey_action_frontends(HOTKEY_CONN_CLEAR) == CONFIG_FE_NOTCURSES);
+  CHECK(hotkey_action_frontends(HOTKEY_CONN_TEST) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_frontends(HOTKEY_CONN_EDIT) == CONFIG_FE_NCURSES);
+  c->frontend = CONFIG_FE_NOTCURSES;
+  static const HotkeyAction fresh[] = {HOTKEY_NEW_CONNECTION, HOTKEY_CONN_OPEN, HOTKEY_CONN_OPEN_BACKGROUND,
+      HOTKEY_CONN_OPEN_NEW_WORKSPACE, HOTKEY_CONN_OPEN_TO_WORKSPACE, HOTKEY_CONN_SAVE_AS_NEW, HOTKEY_CONN_CLEAR};
+  static const char *keys[] = {"n", "ENTER", "CTRL+B", "CTRL+N", "CTRL+O", "CTRL+Y", "CTRL+L"};
+  for (size_t i = 0; i < 7; i++)
+    CHECK(hotkey_find_conflict(c, fresh[i], keys[i]) == HOTKEY_COUNT);
+  config_free(c);
+}
+
+static void test_config_connection_tab_keys(void) {
+  char dir[] = "/tmp/lace-cfg-XXXXXX";
+  CHECK(mkdtemp(dir) != NULL);
+  char *p = str_printf("%s/config.json", dir);
+  char *err = NULL;
+  /* Defaults */
+  Config *c = config_get_defaults();
+  CHECK(c->general.keep_connection_tab);
+  CHECK(c->general.last_workspace_close == CONFIG_LAST_WS_QUIT);
+  config_free(c);
+  /* Migration: the old key on, the new one absent */
+  const char *text = "{\"general\":{\"close_conn_on_last_tab\":true}}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_load_file(p, &err);
+  CHECK(c && !err && !c->general.keep_connection_tab);
+  /* Saved: the new keys are written, the old one is gone */
+  CHECK(config_save_file(c, p, &err));
+  config_free(c);
+  char *back = platform_read_file(p, 1 << 20);
+  CHECK(back && strstr(back, "\"keep_connection_tab\":\tfalse") && !strstr(back, "close_conn_on_last_tab"));
+  CHECK(back && strstr(back, "\"on_last_workspace_close\":\t\"quit\""));
+  free(back);
+  /* The new key wins over the old one */
+  text = "{\"general\":{\"close_conn_on_last_tab\":true,\"keep_connection_tab\":true,"
+         "\"on_last_workspace_close\":\"new\"}}";
+  CHECK(platform_write_file_private(p, text, strlen(text)));
+  c = config_load_file(p, &err);
+  CHECK(c && !err && c->general.keep_connection_tab);
+  CHECK(c->general.last_workspace_close == CONFIG_LAST_WS_NEW);
+  config_free(c);
+  /* An unknown or mistyped value is the default, not an error */
+  const char *odd[] = {"\"exit\"", "1", "null"};
+  for (int i = 0; i < 3; i++) {
+    char *t = str_printf("{\"general\":{\"on_last_workspace_close\":%s}}", odd[i]);
+    CHECK(platform_write_file_private(p, t, strlen(t)));
+    c = config_load_file(p, &err);
+    CHECK(c && !err && c->general.last_workspace_close == CONFIG_LAST_WS_QUIT);
+    config_free(c);
+    free(t);
+  }
+  unlink(p);
+  rmdir(dir);
+  free(p);
+}
+
 static void test_connection_tree(void) {
   ConnectionManager *mgr = connmgr_new();
   CHECK(connmgr_add_folder(&mgr->root, connmgr_new_folder("A")));
@@ -844,6 +907,56 @@ static const char *FLAT_WS =
     "{\"type\":\"TABLE\",\"connection_id\":\"\",\"table_name\":\"lost\",\"ui\":{}}"
     "]}";
 
+static void test_workspace_json_forms(void) {
+  char *err = NULL;
+  /* Flat: two forms around a table tab, the second form current */
+  cJSON *flat = cJSON_Parse(
+      "{\"name\":\"F\",\"current_tab\":2,\"tabs\":["
+      "{\"type\":\"FORM\",\"connection_id\":\"\"},"
+      "{\"type\":\"TABLE\",\"connection_id\":\"A\",\"table_name\":\"t\",\"ui\":{}},"
+      "{\"type\":\"FORM\",\"connection_id\":\"\"}]}");
+  cJSON *n = workspace_json_to_nested(flat, &err);
+  CHECK(n && !err);
+  cJSON *conns = json_get_array(n, "connections");
+  CHECK_SIZE(json_array_size(conns), 3); /* the two forms are not merged */
+  cJSON *f0 = json_get_array_item(conns, 0);
+  CHECK(json_get_bool(f0, "form", false));
+  CHECK_SIZE(json_get_int(f0, "order", -1), 0);
+  CHECK(!cJSON_GetObjectItem(f0, "saved_id") && !cJSON_GetObjectItem(f0, "connstr") &&
+        !cJSON_GetObjectItem(f0, "tabs"));
+  CHECK_STR(json_get_string(json_get_array_item(conns, 1), "saved_id", ""), "A");
+  CHECK_SIZE(json_get_int(json_get_array_item(conns, 2), "order", -1), 2);
+  CHECK_SIZE(json_get_int(n, "current", -1), 2); /* the current tab was the second form */
+  /* And back: the same three tabs in the same order, the same current tab */
+  cJSON *back = workspace_json_to_flat(n, &err);
+  CHECK(back && !err);
+  cJSON *tabs = json_get_array(back, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 3);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "type", ""), "FORM");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connection_id", "x"), "");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 1), "type", ""), "TABLE");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 2), "type", ""), "FORM");
+  CHECK_SIZE(json_get_int(back, "current_tab", -1), 2);
+  cJSON_Delete(back);
+  cJSON_Delete(n);
+  cJSON_Delete(flat);
+
+  /* Nested, GUI-like: no order; "form" wins over a stray saved_id; a
+   * workspace of only a form converts (not "no workspace could be converted") */
+  cJSON *only = cJSON_Parse(
+      "{\"version\":2,\"current\":0,\"workspaces\":[{\"name\":\"O\",\"current\":0,"
+      "\"connections\":[{\"form\":true,\"saved_id\":\"A\"}]}]}");
+  cJSON *v1 = session_json_to_v1(only, &err);
+  CHECK(v1 && !err);
+  cJSON *ws = json_get_array_item(json_get_array(v1, "workspaces"), 0);
+  tabs = json_get_array(ws, "tabs");
+  CHECK_SIZE(json_array_size(tabs), 1);
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "type", ""), "FORM");
+  CHECK_STR(json_get_string(json_get_array_item(tabs, 0), "connection_id", "x"), "");
+  cJSON_Delete(v1);
+  cJSON_Delete(only);
+}
+
 static void test_workspace_json(void) {
   char *err = NULL;
   cJSON *flat = cJSON_Parse(FLAT_WS);
@@ -1160,6 +1273,8 @@ int main(void) {
   test_recent_passwords();
   test_session_connstr_password();
   test_config_file();
+  test_config_connection_tab_keys();
+  test_hotkeys_connection_tab();
   test_connection_tree();
   test_connections_file();
   test_argv_scrub();
@@ -1182,5 +1297,6 @@ int main(void) {
   test_hotkey_frontend_mask();
   test_hotkey_key_string();
   test_workspace_json();
+  test_workspace_json_forms();
   return test_report("tui");
 }

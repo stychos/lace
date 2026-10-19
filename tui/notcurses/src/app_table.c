@@ -331,17 +331,25 @@ View *app_open_table_background(NcApp *app, const char *table) {
 View *app_preview_table(NcApp *app, const char *table) { return open_table(app, table, true); }
 
 bool app_cancel_running(NcApp *app) {
-  ConnTab *t = app_current_tab(app);
-  if (!t || !t->conn || !nc_connection_busy(t->conn)) return false;
-  /* A cancel would reach the COMMIT itself and leave it undecided: let it
-   * finish (Esc is still consumed) */
-  for (size_t i = 0; i < t->num_views; i++)
-    if (t->views[i]->committing) {
-      app_set_status(app, false, "COMMIT in progress");
-      return true;
-    }
-  for (size_t i = 0; i < t->num_views; i++)
-    if (t->views[i]->running) t->views[i]->cancel_run = true; /* a script stops, not only its statement */
-  nc_connection_cancel(t->conn);
+  ConnTab *cur = app_current_tab(app);
+  NcConnection *c = cur ? cur->conn : NULL;
+  if (!c || !nc_connection_busy(c)) return false;
+  /* Every tab holding the connection, in any workspace, runs on it. A cancel
+   * would reach a COMMIT and leave it undecided: let it finish (Esc is still
+   * consumed) */
+  for (int pass = 0; pass < 2; pass++)
+    for (size_t w = 0; w < app->num_workspaces; w++)
+      for (size_t k = 0; k < app->workspaces[w]->num_tabs; k++) {
+        ConnTab *t = app->workspaces[w]->tabs[k];
+        if (t->conn != c) continue;
+        for (size_t i = 0; i < t->num_views; i++) {
+          if (pass == 0 && t->views[i]->committing) {
+            app_set_status(app, false, "COMMIT in progress");
+            return true;
+          }
+          if (pass == 1 && t->views[i]->running) t->views[i]->cancel_run = true; /* a script stops, not only its statement */
+        }
+      }
+  nc_connection_cancel(c);
   return true;
 }

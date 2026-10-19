@@ -160,6 +160,15 @@ typedef enum {
   HOTKEY_COLUMN_WIDER,
   HOTKEY_SPLIT_UP,
   HOTKEY_SPLIT_DOWN,
+  /* The connection tab (notcurses for now): a new form, and the form's buttons
+   * (HOTKEY_CAT_CONNECT, chords so they work while a field is typed in) */
+  HOTKEY_NEW_CONNECTION,
+  HOTKEY_CONN_OPEN,
+  HOTKEY_CONN_OPEN_BACKGROUND,
+  HOTKEY_CONN_OPEN_NEW_WORKSPACE,
+  HOTKEY_CONN_OPEN_TO_WORKSPACE,
+  HOTKEY_CONN_SAVE_AS_NEW,
+  HOTKEY_CONN_CLEAR,
   HOTKEY_COUNT
 } HotkeyAction;
 
@@ -186,7 +195,8 @@ typedef struct {
   bool quit_confirmation;
   bool delete_confirmation;    /* Ask for confirmation before deleting rows */
   bool auto_open_first_table;  /* Open first table instead of connection tab */
-  bool close_conn_on_last_tab; /* Close connection when last tab closes */
+  bool keep_connection_tab;    /* The last view's close leaves a connection tab */
+  int last_workspace_close;    /* CONFIG_LAST_WS_*: closing the last workspace */
   int history_mode;            /* 0=off, 1=session, 2=persistent */
   int history_max_size;        /* Max history entries per connection */
   int daemon_spawn_mode;       /* 0=unix socket, 1=stdio pipes */
@@ -198,6 +208,9 @@ typedef struct {
   int row_numbers;             /* 0 never, 1 auto, 2 always */
   int color_scheme;            /* 0 system, 1 light, 2 dark */
 } GeneralConfig;
+
+#define CONFIG_LAST_WS_QUIT 0 /* "on_last_workspace_close": "quit" */
+#define CONFIG_LAST_WS_NEW 1  /* "new": a fresh workspace */
 
 #define CONFIG_ROW_NUMBERS_NEVER 0
 #define CONFIG_ROW_NUMBERS_AUTO 1

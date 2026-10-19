@@ -29,6 +29,7 @@ typedef struct {
   int (*score)(const char *needle, const ListRow *row); /* -1: hidden; NULL: case-insensitive substring */
   int detail_cols;     /* width reserved for the detail column, 0 = none */
   int page;            /* rows visible at the last draw (PageUp/PageDown step) */
+  bool hide_cursor;    /* draw no cursor row (nothing picked yet); the cursor stays where it is */
 } ListWidget;
 
 typedef enum { LIST_NONE, LIST_CHANGED, LIST_ACTIVATE, LIST_CANCEL } ListAction;

@@ -25,7 +25,7 @@ def test_restore_own_session(home):
         assert t.quit() == 0
     s = home.read("session.json")
     assert s["version"] == 2
-    conn = s["workspaces"][0]["connections"][0]
+    conn = next(c for c in s["workspaces"][0]["connections"] if "saved_id" in c)
     assert conn["saved_id"] == SAVED_ID and [x["type"] for x in conn["tabs"]] == ["table", "query"]
     assert conn["tabs"][0]["cursor"][0] == 122
     with Nc(home, []) as t:
@@ -64,6 +64,42 @@ def test_restore_missing_db_is_skipped(home):
         t.keys("q"); assert t.quit() == 0
 
 
+
+def test_restore_form_current(home):
+    """A connection form entry restores as a form tab in its place, current when it was"""
+    db = make_db(home, rows=5)
+    save_connection(home, db)
+    home.write("session.json", {"version": 2, "current": 0, "workspaces": [{"name": "W", "current": 0, "connections": [
+        {"form": True, "order": 0},
+        {"saved_id": SAVED_ID, "name": "testdb", "sidebar": True, "current": 0, "tabs": [{"type": "table", "table": "big"}]}]}]})
+    with Nc(home, []) as t:
+        t.wait(lambda s: s.split("\n")[0].startswith(" W ▸ New connection"))
+        t.keys("F8"); t.wait("Log")
+        assert "Could not reopen" not in t.text()
+        t.keys("Escape")
+        t.keys("]")
+        t.wait("1 of 5")
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_forms_only_workspace(home):
+    db = make_db(home, rows=5)
+    save_connection(home, db)
+    home.write("session.json", {"version": 2, "current": 0, "workspaces": [
+        {"name": "W", "current": 0, "connections": [
+            {"saved_id": SAVED_ID, "name": "testdb", "sidebar": True, "current": 0, "tabs": [{"type": "table", "table": "big"}]}]},
+        {"name": "Forms", "current": 0, "connections": [{"form": True, "order": 0}, {"form": True, "order": 1}]}]})
+    with Nc(home, []) as t:
+        t.wait("1 of 5")
+        t.keys("}")
+        t.wait(lambda s: s.split("\n")[0].startswith(" Forms ▸ New connection"))
+        t.keys("{")
+        t.wait("1 of 5")
+        t.keys("q"); assert t.quit() == 0
+    ws = home.read("session.json")["workspaces"]
+    assert [c.get("form") for c in ws[1]["connections"]] == [True, True]
+
+
 def test_restore_asks_password(home):
     home.write("connections.json", {"root": {"type": "folder", "name": "Connections", "expanded": True,
         "children": [{"type": "connection", "id": SAVED_ID, "name": "pg", "driver": "postgres", "host": "127.0.0.1",
@@ -100,7 +136,7 @@ def test_saved_workspace_round_trip(home):
     ws = home.read("workspaces.json")["workspaces"]
     assert ws[0]["name"] == "mine" and "connections" in ws[0]["workspace"]
     with Nc(home, ["-s"]) as t:
-        t.wait("Lace")                         # the first screen is drawn (input before it is dropped)
+        t.wait("New connection")               # the first screen is drawn (input before it is dropped)
         t.keys("C-p"); t.type("open saved workspace mine"); t.keys("Enter")
         t.wait("mine ▸"); t.wait("1 of 5")
         t.keys("q"); assert t.quit() == 0

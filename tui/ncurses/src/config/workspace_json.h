@@ -19,6 +19,8 @@ WorkspaceJsonShape workspace_json_shape(const cJSON *workspace);
 
 /* New objects; NULL with *error set when the input is not a workspace or a
  * filter uses an operator key this build does not know */
+/* A connection form is a flat tab {"type": "FORM", "connection_id": ""} and
+ * a nested connection {"form": true, "order": N}, one object per form */
 cJSON *workspace_json_to_nested(const cJSON *flat, char **error);
 cJSON *workspace_json_to_flat(const cJSON *nested, char **error);
 

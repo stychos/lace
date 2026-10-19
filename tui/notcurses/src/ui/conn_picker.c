@@ -2,7 +2,6 @@
 #include "core/connstr_display.h"
 #include "core/utf8.h"
 #include "ui/dialogs/confirm.h"
-#include "ui/dialogs/connect.h"
 #include "ui/input.h"
 #include "ui/overlay.h"
 #include "util/mem.h"
@@ -64,6 +63,22 @@ static bool contains_ci(const char *hay, const char *needle) {
   return false;
 }
 
+/* "data.sqlite" / "db on host": what a narrow panel can show of a URL */
+static char *short_name(const char *url) {
+  LaceSavedConnection *m = lace_saved_conn_from_connstr(url, NULL);
+  if (!m) return NULL;
+  char *out;
+  if (m->driver && !strcmp(m->driver, "sqlite")) {
+    const char *slash = m->database ? strrchr(m->database, '/') : NULL;
+    out = str_dup(slash && slash[1] ? slash + 1 : m->database ? m->database : "sqlite");
+  } else {
+    out = str_printf("%s on %s", m->database && *m->database ? m->database : m->driver ? m->driver : "database",
+                     m->host && *m->host ? m->host : "localhost");
+  }
+  lace_saved_conn_free(m);
+  return out;
+}
+
 static void restore(ConnPicker *p, int kind, size_t idx) {
   ListWidget *l = &p->list;
   for (size_t i = 0; i < l->num_shown; i++) {
@@ -93,24 +108,26 @@ void cp_rebuild(NcApp *app, ConnPicker *p) {
       free(text);
     } else {
       char *text = str_printf("%*s  %s", indent, "", connmgr_item_name(it));
-      char *cs = connmgr_build_connstr(&it->connection);
-      char *detail = cs ? connstr_display(cs) : NULL;
+      char *open = app_conn_open_in(app, it->connection.id);
+      char *detail = open ? str_printf("\xe2\x97\x8f open in %s", open) : NULL;
       add(&r, text, detail, CPK_CONN, i, false);
       free(text);
       free(detail);
-      str_secure_free(cs);
+      free(open);
     }
   }
   bool header = false;
   for (size_t i = 0; i < app->recent.count; i++) {
     char *d = connstr_display(app->recent.items[i].url);
+    char *name = short_name(app->recent.items[i].url);
     const char *label = d ? d : app->recent.items[i].url;
     if (contains_ci(label, filter) || contains_ci(app->recent.items[i].url, filter)) {
       if (!header) { add(&r, "Recent", NULL, 0, 0, true); header = true; }
-      char *text = str_printf("  %s", label);
+      char *text = str_printf("  %s", name ? name : label);
       add(&r, text, NULL, CPK_RECENT, i, false);
       free(text);
     }
+    free(name);
     free(d);
   }
   list_set_rows(&p->list, r.rows, r.n);
@@ -131,198 +148,9 @@ void cp_free(ConnPicker *p) {
   text_input_free(&p->in);
 }
 
-/* ---- keys ---- */
-
-static bool ctrl(const UiEvent *ev, int letter) {
-  return !ev->key.is_special && (ev->key.mods & UI_MOD_CTRL) && toupper(ev->key.key) == letter;
-}
-
-CpResult cp_key(NcApp *app, ConnPicker *p, const UiEvent *ev, bool picker_mode) {
-  CpResult res = {false, CP_NONE};
-  if (ev->type != UI_EVENT_KEY) return res;
-  const char *text = p->in.buf ? p->in.buf : "";
-  ListRow *sel = list_selected(&p->list);
-  if (ev->key.is_special && !(ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT))) {
-    switch (ev->key.key) {
-    case UI_KEY_ESCAPE:
-      if (picker_mode) return res;
-      res.consumed = true;
-      if (*text) { text_input_set(&p->in, ""); cp_rebuild(app, p); }
-      p->input_focused = false; /* even with nothing to pick: global keys (q) work again */
-      return res;
-    case UI_KEY_TAB:
-    case UI_KEY_BTAB:
-      res.consumed = true;
-      if (p->input_focused) { if (sel) p->input_focused = false; }
-      else p->input_focused = true;
-      return res;
-    case UI_KEY_DOWN:
-      res.consumed = true;
-      if (p->input_focused) { if (sel) p->input_focused = false; }
-      else if (list_key(&p->list, ev) == LIST_NONE && !sel) p->input_focused = true;
-      return res;
-    case UI_KEY_UP:
-      res.consumed = true;
-      if (p->input_focused) return res;
-      if (list_key(&p->list, ev) == LIST_NONE) p->input_focused = true;
-      return res;
-    case UI_KEY_PAGEUP:
-    case UI_KEY_PAGEDOWN:
-      res.consumed = true;
-      if (!p->input_focused) list_key(&p->list, ev);
-      return res;
-    case UI_KEY_ENTER:
-      res.consumed = true;
-      if (p->input_focused && *text) res.act = CP_CONNECT_TEXT;
-      else if (sel) res.act = CP_ROW;
-      return res;
-    case UI_KEY_HOME:
-    case UI_KEY_END:
-      if (!p->input_focused) { res.consumed = true; list_key(&p->list, ev); return res; }
-      break;
-    default: break;
-    }
-  }
-  if (ctrl(ev, 'S')) { /* save the typed URL, or the recent one under the cursor */
-    res.consumed = true;
-    if (p->input_focused && *text) res.act = CP_SAVE;
-    else if (sel && sel->kind == CPK_RECENT) res.act = CP_SAVE;
-    return res;
-  }
-  if (p->input_focused) {
-    char *before = str_dup(text);
-    res.consumed = nc_text_input_key(&p->in, ev);
-    if (strcmp(before, p->in.buf ? p->in.buf : "") != 0) cp_rebuild(app, p);
-    str_secure_free(before);
-    return res;
-  }
-  if (ev->key.is_special || (ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT))) return res;
-  switch (ev->key.key) {
-  case '/': res.consumed = true; p->input_focused = true; break;
-  case 'n': res.consumed = true; res.act = CP_NEW; break;
-  case 'e': if (sel && sel->kind == CPK_CONN) { res.consumed = true; res.act = CP_EDIT; } break;
-  case 'x':
-    if (sel && sel->kind == CPK_CONN) { res.consumed = true; res.act = CP_DELETE; }
-    else if (sel && sel->kind == CPK_RECENT) { res.consumed = true; res.act = CP_FORGET; }
-    break;
-  case 's': if (sel && sel->kind == CPK_RECENT) { res.consumed = true; res.act = CP_SAVE; } break;
-  case 't': if (sel && sel->kind != CPK_FOLDER) { res.consumed = true; res.act = CP_ROW_TAB; } break;
-  case 'w':
-    if (picker_mode && sel && sel->kind != CPK_FOLDER) { res.consumed = true; res.act = CP_ROW_WORKSPACE; }
-    break;
-  case ' ': if (sel && sel->kind == CPK_FOLDER) { res.consumed = true; res.act = CP_ROW; } break;
-  default: break;
-  }
-  return res;
-}
-
-/* ---- actions ---- */
-
-static void delete_confirmed(NcApp *app, bool yes, void *data) {
-  char *id = data;
-  if (yes && app->connmgr) {
-    ConnectionItem *it = connmgr_find_by_id(app->connmgr, id);
-    if (it) {
-      char *err = NULL;
-      connmgr_remove_item(app->connmgr, it);
-      if (!connmgr_save(app->connmgr, &err)) app_set_status(app, true, "connections: %s", err ? err : "cannot save");
-      free(err);
-      cp_changed();
-    }
-  }
-  free(id);
-}
-
-void cp_perform(NcApp *app, ConnPicker *p, CpAction act, Overlay *o) {
-  const char *text = p->in.buf ? p->in.buf : "";
-  ListRow *sel = list_selected(&p->list);
-  int kind = sel ? sel->kind : 0;
-  size_t idx = sel ? (size_t)(intptr_t)sel->data : 0;
-  ConnectionItem *it = kind == CPK_CONN || kind == CPK_FOLDER
-                           ? connmgr_get_filtered_item(app->connmgr, text, idx) : NULL;
-  bool as_tab = act != CP_ROW_WORKSPACE;
-  char *err = NULL;
-  switch (act) {
-  case CP_CONNECT_TEXT: {
-    char *cs = app_target_to_connstr(text, &err);
-    if (!cs) { app_set_status(app, true, "%s", err ? err : "Not a connection"); free(err); return; }
-    if (o) overlay_pop_this(app, o);
-    else { /* the welcome screen: the text is spent, the list shows again */
-      text_input_set(&p->in, "");
-      cp_rebuild(app, p);
-    }
-    app_connect_url(app, cs, NULL, NULL, true, NULL, NULL);
-    str_secure_free(cs);
-    return;
-  }
-  case CP_ROW:
-  case CP_ROW_TAB:
-  case CP_ROW_WORKSPACE:
-    if (kind == CPK_FOLDER && it) {
-      connmgr_toggle_folder(it);
-      cp_rebuild(app, p);
-    } else if (kind == CPK_CONN && it) {
-      char *id = str_dup(it->connection.id);
-      if (o) overlay_pop_this(app, o);
-      app_connect_saved(app, id, as_tab, NULL, NULL);
-      free(id);
-    } else if (kind == CPK_RECENT && idx < app->recent.count) {
-      char *url = str_dup(app->recent.items[idx].url);
-      if (o) overlay_pop_this(app, o);
-      app_connect_url(app, url, NULL, NULL, as_tab, NULL, NULL);
-      str_secure_free(url);
-    }
-    return;
-  case CP_EDIT:
-    if (it && kind == CPK_CONN) connect_form_open(app, lace_saved_conn_copy(&it->connection));
-    return;
-  case CP_NEW: connect_form_open(app, NULL); return;
-  case CP_DELETE:
-    if (it && kind == CPK_CONN) {
-      char *msg = str_printf("Delete the saved connection \"%s\"?", connmgr_item_name(it));
-      confirm_open(app, "Delete connection", msg, "Delete", true, delete_confirmed,
-                   str_dup(it->connection.id));
-      free(msg);
-    }
-    return;
-  case CP_FORGET:
-    if (kind == CPK_RECENT && idx < app->recent.count) {
-      recent_remove(&app->recent, idx);
-      recent_save(&app->recent, NULL);
-      cp_rebuild(app, p);
-    }
-    return;
-  case CP_SAVE: {
-    char *url = NULL;
-    if (p->input_focused && *text) url = app_target_to_connstr(text, &err);
-    else if (kind == CPK_RECENT && idx < app->recent.count) url = str_dup(app->recent.items[idx].url);
-    LaceSavedConnection *m = url ? lace_saved_conn_from_connstr(url, &err) : NULL;
-    if (!m) app_set_status(app, true, "%s", err ? err : "Not a connection");
-    else connect_form_open(app, m);
-    str_secure_free(url);
-    free(err);
-    return;
-  }
-  default: return;
-  }
-}
-
 /* ---- drawing ---- */
 
-void cp_draw(NcApp *app, ConnPicker *p, struct ncplane *pl, int y, int x, int rows, int cols,
-             int *cursor_y, int *cursor_x) {
-  if (p->seen != g_version) cp_rebuild(app, p);
-  const Theme *t = &app->theme;
-  nc_style(pl, t, TC_ACCENT, TC_OVERLAY_BG, 0);
-  nc_put(pl, y, x + 1, 2, "> ");
-  int cx = x + 3;
-  if (p->in.len == 0 && !p->input_focused) {
-    nc_style(pl, t, TC_DIM, TC_EDIT_BG, 0);
-    nc_put(pl, y, x + 3, cols - 4, "URL or file, or pick below");
-  } else {
-    nc_draw_input(pl, t, y, x + 3, cols - 4, &p->in, TC_OVERLAY_FG, TC_EDIT_BG, &cx);
-  }
-  if (cursor_y) *cursor_y = y;
-  if (cursor_x) *cursor_x = cx;
-  if (rows > 2) list_draw(&p->list, pl, t, y + 2, x, rows - 2, cols, NULL, NULL);
+void cp_draw_list(NcApp *app, ConnPicker *p, struct ncplane *pl, int y, int x, int rows, int cols) {
+  cp_rebuild(app, p); /* every draw: "open in" follows the tabs */
+  list_draw(&p->list, pl, &app->theme, y, x, rows, cols, NULL, NULL);
 }

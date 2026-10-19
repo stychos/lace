@@ -344,12 +344,12 @@ void tab_close(TuiState *state) {
   }
 
   /* If this was the last content tab for this connection, create a connection
-   * tab (unless close_conn_on_last_tab is enabled, in which case close the
+   * tab (unless keep_connection_tab is off, in which case close the
    * connection) */
   if (remaining_conn_content_tabs == 0 && !has_conn_connection_tab) {
     /* Check if we should close connection instead of creating connection tab */
     bool close_conn = state->app->config &&
-                      state->app->config->general.close_conn_on_last_tab;
+                      !state->app->config->general.keep_connection_tab;
 
     if (!close_conn) {
       /* Get connection string for display */

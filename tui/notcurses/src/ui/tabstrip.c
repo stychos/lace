@@ -2,6 +2,7 @@
 #include "conn/connection.h"
 #include "core/utf8.h"
 #include "model/workspace.h"
+#include "ui/form_tab.h"
 #include "ui/panels.h"
 #include "util/mem.h"
 #include "util/str.h"
@@ -14,7 +15,7 @@
 int tabstrip_rows(const NcApp *app) {
   if (app->rows < STRIP_MIN_ROWS || !prefs_section_bool(app->config, "tabs_strip", true)) return 0;
   const ConnTab *t = app->num_workspaces ? workspace_current_tab(app->workspaces[app->current_ws]) : NULL;
-  return t && t->conn ? 1 : 0;
+  return t ? 1 : 0;
 }
 
 size_t tabstrip_layout(const int *widths, size_t n, size_t current, int width, int *x0, int *x1) {
@@ -85,6 +86,7 @@ static const char *entry_label(const NcWorkspace *ws, const StripEntry *e) {
   const View *v = entry_view(ws, e);
   if (v) return view_title(v);
   const ConnTab *t = ws->tabs[e->tab];
+  if (t->form) return form_tab_label(t->form);
   const char *name = t->conn ? nc_connection_name(t->conn) : NULL;
   return name ? name : "(no views)";
 }

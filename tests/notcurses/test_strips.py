@@ -76,7 +76,7 @@ def test_tabs_strip_spans_connections(home):
         t.keys("Up", "Enter")                                      # the first tab's view
         t.wait(lambda s: strip(s).startswith(" big × │ big"))
         t.click(strip(t).index("│") + 2, 1, button=1)             # a middle click closes the other tab's
-        t.wait(lambda s: strip(s).startswith(" big ×") and "t.sqlite 2" not in s.split("\n")[0])   # only view: the tab goes
+        t.wait(lambda s: strip(s).startswith(" big │ New connection") and "t.sqlite 2" not in s.split("\n")[0])   # only view: the tab turns into a form
         t.keys("q"); assert t.quit() == 0
 
 

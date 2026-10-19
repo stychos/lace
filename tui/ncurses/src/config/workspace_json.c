@@ -149,6 +149,17 @@ cJSON *workspace_json_to_nested(const cJSON *flat_c, char **error) {
     const char *id = json_get_string(t, "connection_id", "");
     const char *cs = json_get_string(t, "connstr", "");
     int idx = order++;
+    if (str_eq(json_get_string(t, "type", ""), "FORM")) {
+      /* A connection form: a connection object of its own, never merged
+       * with another (no id to match), holding only its position */
+      cJSON *f = cJSON_CreateObject();
+      cJSON_AddBoolToObject(f, "form", true);
+      cJSON_AddNumberToObject(f, "order", idx);
+      if (idx == current_tab)
+        cur_conn = json_array_size(conns);
+      cJSON_AddItemToArray(conns, f);
+      continue;
+    }
     if (!id[0] && !cs[0])
       continue;
     /* Find or add the connection */
@@ -295,6 +306,16 @@ cJSON *workspace_json_to_flat(const cJSON *nested_c, char **error) {
   int ci = 0;
   cJSON *c;
   cJSON_ArrayForEach(c, json_get_array(nested, "connections")) {
+    if (json_get_bool(c, "form", false)) { /* wins over any saved_id/connstr */
+      int forder = json_get_int(c, "order", -1);
+      if (forder < 0) all_ordered = false;
+      cJSON *ft = cJSON_CreateObject();
+      cJSON_AddStringToObject(ft, "type", "FORM");
+      cJSON_AddStringToObject(ft, "connection_id", "");
+      if (n == cap) entries = safe_reallocarray(entries, cap *= 2, sizeof(FlatEntry));
+      entries[n++] = (FlatEntry){ft, forder, ci++, 0};
+      continue;
+    }
     int ti = 0;
     cJSON *t;
     cJSON_ArrayForEach(t, json_get_array(c, "tabs")) {

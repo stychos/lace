@@ -55,9 +55,10 @@ typedef struct NcApp {
   size_t next_target;                      /* the next one to connect to at startup */
   bool abandon;                            /* a connect thread is stuck: do not free what it uses */
   struct ConnectReq *connects;             /* connection attempts in flight */
+  struct NcHeldConn { NcConnection *conn; size_t holders; } *conns; /* open connections, shared by tabs */
+  size_t num_conns;
   NcConnection **closing; size_t num_closing; /* disconnecting; freed on NC_CONN_EV_CLOSED */
   char *clipboard;                         /* the app's own copy (edit_ops.c) */
-  void *welcome;                           /* ui/welcome.c state */
   HitSpans header_spans;                   /* value: the tab index; set by header_draw */
   HitSpans status_spans;                   /* value: a HotkeyAction; set by status_draw */
   HitSpans strip_spans, strip_close_spans; /* value: the view index; set by tabstrip_draw */
@@ -87,7 +88,6 @@ void app_handle_event(NcApp *app, const UiEvent *ev);
 bool app_do_action(NcApp *app, HotkeyAction action);
 /* Whether an action makes sense now (the palette lists only those) */
 bool app_action_applies(const NcApp *app, HotkeyAction action);
-void connect_open(NcApp *app); /* the picker overlay (ui/dialogs/connect.c) */
 
 /* Opening a table: switches to the open view of it (a preview of it is
  * pinned), else creates one and loads schema -> page 0 -> count */
@@ -128,18 +128,50 @@ void app_close_view(NcApp *app, size_t index); /* the last view closes the conne
 void app_save_workspace_as(NcApp *app, size_t ws, const char *name);
 void app_open_saved_workspace(NcApp *app, size_t index); /* restores it as a workspace and switches to it */
 void app_delete_saved_workspace(NcApp *app, size_t index); /* asks first */
+void app_rename_saved_workspace(NcApp *app, size_t index, const char *name);
+
+/* ---- shared connections (app_conns.c) ----
+ * One database connection serves every tab, in any workspace, opened on the
+ * same saved connection (by id) or the same URL (password-less string). Each
+ * connected tab holds it; the last release closes it. */
+bool nc_conn_key_matches(const char *saved_a, const char *connstr_a, const char *saved_b, const char *connstr_b);
+/* NULL: none open. With a saved id, connstr (when given) must match too: an
+ * entry edited since its connection opened is connected anew */
+NcConnection *app_conn_lookup(NcApp *app, const char *saved_id, const char *connstr);
+void app_conn_hold(NcApp *app, NcConnection *c); /* registers it on the first hold */
+void app_conn_release(NcApp *app, NcConnection *c); /* the last release detaches (closes) it */
+size_t app_conn_holders(const NcApp *app, const NcConnection *c);
+/* "1, 3": the (1-based) workspaces whose tabs hold the saved connection; NULL when none */
+char *app_conn_open_in(const NcApp *app, const char *saved_id);
+
+/* Where a connection opens. APPEND: a new tab at the end of the current
+ * workspace, current. HERE: the tab tab_uid becomes connected. BACKGROUND: a
+ * new tab right after tab tab_uid, the current tab stays. NEW_WORKSPACE: a new
+ * workspace holding only it. WORKSPACE: a new tab at the end of ws, which
+ * becomes current. */
+typedef enum { NC_DEST_APPEND, NC_DEST_HERE, NC_DEST_BACKGROUND, NC_DEST_NEW_WORKSPACE, NC_DEST_WORKSPACE } NcDestKind;
+typedef struct { NcDestKind kind; uint64_t tab_uid; const NcWorkspace *ws; } NcDest;
+/* Put an open connection where dest says and hold it for the tab; NULL (not
+ * held, status set) when the destination is gone */
+ConnTab *app_place_connection(NcApp *app, NcConnection *c, NcDest dest);
+/* A tab waiting for its first table (auto_open): opened when it is current,
+ * has no view and the table list is known */
+void app_auto_open(NcApp *app, ConnTab *t);
+/* The tab with that uid in any workspace (*wsi gets the workspace's index); NULL when gone */
+ConnTab *app_find_tab(NcApp *app, uint64_t uid, size_t *wsi);
 
 /* ---- connecting (app_connect.c) ---- */
-/* conn is NULL when the attempt failed or was cancelled (error says why; NULL
- * for a finished test); the connection
- * belongs to its tab, done must not keep it */
-typedef void (*ConnectDoneFn)(NcApp *app, NcConnection *conn, const char *error, void *data);
-/* lace_connect runs on a short-lived thread behind a cancellable progress
- * overlay; an authentication refusal asks for the password and retries.
- * as_tab false: a new workspace when the current one already has tabs. */
+/* tab is where the connection landed; NULL when the attempt failed, was
+ * cancelled (error says why), was a test (error NULL when it worked) or its
+ * destination was gone */
+typedef void (*ConnectDoneFn)(NcApp *app, ConnTab *tab, const char *error, void *data);
+/* A connection already open with the same key is placed at once and done runs
+ * before these return; else lace_connect runs on a short-lived thread behind a
+ * cancellable progress overlay, and an authentication refusal asks for the
+ * password and retries. */
 void app_connect_url(NcApp *app, const char *connstr, const char *saved_id, const char *name,
-                     bool as_tab, ConnectDoneFn done, void *data);
-void app_connect_saved(NcApp *app, const char *saved_id, bool as_tab, ConnectDoneFn done, void *data);
+                     NcDest dest, ConnectDoneFn done, void *data);
+void app_connect_saved(NcApp *app, const char *saved_id, NcDest dest, ConnectDoneFn done, void *data);
 /* Connect and disconnect again, reporting in the status line (done gets NULL).
  * model (may be NULL) lets a refused password be asked for. */
 void app_test_connection(NcApp *app, const char *connstr, const LaceSavedConnection *model,
@@ -155,25 +187,23 @@ void app_detach_connection(NcApp *app, NcConnection *c);
 void app_conn_event(NcConnection *c, NcConnEvent ev, const char *msg, void *data); /* the listener */
 void app_connect_cleanup(NcApp *app); /* app_free: join attempts, free closing connections */
 
-/* ---- tabs and workspaces ---- */
+/* ---- tabs and workspaces (app_tabs.c) ---- */
 NcWorkspace *app_current_workspace(NcApp *app);
 ConnTab *app_current_tab(NcApp *app);
 View *app_current_view(NcApp *app);
 void app_switch_workspace(NcApp *app, size_t i);
-void app_new_workspace(NcApp *app, const char *name); /* NULL: "Workspace N"; becomes current */
+/* NULL: "Workspace N"; becomes current; with_form: it opens with a connection form */
+void app_new_workspace(NcApp *app, const char *name, bool with_form);
 void app_close_workspace(NcApp *app, size_t i);       /* confirms when a transaction is open */
 void app_rename_workspace(NcApp *app, size_t i, const char *name);
 void app_switch_tab(NcApp *app, size_t i);
-void app_close_tab(NcApp *app, size_t i);             /* disconnects; confirms when a transaction is open */
+/* Releases the tab's connection; confirms when that closes an open transaction */
+void app_close_tab(NcApp *app, size_t i);
 
-/* ui/header.c, ui/status.c, ui/welcome.c */
+/* ui/header.c, ui/status.c */
 void header_draw(NcApp *app);
 void status_draw(NcApp *app);
-void welcome_draw(NcApp *app);
-bool welcome_handle_key(NcApp *app, const UiEvent *ev);
-bool welcome_handle_mouse(NcApp *app, const UiEvent *ev);
-void welcome_free(NcApp *app);
-void content_draw(NcApp *app); /* the sidebar and the current view's grid or editor */
+void content_draw(NcApp *app); /* the form, or the sidebar and the current view's grid or editor */
 bool content_handle_key(NcApp *app, const UiEvent *ev);
 bool content_handle_mouse(NcApp *app, const UiEvent *ev);
 #endif

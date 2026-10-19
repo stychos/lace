@@ -196,7 +196,6 @@ static ListRow *build_rows(NcApp *app, Palette *pal, size_t *count) {
     add_row(&b, text, NULL, NULL, PAL_RECENT, own(&b, app->recent.items[i].url));
     free(text);
   }
-  add_row(&b, "Connect\xe2\x80\xa6", NULL, NULL, PAL_CONNECT_DIALOG, NULL);
   add_header(&b, "Preferences"); /* the dialog's on/off settings: one list of them */
   for (int i = 0; i < prefs_count(); i++) {
     if (!prefs_is_toggle(i)) continue;
@@ -227,7 +226,7 @@ static void dispatch(NcApp *app, int kind, intptr_t idx, char *str) {
   case PAL_TABLE: app_open_table(app, str); break;
   case PAL_VIEW: app_switch_view(app, (size_t)idx); break;
   case PAL_WORKSPACE: app_switch_workspace(app, (size_t)idx); break;
-  case PAL_NEW_WS: app_new_workspace(app, NULL); break;
+  case PAL_NEW_WS: app_new_workspace(app, NULL, true); break;
   case PAL_RENAME_WS: {
     const char *cur = app->num_workspaces ? app->workspaces[app->current_ws]->name : "";
     prompt_open(app, "Rename workspace", "Name", cur, false, rename_done, NULL);
@@ -245,9 +244,8 @@ static void dispatch(NcApp *app, int kind, intptr_t idx, char *str) {
     if (i != SIZE_MAX) app_delete_saved_workspace(app, i);
     break;
   }
-  case PAL_SAVED_CONN: app_connect_saved(app, str, true, NULL, NULL); break;
-  case PAL_RECENT: app_connect_url(app, str, NULL, NULL, true, NULL, NULL); break;
-  case PAL_CONNECT_DIALOG: connect_open(app); break;
+  case PAL_SAVED_CONN: app_connect_saved(app, str, (NcDest){NC_DEST_APPEND, 0, NULL}, NULL, NULL); break;
+  case PAL_RECENT: app_connect_url(app, str, NULL, NULL, (NcDest){NC_DEST_APPEND, 0, NULL}, NULL, NULL); break;
   case PAL_SORT: {
     View *v = app_current_view(app);
     if (v && v->kind == VIEW_TABLE) sort_picker_open(app, v);

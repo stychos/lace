@@ -163,6 +163,13 @@ static const char *def_column_narrower[] = {"ALT+LEFT", "<"};
 static const char *def_column_wider[] = {"ALT+RIGHT", ">"};
 static const char *def_split_up[] = {"CTRL+UP"};
 static const char *def_split_down[] = {"CTRL+DOWN"};
+static const char *def_new_connection[] = {"n"};
+static const char *def_conn_open[] = {"ENTER"};
+static const char *def_conn_open_background[] = {"CTRL+B"};
+static const char *def_conn_open_new_workspace[] = {"CTRL+N"};
+static const char *def_conn_open_to_workspace[] = {"CTRL+O"};
+static const char *def_conn_save_as_new[] = {"CTRL+Y"};
+static const char *def_conn_clear[] = {"CTRL+L"};
 
 #define DEF_KEYS(arr) arr, sizeof(arr) / sizeof(arr[0])
 
@@ -292,26 +299,26 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
 
     /* Connection Dialog */
     [HOTKEY_CONN_TEST] = {"conn_test", "Test connection", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_test), CONFIG_FE_NCURSES},
+                          DEF_KEYS(def_conn_test), CONFIG_FE_ALL},
     [HOTKEY_CONN_SAVE] = {"conn_save", "Save to list", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_save), CONFIG_FE_NCURSES},
+                          DEF_KEYS(def_conn_save), CONFIG_FE_ALL},
     [HOTKEY_CONN_NEW] = {"conn_new", "New connection", HOTKEY_CAT_CONNECT,
-                         DEF_KEYS(def_conn_new), CONFIG_FE_NCURSES},
+                         DEF_KEYS(def_conn_new), CONFIG_FE_ALL},
     [HOTKEY_CONN_NEW_FOLDER] = {"conn_new_folder", "New folder",
                                 HOTKEY_CAT_CONNECT,
-                                DEF_KEYS(def_conn_new_folder), CONFIG_FE_NCURSES},
+                                DEF_KEYS(def_conn_new_folder), CONFIG_FE_ALL},
     [HOTKEY_CONN_EDIT] = {"conn_edit", "Edit", HOTKEY_CAT_CONNECT,
                           DEF_KEYS(def_conn_edit), CONFIG_FE_NCURSES},
     [HOTKEY_CONN_DELETE] = {"conn_delete", "Delete", HOTKEY_CAT_CONNECT,
-                            DEF_KEYS(def_conn_delete), CONFIG_FE_NCURSES},
+                            DEF_KEYS(def_conn_delete), CONFIG_FE_ALL},
     [HOTKEY_CONN_RENAME] = {"conn_rename", "Rename", HOTKEY_CAT_CONNECT,
-                            DEF_KEYS(def_conn_rename), CONFIG_FE_NCURSES},
+                            DEF_KEYS(def_conn_rename), CONFIG_FE_ALL},
     [HOTKEY_CONN_MOVE] = {"conn_move", "Move item", HOTKEY_CAT_CONNECT,
-                          DEF_KEYS(def_conn_move), CONFIG_FE_NCURSES},
+                          DEF_KEYS(def_conn_move), CONFIG_FE_ALL},
     [HOTKEY_CONN_DUPLICATE] = {"conn_duplicate", "Duplicate connection",
-                               HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_duplicate), CONFIG_FE_NCURSES},
+                               HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_duplicate), CONFIG_FE_ALL},
     [HOTKEY_CONN_FILTER] = {"conn_filter", "Filter connections",
-                            HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_filter), CONFIG_FE_NCURSES},
+                            HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_filter), CONFIG_FE_ALL},
 
     /* Row Selection (Table category) */
     [HOTKEY_TOGGLE_SELECTION] = {"toggle_selection", "Toggle selection",
@@ -372,6 +379,13 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_COLUMN_WIDER] = {"column_wider", "Widen column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_wider), CONFIG_FE_NOTCURSES},
     [HOTKEY_SPLIT_UP] = {"split_up", "Editor smaller", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_up), CONFIG_FE_NOTCURSES},
     [HOTKEY_SPLIT_DOWN] = {"split_down", "Editor larger", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_down), CONFIG_FE_NOTCURSES},
+    [HOTKEY_NEW_CONNECTION] = {"new_connection", "New connection", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_connection), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_OPEN] = {"conn_open", "Open here", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_OPEN_BACKGROUND] = {"conn_open_background", "Open in background tab", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_background), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_OPEN_NEW_WORKSPACE] = {"conn_open_new_workspace", "Open in new workspace", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_new_workspace), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_OPEN_TO_WORKSPACE] = {"conn_open_to_workspace", "Open in workspace\xe2\x80\xa6", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_to_workspace), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_SAVE_AS_NEW] = {"conn_save_as_new", "Save as new", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_save_as_new), CONFIG_FE_NOTCURSES},
+    [HOTKEY_CONN_CLEAR] = {"conn_clear", "Clear form", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_clear), CONFIG_FE_NOTCURSES},
 };
 
 /* Category names for display */
@@ -624,7 +638,8 @@ Config *config_get_defaults(void) {
   config->general.quit_confirmation = false;
   config->general.delete_confirmation = true; /* Default: ask before delete */
   config->general.auto_open_first_table = false;
-  config->general.close_conn_on_last_tab = false;
+  config->general.keep_connection_tab = true;
+  config->general.last_workspace_close = CONFIG_LAST_WS_QUIT;
   config->general.history_mode =
       HISTORY_MODE_SESSION; /* Default: session only */
   config->general.history_max_size = HISTORY_SIZE_DEFAULT;
@@ -885,8 +900,14 @@ Config *config_load_file(const char *path_in, char **error) {
         json_get_bool(general, "delete_confirmation", config->general.delete_confirmation);
     config->general.auto_open_first_table =
         json_get_bool(general, "auto_open_first_table", config->general.auto_open_first_table);
-    config->general.close_conn_on_last_tab =
-        json_get_bool(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
+    /* close_conn_on_last_tab is read only to migrate: on, it meant no tab
+     * stays behind */
+    config->general.keep_connection_tab =
+        cJSON_GetObjectItem(general, "keep_connection_tab")
+            ? json_get_bool(general, "keep_connection_tab", config->general.keep_connection_tab)
+            : !json_get_bool(general, "close_conn_on_last_tab", false);
+    if (str_eq(json_get_string(general, "on_last_workspace_close", ""), "new"))
+      config->general.last_workspace_close = CONFIG_LAST_WS_NEW;
 
     /* Integer settings with range validation */
     int val = json_get_int(general, "history_mode", config->general.history_mode);
@@ -1041,7 +1062,9 @@ bool config_save_file(const Config *config, const char *path_in, char **error) {
   JSON_ADD_BOOL(general, "quit_confirmation", config->general.quit_confirmation);
   JSON_ADD_BOOL(general, "delete_confirmation", config->general.delete_confirmation);
   JSON_ADD_BOOL(general, "auto_open_first_table", config->general.auto_open_first_table);
-  JSON_ADD_BOOL(general, "close_conn_on_last_tab", config->general.close_conn_on_last_tab);
+  JSON_ADD_BOOL(general, "keep_connection_tab", config->general.keep_connection_tab);
+  JSON_ADD_STR(general, "on_last_workspace_close",
+               config->general.last_workspace_close == CONFIG_LAST_WS_NEW ? "new" : "quit");
   JSON_ADD_INT(general, "history_mode", config->general.history_mode);
   JSON_ADD_INT(general, "history_max_size", config->general.history_max_size);
   JSON_ADD_INT(general, "daemon_spawn_mode", config->general.daemon_spawn_mode);

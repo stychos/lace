@@ -32,6 +32,8 @@ static void *f_delete(Config *c) { return &c->general.delete_confirmation; }
 static void *f_quit(Config *c) { return &c->general.quit_confirmation; }
 static void *f_session(Config *c) { return &c->general.restore_session; }
 static void *f_cursor(Config *c) { return &c->general.restore_cursor_position; }
+static void *f_keep(Config *c) { return &c->general.keep_connection_tab; }
+static void *f_lastws(Config *c) { return &c->general.last_workspace_close; }
 static void *f_approx(Config *c) { return &c->general.approximate_counts; }
 static void *f_rownum(Config *c) { return &c->general.row_numbers; }
 static void *f_scheme(Config *c) { return &c->general.color_scheme; }
@@ -43,6 +45,7 @@ static void *f_idle(Config *c) { return &c->general.daemon_idle_timeout; }
 static const char *const ROWNUM[] = {"never", "auto", "always"};
 static const char *const SCHEME[] = {"system", "light", "dark"};
 static const char *const HIST[] = {"off", "session", "persistent"};
+static const char *const LASTWS[] = {"quit", "new workspace"}; /* CONFIG_LAST_WS_* */
 static const char *const DAEMON[] = {"unix", "stdio", "tcp", "detect"};
 static const int HIST_SIZES[] = {50, 100, 500, 1000, 5000, 10000};
 static const int IDLE[] = {0, 60, 300, 900, 3600};
@@ -52,6 +55,8 @@ static const Pref PREFS[] = {
     {.name = "Confirm quit", .kind = P_BOOL, .field = f_quit},
     {.name = "Restore session", .kind = P_BOOL, .field = f_session},
     {.name = "Restore cursor position", .kind = P_BOOL, .field = f_cursor},
+    {.name = "Keep connection tab", .kind = P_BOOL, .field = f_keep},
+    {.name = "Last workspace closes", .kind = P_ENUM, .field = f_lastws, .names = LASTWS, .count = 2},
     {.name = "Approximate counts", .kind = P_BOOL, .field = f_approx},
     {.name = "Row numbers", .kind = P_ENUM, .field = f_rownum, .names = ROWNUM, .count = 3},
     {.name = "Color scheme", .kind = P_ENUM, .field = f_scheme, .names = SCHEME, .count = 3},

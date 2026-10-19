@@ -36,7 +36,7 @@ typedef enum {
   FIELD_HISTORY_MODE,
   FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
-  FIELD_CLOSE_CONN_LAST_TAB,
+  FIELD_KEEP_CONN_TAB,
   FIELD_DAEMON_SPAWN_MODE,
   FIELD_DAEMON_IDLE_TIMEOUT,
   FIELD_RESTORE_SESSION,
@@ -331,9 +331,9 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
                 ds->config->general.auto_open_first_table,
                 ds->selected_field == FIELD_AUTO_OPEN_TABLE, focused);
 
-  draw_checkbox(win, y++, start_x + 2, "Close connection when last tab closes",
-                ds->config->general.close_conn_on_last_tab,
-                ds->selected_field == FIELD_CLOSE_CONN_LAST_TAB, focused);
+  draw_checkbox(win, y++, start_x + 2, "Keep a connection tab when the last tab closes",
+                ds->config->general.keep_connection_tab,
+                ds->selected_field == FIELD_KEEP_CONN_TAB, focused);
 
   draw_option(win, y++, start_x + 2, "Daemon spawn mode",
               spawn_mode_name(ds->config->general.daemon_spawn_mode),
@@ -962,9 +962,9 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
       ds->config->general.auto_open_first_table =
           !ds->config->general.auto_open_first_table;
       break;
-    case FIELD_CLOSE_CONN_LAST_TAB:
-      ds->config->general.close_conn_on_last_tab =
-          !ds->config->general.close_conn_on_last_tab;
+    case FIELD_KEEP_CONN_TAB:
+      ds->config->general.keep_connection_tab =
+          !ds->config->general.keep_connection_tab;
       break;
     case FIELD_DAEMON_SPAWN_MODE:
       /* Cycle through spawn modes: Unix -> Stdio -> TCP -> Detect -> Unix */

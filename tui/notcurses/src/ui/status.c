@@ -1,6 +1,7 @@
 #include "app.h"
 #include "conn/connection.h"
 #include "model/workspace.h"
+#include "ui/form_tab.h"
 #include "ui/overlay.h"
 #include "ui/sidebar.h"
 #include <notcurses/notcurses.h>
@@ -41,6 +42,16 @@ static const Hint H_FILTERS[] = {{"+ add", HOTKEY_ADD_FILTER}, {"- remove", HOTK
 static const Hint H_SIDEBAR[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ search", HOTKEY_SIDEBAR_FILTER},
                                  {"Enter open", NOACT}, {"+ new tab", HOTKEY_NEW_TAB}, {"Tab content", NOACT}, {"Esc back", NOACT},
                                  {"t hide", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
+static const Hint H_FORM[] = {{"Enter open", HOTKEY_CONN_OPEN}, {CTRL "B background", HOTKEY_CONN_OPEN_BACKGROUND},
+                              {CTRL "N workspace", HOTKEY_CONN_OPEN_NEW_WORKSPACE},
+                              {CTRL "O to\xe2\x80\xa6", HOTKEY_CONN_OPEN_TO_WORKSPACE}, {CTRL "S save", HOTKEY_CONN_SAVE},
+                              {CTRL "T test", HOTKEY_CONN_TEST}, {CTRL "L clear", HOTKEY_CONN_CLEAR},
+                              {CTRL "P palette", HOTKEY_PALETTE}, {NULL, 0}};
+static const Hint H_FORM_LIST[] = {{"Enter open", HOTKEY_CONN_OPEN}, {"N folder", HOTKEY_CONN_NEW_FOLDER},
+                                   {"r rename", HOTKEY_CONN_RENAME}, {"d duplicate", HOTKEY_CONN_DUPLICATE},
+                                   {"Space move", HOTKEY_CONN_MOVE}, {"x delete", HOTKEY_CONN_DELETE},
+                                   {"/ filter", HOTKEY_CONN_FILTER}, {CTRL "S save", HOTKEY_CONN_SAVE},
+                                   {CTRL "P palette", HOTKEY_PALETTE}, {NULL, 0}};
 static const Hint H_NONE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"? keys", HOTKEY_HELP},
                               {"q quit", HOTKEY_QUIT}, {NULL, 0}};
 
@@ -74,7 +85,8 @@ void status_draw(NcApp *app) {
   ConnTab *tab = app_current_tab(app);
   NcTxState tx = tab && tab->conn ? nc_connection_tx_state(tab->conn) : NC_TX_NONE;
   const View *view = tab ? conntab_current_view(tab) : NULL;
-  const Hint *hs = view && view->editing ? H_EDIT
+  const Hint *hs = tab && tab->form ? (form_tab_list_focused(tab) ? H_FORM_LIST : H_FORM)
+                   : view && view->editing ? H_EDIT
                    : tab && tab->sidebar_focused && sidebar_width(app) ? H_SIDEBAR
                    : view && view->kind == VIEW_TABLE && view->filters_visible && view->fp.focused ? H_FILTERS
                    : view && view->kind == VIEW_QUERY && !view->focus_results ? H_EDITOR

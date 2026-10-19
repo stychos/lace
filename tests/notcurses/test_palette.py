@@ -52,3 +52,16 @@ def test_palette_lists_only_runnable_actions(home):
         assert "Cut line" not in t.text()
         t.keys("Escape")
         t.keys("q"); assert t.quit() == 0
+
+
+def test_palette_toggles_keep_connection_tab(home):
+    with Nc(home, ["-s"]) as t:
+        t.wait("palette")
+        t.keys("C-p")
+        t.wait("PREFERENCES")
+        t.type("keep connection")
+        t.wait("Keep connection tab: on")
+        t.keys("Enter")
+        t.wait_status("Keep connection tab: off")
+        t.keys("q"); assert t.quit() == 0
+    assert home.read("config.json")["general"]["keep_connection_tab"] is False

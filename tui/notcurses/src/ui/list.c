@@ -268,11 +268,13 @@ void list_draw(ListWidget *l, struct ncplane *p, const Theme *t, int y, int x, i
   }
   if (rows < 1) return;
   l->page = rows;
-  if (l->cursor < l->scroll) l->scroll = l->cursor;
-  if (l->cursor >= l->scroll + (size_t)rows) l->scroll = l->cursor - (size_t)rows + 1;
-  /* a header just above the cursor stays in view */
-  if (l->cursor > 0 && l->scroll == l->cursor && l->scroll > 0 && !selectable(l, l->scroll - 1))
-    l->scroll--;
+  if (!l->hide_cursor) {
+    if (l->cursor < l->scroll) l->scroll = l->cursor;
+    if (l->cursor >= l->scroll + (size_t)rows) l->scroll = l->cursor - (size_t)rows + 1;
+    /* a header just above the cursor stays in view */
+    if (l->cursor > 0 && l->scroll == l->cursor && l->scroll > 0 && !selectable(l, l->scroll - 1))
+      l->scroll--;
+  }
   int kw = 0;
   for (size_t i = l->scroll; i < l->num_shown && i < l->scroll + (size_t)rows; i++) {
     const ListRow *r = &l->rows[l->shown[i]];
@@ -295,7 +297,7 @@ void list_draw(ListWidget *l, struct ncplane *p, const Theme *t, int y, int x, i
       put_upper(p, ry, x + 1, cols - 2, r->text);
       continue;
     }
-    bool cur = i == l->cursor;
+    bool cur = !l->hide_cursor && i == l->cursor;
     ThemeColor bg = cur ? TC_CURSOR_BG : TC_OVERLAY_BG;
     nc_style(p, t, cur ? TC_CURSOR_FG : TC_OVERLAY_FG, bg, 0);
     nc_put(p, ry, x, cols, "");

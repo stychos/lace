@@ -150,7 +150,7 @@ struct NcRestore {
   bool started;      /* workspace wi was created */
   NcWorkspace **wss; /* per workspace of the root: created, NULL until then */
   size_t num_wss;
-  NcConnection **landed; /* of workspace wi, per connection (NULL: failed) */
+  uint64_t *landed;  /* of workspace wi, per connection entry: the tab's uid (0: failed) */
   size_t num_landed;
   NcWorkspace *expected;   /* what the restore left current: another one means the user switched */
   NcWorkspace *return_to;  /* what was current when the step began: the user's choice */
@@ -285,22 +285,20 @@ static void restore_failed(NcRestore *s, const cJSON *cj, const char *error) {
           error && *error ? error : "connection failed");
 }
 
-static void restore_conn_done(NcApp *app, NcConnection *conn, const char *error, void *data) {
+static void restore_conn_done(NcApp *app, ConnTab *tab, const char *error, void *data) {
   NcRestore *s = data;
   const cJSON *wsj = nth(s->workspaces, s->wi);
   const cJSON *cj = nth(cJSON_GetObjectItem(wsj, "connections"), s->ci - 1);
   size_t wsi;
-  if (!conn || !cj || !ws_live(app, s->wss[s->wi], &wsi)) {
-    if (cj) restore_failed(s, cj, conn ? "the workspace was closed" : error);
+  if (!tab || !cj || !ws_live(app, s->wss[s->wi], &wsi)) {
+    if (cj) restore_failed(s, cj, tab ? "the workspace was closed" : error);
     restore_return(s);
     restore_step(s);
     return;
   }
-  s->landed[s->ci - 1] = conn;
+  s->landed[s->ci - 1] = tab->uid;
   NcWorkspace *ws = app->workspaces[wsi];
-  size_t ti = SIZE_MAX;
-  for (size_t i = 0; i < ws->num_tabs; i++)
-    if (ws->tabs[i]->conn == conn) ti = i;
+  size_t ti = workspace_find_tab(ws, tab->uid);
   if (ti != SIZE_MAX) {
     app->current_ws = wsi;
     ws->current = ti;
@@ -329,7 +327,7 @@ static void restore_start_workspace(NcRestore *s, const cJSON *wsj) {
   if (s->wi == 0 && cur && cur->num_tabs == 0) {
     if (name) app_rename_workspace(app, app->current_ws, name);
   } else {
-    app_new_workspace(app, name);
+    app_new_workspace(app, name, false);
   }
   s->wss[s->wi] = app_current_workspace(app);
   size_t n = cJSON_IsArray(cJSON_GetObjectItem(wsj, "connections"))
@@ -346,11 +344,11 @@ static void restore_finish_workspace(NcRestore *s, const cJSON *wsj) {
   size_t wsi;
   if (!ws_live(app, s->wss[s->wi], &wsi)) return;
   NcWorkspace *ws = app->workspaces[wsi];
+  if (!ws->num_tabs) workspace_add_form(ws, SIZE_MAX, true); /* nothing came back: never an empty workspace */
   const cJSON *cur = cJSON_GetObjectItem(wsj, "current");
   if (!cJSON_IsNumber(cur) || cur->valuedouble < 0 || (size_t)cur->valuedouble >= s->num_landed) return;
-  NcConnection *c = s->landed[(size_t)cur->valuedouble];
-  for (size_t i = 0; c && i < ws->num_tabs; i++)
-    if (ws->tabs[i]->conn == c) ws->current = i;
+  size_t ti = workspace_find_tab(ws, s->landed[(size_t)cur->valuedouble]);
+  if (ti != SIZE_MAX) ws->current = ti;
 }
 
 static void restore_step(NcRestore *s) {
@@ -379,16 +377,21 @@ static void restore_step(NcRestore *s) {
     }
     app->current_ws = wsi; /* the connection joins the current workspace */
     s->expected = s->wss[s->wi];
+    if (cJSON_IsTrue(cJSON_GetObjectItem(cj, "form"))) { /* a connection form: empty, in its place */
+      s->landed[s->ci++] = workspace_add_form(app->workspaces[wsi], SIZE_MAX, true)->uid;
+      continue;
+    }
     const cJSON *sid = cJSON_GetObjectItem(cj, "saved_id"), *cs = cJSON_GetObjectItem(cj, "connstr");
     const cJSON *nm = cJSON_GetObjectItem(cj, "name");
     const char *saved = cJSON_IsString(sid) && *sid->valuestring ? sid->valuestring : NULL;
     s->ci++;
     if (saved && app->connmgr && connmgr_find_by_id(app->connmgr, saved)) {
-      app_connect_saved(app, saved, true, restore_conn_done, s);
+      app_connect_saved(app, saved, (NcDest){NC_DEST_APPEND, 0, NULL}, restore_conn_done, s);
       return;
     }
     if (cJSON_IsString(cs) && *cs->valuestring) {
-      app_connect_url(app, cs->valuestring, saved, cJSON_IsString(nm) ? nm->valuestring : NULL, true,
+      app_connect_url(app, cs->valuestring, saved, cJSON_IsString(nm) ? nm->valuestring : NULL,
+                      (NcDest){NC_DEST_APPEND, 0, NULL},
                       restore_conn_done, s);
       return;
     }
@@ -494,6 +497,24 @@ static void delete_confirmed(NcApp *app, bool yes, void *data) {
     }
   }
   free(name);
+}
+
+void app_rename_saved_workspace(NcApp *app, size_t index, const char *name) {
+  if (index >= app->saved_ws.count || !name || !*name) return;
+  if (saved_workspaces_find(&app->saved_ws, name) != SIZE_MAX) {
+    app_set_status(app, true, "A saved workspace named %s exists already", name);
+    return;
+  }
+  char *old = str_dup(app->saved_ws.items[index].name);
+  saved_workspaces_put(&app->saved_ws, name, cJSON_Duplicate(app->saved_ws.items[index].workspace, true));
+  size_t i = saved_workspaces_find(&app->saved_ws, old);
+  if (i != SIZE_MAX) saved_workspaces_remove(&app->saved_ws, i);
+  free(old);
+  char *err = NULL;
+  if (!saved_workspaces_save(&app->saved_ws, &err))
+    app_set_status(app, true, "Cannot save workspaces: %s", err ? err : "write failed");
+  else app_set_status(app, false, "Renamed the saved workspace to %s", name);
+  free(err);
 }
 
 void app_delete_saved_workspace(NcApp *app, size_t index) {

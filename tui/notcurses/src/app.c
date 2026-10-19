@@ -1,4 +1,6 @@
 #include "app.h"
+#include "ui/form_tab.h"
+#include "ui/dialogs/workspaces.h"
 #include "ui/query_view.h"
 #include "conn/mainq.h"
 #include "model/workspace.h"
@@ -133,13 +135,16 @@ void app_free(NcApp *app) {
     for (size_t k = 0; k < app->workspaces[i]->num_tabs; k++) {
       ConnTab *t = app->workspaces[i]->tabs[k];
       if (t->owner) nc_owner_release(t->owner), t->owner = NULL;
-      if (t->conn) nc_connection_free(t->conn), t->conn = NULL;
+      t->conn = NULL;
     }
+  for (size_t i = 0; i < app->num_conns; i++) nc_connection_free(app->conns[i].conn);
+  free(app->conns);
+  app->conns = NULL;
+  app->num_conns = 0;
   if (app->mainq) {
     mainq_drain(app->mainq);
   }
   overlay_free_all(app);
-  welcome_free(app);
   free(app->header_spans.v);
   free(app->status_spans.v);
   free(app->strip_spans.v);
@@ -226,11 +231,8 @@ void app_set_status(NcApp *app, bool error, const char *fmt, ...) {
 }
 
 bool app_busy(const NcApp *app) {
-  for (size_t i = 0; i < app->num_workspaces; i++)
-    for (size_t k = 0; k < app->workspaces[i]->num_tabs; k++) {
-      const ConnTab *t = app->workspaces[i]->tabs[k];
-      if (t->conn && nc_connection_busy(t->conn)) return true;
-    }
+  for (size_t i = 0; i < app->num_conns; i++)
+    if (nc_connection_busy(app->conns[i].conn)) return true;
   return false;
 }
 
@@ -241,25 +243,21 @@ static void quit_confirmed(NcApp *app, bool yes, void *data) {
 
 /* Quitting asks first: a transaction is open or the config says so */
 bool app_quit_needs_confirm(const NcApp *app) {
-  for (size_t i = 0; i < app->num_workspaces; i++)
-    for (size_t k = 0; k < app->workspaces[i]->num_tabs; k++) {
-      NcConnection *c = app->workspaces[i]->tabs[k]->conn;
-      if (c && nc_connection_tx_state(c) != NC_TX_NONE) return true;
-    }
+  for (size_t i = 0; i < app->num_conns; i++)
+    if (nc_connection_tx_state(app->conns[i].conn) != NC_TX_NONE) return true;
   return app->config && app->config->general.quit_confirmation;
 }
 
 void app_quit(NcApp *app) {
-  for (size_t i = 0; i < app->num_workspaces; i++)
-    for (size_t k = 0; k < app->workspaces[i]->num_tabs; k++) {
-      NcConnection *c = app->workspaces[i]->tabs[k]->conn;
-      if (c && nc_connection_tx_state(c) != NC_TX_NONE) {
-        char *msg = str_printf("A transaction is open on %s. Quit and roll it back?", nc_connection_name(c));
-        confirm_open(app, "Quit", msg, "Quit", true, quit_confirmed, NULL);
-        free(msg);
-        return;
-      }
+  for (size_t i = 0; i < app->num_conns; i++) {
+    NcConnection *c = app->conns[i].conn;
+    if (nc_connection_tx_state(c) != NC_TX_NONE) {
+      char *msg = str_printf("A transaction is open on %s. Quit and roll it back?", nc_connection_name(c));
+      confirm_open(app, "Quit", msg, "Quit", true, quit_confirmed, NULL);
+      free(msg);
+      return;
     }
+  }
   if (app->config && app->config->general.quit_confirmation) {
     confirm_open(app, "Quit", "Quit lace?", "Quit", false, quit_confirmed, NULL);
     return;
@@ -315,8 +313,13 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
     help_open(app);
     return true;
   case HOTKEY_CONNECT_DIALOG:
-    connect_open(app);
+    workspaces_open(app);
     return true;
+  case HOTKEY_NEW_CONNECTION: { /* a form right after the current tab */
+    if (!ws) return false;
+    workspace_add_form(ws, ws->num_tabs ? ws->current + 1 : 0, true);
+    return true;
+  }
   case HOTKEY_NEXT_CONN_TAB: /* the same walk as next_tab/prev_tab */
   case HOTKEY_PREV_CONN_TAB:
     if (!ws) return false;
@@ -393,6 +396,7 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
                                   : (app->current_ws + app->num_workspaces - 1) % app->num_workspaces);
     return true;
   default: {
+    if (hotkey_get_category(action) == HOTKEY_CAT_CONNECT) return form_tab_do_action(app, app_current_tab(app), action);
     View *cv = app_current_view(app);
     if (cv && cv->kind == VIEW_QUERY && query_view_do_action(app, cv, action)) return true;
     return grid_do_action(app, cv, action);
@@ -402,6 +406,7 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
 
 bool app_action_applies(const NcApp *app, HotkeyAction action) {
   const ConnTab *t = app->num_workspaces ? workspace_current_tab(app->workspaces[app->current_ws]) : NULL;
+  if (hotkey_get_category(action) == HOTKEY_CAT_CONNECT) return t && t->form; /* the form's own keys */
   switch (action) {
   case HOTKEY_ADD_FILTER: { /* its keys are the add-row keys: the panel takes them when it has the focus */
     const View *v = t ? conntab_current_view(t) : NULL;
@@ -484,6 +489,7 @@ static bool dispatch_hotkeys(NcApp *app, const UiEvent *ev) {
     HotkeyAction act = (HotkeyAction)a;
     if (!(hotkey_action_frontends(act) & CONFIG_FE_NOTCURSES)) continue;
     if (in_sidebar && sidebar_keeps(act)) continue;
+    if (hotkey_get_category(act) == HOTKEY_CAT_CONNECT) continue; /* the form takes its own keys */
     if (!hotkey_matches(app->config, ev, act) || !app_action_applies(app, act)) continue;
     if (app_do_action(app, act)) return true;
   }
@@ -492,7 +498,7 @@ static bool dispatch_hotkeys(NcApp *app, const UiEvent *ev) {
 
 /* A mouse event with no overlay open: a left press on the header's tab names
  * switches tabs, on a status hint runs its action; the rest goes to the
- * welcome screen or the content */
+ * content */
 static void handle_mouse(NcApp *app, const UiEvent *ev) {
   View *cv = app_current_view(app);
   bool press = ev->mouse.action == UI_MOUSE_PRESS && ev->mouse.button == UI_MOUSE_LEFT;
@@ -518,8 +524,7 @@ static void handle_mouse(NcApp *app, const UiEvent *ev) {
       return;
     }
   }
-  if (!app_current_tab(app)) welcome_handle_mouse(app, ev);
-  else content_handle_mouse(app, ev);
+  content_handle_mouse(app, ev);
 }
 
 void app_handle_event(NcApp *app, const UiEvent *ev) {
@@ -550,7 +555,6 @@ void app_handle_event(NcApp *app, const UiEvent *ev) {
     View *cv = app_current_view(app);
     if (cv) cv->split_drag = false; /* a key ends a drag whose release was lost */
     if (cv && cv->editing && grid_edit_key(app, cv, ev)) return; /* the field owns every key */
-    if (!app_current_tab(app) && welcome_handle_key(app, ev)) return;
     /* Esc stops the statement that is running; the rows stay */
     if (ev->key.is_special && ev->key.key == UI_KEY_ESCAPE && app_cancel_running(app)) return;
     if (content_handle_key(app, ev)) return;
@@ -598,6 +602,9 @@ int app_run(NcApp *app) {
     }
     free(serr);
   }
+  /* Nothing to restore or connect to: the app opens on a connection form */
+  NcWorkspace *first = app_current_workspace(app);
+  if (!app->num_targets && !app->restore && first && !first->num_tabs) workspace_add_form(first, SIZE_MAX, true);
   int64_t start = app_now_ms();
   bool draining = true;
   bool input_failed = false;
@@ -621,6 +628,7 @@ int app_run(NcApp *app) {
       input_failed = true;
       break;
     }
+    app_auto_open(app, app_current_tab(app)); /* a tab that waited until it became current */
     if (app_busy(app)) app->spinner++;
     if (app->status_until_ms && app_now_ms() > app->status_until_ms) {
       free(app->status);
