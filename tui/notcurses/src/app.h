@@ -51,6 +51,8 @@ typedef struct NcApp {
   bool quit;
   bool no_session;
   int input_errors;          /* consecutive notcurses_get failures */
+#define APP_HELD_MAX 40 /* keys kept back while they may be an escape sequence notcurses did not parse (pump_input) */
+  UiEvent held[APP_HELD_MAX]; int num_held; int64_t held_since_ms;
   char **targets; size_t num_targets;      /* URLs/files from the command line */
   size_t next_target;                      /* the next one to connect to at startup */
   bool abandon;                            /* a connect thread is stuck: do not free what it uses */
@@ -59,9 +61,10 @@ typedef struct NcApp {
   size_t num_conns;
   NcConnection **closing; size_t num_closing; /* disconnecting; freed on NC_CONN_EV_CLOSED */
   char *clipboard;                         /* the app's own copy (edit_ops.c) */
-  HitSpans header_spans;                   /* value: the tab index; set by header_draw */
+  HitSpans header_spans;                   /* value 0: the database segment; set by header_draw */
   HitSpans status_spans;                   /* value: a HotkeyAction; set by status_draw */
   HitSpans strip_spans, strip_close_spans; /* value: the view index; set by tabstrip_draw */
+  HitSpans subview_spans;                  /* value: a SubView; set by subviews_draw */
   struct NcRestore *restore;               /* session restores in flight (session.c) */
 } NcApp;
 
@@ -98,6 +101,14 @@ View *app_open_table_background(NcApp *app, const char *table);
 /* The same in the preview tab: an open view of the table is switched to as
  * it is; else the view replaces the tab's preview view, or becomes it */
 View *app_preview_table(NcApp *app, const char *table);
+/* The same for a database view, routine or trigger (as lace_list_objects
+ * names it; table: a trigger's, detail: a routine's kind), which get the
+ * sub-views that fit them; a table is LACE_OBJ_TABLE */
+View *app_open_object(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail);
+View *app_open_object_background(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail);
+View *app_preview_object(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail);
+/* Load the schema again (then page 0 and the count); the sub-views read it */
+void app_view_reload_schema(NcApp *app, View *v);
 View *app_find_view(NcApp *app, uint64_t uid);
 ConnTab *app_view_tab(NcApp *app, const View *v); /* the tab holding the view, or NULL */
 /* Sort/filter/refresh: the pages are fetched again (the old rows stay shown,
@@ -107,6 +118,20 @@ void app_view_request_page(NcApp *app, View *v, size_t page); /* the cache's fet
 void app_view_count(NcApp *app, View *v);
 /* The page cache's fetch target for a view that has none yet (query views) */
 void app_view_attach(NcApp *app, View *v);
+
+/* ---- the sub-views' reads (app_catalog.c): asked for by the lists when
+ * first drawn, answered into the view ---- */
+void app_view_load_info(NcApp *app, View *v);       /* lace_table_info + the counter */
+void app_view_load_deps(NcApp *app, View *v);       /* the tables referencing it */
+void app_view_load_definition(NcApp *app, View *v); /* a view's, routine's or trigger's SQL */
+void app_view_count_exact(NcApp *app, View *v);     /* Information's exact count */
+void app_view_refresh_catalog(NcApp *app, View *v); /* drop them all and load the schema again */
+
+/* ---- following foreign keys (app_follow.c) ---- */
+/* The cursor column is the first column of a foreign key (the header's marker) */
+bool view_column_is_fk(const View *v, const char *column);
+void app_follow_fk(NcApp *app, View *v);      /* the referenced table, filtered by the cursor row's key */
+void app_referenced_by(NcApp *app, View *v);  /* a pick list of the tables referencing this one */
 
 /* ---- query views (app_query.c) ---- */
 View *app_open_query(NcApp *app, const char *text); /* a new query tab on the current connection */
@@ -186,6 +211,11 @@ void app_connect_targets(NcApp *app);
 void app_detach_connection(NcApp *app, NcConnection *c);
 void app_conn_event(NcConnection *c, NcConnEvent ev, const char *msg, void *data); /* the listener */
 void app_connect_cleanup(NcApp *app); /* app_free: join attempts, free closing connections */
+
+/* ---- the header's database segment (app_database.c) ---- */
+/* List the server's databases and switch the current tab to the picked one
+ * (the shared switch_database action, the palette, a click on the segment) */
+void app_switch_database(NcApp *app);
 
 /* ---- tabs and workspaces (app_tabs.c) ---- */
 NcWorkspace *app_current_workspace(NcApp *app);

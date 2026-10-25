@@ -1,6 +1,8 @@
 #include "model/view.h"
 #include "core/utf8.h"
+#include "core/catalog_rows.h"
 #include "keyset.h"
+#include <lace.h>
 #include "util/mem.h"
 #include "util/str.h"
 #include <stdlib.h>
@@ -24,7 +26,71 @@ static View *view_new(ViewKind kind) {
 View *view_new_table(const char *table) {
   View *v = view_new(VIEW_TABLE);
   v->table = str_dup(table ? table : "");
+  v->info_count = -1;
   return v;
+}
+
+View *view_new_object(LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  View *v = view_new_table(name);
+  v->object = kind;
+  v->object_table = table ? str_dup(table) : NULL;
+  v->object_detail = detail ? str_dup(detail) : NULL;
+  if (!view_has_subview(v, SV_DATA)) v->subview = SV_STRUCTURE;
+  return v;
+}
+
+bool view_has_subview(const View *v, SubView sv) {
+  if (v->kind != VIEW_TABLE) return false;
+  switch (v->object) {
+  case LACE_OBJ_TABLE: return sv < SV_COUNT;
+  case LACE_OBJ_VIEW: return sv == SV_DATA || sv == SV_STRUCTURE || sv == SV_INFORMATION;
+  default: return sv == SV_STRUCTURE || sv == SV_INFORMATION;
+  }
+}
+
+void view_drop_catalog(View *v) {
+  lace_table_info_free(v->info);
+  lace_autoinc_free(v->autoinc);
+  v->info = NULL;
+  v->autoinc = NULL;
+  free(v->info_error);
+  v->info_error = NULL;
+  v->info_count = -1;
+  lace_dependents_free(v->deps, v->num_deps);
+  v->deps = NULL;
+  v->num_deps = 0;
+  v->deps_loaded = false;
+  free(v->deps_error);
+  v->deps_error = NULL;
+  free(v->definition);
+  v->definition = NULL;
+  free(v->definition_error);
+  v->definition_error = NULL;
+}
+
+static const char *const SUBVIEW_KEYS[SV_COUNT] = {"data", "structure", "indexes", "foreign_keys", "information"};
+
+const char *view_subview_key(const View *v, SubView sv) {
+  if (sv == SV_STRUCTURE && v->object != LACE_OBJ_TABLE) return "definition";
+  return sv < SV_COUNT ? SUBVIEW_KEYS[sv] : "data";
+}
+
+bool view_subview_from_key(const char *key, SubView *out) {
+  if (!key) return false;
+  if (!strcmp(key, "definition")) { *out = SV_STRUCTURE; return true; }
+  for (int i = 0; i < SV_COUNT; i++)
+    if (!strcmp(key, SUBVIEW_KEYS[i])) { *out = (SubView)i; return true; }
+  return false;
+}
+
+static const char *const OBJECT_KEYS[] = {"table", "view", "routine", "trigger"};
+
+const char *view_object_key(LaceObjectKind kind) { return kind <= LACE_OBJ_TRIGGER ? OBJECT_KEYS[kind] : "table"; }
+
+bool view_object_from_key(const char *key, LaceObjectKind *out) {
+  for (int i = 0; key && i < 4; i++)
+    if (!strcmp(key, OBJECT_KEYS[i])) { *out = (LaceObjectKind)i; return true; }
+  return false;
 }
 
 View *view_new_query(const char *text) {
@@ -130,6 +196,9 @@ void view_free(View *v) {
   free(v->fp.text);
   free(v->fetch_ctx);
   free(v->table);
+  free(v->object_table);
+  free(v->object_detail);
+  view_drop_catalog(v);
   view_clear_filters(v);
   free(v->search);
   view_clear_sorts(v);
@@ -201,6 +270,14 @@ bool view_columns_changed(View *v) {
   return true;
 }
 
+static const LaceColumn *schema_column_named(const View *v, const char *name) {
+  for (size_t i = 0; v->schema && i < v->schema->num_columns; i++)
+    if (v->schema->columns[i].name && !strcmp(v->schema->columns[i].name, name)) return &v->schema->columns[i];
+  return NULL;
+}
+
+bool view_fk_first_column(const View *v, const char *name) { return catalog_fk_first_column(v->schema, name); }
+
 void view_measure(View *v, size_t from_row, size_t to_row) {
   ensure_widths(v);
   for (size_t c = 0; c < v->num_widths; c++) {
@@ -208,6 +285,10 @@ void view_measure(View *v, size_t from_row, size_t to_row) {
     const LaceColumn *col = page_cache_column(v->cache, c);
     int w = v->widths[c];
     int hw = col && col->name ? utf8_width(col->name, strlen(col->name)) : 0;
+    /* room for the header's marks: ⚷ on a key column, ⇒ on a foreign key's */
+    const LaceColumn *sc = col && col->name ? schema_column_named(v, col->name) : NULL;
+    if (sc && sc->primary_key) hw += 2;
+    if (sc && view_fk_first_column(v, col->name)) hw += 2;
     if (hw > w) w = hw;
     for (size_t r = from_row; r < to_row; r++) {
       const LaceValue *cell = page_cache_cell(v->cache, r, c);

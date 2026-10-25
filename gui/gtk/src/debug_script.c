@@ -7,6 +7,13 @@
  *
  *   wait MS             pause
  *   table NAME          open a table in the current connection
+ *   object KIND NAME    open a view, routine or trigger from the sidebar's list
+ *   subview NAME        show a sub-view of the table tab (data, structure, indexes,
+ *                       foreign_keys, information)
+ *   sidebar-toggle KIND fold or unfold a sidebar section (view, routine, trigger)
+ *   follow              follow the focused cell's foreign key
+ *   referenced-by       open the first table referencing the focused row
+ *   dump                log the sidebar's rows and the sub-view's rows
  *   query SQL           open a SQL editor with the text
  *   run | run-all       run in the current editor
  *   action NAME         activate a window action (win.filter) or app action
@@ -30,6 +37,7 @@
 #include "views/connection_page.h"
 #include "views/filter_bar.h"
 #include "views/query_view.h"
+#include "views/sidebar.h"
 #include "views/table_view.h"
 #include "window.h"
 #include <stdlib.h>
@@ -99,6 +107,50 @@ static gboolean step(gpointer data) {
     delay = arg ? (guint)atoi(arg) : 100;
   } else if (g_str_equal(cmd, "table") && cp && arg) {
     lace_connection_page_open_table(cp, arg);
+  } else if (g_str_equal(cmd, "object") && cp && arg) {
+    char **parts = g_strsplit(arg, " ", 2);
+    LaceObjectKind kind;
+    if (parts[0] && parts[1] && lace_object_kind_from_key(parts[0], &kind)) {
+      if (!lace_sidebar_open(lace_connection_page_get_sidebar(cp), kind, parts[1]))
+        g_warning("script: object %s not in the sidebar", parts[1]);
+    }
+    g_strfreev(parts);
+  } else if (g_str_equal(cmd, "subview") && arg && LACE_IS_TABLE_VIEW(current_view(s->app))) {
+    LaceSubView sv;
+    if (lace_subview_from_key(arg, &sv))
+      lace_table_view_set_subview(LACE_TABLE_VIEW(current_view(s->app)), sv);
+    delay = 300;
+  } else if (g_str_equal(cmd, "sidebar-toggle") && cp && arg) {
+    LaceObjectKind kind;
+    if (lace_object_kind_from_key(arg, &kind))
+      lace_sidebar_toggle_section(lace_connection_page_get_sidebar(cp), kind);
+  } else if (g_str_equal(cmd, "follow")) {
+    LaceDataGrid *g = current_grid(s->app);
+    if (g)
+      g_signal_emit_by_name(g, "follow-fk");
+    delay = 300;
+  } else if (g_str_equal(cmd, "referenced-by") && cp && LACE_IS_TABLE_VIEW(current_view(s->app))) {
+    lace_table_view_referenced_by(LACE_TABLE_VIEW(current_view(s->app)));
+    delay = 300;
+  } else if (g_str_equal(cmd, "dump") && cp) {
+    char **rows = lace_sidebar_get_texts(lace_connection_page_get_sidebar(cp));
+    char *joined = g_strjoinv(" | ", rows);
+    g_message("sidebar: %s", joined);
+    g_free(joined);
+    g_strfreev(rows);
+    GtkWidget *v = current_view(s->app);
+    if (LACE_IS_TABLE_VIEW(v)) {
+      char **texts = lace_table_view_get_subview_texts(LACE_TABLE_VIEW(v));
+      if (texts) {
+        joined = g_strjoinv(" | ", texts);
+        g_message("subview %s: %s", lace_subview_key(lace_table_view_get_subview(LACE_TABLE_VIEW(v)), lace_table_view_get_object_kind(LACE_TABLE_VIEW(v))), joined);
+        g_free(joined);
+        g_strfreev(texts);
+      } else {
+        g_message("subview data: %u rows",
+                  g_list_model_get_n_items(G_LIST_MODEL(lace_data_grid_get_model(lace_table_view_get_grid(LACE_TABLE_VIEW(v))))));
+      }
+    }
   } else if (g_str_equal(cmd, "query") && cp) {
     lace_connection_page_new_query(cp, arg ? arg : "");
   } else if ((g_str_equal(cmd, "run") || g_str_equal(cmd, "run-all")) && LACE_IS_QUERY_VIEW(current_view(s->app))) {

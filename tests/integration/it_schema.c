@@ -9,6 +9,7 @@
 #include "it.h"
 #include <stdlib.h>
 #include <string.h>
+#include <util/connstr.h>
 
 static const LaceColumn *find_col(const LaceSchema *s, const char *name) {
   for (size_t i = 0; s && i < s->num_columns; i++) {
@@ -169,7 +170,33 @@ static void test_dependents(ItDb *db) {
   it_ex(db, "DROP TABLE it_dep_parent");
 }
 
+/* The current database is the URL's and is among the server's databases */
+static void test_databases(ItDb *db) {
+  char *cur = NULL;
+  char **names = NULL;
+  size_t n = 0;
+  CHECK_OK(db, lace_current_database(db->client, db->conn, &cur));
+  CHECK_OK(db, lace_list_databases(db->client, db->conn, &names, &n));
+  if (db->driver == LACE_DRIVER_SQLITE) {
+    if (cur) it_fail(db, "SQLite has a current database: %s", cur);
+    if (n) it_fail(db, "SQLite lists %zu databases", n);
+  } else {
+    if (!cur) it_fail(db, "no current database");
+    ConnString *cs = connstr_parse(db->url, NULL);
+    if (cs && cs->database && cur && strcmp(cs->database, cur) != 0)
+      it_fail(db, "current database %s, the URL's is %s", cur, cs->database);
+    connstr_free(cs);
+    bool found = false;
+    for (size_t i = 0; i < n; i++)
+      found = found || (cur && strcmp(names[i], cur) == 0);
+    if (!found) it_fail(db, "the current database is not among the %zu listed", n);
+  }
+  free(cur);
+  lace_tables_free(names, n);
+}
+
 const ItTest it_schema_tests[] = {
+    {"databases", test_databases, IT_ALL, false},
     {"schema_columns", test_schema_columns, IT_ALL, false},
     {"composite_key", test_composite_key, IT_ALL, false},
     {"odd_names", test_odd_names, IT_ALL, false},

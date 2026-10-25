@@ -120,6 +120,29 @@ LaceJob *lace_job_insert(const char *table, const char *const *columns,
 
 LaceJob *lace_job_disconnect(void) { return job_new(LACE_JOB_DISCONNECT); }
 
+LaceJob *lace_job_table_info(const char *table) {
+  LaceJob *j = lace_job_schema(table);
+  j->kind = LACE_JOB_TABLE_INFO;
+  return j;
+}
+
+LaceJob *lace_job_dependents(const char *table) {
+  LaceJob *j = lace_job_schema(table);
+  j->kind = LACE_JOB_DEPENDENTS;
+  return j;
+}
+
+LaceJob *lace_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  LaceJob *j = lace_job_schema(name);
+  j->kind = LACE_JOB_DEFINITION;
+  j->object_kind = (int)kind;
+  j->sql = g_strdup(name ? name : "");
+  free(j->table);
+  j->table = table ? g_strdup(table) : NULL;
+  j->column = detail ? g_strdup(detail) : NULL;
+  return j;
+}
+
 LaceJob *lace_job_ref(LaceJob *job) {
   g_atomic_ref_count_inc(&job->ref);
   return job;
@@ -146,6 +169,11 @@ void lace_job_unref(LaceJob *job) {
   lace_result_free(job->result);
   lace_schema_free(job->schema);
   lace_tables_free(job->tables, job->num_tables);
+  lace_objects_free(job->objects, job->num_objects);
+  lace_table_info_free(job->info);
+  lace_autoinc_free(job->autoinc);
+  lace_dependents_free(job->deps, job->num_deps);
+  free(job->definition);
   free(job->error);
   str_secure_free(job->last_sql);
   free(job);

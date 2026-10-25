@@ -130,7 +130,7 @@ def test_sort_and_filter(home):
         t.wait("↓v")
         assert wait_id(t, 100) == 100       # the sorted page replaces the old rows
         t.wait(at(1, 100))
-        t.keys("f")                         # filter on v
+        t.keys("/")                         # filter on v
         t.wait("Filter")
         t.type("42")                        # value field focused, op = equals
         t.keys("Enter")
@@ -147,9 +147,9 @@ def test_sort_and_filter(home):
 def test_structure_and_refresh(home):
     with open_big(home, 5) as t:
         t.keys("s")
-        t.wait("INTEGER")                   # the structure overlay lists types
+        t.wait("INTEGER")                   # the Structure sub-view lists types
         t.wait("name")
-        t.keys("Escape")
+        t.keys("a")                         # back to Data
         t.keys("r")
         assert wait_id(t, 1) == 1
         t.wait(at(1, 5))
@@ -173,7 +173,7 @@ def test_cancel_keeps_rows(home):
 
 def test_filter_operator_and_sort_picker(home):
     with open_big(home, 100) as t:
-        t.keys("Right", "Right", "f")       # filter on name
+        t.keys("Right", "Right", "/")       # filter on name
         t.wait("Filter")
         for _ in range(7):                  # = != > >= < <= in contains
             t.keys("M-Right")

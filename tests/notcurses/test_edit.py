@@ -180,7 +180,7 @@ def test_text_in_a_number_column_is_written_as_text(home):
 def test_empty_inline_edit_of_null_is_no_change(home):
     t, db = open_big(home, 3)
     with t:
-        t.keys("Right", "Right", "C-n")                  # NULL (set-null action)
+        t.keys("Right", "Right", "Enter", "C-n")         # NULL (the editor's NULL action; the grid's own is Ctrl+Shift+N)
         t.wait_status("Updated")
         t.keys("Enter", "x", "BSpace", "Enter")          # typed and cleared: still nothing
         t.wait_status("No change")

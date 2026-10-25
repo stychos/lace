@@ -44,6 +44,16 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
     return true;
   }
 
+  /* Ctrl+Enter / Alt+Enter - the referenced table; Alt+R - the referencing ones */
+  if (hotkey_matches(cfg, event, HOTKEY_FOLLOW_FK)) {
+    tui_follow_fk(state);
+    return true;
+  }
+  if (hotkey_matches(cfg, event, HOTKEY_REFERENCED_BY)) {
+    tui_referenced_by(state);
+    return true;
+  }
+
   /* Ctrl+N or n - set cell to NULL */
   if (hotkey_matches(cfg, event, HOTKEY_SET_NULL)) {
     query_result_set_cell_direct(state, tab, true);

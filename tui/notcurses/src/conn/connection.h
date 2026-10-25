@@ -54,6 +54,13 @@ char *nc_connection_short_name(const NcConnection *c);     /* "data.sqlite" / "d
 char *nc_connection_masked_connstr(const NcConnection *c); /* password-less (allocated) */
 char **nc_connection_tables(const NcConnection *c, size_t *n); /* owned by c */
 bool nc_connection_tables_loaded(const NcConnection *c);
+/* The database the connection is in (known with the table list; NULL: none,
+ * as SQLite, or not known yet). Owned by c. */
+const char *nc_connection_database(const NcConnection *c);
+/* The views, routines and triggers (lace_list_objects), known with the table
+ * list; owned by c */
+LaceObject *nc_connection_objects(const NcConnection *c, size_t *n);
+const LaceObject *nc_connection_find_object(const NcConnection *c, LaceObjectKind kind, const char *name);
 void nc_connection_refresh_tables(NcConnection *c);
 NcTxState nc_connection_tx_state(const NcConnection *c);
 bool nc_connection_busy(const NcConnection *c);

@@ -51,7 +51,7 @@ def test_tabs_strip_spans_connections(home):
         t.wait("big"); t.keys("Enter"); t.wait(at(1, 10))
         t.wait(lambda s: strip(s).startswith(" t.sqlite │ big ×"))  # one flat row; a tab without views is a cell of its own
         t.keys("]")                                                # ...which the tab keys reach
-        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite │"))
+        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite") and "t.sqlite 2" not in s.split("\n")[0])
         t.wait(lambda s: strip(s).startswith(" t.sqlite × │ big"))
         t.keys("M-2")                                              # Alt+N: the strip's Nth cell
         t.wait(lambda s: strip(s).startswith(" t.sqlite │ big ×"))
@@ -176,7 +176,7 @@ def test_tabs_strip_scrolls_to_the_current_view(home):
 
 def test_filter_panel_edit_add_remove_clear(home):
     with open_big(home, 100) as t:
-        t.keys("Right", "f")                              # a row for v, its value field focused
+        t.keys("Right", "/")                              # a row for v, its value field focused
         t.wait("Filters")
         t.wait(lambda s: "v " in s.split("\n")[3] and "=" in s.split("\n")[3])
         t.type("42"); t.keys("Enter")                     # typing edits the value; Enter applies
@@ -192,21 +192,32 @@ def test_filter_panel_edit_add_remove_clear(home):
         t.keys("-")                                       # remove the cursor row: back to one match
         t.wait("Filters (1)")
         t.wait(at(1, 1))
+        t.keys("-")                                       # remove the last one: the panel hides itself
+        t.wait(lambda s: "Filters" not in s)
+        t.wait("/ filter")                                # and the grid has the focus
+        t.wait(at(1, 100))
+        t.keys("/")                                       # a blank row for the cursor column again
+        t.wait("Filters")
+        t.keys("+")                                       # a blank row does not stop another being added
+        t.wait(lambda s: len([l for l in s.split("\n")[3:6] if "=" in l]) >= 2)
+        t.type("42"); t.keys("Enter")
+        t.wait("Filters (1)")                             # one active, one blank
+        t.wait(at(1, 1))
         t.keys("Escape")                                  # the panel stays, the grid has the focus
-        t.wait("f filter")
+        t.wait("/ filter")
         t.keys("X")                                       # clear from the grid
         t.wait(lambda s: "v = 42" not in s)
         t.wait(at(1, 100))
-        t.keys("f")                                       # focus the panel again
+        t.keys("/")                                       # focus the panel again
         t.wait("Enter edit")
-        t.keys("f")                                       # and hide it
+        t.keys("/")                                       # and hide it
         t.wait(lambda s: "Filters" not in s)
         t.keys("q"); assert t.quit() == 0
 
 
 def test_filter_panel_pickers_and_tab_ring(home):
     with open_big(home, 100) as t:
-        t.keys("Right", "Right", "f")                     # name
+        t.keys("Right", "Right", "/")                     # name
         t.wait("Filters")
         t.keys("BTab")                                   # the operator field
         t.keys("Enter")                                   # its picker
@@ -234,7 +245,7 @@ def test_filter_panel_pickers_and_tab_ring(home):
         t.keys("Tab")                                     # sidebar -> panel
         t.wait("Enter edit")
         t.keys("Tab", "Tab", "Tab")                       # past the last field: the grid
-        t.wait("f filter")
+        t.wait("/ filter")
         t.keys("BTab")                                   # grid -> panel (its last field)
         t.wait("Enter edit")
         t.keys("q")                                       # a letter on the value field types, no quit
@@ -246,7 +257,7 @@ def test_filter_panel_pickers_and_tab_ring(home):
 
 def test_filter_panel_raw_and_between(home):
     with open_big(home, 100) as t:
-        t.keys("f")
+        t.keys("/")
         t.wait("Filters")
         t.keys("BTab", "BTab")                          # the column field
         t.keys("Enter"); t.wait("Raw SQL")
@@ -273,7 +284,7 @@ def test_strips_off_by_preference(home):
     with open_big(home, 10) as t:
         t.wait("big (1 of 1)")                            # no strip: the header counts the views
         assert " big ×" not in t.text()
-        t.keys("f")
+        t.keys("/")
         t.wait("Operator:")                               # the overlay editor instead of the panel
         t.keys("Escape")
         t.keys(",")
@@ -292,7 +303,7 @@ def test_filter_panel_restored_with_the_session(home):
     home.write("config.json", {"general": {"restore_session": True}})
     with Nc(home, ["sqlite://" + db]) as t:
         t.wait("big"); t.keys("Enter"); t.wait(at(1, 50))
-        t.keys("Right", "f"); t.wait("Filters")
+        t.keys("Right", "/"); t.wait("Filters")
         t.type("7"); t.keys("Enter")
         t.wait(at(1, 1))
         t.keys("+")                                       # a blank row: not saved

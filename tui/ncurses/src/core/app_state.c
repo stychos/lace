@@ -100,7 +100,59 @@ void tab_init(Tab *tab) {
   static uint64_t next_uid = 1; /* Tabs are created on the main thread only */
   memset(tab, 0, sizeof(Tab));
   tab->uid = next_uid++;
+  tab->info_count = -1;
   filters_init(&tab->filters);
+}
+
+bool tab_has_subview(const Tab *tab, TabSubView sv) {
+  if (!tab || tab->type != TAB_TYPE_TABLE) return false;
+  switch (tab->object) {
+  case LACE_OBJ_TABLE: return sv < SUBVIEW_COUNT;
+  case LACE_OBJ_VIEW: return sv == SUBVIEW_DATA || sv == SUBVIEW_STRUCTURE || sv == SUBVIEW_INFORMATION;
+  default: return sv == SUBVIEW_STRUCTURE || sv == SUBVIEW_INFORMATION;
+  }
+}
+
+void tab_drop_catalog(Tab *tab) {
+  if (!tab) return;
+  lace_table_info_free(tab->info);
+  lace_autoinc_free(tab->autoinc);
+  tab->info = NULL;
+  tab->autoinc = NULL;
+  FREE_NULL(tab->info_error);
+  tab->info_count = -1;
+  lace_dependents_free(tab->deps, tab->num_deps);
+  tab->deps = NULL;
+  tab->num_deps = 0;
+  tab->deps_loaded = false;
+  FREE_NULL(tab->deps_error);
+  FREE_NULL(tab->definition);
+  FREE_NULL(tab->definition_error);
+}
+
+static const char *const SUBVIEW_KEYS[SUBVIEW_COUNT] = {"data", "structure", "indexes", "foreign_keys", "information"};
+
+const char *tab_subview_key(const Tab *tab, TabSubView sv) {
+  if (sv == SUBVIEW_STRUCTURE && tab && tab->object != LACE_OBJ_TABLE) return "definition";
+  return sv < SUBVIEW_COUNT ? SUBVIEW_KEYS[sv] : "data";
+}
+
+bool tab_subview_from_key(const char *key, TabSubView *out) {
+  if (!key) return false;
+  if (!strcmp(key, "definition")) { *out = SUBVIEW_STRUCTURE; return true; }
+  for (int i = 0; i < SUBVIEW_COUNT; i++)
+    if (!strcmp(key, SUBVIEW_KEYS[i])) { *out = (TabSubView)i; return true; }
+  return false;
+}
+
+static const char *const OBJECT_KEYS[] = {"table", "view", "routine", "trigger"};
+
+const char *tab_object_key(LaceObjectKind kind) { return kind <= LACE_OBJ_TRIGGER ? OBJECT_KEYS[kind] : "table"; }
+
+bool tab_object_from_key(const char *key, LaceObjectKind *out) {
+  for (int i = 0; key && i < 4; i++)
+    if (!strcmp(key, OBJECT_KEYS[i])) { *out = (LaceObjectKind)i; return true; }
+  return false;
 }
 
 void query_count_stop(Tab *tab) {
@@ -160,6 +212,9 @@ void tab_free_data(Tab *tab) {
   /* Free table data */
   FREE_NULL(tab->table_name);
   FREE_NULL(tab->table_error);
+  FREE_NULL(tab->object_table);
+  FREE_NULL(tab->object_detail);
+  tab_drop_catalog(tab);
   db_result_free(tab->data);
   tab->data = NULL;
   db_schema_free(tab->schema);
@@ -460,6 +515,9 @@ void connection_free_data(Connection *conn) {
     conn->tables = NULL;
   }
   conn->num_tables = 0;
+  lace_objects_free(conn->objects, conn->num_objects);
+  conn->objects = NULL;
+  conn->num_objects = 0;
 
   /* Free connection string and saved connection ID */
   FREE_NULL(conn->connstr);

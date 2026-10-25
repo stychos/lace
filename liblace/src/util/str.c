@@ -108,7 +108,7 @@ char *str_url_encode(const char *s) {
 
   for (const char *p = s; *p; p++) {
     unsigned char c = *p;
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+    if ((c < 128 && isalnum(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
       sb_append_char(sb, c);
     } else {
       char hex[4];

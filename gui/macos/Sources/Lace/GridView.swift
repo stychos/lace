@@ -32,6 +32,10 @@ protocol GridDelegate: AnyObject {
   /// From the context menu: value nil asks for "is NULL", "" opens the
   /// filter editor on the column
   func grid(_ grid: GridController, filterColumn name: String, value: String?)
+  /// ⌘-click or the context menu on a foreign key column: the referenced row
+  func gridFollowForeignKey(_ grid: GridController)
+  /// The context menu: a table whose key points at the focused row
+  func gridReferencedBy(_ grid: GridController)
 }
 
 @MainActor
@@ -49,6 +53,10 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
   var allowsFiltering = true
   /// "Add Row…" in the context menu (table tabs)
   var allowsAdding = false
+  /// The first columns of the foreign keys: ⇒ in their header, followable
+  var foreignKeyColumns: Set<String> = [] {
+    didSet { if foreignKeyColumns != oldValue { rebuildColumns() } }
+  }
   var showRowNumbers = false {
     didSet { if showRowNumbers != oldValue { rebuildColumns() } }
   }
@@ -145,9 +153,11 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
     for (i, col) in model.columns.enumerated() {
       let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c\(i)"))
-      c.title = col.name
+      let fk = foreignKeyColumns.contains(col.name)
+      c.title = fk ? "\(col.name) ⇒" : col.name
       var tip = col.typeName ?? col.type.name
       if col.primaryKey { tip += " · primary key" }
+      if fk { tip += " · foreign key: ⌘-click follows it" }
       if !col.nullable { tip += " · NOT NULL" }
       c.headerToolTip = tip
       c.width = widths[col.name] ?? 120
@@ -490,6 +500,11 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
       add("Filter: \(name) Is NULL", #selector(menuFilterNull))
       add("Add Filter on \(name)…", #selector(menuFilterAdd))
     }
+    if let (_, c) = focusedCell, c < model.columns.count {
+      menu.addItem(.separator())
+      add("Follow Foreign Key", #selector(menuFollow), enabled: foreignKeyColumns.contains(model.columns[c].name))
+      add("Referenced By…", #selector(menuReferencedBy), enabled: canFollow)
+    }
     if isEditable {
       menu.addItem(.separator())
       let n = max(tableView.selectedRowIndexes.count, 1)
@@ -503,6 +518,17 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
   }
 
   @objc private func menuAddRow() { delegate?.gridAddRow(self) }
+  @objc private func menuFollow() { delegate?.gridFollowForeignKey(self) }
+  @objc private func menuReferencedBy() { delegate?.gridReferencedBy(self) }
+  /// The rows are a table's (the owner says): the referencing tables can be listed
+  var canFollow = false
+  fileprivate func cmdClicked(row: Int, column tci: Int) {
+    setCurrentColumn(fromTableColumnIndex: tci)
+    focusRow = row
+    if let (_, c) = focusedCell, c < model.columns.count, foreignKeyColumns.contains(model.columns[c].name) {
+      delegate?.gridFollowForeignKey(self)
+    }
+  }
 
   @objc private func menuCopy() { copySelection() }
   @objc private func menuEdit() { beginEdit(initialText: nil) }
@@ -591,6 +617,12 @@ final class GridTableView: NSTableView {
     let col = column(at: point)
     if col >= 0 {
       grid?.setCurrentColumn(fromTableColumnIndex: col)
+    }
+    let r = row(at: point)
+    if event.modifierFlags.contains(.command), r >= 0, col >= 0 {
+      selectRowIndexes(IndexSet(integer: r), byExtendingSelection: false) /* ⌘-click: follow the key */
+      grid?.cmdClicked(row: r, column: col)
+      return
     }
     super.mouseDown(with: event)
   }

@@ -7,7 +7,6 @@
  */
 
 #include "connection_page.h"
-#include "schema_dialog.h"
 #include "sidebar.h"
 #include "util.h"
 
@@ -57,13 +56,19 @@ static gboolean on_close_page(AdwTabView *view, AdwTabPage *page, LaceConnection
   return GDK_EVENT_STOP;
 }
 
-static AdwTabPage *find_table_page(LaceConnectionPage *p, const char *table) {
+/* Tables and database views share a namespace; routines and triggers have their own */
+static gboolean same_object(LaceObjectKind a, LaceObjectKind b) {
+  gboolean ra = a == LACE_OBJ_TABLE || a == LACE_OBJ_VIEW, rb = b == LACE_OBJ_TABLE || b == LACE_OBJ_VIEW;
+  return ra ? rb : a == b;
+}
+
+static AdwTabPage *find_object_page(LaceConnectionPage *p, LaceObjectKind kind, const char *name) {
   int n = adw_tab_view_get_n_pages(ADW_TAB_VIEW(p->tab_view));
   for (int i = 0; i < n; i++) {
     AdwTabPage *page = adw_tab_view_get_nth_page(ADW_TAB_VIEW(p->tab_view), i);
     GtkWidget *child = page_view(page);
-    if (LACE_IS_TABLE_VIEW(child) &&
-        g_strcmp0(lace_table_view_get_table(LACE_TABLE_VIEW(child)), table) == 0)
+    if (LACE_IS_TABLE_VIEW(child) && same_object(lace_table_view_get_object_kind(LACE_TABLE_VIEW(child)), kind) &&
+        g_strcmp0(lace_table_view_get_table(LACE_TABLE_VIEW(child)), name) == 0)
       return page;
   }
   return NULL;
@@ -166,8 +171,31 @@ static void on_view_touched(LaceTableView *view, LaceConnectionPage *p) {
     set_preview(p, page, FALSE);
 }
 
-static LaceTableView *open_table(LaceConnectionPage *p, const char *table, gboolean preview) {
-  AdwTabPage *existing = find_table_page(p, table);
+static void on_open_filtered(GObject *view, const char *table, gpointer filters, guint n, LaceConnectionPage *p) {
+  (void)view;
+  lace_connection_page_open_filtered(p, table, filters, n);
+}
+
+static void on_open_object(LaceTableView *view, int kind, const char *name, const char *table, int subview,
+                           LaceConnectionPage *p) {
+  (void)view;
+  LaceTableView *tv = lace_connection_page_open_object(p, (LaceObjectKind)kind, name, table, NULL, FALSE);
+  if (tv)
+    lace_table_view_set_subview(tv, (LaceSubView)subview);
+}
+
+static const char *kind_icon(LaceObjectKind k) {
+  switch (k) {
+  case LACE_OBJ_VIEW: return "view-paged-symbolic";
+  case LACE_OBJ_ROUTINE: return "system-run-symbolic";
+  case LACE_OBJ_TRIGGER: return "lace-key-symbolic";
+  default: return "lace-table-symbolic";
+  }
+}
+
+static LaceTableView *open_object(LaceConnectionPage *p, LaceObjectKind kind, const char *table, const char *otable,
+                                  const char *detail, gboolean preview) {
+  AdwTabPage *existing = find_object_page(p, kind, table);
   if (existing) {
     if (!preview && g_object_get_data(G_OBJECT(existing), "preview"))
       set_preview(p, existing, FALSE);
@@ -175,8 +203,10 @@ static LaceTableView *open_table(LaceConnectionPage *p, const char *table, gbool
     lace_table_view_focus_grid(LACE_TABLE_VIEW(page_view(existing)));
     return LACE_TABLE_VIEW(page_view(existing));
   }
-  LaceTableView *view = lace_table_view_new(p->conn, table, p->prefs);
+  LaceTableView *view = lace_table_view_new_object(p->conn, kind, table, otable, detail, p->prefs);
   g_signal_connect(view, "touched", G_CALLBACK(on_view_touched), p);
+  g_signal_connect(view, "open-filtered", G_CALLBACK(on_open_filtered), p);
+  g_signal_connect(view, "open-object", G_CALLBACK(on_open_object), p);
   AdwTabPage *page;
   AdwTabPage *old = preview ? preview_page(p) : NULL;
   if (old) {
@@ -192,6 +222,11 @@ static LaceTableView *open_table(LaceConnectionPage *p, const char *table, gbool
   }
   adw_tab_page_set_title(page, table);
   set_preview(p, page, preview);
+  if (!preview && kind != LACE_OBJ_TABLE) {
+    GIcon *icon = g_icon_new_for_string(kind_icon(kind), NULL);
+    adw_tab_page_set_icon(page, icon);
+    g_object_unref(icon);
+  }
   adw_tab_view_set_selected_page(ADW_TAB_VIEW(p->tab_view), page);
   update_empty(p);
   if (!preview)
@@ -200,12 +235,33 @@ static LaceTableView *open_table(LaceConnectionPage *p, const char *table, gbool
 }
 
 LaceTableView *lace_connection_page_open_table(LaceConnectionPage *p, const char *table) {
-  return open_table(p, table, FALSE);
+  return open_object(p, LACE_OBJ_TABLE, table, NULL, NULL, FALSE);
 }
 
 LaceTableView *lace_connection_page_preview_table(LaceConnectionPage *p, const char *table) {
-  return open_table(p, table, TRUE);
+  return open_object(p, LACE_OBJ_TABLE, table, NULL, NULL, TRUE);
 }
+
+LaceTableView *lace_connection_page_open_object(LaceConnectionPage *p, LaceObjectKind kind, const char *name,
+                                                const char *table, const char *detail, gboolean preview) {
+  return open_object(p, kind, name, table, detail, preview);
+}
+
+LaceTableView *lace_connection_page_open_filtered(LaceConnectionPage *p, const char *table,
+                                                  const LaceFilter *filters, gsize n) {
+  char *name = g_strdup(table); /* opening may free what table pointed into */
+  LaceTableView *tv = open_object(p, LACE_OBJ_TABLE, name, NULL, NULL, FALSE);
+  lace_table_view_show_filtered(tv, filters, n);
+  GString *cond = g_string_new(NULL);
+  for (gsize k = 0; k < n; k++)
+    g_string_append_printf(cond, "%s%s = %s", k ? ", " : "", filters[k].column ? filters[k].column : "", filters[k].value ? filters[k].value : "");
+  lace_toast(GTK_WIDGET(p), "%s where %s", name, cond->str);
+  g_string_free(cond, TRUE);
+  g_free(name);
+  return tv;
+}
+
+LaceSidebar *lace_connection_page_get_sidebar(LaceConnectionPage *p) { return p->sidebar; }
 
 static void on_query_title_changed(LaceQueryView *qv, LaceConnectionPage *p) {
   AdwTabPage *page = adw_tab_view_get_page(ADW_TAB_VIEW(p->tab_view), GTK_WIDGET(qv));
@@ -218,6 +274,7 @@ static void on_query_title_changed(LaceQueryView *qv, LaceConnectionPage *p) {
 
 LaceQueryView *lace_connection_page_new_query(LaceConnectionPage *p, const char *text) {
   LaceQueryView *view = lace_query_view_new(p->conn, p->prefs);
+  g_signal_connect(view, "open-filtered", G_CALLBACK(on_open_filtered), p);
   AdwTabPage *page = adw_tab_view_append(ADW_TAB_VIEW(p->tab_view), GTK_WIDGET(view));
   p->query_counter++;
   char *title = g_strdup_printf("Query %u", p->query_counter);
@@ -283,29 +340,40 @@ void lace_connection_page_focus_content(LaceConnectionPage *p) {
 
 LaceConnection *lace_connection_page_get_connection(LaceConnectionPage *p) { return p->conn; }
 
-/* Sidebar signals */
-static void on_open_table(LaceSidebar *s, const char *table, LaceConnectionPage *p) {
+/* Sidebar signals (the entry is the sidebar's: copy what outlives the emission) */
+static void on_open_entry(LaceSidebar *s, gpointer entry, LaceConnectionPage *p) {
   (void)s;
-  lace_connection_page_open_table(p, table);
+  const LaceSidebarEntry *e = entry;
+  char *name = g_strdup(e->name), *table = e->table ? g_strdup(e->table) : NULL;
+  char *detail = e->detail ? g_strdup(e->detail) : NULL;
+  open_object(p, e->kind, name, table, detail, FALSE);
+  g_free(name);
+  g_free(table);
+  g_free(detail);
 }
 
-static void on_preview_table(LaceSidebar *s, const char *table, LaceConnectionPage *p) {
+static void on_preview_entry(LaceSidebar *s, gpointer entry, LaceConnectionPage *p) {
   (void)s;
-  lace_connection_page_preview_table(p, table);
+  const LaceSidebarEntry *e = entry;
+  char *name = g_strdup(e->name), *table = e->table ? g_strdup(e->table) : NULL;
+  char *detail = e->detail ? g_strdup(e->detail) : NULL;
+  open_object(p, e->kind, name, table, detail, TRUE);
+  g_free(name);
+  g_free(table);
+  g_free(detail);
 }
 
-static void schema_for_dialog_done(LaceJob *job, gpointer data) {
-  LaceConnectionPage *p = data;
-  if (job->error) {
-    lace_error_dialog(GTK_WIDGET(p), "Structure", lace_job_error(job));
-    return;
-  }
-  lace_schema_dialog_show(GTK_WIDGET(p), job->table, job->schema);
-}
-
-static void on_show_structure(LaceSidebar *s, const char *table, LaceConnectionPage *p) {
+static void on_show_structure(LaceSidebar *s, gpointer entry, LaceConnectionPage *p) {
   (void)s;
-  lace_connection_submit(p->conn, lace_job_schema(table), G_OBJECT(p), schema_for_dialog_done, p);
+  const LaceSidebarEntry *e = entry;
+  char *name = g_strdup(e->name), *table = e->table ? g_strdup(e->table) : NULL;
+  char *detail = e->detail ? g_strdup(e->detail) : NULL;
+  LaceTableView *tv = open_object(p, e->kind, name, table, detail, FALSE);
+  if (tv)
+    lace_table_view_set_subview(tv, LACE_SUBVIEW_STRUCTURE);
+  g_free(name);
+  g_free(table);
+  g_free(detail);
 }
 
 static void on_new_query(LaceSidebar *s, LaceConnectionPage *p) {
@@ -367,8 +435,8 @@ LaceConnectionPage *lace_connection_page_new(LaceConnection *conn, const LacePre
 
   p->sidebar = lace_sidebar_new(conn);
   adw_overlay_split_view_set_sidebar(ADW_OVERLAY_SPLIT_VIEW(p->split), GTK_WIDGET(p->sidebar));
-  g_signal_connect(p->sidebar, "open-table", G_CALLBACK(on_open_table), p);
-  g_signal_connect(p->sidebar, "preview-table", G_CALLBACK(on_preview_table), p);
+  g_signal_connect(p->sidebar, "open-object", G_CALLBACK(on_open_entry), p);
+  g_signal_connect(p->sidebar, "preview-object", G_CALLBACK(on_preview_entry), p);
   g_signal_connect(p->sidebar, "show-structure", G_CALLBACK(on_show_structure), p);
   g_signal_connect(p->sidebar, "new-query", G_CALLBACK(on_new_query), p);
 

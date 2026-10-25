@@ -123,11 +123,22 @@ View *conntab_current_view(const ConnTab *t) {
   return t && t->current < t->num_views ? t->views[t->current] : NULL;
 }
 
-size_t conntab_find_table_view(const ConnTab *t, const char *table) {
-  for (size_t i = 0; t && table && i < t->num_views; i++)
-    if (t->views[i]->kind == VIEW_TABLE && t->views[i]->table && !strcmp(t->views[i]->table, table))
-      return i;
+/* Tables and database views share one namespace; routines and triggers have their own */
+static bool same_namespace(LaceObjectKind a, LaceObjectKind b) {
+  bool ra = a == LACE_OBJ_TABLE || a == LACE_OBJ_VIEW, rb = b == LACE_OBJ_TABLE || b == LACE_OBJ_VIEW;
+  return ra ? rb : a == b;
+}
+
+size_t conntab_find_object_view(const ConnTab *t, LaceObjectKind kind, const char *name) {
+  for (size_t i = 0; t && name && i < t->num_views; i++) {
+    const View *v = t->views[i];
+    if (v->kind == VIEW_TABLE && v->table && same_namespace(v->object, kind) && !strcmp(v->table, name)) return i;
+  }
   return SIZE_MAX;
+}
+
+size_t conntab_find_table_view(const ConnTab *t, const char *table) {
+  return conntab_find_object_view(t, LACE_OBJ_TABLE, table);
 }
 
 size_t conntab_find_preview(const ConnTab *t) {
@@ -164,6 +175,13 @@ cJSON *view_to_json(const View *v, bool with_cursor) {
   }
   cJSON_AddStringToObject(o, "type", "table");
   cJSON_AddStringToObject(o, "table", v->table ? v->table : "");
+  /* only what differs from a table on Data, so older frontends read the file as before */
+  if (v->object != LACE_OBJ_TABLE) {
+    cJSON_AddStringToObject(o, "object", view_object_key(v->object));
+    if (v->object_table) cJSON_AddStringToObject(o, "object_table", v->object_table);
+    if (v->object_detail) cJSON_AddStringToObject(o, "object_detail", v->object_detail);
+  }
+  if (v->subview != SV_DATA) cJSON_AddStringToObject(o, "subview", view_subview_key(v, v->subview));
   cJSON *fs = cJSON_AddArrayToObject(o, "filters");
   for (size_t i = 0; i < v->num_filters; i++) {
     const LaceFilter *f = &v->filters[i];

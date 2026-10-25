@@ -2,6 +2,7 @@
 #include "ui/sidebar.h"
 #include "ui/query_view.h"
 #include "ui/filter_panel.h"
+#include "ui/subviews.h"
 #include "ui/tabstrip.h"
 #include "edit_ops.h"
 #include "undo.h"
@@ -27,7 +28,7 @@ Rect grid_content_rect(const NcApp *app) {
   r.x += sw;
   r.cols -= sw;
   const ConnTab *t = app->num_workspaces ? workspace_current_tab(app->workspaces[app->current_ws]) : NULL;
-  int ph = filter_panel_rows(app, conntab_current_view(t));
+  int ph = subviews_rows(app) + filter_panel_rows(app, conntab_current_view(t));
   r.y += ph;
   r.rows -= ph;
   if (r.rows < 0) r.rows = 0;
@@ -109,6 +110,11 @@ static void draw_header(NcApp *app, View *v, Rect r, int gutter) {
     if (pk) {
       nc_style(p, t, TC_PK_FG, TC_HEADER_BG, NCSTYLE_BOLD);
       nc_put(p, r.y, x + lw + 1, 1, "\xe2\x9a\xb7");
+    }
+    int fx = x + lw + (pk ? 3 : 1); /* a foreign key column can be followed: ⇒ after the name */
+    if (view_column_is_fk(v, name) && fx < x + w) {
+      nc_style(p, t, TC_ACCENT, TC_HEADER_BG, NCSTYLE_BOLD);
+      nc_put(p, r.y, fx, 1, "\xe2\x87\x92");
     }
     free(label);
     x += w + 1;
@@ -348,7 +354,7 @@ bool grid_do_action(NcApp *app, View *v, HotkeyAction a) {
   if (!v) return false;
   if (v->kind == VIEW_QUERY) { /* sorting, filters, structure and new rows belong to tables */
     if (a == HOTKEY_CYCLE_SORT || a == HOTKEY_TOGGLE_FILTERS || a == HOTKEY_CLEAR_FILTERS ||
-        a == HOTKEY_SHOW_SCHEMA || a == HOTKEY_ROW_ADD || a == HOTKEY_EDIT_INLINE)
+        a == HOTKEY_ROW_ADD || a == HOTKEY_EDIT_INLINE)
       return false;
   }
   Rect r = grid_view_rect(app, v);
@@ -403,9 +409,11 @@ bool grid_do_action(NcApp *app, View *v, HotkeyAction a) {
   case HOTKEY_UNDO:
     undo_last(app, v);
     return true;
-  case HOTKEY_SHOW_SCHEMA:
-    if (!v->schema) { app_set_status(app, false, "The structure is not loaded"); return true; }
-    structure_open(app, v);
+  case HOTKEY_FOLLOW_FK:
+    app_follow_fk(app, v);
+    return true;
+  case HOTKEY_REFERENCED_BY:
+    app_referenced_by(app, v);
     return true;
   case HOTKEY_TOGGLE_SELECTION:
     if (page_cache_extent(v->cache) == 0) return true;
@@ -431,8 +439,8 @@ static const HotkeyAction GRID_ACTIONS[] = {
     HOTKEY_MOVE_UP, HOTKEY_MOVE_DOWN, HOTKEY_MOVE_LEFT, HOTKEY_MOVE_RIGHT, HOTKEY_PAGE_UP,
     HOTKEY_PAGE_DOWN, HOTKEY_FIRST_ROW, HOTKEY_LAST_ROW, HOTKEY_GOTO_ROW, HOTKEY_FIRST_COL,
     HOTKEY_LAST_COL, HOTKEY_CYCLE_SORT, HOTKEY_TOGGLE_FILTERS, HOTKEY_CLEAR_FILTERS,
-    HOTKEY_REFRESH, HOTKEY_SHOW_SCHEMA, HOTKEY_TOGGLE_SELECTION, HOTKEY_CLEAR_SELECTIONS,
-    HOTKEY_COLUMN_NARROWER, HOTKEY_COLUMN_WIDER};
+    HOTKEY_REFRESH, HOTKEY_TOGGLE_SELECTION, HOTKEY_CLEAR_SELECTIONS,
+    HOTKEY_COLUMN_NARROWER, HOTKEY_COLUMN_WIDER, HOTKEY_FOLLOW_FK, HOTKEY_REFERENCED_BY};
 
 bool grid_handle_key(NcApp *app, View *v, const UiEvent *ev, Rect r) {
   (void)r;

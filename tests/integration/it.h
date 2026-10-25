@@ -62,6 +62,8 @@ extern const ItTest it_recovery_tests[];
 extern const ItTest it_daemon_tests[];
 extern const ItTest it_tunnel_tests[];
 extern const ItTest it_paging_tests[];
+extern const ItTest it_catalog_tests[];
+extern const ItTest it_ddl_tests[];
 
 /* ---- Helpers (it_main.c) ------------------------------------------------ */
 
@@ -105,6 +107,7 @@ int64_t it_now_ms(void);
     CHECK(rc_ == LACE_OK);                                                     \
   } while (0)
 
+#undef CHECK_STR
 #define CHECK_STR(got, want)                                                   \
   do {                                                                         \
     const char *g_ = (got), *w_ = (want);                                      \

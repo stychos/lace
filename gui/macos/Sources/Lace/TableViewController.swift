@@ -23,13 +23,21 @@ import LaceKit
 
 final class TableViewController: NSViewController, GridDelegate {
   let connection: Connection
-  let table: String
+  /// What the tab shows: a table, a database view, a routine or a trigger
+  let object: CatalogObject
+  var table: String { object.name }
   let prefs: Prefs
   let model: RowModel
   let grid: GridController
   var onTouched: (() -> Void)?
   /// A statement that wrote (the SQL liblace sent), for history
   var record: ((String) -> Void)?
+  /// Open a table filtered by a followed key (the connection page reuses an open tab)
+  var onOpenFiltered: ((String, [Filter]) -> Void)?
+  /// Open another object (a trigger from Information, a referencing table's keys)
+  var onOpenObject: ((CatalogObject, SubView) -> Void)?
+  /// The connection's objects for the Information view (the sidebar's list)
+  var objectsProvider: (() -> [CatalogObject])?
   var toast: ((String) -> Void)? {
     didSet {
       grid.toast = toast
@@ -37,6 +45,8 @@ final class TableViewController: NSViewController, GridDelegate {
     }
   }
 
+  private let strip = NSSegmentedControl()
+  private let list = CatalogListController()
   private let filterBar = FilterBarView(frame: .zero)
   private let banner = BannerView(frame: .zero)
   private let statusLabel = NSTextField(labelWithString: "")
@@ -54,11 +64,28 @@ final class TableViewController: NSViewController, GridDelegate {
     didSet { inFlight > 0 ? spinner.startAnimation(nil) : spinner.stopAnimation(nil) }
   }
   private var editable = false
+  /// The sub-view shown (saved in the session)
+  private(set) var subview: SubView
+  /// What the other sub-views read when first shown; a refresh drops them
+  private var info: TableInfo?
+  private var infoError: String?
+  private var infoCount: Int64 = -1
+  private var counting = false
+  private var dependents: Dependents?
+  private var dependentsError: String?
+  private var definition: String?
+  private var definitionError: String?
+  private var catalogLoading = 0
 
-  init(connection: Connection, table: String, prefs: Prefs) {
+  convenience init(connection: Connection, table: String, prefs: Prefs) {
+    self.init(connection: connection, object: CatalogObject(kind: .table, name: table), prefs: prefs)
+  }
+
+  init(connection: Connection, object: CatalogObject, prefs: Prefs) {
     self.connection = connection
-    self.table = table
+    self.object = object
     self.prefs = prefs
+    subview = SubView.available(for: object.kind).contains(.data) ? .data : .structure
     model = RowModel(pageSize: prefs.pageSize)
     grid = GridController(model: model)
     edit = EditController(connection: connection, model: model, grid: grid)
@@ -102,7 +129,25 @@ final class TableViewController: NSViewController, GridDelegate {
     footer.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
     footer.setContentHuggingPriority(.required, for: .vertical)
 
-    let stack = NSStackView(views: [banner, filterBar, grid.scrollView, SeparatorView(), footer])
+    strip.segmentStyle = .texturedSquare
+    strip.trackingMode = .selectOne
+    let available = SubView.available(for: object.kind)
+    strip.segmentCount = available.count
+    for (i, sv) in available.enumerated() {
+      strip.setLabel(sv.label(for: object.kind), forSegment: i)
+      strip.setTag(sv.rawValue, forSegment: i)
+    }
+    strip.selectedSegment = available.firstIndex(of: subview) ?? 0
+    strip.target = self
+    strip.action = #selector(stripChanged(_:))
+    let stripRow = NSStackView(views: [strip])
+    stripRow.orientation = .horizontal
+    stripRow.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+    stripRow.setContentHuggingPriority(.required, for: .vertical)
+    list.onActivate = { [weak self] tag in self?.activate(tag: tag) }
+    list.scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
+
+    let stack = NSStackView(views: [stripRow, banner, filterBar, grid.scrollView, list.scrollView, SeparatorView(), footer])
     stack.orientation = .vertical
     stack.alignment = .width
     stack.spacing = 0
@@ -121,7 +166,10 @@ final class TableViewController: NSViewController, GridDelegate {
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    loadSchema()
+    if SubView.available(for: object.kind).contains(.data) {
+      loadSchema()
+    }
+    showSubView()
   }
 
   func tearDown() {
@@ -143,6 +191,7 @@ final class TableViewController: NSViewController, GridDelegate {
         schema = s
         edit.schema = s
         filterBar.schema = s
+        grid.foreignKeyColumns = Set(s.foreignKeys.compactMap(\.columns.first))
         editable = !s.primaryKey.isEmpty
         grid.readOnlyReason = editable ? nil : "the table has no primary key"
         grid.showRowNumbers = prefs.rowNumbers(for: s)
@@ -153,6 +202,7 @@ final class TableViewController: NSViewController, GridDelegate {
       }
       grid.isEditable = editable
       startLoad()
+      renderList()
     }
   }
 
@@ -339,12 +389,260 @@ final class TableViewController: NSViewController, GridDelegate {
   }
 
   func refresh() {
-    if schema == nil {
-      loadSchema()
+    dropCatalog()
+    if !SubView.available(for: object.kind).contains(.data) {
+      renderList()
+    } else if schema == nil || subview != .data {
+      loadSchema()  // the columns, keys and indexes again
     } else {
       startLoad()
     }
   }
+
+  // MARK: Sub-views
+
+  private func dropCatalog() {
+    info = nil
+    infoError = nil
+    infoCount = -1
+    dependents = nil
+    dependentsError = nil
+    definition = nil
+    definitionError = nil
+  }
+
+  func setSubView(_ sv: SubView) {
+    guard SubView.available(for: object.kind).contains(sv) else {
+      toast?("A \(object.kind.word.lowercased()) has no \(sv.label(for: object.kind))")
+      return
+    }
+    guard sv != subview else { return }
+    subview = sv
+    showSubView()
+  }
+
+  private func showSubView() {
+    let available = SubView.available(for: object.kind)
+    strip.selectedSegment = available.firstIndex(of: subview) ?? 0
+    let data = subview == .data
+    filterBar.isHidden = !data || (filterBar.filters.isEmpty && filterBar.search == nil && filterBar.isHidden)
+    grid.scrollView.isHidden = !data
+    list.scrollView.isHidden = data
+    if !data {
+      renderList()
+    }
+  }
+
+  @objc private func stripChanged(_ sender: Any?) {
+    let tag = strip.tag(forSegment: strip.selectedSegment)
+    if let sv = SubView(rawValue: tag) {
+      setSubView(sv)
+      if sv != .data {
+        list.focus()
+      } else {
+        focusGrid()
+      }
+    }
+  }
+
+  /// The list of the current sub-view, from what is loaded; asks for what is not
+  private func renderList() {
+    guard subview != .data else { return }
+    let dataLike = SubView.available(for: object.kind).contains(.data)
+    if dataLike && schema == nil {
+      list.show(nil, message: inFlight > 0 ? "Loading…" : "The structure could not be read")
+      return
+    }
+    switch subview {
+    case .structure:
+      if object.kind == .table, let schema {
+        list.show(CatalogTable.structure(schema))
+      } else {
+        loadDefinition()
+        if let definition {
+          list.show(CatalogTable.definition(definition, width: 110, columns: object.kind == .view ? schema : nil))
+        } else {
+          list.show(nil, message: definitionError ?? "Loading…")
+        }
+      }
+    case .indexes:
+      if let schema, let t = CatalogTable.indexes(schema) {
+        list.show(t)
+      } else {
+        list.show(nil, message: "No indexes or constraints")
+      }
+    case .foreignKeys:
+      guard let schema else { return }
+      loadDependents()
+      list.show(
+        CatalogTable.foreignKeys(
+          schema, table: table, dependents: dependents, loaded: dependents != nil, error: dependentsError))
+    case .information:
+      loadInfo()
+      // the exact count: asked for here, or Data's when it was counted and unfiltered
+      let exact: Int64 =
+        infoCount >= 0
+        ? infoCount
+        : (dataLike && model.totalKnown && !model.totalApproximate && filterBar.isEmpty ? Int64(model.total) : -1)
+      list.show(
+        CatalogTable.info(
+          object, info: info, error: infoError, exact: exact, counting: counting, objects: objectsProvider?() ?? []))
+    case .data:
+      break
+    }
+  }
+
+  private func loadInfo() {
+    guard info == nil, infoError == nil, object.kind == .table || object.kind == .view else { return }
+    guard catalogLoading == 0 else { return }
+    catalogLoading += 1
+    let connection = self.connection
+    let table = self.table
+    Task { [weak self] in
+      let outcome = await Result { try await connection.tableInfo(of: table) }
+      guard let self else { return }
+      catalogLoading -= 1
+      switch outcome {
+      case .success(let i): info = i
+      case .failure(let error): infoError = "\(error)"
+      }
+      renderList()
+    }
+  }
+
+  private func loadDependents() {
+    guard dependents == nil, dependentsError == nil, catalogLoading == 0 else { return }
+    catalogLoading += 1
+    let connection = self.connection
+    let table = self.table
+    Task { [weak self] in
+      let outcome = await Result { try await connection.dependents(of: table) }
+      guard let self else { return }
+      catalogLoading -= 1
+      switch outcome {
+      case .success(let d): dependents = d
+      case .failure(let error): dependentsError = "\(error)"
+      }
+      renderList()
+    }
+  }
+
+  private func loadDefinition() {
+    guard definition == nil, definitionError == nil, catalogLoading == 0 else { return }
+    catalogLoading += 1
+    let connection = self.connection
+    var object = self.object
+    if object.kind == .trigger, object.table == nil,
+      let o = objectsProvider?().first(where: { $0.kind == .trigger && $0.name == object.name })
+    {
+      object = o  // restored without its table: the object list knows it
+    }
+    Task { [weak self] in
+      let outcome = await Result { try await connection.definition(of: object) }
+      guard let self else { return }
+      catalogLoading -= 1
+      switch outcome {
+      case .success(let sql): definition = sql
+      case .failure(let error): definitionError = "\(error)"
+      }
+      renderList()
+    }
+  }
+
+  /// Return or a double click on a list row
+  private func activate(tag: Int) {
+    if tag == CatalogTable.Tag.rows, subview == .information {
+      guard !counting else { return }
+      counting = true
+      renderList()
+      let connection = self.connection
+      let table = self.table
+      Task { [weak self] in
+        let outcome = await Result { try await connection.count(table: table, approximate: false) }
+        guard let self else { return }
+        counting = false
+        if case .success(let c) = outcome { infoCount = c.count } else { toast?("The count failed") }
+        renderList()
+      }
+      return
+    }
+    if tag >= CatalogTable.Tag.trigger, let objects = objectsProvider?() {
+      let i = tag - CatalogTable.Tag.trigger
+      if i < objects.count, objects[i].kind == .trigger {
+        onOpenObject?(objects[i], .structure)
+      }
+      return
+    }
+    if tag >= CatalogTable.Tag.dependent, tag < CatalogTable.Tag.trigger, let deps = dependents {
+      let i = tag - CatalogTable.Tag.dependent
+      if i < deps.entries.count {
+        onOpenObject?(CatalogObject(kind: .table, name: deps.entries[i].table), .foreignKeys)
+      }
+    }
+  }
+
+  /// The current list's rows as text (the script driver)
+  var listRows: [String] { (0..<list.rowCount).compactMap { list.rowText($0) } }
+
+  /// Session restore of the sub-view
+  func restore(subview: SubView) {
+    guard SubView.available(for: object.kind).contains(subview) else { return }
+    self.subview = subview
+    showSubView()
+  }
+
+  /// Show the table's rows filtered by a followed key (the filters replace the tab's)
+  func showFiltered(_ filters: [Filter]) {
+    filterBar.setFilters(filters, search: nil)
+    filterBar.isHidden = false
+    if subview != .data {
+      subview = .data
+      showSubView()
+    }
+    onTouched?()
+    if schema != nil {
+      startLoad()
+    }
+  }
+
+  @objc func followForeignKey(_ sender: Any?) {
+    guard subview == .data else { return }
+    Follow.follow(grid: grid, schema: schema, toast: toast) { [weak self] table, filters in
+      self?.onOpenFiltered?(table, filters)
+    }
+  }
+
+  @objc func referencedBy(_ sender: Any?) {
+    guard subview == .data, grid.focusedCell != nil else {
+      toast?("No row to follow")
+      return
+    }
+    if let dependents {
+      Follow.referencedBy(grid: grid, dependents: dependents, table: table, toast: toast) { [weak self] t, f in
+        self?.onOpenFiltered?(t, f)
+      }
+      return
+    }
+    let connection = self.connection
+    let table = self.table
+    Task { [weak self] in
+      let outcome = await Result { try await connection.dependents(of: table) }
+      guard let self else { return }
+      switch outcome {
+      case .success(let d):
+        dependents = d
+        referencedBy(nil)
+      case .failure(let error):
+        toast?("\(error)")
+      }
+    }
+  }
+
+  @objc func showData(_ sender: Any?) { setSubView(.data) }
+  @objc func showStructure(_ sender: Any?) { setSubView(.structure) }
+  @objc func showIndexes(_ sender: Any?) { setSubView(.indexes) }
+  @objc func showForeignKeys(_ sender: Any?) { setSubView(.foreignKeys) }
+  @objc func showInformation(_ sender: Any?) { setSubView(.information) }
 
   // MARK: Actions (responder chain)
 
@@ -379,14 +677,6 @@ final class TableViewController: NSViewController, GridDelegate {
       }
       grid.scrollTo(row: row)
     }
-  }
-
-  @objc func showStructure(_ sender: Any?) {
-    guard let schema else {
-      toast?("The table's structure is not loaded")
-      return
-    }
-    presentAsSheet(StructureViewController(table: table, schema: schema))
   }
 
   @objc func deleteRows(_ sender: Any?) {
@@ -481,5 +771,13 @@ final class TableViewController: NSViewController, GridDelegate {
     } else {
       filterBar.openAdd(column: name)
     }
+  }
+
+  func gridFollowForeignKey(_ grid: GridController) {
+    followForeignKey(nil)
+  }
+
+  func gridReferencedBy(_ grid: GridController) {
+    referencedBy(nil)
   }
 }

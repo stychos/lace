@@ -30,6 +30,9 @@ typedef enum {
   LACE_JOB_DELETE,     /* table, key, snapshot */
   LACE_JOB_INSERT,     /* table, columns, values */
   LACE_JOB_DISCONNECT, /* close the database connection */
+  LACE_JOB_TABLE_INFO, /* table -> info, autoinc (lace_table_info, lace_autoincrement_get) */
+  LACE_JOB_DEPENDENTS, /* table -> deps (lace_table_dependents) */
+  LACE_JOB_DEFINITION, /* an object (object_kind, sql = name, table, column = detail) -> definition */
 } LaceJobKind;
 
 typedef struct _LaceJob LaceJob;
@@ -68,6 +71,14 @@ struct _LaceJob {
   LaceSchema *schema;
   char **tables;
   size_t num_tables;
+  LaceObject *objects; /* TABLES: the views, routines and triggers with the tables */
+  size_t num_objects;
+  LaceTableInfo *info; /* TABLE_INFO */
+  LaceAutoInc *autoinc;
+  LaceDependent *deps; /* DEPENDENTS */
+  size_t num_deps;
+  char *definition;    /* DEFINITION */
+  int object_kind;
   int64_t count;
   gboolean count_approximate;
   int64_t affected;
@@ -98,6 +109,11 @@ LaceJob *lace_job_delete(const char *table, const LaceRowKey *key,
 LaceJob *lace_job_insert(const char *table, const char *const *columns,
                          const LaceValue *values, size_t n);
 LaceJob *lace_job_disconnect(void);
+/* The sub-views' reads: a table's information and counter, the tables
+ * referencing one, the CREATE text of a view, routine or trigger */
+LaceJob *lace_job_table_info(const char *table);
+LaceJob *lace_job_dependents(const char *table);
+LaceJob *lace_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail);
 
 LaceJob *lace_job_ref(LaceJob *job);
 void lace_job_unref(LaceJob *job);

@@ -1,6 +1,7 @@
 """Mouse on the chrome, resize and small terminals"""
 import importlib.util
 import os
+import time
 
 from nc import Nc
 
@@ -46,22 +47,14 @@ def test_resize_relayouts(home):
         t.keys("q"); assert t.quit() == 0
 
 
-def test_header_overflow_collapses_tabs(home):
+def test_header_names_only_the_current_tab(home):
     db = make_db(home, rows=5)
-    with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db, "sqlite://" + db], cols=40) as t:
-        t.wait("t.sqlite")
-        assert "│ 1 │ 2" in t.text().splitlines()[0]
-        t.keys("q"); assert t.quit() == 0
-
-
-def test_header_tab_click_switches(home):
-    db = make_db(home, rows=5)
-    with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db], cols=100) as t:
-        t.wait(lambda s: "│ t.sqlite" in s.split("\n")[0])
+    with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db, "sqlite://" + db], cols=100) as t:
+        t.wait(lambda s: "t.sqlite 3" in s.split("\n")[0])     # the last tab opened is current
         first = t.text().splitlines()[0]
-        assert "▸ t.sqlite 2 │ t.sqlite" in first, first
-        t.click(first.index("│ ") + 2, 0)      # the other tab's name
-        t.wait(lambda s: "▸ t.sqlite │ t.sqlite 2" in s.split("\n")[0])
+        assert first.startswith(" Workspace ▸ t.sqlite 3") and "│" not in first, first
+        t.keys("M-1")                                           # the first tab: its name, no suffix
+        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite") and "t.sqlite 3" not in s.split("\n")[0])
         t.keys("q"); assert t.quit() == 0
 
 
@@ -132,3 +125,17 @@ def test_click_in_editor_moves_cursor(home):
         t.wait("seXlect 1")
         t.keys("Escape")
         t.keys("q"); assert t.quit() == 0
+
+
+def test_switch_database_needs_a_server(home):
+    """The header's database segment and the switch exist for server databases only"""
+    db = make_db(home, rows=5)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("big"); t.keys("Enter"); t.wait("1 of 5")
+        first = t.text().split("\n")[0]
+        assert first.startswith(" Workspace ▸ t.sqlite ▸ big"), first    # no database between them
+        t.keys("D"); time.sleep(0.3)                                      # the key does nothing here
+        assert "Switch" not in t.text()
+        t.keys("C-p"); t.wait("ACTIONS"); t.type("switch data"); time.sleep(0.3)
+        assert "Switch database" not in t.text()                          # and the palette does not list it
+        t.keys("Escape", "q"); assert t.quit() == 0

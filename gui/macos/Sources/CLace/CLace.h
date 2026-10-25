@@ -21,6 +21,7 @@
 #include "../../../../tui/ncurses/src/config/connections.h"
 #include "../../../../tui/ncurses/src/config/recent.h"
 #include "../../../../tui/ncurses/src/core/history.h"
+#include "../../../../tui/ncurses/src/core/catalog_rows.h"
 #include "CLaceShared.h"
 
 #endif /* LACE_MACOS_CLACE_H */

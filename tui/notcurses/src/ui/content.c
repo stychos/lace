@@ -6,6 +6,7 @@
 #include "ui/input.h"
 #include "ui/query_view.h"
 #include "ui/sidebar.h"
+#include "ui/subviews.h"
 #include <notcurses/notcurses.h>
 
 /* The current connection tab: the sidebar on the left (when shown) and the
@@ -33,8 +34,14 @@ void content_draw(NcApp *app) {
     if (v->kind == VIEW_QUERY) {
       query_view_draw(app, v, grid_content_rect(app));
     } else {
-      if (filter_panel_rows(app, v)) filter_panel_draw(app, v, filter_panel_rect(app, v));
-      grid_draw(app, v, grid_content_rect(app));
+      subviews_draw(app, v); /* the strip over the view's area */
+      if (v->subview == SV_DATA) {
+        if (filter_panel_rows(app, v)) filter_panel_draw(app, v, filter_panel_rect(app, v));
+        grid_draw(app, v, grid_content_rect(app));
+      } else {
+        grid_edit_begin_frame();
+        subview_draw(app, v, grid_content_rect(app));
+      }
     }
     cursor = grid_edit_cursor(&cy, &cx) || (v->kind == VIEW_QUERY && query_view_cursor(&cy, &cx)) ||
              (v->kind == VIEW_TABLE && v->fp.focused && filter_panel_cursor(&cy, &cx));
@@ -83,6 +90,7 @@ bool content_handle_key(NcApp *app, const UiEvent *ev) {
   }
   if (sidebar_handle_key(app, t, ev)) return true;
   if (v && v->kind == VIEW_QUERY) return query_view_handle_key(app, v, ev, grid_content_rect(app));
+  if (v && v->subview != SV_DATA) return subview_handle_key(app, v, ev, grid_content_rect(app)); /* a list, not the grid */
   if (v) return grid_handle_key(app, v, ev, grid_content_rect(app));
   return false;
 }
@@ -99,6 +107,10 @@ bool content_handle_mouse(NcApp *app, const UiEvent *ev) {
     return true;
   }
   if (press) t->sidebar_focused = false;
+  if (v && v->kind == VIEW_TABLE && subviews_handle_mouse(app, v, ev, grid_content_rect(app))) { /* the strip, a list */
+    if (press && panel) filter_panel_blur(app, v);
+    return true;
+  }
   if (panel && filter_panel_handle_mouse(app, v, ev, filter_panel_rect(app, v))) return true;
   if (press && panel) filter_panel_blur(app, v);
   if (v && v->kind == VIEW_QUERY && !v->editing && query_view_handle_mouse(app, v, ev, grid_content_rect(app)))

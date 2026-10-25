@@ -14,6 +14,7 @@
 #include "core/connstr_display.h"
 #include "util/connstr.h"
 #include "render_helpers.h"
+#include "core/catalog_rows.h"
 #include "tui_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -115,8 +116,17 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 
     const char *name = data->columns[col].name;
 
-    /* Draw column name at full width */
+    /* Draw column name at full width; a foreign key's first column gets ⇒
+     * after the name (it can be followed) when there is room */
     tui_print_fit(win, y, x, width, name ? name : "");
+    if (name && catalog_fk_first_column(params->sort_schema, name)) {
+      int nw = utf8_width(name, strlen(name));
+      if (nw + 2 <= width) {
+        wattron(win, COLOR_PAIR(COLOR_SELECTED));
+        mvwprintw(win, y, x + nw + 1, "\xe2\x87\x92");
+        wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+      }
+    }
 
     if (col == params->cursor_col && params->is_focused) {
       wattroff(win, A_REVERSE);
@@ -565,15 +575,24 @@ void tui_draw_table(TuiState *state) {
   int win_rows, win_cols;
   getmaxyx(state->main_win, win_rows, win_cols);
 
-  /* Calculate filters panel height and draw if visible */
-  int filters_height = 0;
+  /* The sub-view strip, then a list (every sub-view but Data) */
+  tui_draw_subview_strip(state);
+  Tab *tab = TUI_TAB(state);
+  if (tab && tab->type == TAB_TYPE_TABLE && tab->subview != SUBVIEW_DATA) {
+    tui_draw_subview(state);
+    wrefresh(state->main_win);
+    return;
+  }
+
+  /* Calculate filters panel height and draw if visible; the panel and the
+   * grid sit under the strip */
+  int filters_height = tui_subview_strip_rows(state);
   if (tui_filters_visible(state)) {
-    filters_height = tui_get_filters_panel_height(state);
+    filters_height += tui_get_filters_panel_height(state);
     tui_draw_filters_panel(state);
   }
 
   /* Get tab for model data, widget for view state */
-  Tab *tab = TUI_TAB(state);
   VmTable *widget = state->vm_table;
   if (!tab) {
     wrefresh(state->main_win);
@@ -822,17 +841,12 @@ void tui_draw_status(TuiState *state) {
                             tab->query_results);
   }
 
-  /* Left: show table name when sidebar focused, otherwise column info */
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-  if (tui_sidebar_focused(state) && tables && num_tables > 0) {
-    /* Show highlighted table name */
-    size_t actual_idx =
-        tui_get_filtered_table_index(state, tui_sidebar_highlight(state));
-    if (actual_idx < num_tables && tables[actual_idx]) {
-      const char *name = tables[actual_idx];
+  /* Left: show the highlighted entry when sidebar focused, otherwise column info */
+  SidebarEntry entry;
+  if (tui_sidebar_focused(state) && tui_sidebar_entry_at(state, tui_sidebar_highlight(state), &entry)) {
+    const char *name = tui_sidebar_entry_name(state, &entry);
+    if (name)
       mvwprintw(state->status_win, 0, 1, "%s", name);
-    }
   } else if (query_results_active && tab->query_results->columns &&
              tab->query_result_col < tab->query_results->num_columns) {
     /* Query results column info */

@@ -77,11 +77,11 @@ def test_background_and_new_workspace(home):
     save_connection(home, db)
     with Nc(home, ["-s"]) as t:
         t.wait("testdb"); t.keys("Down", "C-b")
-        t.wait(lambda s: "testdb" in s.split("\n")[1] and first_line(s).startswith(" Workspace ▸ testdb │"))
+        t.wait(lambda s: "testdb" in s.split("\n")[1] and first_line(s).startswith(" Workspace ▸ testdb"))
         t.keys("C-n")
         t.wait(lambda s: first_line(s).startswith(" Workspace 2 ▸ testdb"))
         t.keys("{")
-        t.wait(lambda s: first_line(s).startswith(" Workspace ▸ testdb │"))
+        t.wait(lambda s: first_line(s).startswith(" Workspace ▸ testdb"))
         t.keys("Escape", "q")
         assert t.quit() == 0
 
@@ -168,7 +168,7 @@ def test_new_connection_key(home):
     db = make_db(home, rows=3)
     with Nc(home, ["-s", "sqlite://" + db]) as t:
         t.wait("big"); t.keys("Enter"); t.wait("1 of 3")
-        t.keys("n")
+        t.keys("C-t")                  # a new connection tab (Ctrl+T, Cmd+T)
         t.wait(lambda s: first_line(s).startswith(" Workspace ▸ New connection"))
         t.wait(lambda s: s.split("\n")[1].index("big") < s.split("\n")[1].index("New connection"))
         t.keys("q")
@@ -206,7 +206,7 @@ def test_connection_tabs_and_workspaces(home):
     with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db]) as t:
         t.wait("t.sqlite 2")        # a repeated name gets its index in the header
         t.keys("M-1")               # Alt+1: the strip's first cell, the first tab (without views, a cell of its own)
-        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite │ t.sqlite 2"))
+        t.wait(lambda s: s.split("\n")[0].startswith(" Workspace ▸ t.sqlite") and "t.sqlite 2" not in s.split("\n")[0])
         t.keys("}")                 # next workspace: none yet -> message
         t.wait_status("one workspace")
         t.keys("C-p"); t.type("new work"); t.keys("Enter")
@@ -395,3 +395,23 @@ def test_auto_open_background_tab(home):
         t.wait("1 of 10")
         t.keys("q")
         assert t.quit() == 0
+
+
+def test_double_click_opens_here(home):
+    """A double click on a saved connection in the panel opens it in this tab (Open here)"""
+    db = make_db(home, rows=10)
+    save_connection(home, db)
+    with Nc(home, ["-s"]) as t:
+        t.wait("testdb")
+        def row():                                # the panel's row (the header names the tab "testdb" too, once highlighted)
+            lines = t.text().split("\n")
+            y = next(i for i, l in enumerate(lines) if i > 1 and l.strip().startswith("testdb"))
+            return lines[y].index("testdb"), y
+        t.click(*row())                           # a single click only highlights and fills the form
+        t.wait(lambda s: "Name               testdb" in s)
+        assert "TABLES" not in t.text()
+        t.click(*row(), double=True)              # a double click opens it here
+        t.wait("TABLES")
+        t.wait(lambda s: first_line(s).startswith(" Workspace ▸ testdb"))
+        assert "New connection" not in t.text()
+        t.keys("q"); assert t.quit() == 0

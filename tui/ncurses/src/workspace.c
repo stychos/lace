@@ -92,6 +92,16 @@ void tab_switch(TuiState *state, size_t index) {
 bool tab_create(TuiState *state, size_t table_index) {
   if (!state || !state->app || table_index >= TUI_NUM_TABLES(state))
     return false;
+  return tab_create_object(state, LACE_OBJ_TABLE, TUI_TABLES(state)[table_index], NULL, NULL);
+}
+
+bool tab_create_object(TuiState *state, LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  if (!state || !state->app || !name)
+    return false;
+  size_t table_index = SIZE_MAX;
+  for (size_t i = 0; kind == LACE_OBJ_TABLE && i < TUI_NUM_TABLES(state); i++)
+    if (TUI_TABLES(state)[i] && !strcmp(TUI_TABLES(state)[i], name))
+      table_index = i;
 
   Workspace *ws = TUI_WORKSPACE(state);
   if (!ws) {
@@ -109,11 +119,15 @@ bool tab_create(TuiState *state, size_t table_index) {
   }
 
   /* Create new tab with connection reference */
-  Tab *tab = workspace_create_table_tab(ws, connection_index, TUI_TABLES(state)[table_index]);
+  Tab *tab = workspace_create_table_tab(ws, connection_index, name);
   if (!tab) {
     tui_set_error(state, "Failed to create tab");
     return false;
   }
+  tab->object = kind;
+  tab->object_table = table ? str_dup(table) : NULL;
+  tab->object_detail = detail ? str_dup(detail) : NULL;
+  if (!tab_has_subview(tab, SUBVIEW_DATA)) tab->subview = SUBVIEW_STRUCTURE;
 
   /* Ensure UITabState capacity for new tab */
   tui_ensure_tab_ui_capacity(state, state->app->current_workspace,
@@ -128,7 +142,7 @@ bool tab_create(TuiState *state, size_t table_index) {
   }
 
   /* Update sidebar last position (global state) */
-  state->sidebar_last_position = table_index;
+  if (table_index != SIZE_MAX) state->sidebar_last_position = table_index;
 
   /* Reset TUI state for new tab - all panels start unfocused */
   state->sidebar_focused = false;
@@ -143,7 +157,7 @@ bool tab_create(TuiState *state, size_t table_index) {
   /* Tab cursor/scroll/data is initialized by tui_load_table_data */
 
   /* Load the table data (updates Tab directly) */
-  if (!tui_load_table_data(state, TUI_TABLES(state)[table_index])) {
+  if (!tui_load_table_data(state, name)) {
     /* Failed - remove the tab */
     workspace_close_tab(ws, ws->current_tab);
 

@@ -59,6 +59,14 @@ static void *async_worker_thread(void *arg) {
       op->result = db_list_tables(op->conn, &op->result_count, &err);
       break;
 
+    case ASYNC_OP_LIST_OBJECTS: {
+      LaceObject *objs = NULL;
+      op->result_count = 0;
+      db_list_objects(op->conn, &objs, &op->result_count, &err);
+      op->result = objs;
+      break;
+    }
+
     case ASYNC_OP_GET_SCHEMA:
       op->result = db_get_table_schema(op->conn, op->table_name, &err);
       break;
@@ -144,6 +152,9 @@ static void *async_worker_thread(void *arg) {
         free(tables);
         break;
       }
+      case ASYNC_OP_LIST_OBJECTS:
+        lace_objects_free(op->result, op->result_count);
+        break;
       case ASYNC_OP_CONNECT:
         if (op->result) {
           db_disconnect(op->result);

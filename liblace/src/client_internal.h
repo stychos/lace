@@ -172,4 +172,13 @@ char *lace_value_to_sql_literal(const LaceValue *val, LaceDriver driver);
 /* Record an error for the calling thread (see lace_client_error). */
 void lace_set_thread_error(const char *msg);
 
+/* Record why a call failed (msg NULL: the code's standard text) and return
+ * the code, for lace_client_error() */
+int lace_fail(int code, const char *msg);
+
+/* The dialect of a conn_id (client.c's per-connection driver cache; the
+ * daemon's connection list for one this client did not open). Fails with
+ * LACE_ERR_CONNECTION_CLOSED when the client is not connected. */
+int lace_client_driver_of(lace_client_t *client, int conn_id, LaceDriver *driver);
+
 #endif /* LIBLACE_CLIENT_INTERNAL_H */

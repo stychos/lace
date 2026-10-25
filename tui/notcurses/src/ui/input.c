@@ -49,14 +49,11 @@ static unsigned modifiers_of(const struct ncinput *ni) {
 
 bool input_translate(const struct ncinput *ni, uint32_t id, UiEvent *out) {
   memset(out, 0, sizeof *out);
-  if (ni->evtype == NCTYPE_RELEASE || ni->evtype == NCTYPE_REPEAT) {
-    /* Repeats of movement keys are useful; drop the rest */
-    if (!(ni->evtype == NCTYPE_REPEAT &&
-          (id == NCKEY_UP || id == NCKEY_DOWN || id == NCKEY_LEFT || id == NCKEY_RIGHT ||
-           id == NCKEY_PGUP || id == NCKEY_PGDOWN)) &&
-        !(ni->evtype == NCTYPE_RELEASE && nckey_mouse_p(id)))
-      return false;
-  }
+  /* A held key repeats: under the kitty protocol its repeats come typed as
+   * such and count as presses (so Backspace, letters and the arrows all
+   * repeat in a field, as on a legacy terminal); releases mean nothing
+   * except for the mouse buttons */
+  if (ni->evtype == NCTYPE_RELEASE && !nckey_mouse_p(id)) return false;
   if (id == NCKEY_RESIZE) { out->type = UI_EVENT_RESIZE; return true; }
   if (id == NCKEY_EOF) { out->type = UI_EVENT_QUIT; return true; }
   unsigned mods = modifiers_of(ni);
@@ -97,7 +94,7 @@ bool input_translate(const struct ncinput *ni, uint32_t id, UiEvent *out) {
     out->key.mods = (UiKeyMod)(mods | UI_MOD_CTRL);
     return true;
   }
-  if (id >= 'a' && id <= 'z' && (mods & (UI_MOD_CTRL | UI_MOD_SHIFT | UI_MOD_SUPER)))
+  if (id >= 'a' && id <= 'z' && (mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT | UI_MOD_SUPER)))
     id = id - 'a' + 'A';
   /* On a character Shift is its case, unless Ctrl, Alt or Cmd is held too:
    * then it stays a modifier (Ctrl+Shift+P), the rule config.c's parser applies */

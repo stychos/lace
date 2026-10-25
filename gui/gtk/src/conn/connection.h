@@ -62,6 +62,8 @@ char *lace_connection_get_masked_connstr(LaceConnection *c);
 GListModel *lace_connection_get_tables(LaceConnection *c);
 void lace_connection_refresh_tables(LaceConnection *c);
 gboolean lace_connection_tables_loaded(LaceConnection *c);
+/* The views, routines and triggers (lace_list_objects), loaded with the tables; owned by c */
+const LaceObject *lace_connection_get_objects(LaceConnection *c, size_t *n);
 
 LaceTxState lace_connection_get_tx_state(LaceConnection *c);
 gboolean lace_connection_is_busy(LaceConnection *c);

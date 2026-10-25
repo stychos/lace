@@ -48,6 +48,8 @@ void lace_query_view_refresh(LaceQueryView *v);
 /* Signal: title-changed () when the tab title (first words) changes */
 char *lace_query_view_get_title(LaceQueryView *v); /* g_free */
 
+/* Signal: open-filtered (const char *table, gpointer filters, guint n): a
+ * followed key of the results (one table's rows): LaceFilter[n] */
 G_END_DECLS
 
 #endif /* LACE_GTK_QUERY_VIEW_H */

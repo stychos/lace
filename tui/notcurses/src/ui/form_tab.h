@@ -12,6 +12,8 @@ FormTab *form_tab_new(void);
 void form_tab_free(FormTab *f);
 /* The tab's label: the highlighted saved connection's name, else "New connection" */
 const char *form_tab_label(const FormTab *f);
+/* The form shows connstr in its fields and URI line (not dirty, no row highlighted) */
+void form_tab_set_connstr(FormTab *f, const char *connstr);
 /* The content area rows y0 .. y0+rows-1; true when a text field wants the
  * cursor (at *cursor_y, *cursor_x) */
 bool form_tab_draw(NcApp *app, ConnTab *t, int y0, int rows, int *cursor_y, int *cursor_x);

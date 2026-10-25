@@ -352,7 +352,7 @@ static const HotkeyAction RESULT_ACTIONS[] = {
     HOTKEY_PAGE_DOWN, HOTKEY_FIRST_ROW, HOTKEY_LAST_ROW, HOTKEY_GOTO_ROW, HOTKEY_FIRST_COL,
     HOTKEY_LAST_COL, HOTKEY_REFRESH, HOTKEY_TOGGLE_SELECTION, HOTKEY_CLEAR_SELECTIONS,
     HOTKEY_COLUMN_NARROWER, HOTKEY_COLUMN_WIDER, HOTKEY_EDIT_MODAL, HOTKEY_SET_NULL,
-    HOTKEY_SET_EMPTY, HOTKEY_DELETE_ROW, HOTKEY_CELL_COPY, HOTKEY_CELL_CUT, HOTKEY_CELL_PASTE, HOTKEY_UNDO};
+    HOTKEY_SET_EMPTY, HOTKEY_DELETE_ROW, HOTKEY_CELL_COPY, HOTKEY_CELL_CUT, HOTKEY_CELL_PASTE, HOTKEY_UNDO, HOTKEY_FOLLOW_FK, HOTKEY_REFERENCED_BY};
 
 static bool editor_key(NcApp *app, View *v, const UiEvent *ev, Rect ed) {
   if (nc_key_special(ev, UI_KEY_ESCAPE)) {
@@ -454,8 +454,8 @@ bool query_view_handle_key(NcApp *app, View *v, const UiEvent *ev, Rect r) {
   Layout L;
   layout(v, r, &L);
   if (!v->focus_results) return editor_key(app, v, ev, L.editor);
-  if (nc_key_special(ev, UI_KEY_ENTER)) {
-    v->focus_results = false;
+  if (nc_key_special(ev, UI_KEY_ENTER) && !(ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT))) {
+    v->focus_results = false; /* a plain Enter; Ctrl+Enter follows a key */
     return true;
   }
   for (size_t i = 0; i < sizeof RESULT_ACTIONS / sizeof *RESULT_ACTIONS; i++)

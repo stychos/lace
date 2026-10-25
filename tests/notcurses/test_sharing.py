@@ -41,7 +41,7 @@ def test_tx_follows_connection(home):
 def test_same_url_opens_once(home):
     db = make_db(home, rows=5)
     with Nc(home, ["-s", "sqlite://" + db, "sqlite://" + db]) as t:
-        t.wait(lambda s: "t.sqlite │ t.sqlite" in s.split("\n")[0] or "t.sqlite 2" in s.split("\n")[0])
+        t.wait(lambda s: "t.sqlite 2" in s.split("\n")[0] or "t.sqlite │ t.sqlite" in s.split("\n")[1])
         t.keys("F8"); t.wait("Log")
         assert t.text().count("list tables") == 1
         t.keys("Escape")

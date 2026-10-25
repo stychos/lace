@@ -7,6 +7,7 @@
  */
 
 #include "query_view.h"
+#include "core/catalog_rows.h"
 #include "edit_ops.h"
 #include "history_dialog.h"
 #include <lace.h>
@@ -60,7 +61,7 @@ struct _LaceQueryView {
   gulong style_handler;
 };
 
-enum { SIG_TITLE_CHANGED, N_SIGNALS };
+enum { SIG_TITLE_CHANGED, SIG_OPEN_FILTERED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 typedef struct {
@@ -313,6 +314,7 @@ static void schema_done(LaceJob *job, gpointer data) {
   lace_schema_free(v->schema);
   v->schema = job->error ? NULL : lace_job_steal_schema(job);
   lace_data_grid_set_schema(v->grid, v->schema);
+  lace_data_grid_set_fk_columns(v->grid, v->schema);
   if (v->schema)
     lace_data_grid_set_row_numbers(v->grid, lace_prefs_row_numbers_for(v->prefs, v->schema));
   set_editable_state(v);
@@ -320,6 +322,7 @@ static void schema_done(LaceJob *job, gpointer data) {
 
 static void detect_source_table(LaceQueryView *v, const char *sql) {
   g_clear_pointer(&v->source_table, g_free);
+  lace_data_grid_set_fk_columns(v->grid, NULL);
   lace_data_grid_set_schema(v->grid, NULL);
   g_clear_pointer(&v->schema, lace_schema_free);
   char *t = lace_sql_simple_select_table(sql, lace_connection_get_driver(v->conn));
@@ -742,6 +745,196 @@ static gboolean on_editor_key(GtkEventControllerKey *c, guint keyval, guint code
   return FALSE;
 }
 
+/* ==========================================================================
+ * Following foreign keys from the results (one table's rows)
+ * ========================================================================== */
+
+static char **result_values(LaceQueryView *v, char *const *columns, size_t n) {
+  gsize row = 0, col = 0;
+  if (!lace_data_grid_get_focus_cell(v->grid, &row, &col)) {
+    lace_toast(GTK_WIDGET(v), "No row to follow");
+    return NULL;
+  }
+  char **vals = g_new0(char *, n + 1);
+  for (size_t k = 0; k < n; k++) {
+    gsize ci = (gsize)-1;
+    for (gsize c = 0; c < lace_row_model_n_columns(v->model); c++) {
+      const LaceColumn *mc = lace_row_model_get_column(v->model, c);
+      if (mc && mc->name && columns[k] && g_str_equal(mc->name, columns[k])) {
+        ci = c;
+        break;
+      }
+    }
+    const LaceValue *cell = ci == (gsize)-1 ? NULL : lace_row_model_get_cell(v->model, row, ci);
+    const char *why = ci == (gsize)-1 ? "is not in the results" : !cell ? "is not loaded yet"
+                      : cell->is_null ? "is NULL: nothing to follow" : cell->omitted ? "is too large to load" : NULL;
+    if (why) {
+      lace_toast(GTK_WIDGET(v), "%s %s", columns[k], why);
+      g_strfreev(vals);
+      return NULL;
+    }
+    char *t = lace_value_to_edit_text(cell);
+    vals[k] = g_strdup(t ? t : "");
+    free(t);
+  }
+  return vals;
+}
+
+static void emit_filtered(LaceQueryView *v, const char *table, char *const *columns, char **values, size_t n) {
+  LaceFilter *filters = g_new0(LaceFilter, n + 1);
+  for (size_t k = 0; k < n; k++) {
+    filters[k].column = g_strdup(columns[k]);
+    filters[k].op = LACE_FILTER_EQ;
+    filters[k].value = g_strdup(values[k]);
+  }
+  g_signal_emit(v, signals[SIG_OPEN_FILTERED], 0, table, filters, (guint)n);
+  for (size_t k = 0; k < n; k++) {
+    g_free(filters[k].column);
+    g_free(filters[k].value);
+  }
+  g_free(filters);
+}
+
+static void follow_key(LaceQueryView *v, const LaceForeignKey *fk) {
+  if (!fk->ref_table || fk->num_ref_columns != fk->num_columns) {
+    lace_toast(GTK_WIDGET(v), "The foreign key %s is incomplete", fk->name ? fk->name : "");
+    return;
+  }
+  char **vals = result_values(v, fk->columns, fk->num_columns);
+  if (!vals)
+    return;
+  emit_filtered(v, fk->ref_table, fk->ref_columns, vals, fk->num_columns);
+  g_strfreev(vals);
+}
+
+static void act_follow_key(GSimpleAction *a, GVariant *p, gpointer data) {
+  (void)a;
+  LaceQueryView *v = data;
+  guint64 i = g_variant_get_uint64(p);
+  if (v->schema && i < v->schema->num_foreign_keys)
+    follow_key(v, &v->schema->foreign_keys[i]);
+}
+
+static void popup_choices(LaceQueryView *v, GMenu *menu) {
+  GtkWidget *pop = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+  gtk_widget_set_parent(pop, GTK_WIDGET(v->grid));
+  gtk_popover_set_has_arrow(GTK_POPOVER(pop), FALSE);
+  g_signal_connect(pop, "closed", G_CALLBACK(gtk_widget_unparent), NULL);
+  gtk_popover_popup(GTK_POPOVER(pop));
+}
+
+static void on_follow_fk(LaceDataGrid *g, LaceQueryView *v) {
+  (void)g;
+  if (!v->source_table || !v->schema) {
+    lace_toast(GTK_WIDGET(v), "Foreign keys are followed from a table's rows");
+    return;
+  }
+  gsize row = 0, col = 0;
+  if (!lace_data_grid_get_focus_cell(v->grid, &row, &col)) {
+    lace_toast(GTK_WIDGET(v), "No row to follow");
+    return;
+  }
+  const LaceColumn *c = lace_row_model_get_column(v->model, col);
+  const char *name = c && c->name ? c->name : NULL;
+  size_t matches[16];
+  size_t n = 0;
+  for (size_t i = 0; name && i < v->schema->num_foreign_keys && n < 16; i++) {
+    const LaceForeignKey *fk = &v->schema->foreign_keys[i];
+    if (fk->num_columns && fk->columns[0] && g_str_equal(fk->columns[0], name))
+      matches[n++] = i;
+  }
+  if (!n) {
+    lace_toast(GTK_WIDGET(v), "%s is not a foreign key column", name ? name : "This column");
+    return;
+  }
+  if (n == 1) {
+    follow_key(v, &v->schema->foreign_keys[matches[0]]);
+    return;
+  }
+  GMenu *menu = g_menu_new();
+  for (size_t k = 0; k < n; k++) {
+    const LaceForeignKey *fk = &v->schema->foreign_keys[matches[k]];
+    char *cols = catalog_join(fk->ref_columns, fk->num_ref_columns);
+    char *title = g_strdup_printf("%s (%s)", fk->ref_table ? fk->ref_table : "?", cols);
+    GMenuItem *it = g_menu_item_new(title, NULL);
+    g_menu_item_set_action_and_target(it, "query.follow-key", "t", (guint64)matches[k]);
+    g_menu_append_item(menu, it);
+    g_object_unref(it);
+    g_free(title);
+    free(cols);
+  }
+  popup_choices(v, menu);
+  g_object_unref(menu);
+}
+
+typedef struct { LaceDependent *deps; size_t n; } QueryDeps;
+
+static void query_deps_free(gpointer data) {
+  QueryDeps *d = data;
+  if (d) {
+    lace_dependents_free(d->deps, d->n);
+    g_free(d);
+  }
+}
+
+static void act_follow_dep(GSimpleAction *a, GVariant *p, gpointer data) {
+  (void)a;
+  LaceQueryView *v = data;
+  QueryDeps *qd = g_object_get_data(G_OBJECT(v), "deps");
+  guint64 i = g_variant_get_uint64(p);
+  if (!qd || i >= qd->n)
+    return;
+  const LaceDependent *d = &qd->deps[i];
+  char **vals = result_values(v, d->ref_columns, d->num_columns);
+  if (!vals)
+    return;
+  emit_filtered(v, d->table, d->columns, vals, d->num_columns);
+  g_strfreev(vals);
+}
+
+static void deps_done(LaceJob *job, gpointer data) {
+  LaceQueryView *v = data;
+  if (job->error) {
+    lace_toast(GTK_WIDGET(v), "%s", lace_job_error(job));
+    return;
+  }
+  if (!job->num_deps) {
+    lace_toast(GTK_WIDGET(v), "No table references %s", job->table ? job->table : "");
+    return;
+  }
+  QueryDeps *qd = g_new0(QueryDeps, 1);
+  qd->deps = job->deps;
+  qd->n = job->num_deps;
+  job->deps = NULL;
+  job->num_deps = 0;
+  g_object_set_data_full(G_OBJECT(v), "deps", qd, query_deps_free);
+  GMenu *menu = g_menu_new();
+  for (size_t i = 0; i < qd->n; i++) {
+    const LaceDependent *d = &qd->deps[i];
+    char *cols = catalog_join(d->columns, d->num_columns);
+    char *title = g_strdup_printf("%s (%s)%s%s", d->table ? d->table : "?", cols, d->on_delete ? "  ON DELETE " : "",
+                                  d->on_delete ? d->on_delete : "");
+    GMenuItem *it = g_menu_item_new(title, NULL);
+    g_menu_item_set_action_and_target(it, "query.follow-dep", "t", (guint64)i);
+    g_menu_append_item(menu, it);
+    g_object_unref(it);
+    g_free(title);
+    free(cols);
+  }
+  popup_choices(v, menu);
+  g_object_unref(menu);
+}
+
+static void on_referenced_by(LaceDataGrid *g, LaceQueryView *v) {
+  (void)g;
+  gsize row = 0, col = 0;
+  if (!v->source_table || !lace_data_grid_get_focus_cell(v->grid, &row, &col)) {
+    lace_toast(GTK_WIDGET(v), "Foreign keys are followed from a table's rows");
+    return;
+  }
+  lace_connection_submit(v->conn, lace_job_dependents(v->source_table), G_OBJECT(v), deps_done, v);
+}
+
 static void act_query(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)p;
   LaceQueryView *v = data;
@@ -790,6 +983,8 @@ static void lace_query_view_class_init(LaceQueryViewClass *klass) {
   G_OBJECT_CLASS(klass)->dispose = lace_query_view_dispose;
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass), GTK_TYPE_BIN_LAYOUT);
   gtk_widget_class_set_css_name(GTK_WIDGET_CLASS(klass), "lace-queryview");
+  signals[SIG_OPEN_FILTERED] = g_signal_new("open-filtered", LACE_TYPE_QUERY_VIEW,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_UINT);
   signals[SIG_TITLE_CHANGED] = g_signal_new("title-changed", LACE_TYPE_QUERY_VIEW,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
@@ -923,6 +1118,8 @@ LaceQueryView *lace_query_view_new(LaceConnection *conn, const LacePrefs *prefs)
   g_signal_connect(v->grid, "delete-rows", G_CALLBACK(on_delete_rows), v);
   g_signal_connect(v->grid, "cell-focused", G_CALLBACK(on_cell_focused), v);
   g_signal_connect(v->grid, "refresh", G_CALLBACK(on_grid_refresh), v);
+  g_signal_connect(v->grid, "follow-fk", G_CALLBACK(on_follow_fk), v);
+  g_signal_connect(v->grid, "referenced-by", G_CALLBACK(on_referenced_by), v);
 
   v->edit.owner = G_OBJECT(v);
   v->edit.widget = GTK_WIDGET(v);
@@ -944,6 +1141,8 @@ LaceQueryView *lace_query_view_new(LaceConnection *conn, const LacePrefs *prefs)
       {"goto-row", act_query, NULL, NULL, NULL, {0}},
       {"delete-rows", act_query, NULL, NULL, NULL, {0}},
       {"refresh", act_query, NULL, NULL, NULL, {0}},
+      {"follow-key", act_follow_key, "t", NULL, NULL, {0}},
+      {"follow-dep", act_follow_dep, "t", NULL, NULL, {0}},
   };
   GSimpleActionGroup *group = g_simple_action_group_new();
   g_action_map_add_action_entries(G_ACTION_MAP(group), entries, G_N_ELEMENTS(entries), v);

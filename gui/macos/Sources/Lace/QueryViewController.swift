@@ -33,6 +33,8 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
   var onTablesChanged: (() -> Void)?
   /// A statement that ran (as written), or the SQL of a verified write, for history
   var record: ((String) -> Void)?
+  /// Open a table filtered by a followed key (the results are one table's rows)
+  var onOpenFiltered: ((String, [Filter]) -> Void)?
   var toast: ((String) -> Void)? {
     didSet {
       grid.toast = toast
@@ -382,6 +384,8 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     schema = nil
     edit.schema = nil
     edit.table = nil
+    grid.foreignKeyColumns = []
+    grid.canFollow = sourceTable != nil
     if let table = sourceTable {
       let generation = model.generation
       let connection = self.connection
@@ -391,6 +395,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
         schema = loaded
         if let loaded {
           grid.showRowNumbers = prefs.rowNumbers(for: loaded)
+          grid.foreignKeyColumns = Set(loaded.foreignKeys.compactMap(\.columns.first))
         }
         setEditableState()
       }
@@ -696,6 +701,36 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
 
   func grid(_ grid: GridController, filterColumn name: String, value: String?) {}
   func gridAddRow(_ grid: GridController) {}
+
+  func gridFollowForeignKey(_ grid: GridController) {
+    guard sourceTable != nil else {
+      toast?("Foreign keys are followed from a table's rows")
+      return
+    }
+    Follow.follow(grid: grid, schema: schema, toast: toast) { [weak self] table, filters in
+      self?.onOpenFiltered?(table, filters)
+    }
+  }
+
+  func gridReferencedBy(_ grid: GridController) {
+    guard let sourceTable, grid.focusedCell != nil else {
+      toast?("Foreign keys are followed from a table's rows")
+      return
+    }
+    let connection = self.connection
+    Task { [weak self] in
+      let outcome = await Result { try await connection.dependents(of: sourceTable) }
+      guard let self else { return }
+      switch outcome {
+      case .success(let deps):
+        Follow.referencedBy(grid: grid, dependents: deps, table: sourceTable, toast: toast) { [weak self] t, f in
+          self?.onOpenFiltered?(t, f)
+        }
+      case .failure(let error):
+        toast?("\(error)")
+      }
+    }
+  }
 }
 
 /// The SQL editor: Esc stops a running statement instead of completing a word

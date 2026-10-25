@@ -260,6 +260,10 @@ void app_view_reload(NcApp *app, View *v) {
     app_view_count(app, v);
     return;
   }
+  if (!view_has_subview(v, SV_DATA)) { /* a routine or trigger: only its definition to ask again */
+    app_view_refresh_catalog(app, v);
+    return;
+  }
   if (!v->schema) { /* the schema never arrived: ask again */
     if (!v->loading) {
       free(v->schema_error);
@@ -286,49 +290,75 @@ void app_view_attach(NcApp *app, View *v) {
   page_cache_set_fetch(v->cache, fetch_cb, ctx);
 }
 
-static View *open_table(NcApp *app, const char *table, bool preview) {
+/* A table or a database view loads its schema, then page 0 and the count; a
+ * routine or trigger has no rows: its definition is asked for when shown */
+static void start_object(NcApp *app, View *v) {
+  app_view_attach(app, v);
+  if (view_has_subview(v, SV_DATA)) load_schema(app, v);
+}
+
+static View *open_object(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail,
+                         bool preview) {
   ConnTab *t = app_current_tab(app);
-  if (!t || !t->conn || !table) return NULL;
+  if (!t || !t->conn || !name) return NULL;
   t->sidebar_focused = false;
-  size_t i = conntab_find_table_view(t, table);
+  size_t i = conntab_find_object_view(t, kind, name);
   if (i != SIZE_MAX) {
     t->current = i;
     if (!preview) t->views[i]->preview = false; /* opened for keeps */
     return t->views[i];
   }
-  View *v = view_new_table(table);
+  View *v = view_new_object(kind, name, table, detail);
   v->preview = preview;
   size_t old = preview ? conntab_find_preview(t) : SIZE_MAX;
   if (old != SIZE_MAX) conntab_replace_view(t, old, v); /* the preview tab stays; what it shows changes */
   else conntab_add_view(t, v);
-  app_view_attach(app, v);
-  load_schema(app, v);
+  start_object(app, v);
   return v;
 }
 
-View *app_open_table(NcApp *app, const char *table) { return open_table(app, table, false); }
+View *app_open_table(NcApp *app, const char *table) { return open_object(app, LACE_OBJ_TABLE, table, NULL, NULL, false); }
+View *app_preview_table(NcApp *app, const char *table) { return open_object(app, LACE_OBJ_TABLE, table, NULL, NULL, true); }
 
-View *app_open_table_background(NcApp *app, const char *table) {
+View *app_open_object(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  return open_object(app, kind, name, table, detail, false);
+}
+
+View *app_preview_object(NcApp *app, LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  return open_object(app, kind, name, table, detail, true);
+}
+
+View *app_open_object_background(NcApp *app, LaceObjectKind kind, const char *name, const char *table,
+                                 const char *detail) {
   ConnTab *t = app_current_tab(app);
-  if (!t || !t->conn || !table) return NULL;
-  size_t i = conntab_find_table_view(t, table);
+  if (!t || !t->conn || !name) return NULL;
+  size_t i = conntab_find_object_view(t, kind, name);
   if (i != SIZE_MAX) {
     t->views[i]->preview = false; /* asked for by name: kept */
-    app_set_status(app, false, "%s is already open", table);
+    app_set_status(app, false, "%s is already open", name);
     return t->views[i];
   }
-  View *v = view_new_table(table);
+  View *v = view_new_object(kind, name, table, detail);
   size_t cur = t->current;
   bool had_views = t->num_views > 0;
   conntab_add_view(t, v);
   if (had_views) t->current = cur; /* the new view waits behind the current one */
-  app_view_attach(app, v);
-  load_schema(app, v);
-  app_set_status(app, false, "Opened %s in a new tab", table);
+  start_object(app, v);
+  app_set_status(app, false, "Opened %s in a new tab", name);
   return v;
 }
 
-View *app_preview_table(NcApp *app, const char *table) { return open_table(app, table, true); }
+View *app_open_table_background(NcApp *app, const char *table) {
+  return app_open_object_background(app, LACE_OBJ_TABLE, table, NULL, NULL);
+}
+
+void app_view_reload_schema(NcApp *app, View *v) {
+  if (v->kind != VIEW_TABLE || v->loading) return;
+  view_set_schema(v, NULL);
+  free(v->schema_error);
+  v->schema_error = NULL;
+  load_schema(app, v);
+}
 
 bool app_cancel_running(NcApp *app) {
   ConnTab *cur = app_current_tab(app);

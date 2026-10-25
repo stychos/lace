@@ -54,3 +54,15 @@ def test_manager_new_workspace(home):
         t.wait(lambda s: first_line(s).startswith(" Workspace 2 ▸ New connection"))
         t.keys("q")
         assert t.quit() == 0
+
+
+def test_new_workspace_key(home):
+    """Ctrl+N (Cmd+N) opens a new workspace with a connection form, as a GUI's new window"""
+    db = make_db(home, rows=3)
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("big"); t.keys("Enter"); t.wait("1 of 3")
+        t.keys("C-n")
+        t.wait(lambda s: first_line(s).startswith(" Workspace 2 ▸ New connection"))
+        t.keys("{")                                    # back: the table is still there
+        t.wait(lambda s: first_line(s).startswith(" Workspace ▸ t.sqlite ▸ big"))
+        t.keys("q"); assert t.quit() == 0

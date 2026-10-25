@@ -10,6 +10,9 @@
 typedef enum {
   NC_JOB_EXEC, NC_JOB_SCHEMA, NC_JOB_TABLES, NC_JOB_COUNT,
   NC_JOB_UPDATE, NC_JOB_DELETE, NC_JOB_INSERT, NC_JOB_DISCONNECT, NC_JOB_DEPENDENTS,
+  NC_JOB_DATABASES, /* lace_list_databases(): the names land in tables/num_tables */
+  NC_JOB_TABLE_INFO, /* lace_table_info() and lace_autoincrement_get(): info, autoinc */
+  NC_JOB_DEFINITION, /* lace_object_definition(): definition */
 } NcJobKind;
 
 /* Main-thread token: the done callback is skipped once it is released */
@@ -47,8 +50,15 @@ struct NcJob {
   /* Outputs */
   LaceResult *result;
   LaceSchema *schema;
-  char **tables;
+  char **tables; /* NC_JOB_TABLES; NC_JOB_DATABASES: the database names */
   size_t num_tables;
+  char *database; /* NC_JOB_TABLES: the connection's current database (NULL: none or unknown) */
+  LaceObject *objects; /* NC_JOB_TABLES: the views, routines and triggers (lace_list_objects) */
+  size_t num_objects;
+  LaceTableInfo *info; /* NC_JOB_TABLE_INFO */
+  LaceAutoInc *autoinc;
+  char *definition;    /* NC_JOB_DEFINITION; the object is sql (name), table and column (detail) under kind object_kind */
+  int object_kind;
   LaceDependent *deps; /* NC_JOB_DEPENDENTS: the tables referencing job->table */
   size_t num_deps;
   int64_t count;
@@ -66,8 +76,12 @@ NcJob *nc_job_exec(const char *sql);
 /* A read: retried after a reconnect, savepoint inside a PostgreSQL transaction */
 NcJob *nc_job_read(const char *sql);
 NcJob *nc_job_schema(const char *table);
-NcJob *nc_job_tables(void);
+NcJob *nc_job_tables(void); /* the table list and the current database */
+NcJob *nc_job_databases(void); /* the server's databases (lace_list_databases()): a read */
 NcJob *nc_job_dependents(const char *table); /* lace_table_dependents(): a read */
+NcJob *nc_job_table_info(const char *table); /* lace_table_info() + lace_autoincrement_get(): a read */
+/* lace_object_definition() of a view, routine or trigger (table: a trigger's; detail: a routine's kind) */
+NcJob *nc_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail);
 NcJob *nc_job_table_count(const char *table, const char *where, bool approximate);
 NcJob *nc_job_count_sql(const char *sql);
 NcJob *nc_job_update(const char *table, const LaceRowKey *key, const LaceRowSnapshot *snap,

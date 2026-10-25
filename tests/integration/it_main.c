@@ -143,7 +143,8 @@ int64_t it_now_ms(void) {
 static const ItTest *const g_tables[] = {
     it_basic_tests,    it_values_tests, it_schema_tests,   it_mutation_tests,
     it_keyset_tests,   it_tx_tests,     it_recovery_tests, it_paging_tests,
-    it_tunnel_tests,   it_daemon_tests,
+    it_tunnel_tests,   it_daemon_tests,   it_catalog_tests,
+    it_ddl_tests,
 };
 
 typedef struct {

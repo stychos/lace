@@ -51,6 +51,10 @@ typedef struct {
   char *connection_id; /* UUID from saved connections */
   char *connstr;       /* Password-less; a connection a GUI opened by URL (no saved id), may be NULL */
   char *table_name;    /* For TABLE tabs */
+  char *object;        /* "view", "routine", "trigger" (NULL: a table), object_table a trigger's, object_detail a routine's kind */
+  char *object_table;
+  char *object_detail;
+  char *subview;       /* "structure", "indexes", ... (NULL: data) */
 
   /* Cursor/scroll state */
   size_t cursor_row;

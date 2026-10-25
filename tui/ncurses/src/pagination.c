@@ -178,6 +178,17 @@ bool tui_load_table_data(TuiState *state, const char *table) {
   /* Clear previous data */
   free(tab->table_error);
   tab->table_error = NULL;
+  tab_drop_catalog(tab);
+  if (!tab_has_subview(tab, SUBVIEW_DATA)) { /* a routine or trigger: its Definition is read when shown */
+    tab_data_replaced(tab);
+    db_result_free(tab->data);
+    tab->data = NULL;
+    db_schema_free(tab->schema);
+    tab->schema = NULL;
+    tab->total_rows = tab->loaded_count = tab->loaded_offset = 0;
+    if (tab->subview == SUBVIEW_DATA) tab->subview = SUBVIEW_STRUCTURE;
+    return true;
+  }
 
   /* Free old data */
   tab_data_replaced(tab);

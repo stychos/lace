@@ -70,6 +70,13 @@ enum Session {
   private static func tabJSON(_ controller: NSViewController) -> [String: Any] {
     if let t = controller as? TableViewController {
       var j: [String: Any] = ["type": "table", "table": t.table, "filters_visible": t.filtersVisible]
+      // what differs from a table on Data, so other frontends read the file as before
+      if t.object.kind != .table {
+        j["object"] = t.object.kind.key
+        if let ot = t.object.table { j["object_table"] = ot }
+        if let od = t.object.detail { j["object_detail"] = od }
+      }
+      if t.subview != .data { j["subview"] = t.subview.key(for: t.object.kind) }
       j["filters"] = t.filters.map { f -> [String: Any] in
         var fj: [String: Any] = ["op": f.op.key, "value": f.value]
         if let c = f.column { fj["column"] = c }
@@ -144,7 +151,13 @@ enum Session {
       switch tj["type"] as? String {
       case "table":
         guard let name = tj["table"] as? String, !name.isEmpty else { continue }
-        let t = vc.content.openTable(name, preview: false)
+        let kind = (tj["object"] as? String).flatMap(ObjectKind.init(key:)) ?? .table
+        let object = CatalogObject(
+          kind: kind, name: name, table: tj["object_table"] as? String, detail: tj["object_detail"] as? String)
+        let t = vc.content.openObject(object, preview: false)
+        if let sv = (tj["subview"] as? String).flatMap(SubView.init(key:)) {
+          t.restore(subview: sv)
+        }
         let filters = (tj["filters"] as? [[String: Any]] ?? []).compactMap { fj -> Filter? in
           guard let op = fj["op"] as? String else { return nil }
           return Filter(

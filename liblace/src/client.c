@@ -12,6 +12,7 @@
 #include "../include/util/str.h"
 #include "rpc.h"
 #include "client_internal.h"
+#include "catalog_internal.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -122,7 +123,7 @@ void lace_set_thread_error(const char *msg) {
 /* Record why a call failed (msg NULL: the code's standard text) and return
  * the code: every failing public call leaves a message for
  * lace_client_error() */
-static int lace_fail(int code, const char *msg) {
+int lace_fail(int code, const char *msg) {
   lace_set_thread_error(msg ? msg : lace_error_message(code));
   return code;
 }
@@ -1948,6 +1949,12 @@ void lace_conn_info_array_free(LaceConnInfo *info, size_t count) {
  * Schema Discovery
  * ========================================================================== */
 
+int lace_client_driver_of(lace_client_t *client, int conn_id, LaceDriver *driver) {
+  if (!client || !driver) return lace_fail(LACE_ERR_INVALID_PARAMS, NULL);
+  if (!client->connected) return lace_fail(LACE_ERR_CONNECTION_CLOSED, NOT_CONNECTED_MSG);
+  return get_connection_driver(client, conn_id, driver);
+}
+
 int lace_list_tables(lace_client_t *client, int conn_id, char ***tables,
                      size_t *count) {
   if (!client || !tables || !count) {
@@ -2048,6 +2055,101 @@ static char *cell_text_dup(const LaceValue *v) {
   return v->type == LACE_TYPE_TEXT && v->text.data ? str_dup(v->text.data) : NULL;
 }
 
+int lace_current_database(lace_client_t *client, int conn_id, char **name) {
+  if (!client || !name) {
+    return lace_fail(LACE_ERR_INVALID_PARAMS, NULL);
+  }
+  *name = NULL;
+  if (!client->connected) {
+    return lace_fail(LACE_ERR_CONNECTION_CLOSED, NOT_CONNECTED_MSG);
+  }
+  LaceDriver driver;
+  int err = get_connection_driver(client, conn_id, &driver);
+  if (err != LACE_OK) {
+    return err;
+  }
+  const char *sql;
+  switch (driver) {
+  case LACE_DRIVER_SQLITE:
+    return LACE_OK; /* one file, no name */
+  case LACE_DRIVER_POSTGRES:
+    sql = "SELECT pg_catalog.current_database()";
+    break;
+  case LACE_DRIVER_MYSQL:
+  case LACE_DRIVER_MARIADB:
+    sql = "SELECT DATABASE()";
+    break;
+  default:
+    return lace_fail(LACE_ERR_INTERNAL_ERROR, NULL);
+  }
+  LaceResult *result = NULL;
+  err = lace_exec(client, conn_id, sql, &result);
+  if (err != LACE_OK) {
+    return err;
+  }
+  if (result && result->rows && result->num_rows > 0 && result->rows[0].cells &&
+      result->rows[0].num_cells > 0)
+    *name = cell_text_dup(&result->rows[0].cells[0]);
+  lace_result_free(result);
+  return LACE_OK;
+}
+
+int lace_list_databases(lace_client_t *client, int conn_id, char ***names,
+                        size_t *count) {
+  if (!client || !names || !count) {
+    return lace_fail(LACE_ERR_INVALID_PARAMS, NULL);
+  }
+  *names = NULL;
+  *count = 0;
+  if (!client->connected) {
+    return lace_fail(LACE_ERR_CONNECTION_CLOSED, NOT_CONNECTED_MSG);
+  }
+  LaceDriver driver;
+  int err = get_connection_driver(client, conn_id, &driver);
+  if (err != LACE_OK) {
+    return err;
+  }
+  const char *sql;
+  switch (driver) {
+  case LACE_DRIVER_SQLITE:
+    return LACE_OK;
+  case LACE_DRIVER_POSTGRES:
+    sql = "SELECT datname FROM pg_catalog.pg_database "
+          "WHERE datallowconn AND NOT datistemplate "
+          "AND pg_catalog.has_database_privilege(datname, 'CONNECT') "
+          "ORDER BY datname";
+    break;
+  case LACE_DRIVER_MYSQL:
+  case LACE_DRIVER_MARIADB:
+    sql = "SHOW DATABASES";
+    break;
+  default:
+    return lace_fail(LACE_ERR_INTERNAL_ERROR, NULL);
+  }
+  LaceResult *result = NULL;
+  err = lace_exec(client, conn_id, sql, &result);
+  if (err != LACE_OK) {
+    return err;
+  }
+  size_t n = 0;
+  char **arr = result && result->rows && result->num_rows > 0
+                   ? safe_calloc(result->num_rows, sizeof(char *))
+                   : NULL;
+  for (size_t i = 0; arr && i < result->num_rows; i++) {
+    const LaceRow *row = &result->rows[i];
+    char *s = row->cells && row->num_cells > 0 ? cell_text_dup(&row->cells[0]) : NULL;
+    if (s) arr[n++] = s;
+  }
+  if (!n) {
+    free(arr);
+    arr = NULL;
+  }
+  *names = arr;
+  *count = n;
+  lace_result_free(result);
+  return LACE_OK;
+}
+
 int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
                     LaceSchema **schema) {
   if (!client || !table || !schema) {
@@ -2094,10 +2196,21 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
           "d.adbin, d.adrelid) LIKE 'nextval(%%', false))::int, "
           /* attgenerated exists from PostgreSQL 12: read it via JSON so
            * older servers just get NULL */
-          "(COALESCE(row_to_json(a)->>'attgenerated', '') <> '')::int "
+          "(COALESCE(row_to_json(a)->>'attgenerated', '') <> '')::int, "
+          /* the column's own collation (not the type's default), comment,
+           * identity kind and position in the primary key */
+          "CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation "
+          "THEN co.collname END, "
+          "pg_catalog.col_description(a.attrelid, a.attnum), "
+          "a.attidentity::text, "
+          /* an int2vector cast to an array is zero-based */
+          "COALESCE((SELECT pg_catalog.array_position(i.indkey::int2[], a.attnum) + 1 "
+          "FROM pg_catalog.pg_index i WHERE i.indrelid = a.attrelid AND i.indisprimary), 0) "
           "FROM pg_catalog.pg_attribute a "
+          "JOIN pg_catalog.pg_type t ON t.oid = a.atttypid "
           "LEFT JOIN pg_catalog.pg_attrdef d "
           "ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
+          "LEFT JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation "
           "WHERE a.attrelid = to_regclass(%s) "
           "AND a.attnum > 0 AND NOT a.attisdropped "
           "ORDER BY a.attnum",
@@ -2180,6 +2293,7 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
         col->type_name = row->cells[2].type == LACE_TYPE_TEXT ? str_dup(row->cells[2].text.data) : NULL;
         col->nullable = row->cells[3].type == LACE_TYPE_INT ? !row->cells[3].int_val : true;
         col->primary_key = row->cells[5].type == LACE_TYPE_INT ? row->cells[5].int_val > 0 : false;
+        col->key_position = col->primary_key ? (int)row->cells[5].int_val : 0;
         col->default_val = cell_text_dup(&row->cells[4]);
         col->generated = hidden == 2 || hidden == 3;
       }
@@ -2196,6 +2310,17 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
         col->auto_increment = row->cells[5].type == LACE_TYPE_INT && row->cells[5].int_val != 0;
         col->generated = row->num_cells >= 7 && row->cells[6].type == LACE_TYPE_INT &&
                          row->cells[6].int_val != 0;
+        if (row->num_cells >= 11) {
+          col->collation = cell_text_dup(&row->cells[7]);
+          col->comment = cell_text_dup(&row->cells[8]);
+          const char *ident = row->cells[9].type == LACE_TYPE_TEXT ? row->cells[9].text.data : "";
+          col->identity = ident && ident[0] == 'a' ? 1 : ident && ident[0] == 'd' ? 2 : 0;
+          col->key_position = row->cells[10].type == LACE_TYPE_INT ? (int)row->cells[10].int_val : 0;
+        }
+        if (col->generated) { /* the default slot holds the expression */
+          col->generated_expr = col->default_val;
+          col->default_val = NULL;
+        }
       }
       break;
 
@@ -2253,6 +2378,12 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table,
   }
 
   lace_result_free(result);
+
+  /* Indexes, constraints, foreign keys and the per-driver column extras.
+   * Their failure is not the schema's: an older server, or a catalog the
+   * user may not read, leaves those parts empty. */
+  lace_catalog_fill_schema(client, conn_id, driver, table, sch);
+
   *schema = sch;
   return LACE_OK;
 }
@@ -2437,9 +2568,12 @@ int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
      * every table's foreign keys, kept where they point at ours */
     char *lit = sql_string_literal(table, driver);
     if (lit)
-      sql = str_printf("SELECT m.name, f.on_delete FROM sqlite_master m "
+      sql = str_printf("SELECT m.name, f.on_delete, NULL, "
+                       "group_concat(f.\"from\", char(10)), group_concat(f.\"to\", char(10)) "
+                       "FROM sqlite_master m "
                        "JOIN pragma_foreign_key_list(m.name) f "
-                       "WHERE m.type = 'table' AND f.\"table\" = %s COLLATE NOCASE",
+                       "WHERE m.type = 'table' AND f.\"table\" = %s COLLATE NOCASE "
+                       "GROUP BY m.name, f.id ORDER BY m.name, f.id",
                        lit);
     free(lit);
     break;
@@ -2450,9 +2584,16 @@ int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
     char *ident = lace_quote_table(driver, table);
     char *lit = ident ? sql_string_literal(ident, driver) : NULL;
     if (lit)
-      sql = str_printf("SELECT c.conrelid::regclass::text, c.confdeltype::text "
+      sql = str_printf("SELECT c.conrelid::regclass::text, c.confdeltype::text, c.conname, "
+                       "(SELECT string_agg(a.attname, E'\\n' ORDER BY k.n) "
+                       "FROM unnest(c.conkey) WITH ORDINALITY k(attnum, n) "
+                       "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum), "
+                       "(SELECT string_agg(a.attname, E'\\n' ORDER BY k.n) "
+                       "FROM unnest(c.confkey) WITH ORDINALITY k(attnum, n) "
+                       "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum) "
                        "FROM pg_catalog.pg_constraint c "
-                       "WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s)",
+                       "WHERE c.contype = 'f' AND c.confrelid = to_regclass(%s) "
+                       "ORDER BY 1, c.conname",
                        lit);
     free(ident);
     free(lit);
@@ -2462,11 +2603,20 @@ int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
   case LACE_DRIVER_MARIADB: {
     char *lit = sql_string_literal(table, driver);
     if (lit)
-      sql = str_printf("SELECT TABLE_NAME, DELETE_RULE "
-                       "FROM information_schema.REFERENTIAL_CONSTRAINTS "
-                       "WHERE CONSTRAINT_SCHEMA = DATABASE() "
-                       "AND UNIQUE_CONSTRAINT_SCHEMA = DATABASE() "
-                       "AND REFERENCED_TABLE_NAME = %s",
+      sql = str_printf("SELECT r.TABLE_NAME, r.DELETE_RULE, r.CONSTRAINT_NAME, "
+                       "(SELECT GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\\n') "
+                       "FROM information_schema.KEY_COLUMN_USAGE k "
+                       "WHERE k.CONSTRAINT_SCHEMA = r.CONSTRAINT_SCHEMA "
+                       "AND k.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND k.TABLE_NAME = r.TABLE_NAME), "
+                       "(SELECT GROUP_CONCAT(k.REFERENCED_COLUMN_NAME ORDER BY k.ORDINAL_POSITION SEPARATOR '\\n') "
+                       "FROM information_schema.KEY_COLUMN_USAGE k "
+                       "WHERE k.CONSTRAINT_SCHEMA = r.CONSTRAINT_SCHEMA "
+                       "AND k.CONSTRAINT_NAME = r.CONSTRAINT_NAME AND k.TABLE_NAME = r.TABLE_NAME) "
+                       "FROM information_schema.REFERENTIAL_CONSTRAINTS r "
+                       "WHERE r.CONSTRAINT_SCHEMA = DATABASE() "
+                       "AND r.UNIQUE_CONSTRAINT_SCHEMA = DATABASE() "
+                       "AND r.REFERENCED_TABLE_NAME = %s "
+                       "ORDER BY r.TABLE_NAME, r.CONSTRAINT_NAME",
                        lit);
     free(lit);
     break;
@@ -2496,6 +2646,18 @@ int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
     out[k].table = name;
     out[k].on_delete = str_dup(delete_rule_word(rule));
     free(rule);
+    if (r->num_cells >= 5) {
+      out[k].name = r->cells[2].is_null ? NULL : lace_value_to_edit_text(&r->cells[2]);
+      char *cols = r->cells[3].is_null ? NULL : lace_value_to_edit_text(&r->cells[3]);
+      char *refs = r->cells[4].is_null ? NULL : lace_value_to_edit_text(&r->cells[4]);
+      size_t nc = lace_catalog_split_lines(cols, &out[k].columns);
+      size_t nr = lace_catalog_split_lines(refs, &out[k].ref_columns);
+      out[k].num_columns = nc < nr ? nc : nr;
+      for (size_t x = out[k].num_columns; x < nc; x++) free(out[k].columns[x]);
+      for (size_t x = out[k].num_columns; x < nr; x++) free(out[k].ref_columns[x]);
+      free(cols);
+      free(refs);
+    }
     k++;
   }
   lace_result_free(result);

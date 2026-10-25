@@ -150,8 +150,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     view.addItem(withTitle: "Filter", action: #selector(TableViewController.toggleFilters(_:)), keyEquivalent: "f")
     view.addItem(withTitle: "Refresh", action: #selector(TableViewController.refresh(_:)), keyEquivalent: "r")
     view.addItem(withTitle: "Go to Row…", action: #selector(TableViewController.gotoRow(_:)), keyEquivalent: "l")
-    view.addItem(
-      withTitle: "Table Structure", action: #selector(TableViewController.showStructure(_:)), keyEquivalent: "i")
+    view.addItem(.separator())
+    // The sub-views of a table tab (⌃⌘1..5 as the TUIs' a s y f n), and following keys
+    for (title, sel, key) in [
+      ("Data", #selector(TableViewController.showData(_:)), "1"),
+      ("Structure", #selector(TableViewController.showStructure(_:)), "2"),
+      ("Indexes", #selector(TableViewController.showIndexes(_:)), "3"),
+      ("Foreign Keys", #selector(TableViewController.showForeignKeys(_:)), "4"),
+      ("Information", #selector(TableViewController.showInformation(_:)), "5"),
+    ] as [(String, Selector, String)] {
+      let item = view.addItem(withTitle: title, action: sel, keyEquivalent: key)
+      item.keyEquivalentModifierMask = [.command, .control]
+    }
+    view.addItem(.separator())
+    let follow = view.addItem(
+      withTitle: "Follow Foreign Key", action: #selector(TableViewController.followForeignKey(_:)), keyEquivalent: "\r")
+    follow.keyEquivalentModifierMask = [.command, .option]
+    let refs = view.addItem(
+      withTitle: "Referenced By…", action: #selector(TableViewController.referencedBy(_:)), keyEquivalent: "\r")
+    refs.keyEquivalentModifierMask = [.command, .option, .shift]
     view.addItem(.separator())
     let nextTab = view.addItem(
       withTitle: "Next Tab", action: #selector(ContentViewController.selectNextTab(_:)), keyEquivalent: "\t")

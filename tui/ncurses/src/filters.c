@@ -105,9 +105,9 @@ void tui_draw_filters_panel(TuiState *state) {
 
   int panel_width = win_cols;
 
-  /* Draw within main_win at (0,0) - window is already positioned correctly */
+  /* Draw within main_win under the sub-view strip */
   int start_x = 0;
-  int start_y = 0;
+  int start_y = tui_subview_strip_rows(state);
 
   /* Draw panel background */
   for (int row = 0; row < panel_height; row++) {
@@ -427,7 +427,7 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
     tui_set_filters_visible(state, false);
     tui_set_filters_focused(state, false);
   }
-  /* Filter hotkey (f, /) - switch focus to table if filters exist, else close */
+  /* Filter hotkey (/) - switch focus to table if filters exist, else close */
   else if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_FILTERS)) {
     if (f && f->num_filters > 0) {
       /* Filters exist - just switch focus to table, keep panel visible */
@@ -735,7 +735,6 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
            hotkey_matches(cfg, event, HOTKEY_OPEN_QUERY) ||
            hotkey_matches(cfg, event, HOTKEY_REFRESH) ||
-           hotkey_matches(cfg, event, HOTKEY_SHOW_SCHEMA) ||
            hotkey_matches(cfg, event, HOTKEY_QUIT) ||
            hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false; /* Let global keys work from filters */

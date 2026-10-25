@@ -10,72 +10,104 @@
 
 #include "config/config.h"
 #include "tui_internal.h"
+#include "util/mem.h"
 #include "views/config_view.h"
 #include <stdlib.h>
 #include <string.h>
 
-/* Count filtered tables */
+/* The sidebar's entries after the search text: the tables, then each
+ * object section that has a match (a header, foldable, then its entries) */
+static bool name_matches(TuiState *state, const char *name) {
+  return name && (state->sidebar_filter_len == 0 || tui_str_istr(name, state->sidebar_filter));
+}
+
+static int section_of(LaceObjectKind k) {
+  return k == LACE_OBJ_VIEW ? 1 : k == LACE_OBJ_ROUTINE ? 2 : k == LACE_OBJ_TRIGGER ? 3 : 0;
+}
+
+static const char *const SECTION_TITLE[] = {"TABLES", "VIEWS", "FUNCTIONS", "TRIGGERS"};
+
+size_t tui_sidebar_entries(TuiState *state, SidebarEntry **out) {
+  *out = NULL;
+  if (!state)
+    return 0;
+  char **tables = TUI_TABLES(state);
+  size_t num_tables = TUI_NUM_TABLES(state);
+  Connection *conn = TUI_TAB_CONNECTION(state);
+  size_t no = conn ? conn->num_objects : 0;
+  const LaceObject *objs = conn ? conn->objects : NULL;
+  SidebarEntry *e = safe_calloc(num_tables + no + 4, sizeof *e);
+  size_t n = 0;
+  for (size_t i = 0; i < num_tables; i++)
+    if (name_matches(state, tables[i]))
+      e[n++] = (SidebarEntry){SB_TABLE, i, 0};
+  for (int sec = 1; sec <= 3; sec++) {
+    bool any = false;
+    for (size_t i = 0; i < no; i++)
+      if (section_of(objs[i].kind) == sec && name_matches(state, objs[i].name))
+        any = true;
+    if (!any)
+      continue;
+    e[n++] = (SidebarEntry){SB_HEADER, 0, sec};
+    if (state->sidebar_collapsed & (1u << sec))
+      continue;
+    for (size_t i = 0; i < no; i++)
+      if (section_of(objs[i].kind) == sec && name_matches(state, objs[i].name))
+        e[n++] = (SidebarEntry){SB_OBJECT, i, sec};
+  }
+  *out = e;
+  return n;
+}
+
+bool tui_sidebar_entry_at(TuiState *state, size_t i, SidebarEntry *out) {
+  SidebarEntry *e;
+  size_t n = tui_sidebar_entries(state, &e);
+  bool ok = i < n;
+  if (ok)
+    *out = e[i];
+  free(e);
+  return ok;
+}
+
+const char *tui_sidebar_entry_name(TuiState *state, const SidebarEntry *e) {
+  if (e->kind == SB_HEADER)
+    return SECTION_TITLE[e->section];
+  if (e->kind == SB_TABLE) {
+    char **tables = TUI_TABLES(state);
+    return e->idx < TUI_NUM_TABLES(state) ? tables[e->idx] : "";
+  }
+  Connection *conn = TUI_TAB_CONNECTION(state);
+  return conn && e->idx < conn->num_objects && conn->objects[e->idx].name ? conn->objects[e->idx].name : "";
+}
+
+/* Count the entries (tables, section headers, objects) after the search */
 size_t tui_count_filtered_tables(TuiState *state) {
-  if (!state)
-    return 0;
-
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-
-  if (state->sidebar_filter_len == 0)
-    return num_tables;
-
-  size_t count = 0;
-  for (size_t i = 0; i < num_tables; i++) {
-    if (tables && tables[i] &&
-        tui_str_istr(tables[i], state->sidebar_filter)) {
-      count++;
-    }
-  }
-  return count;
+  SidebarEntry *e;
+  size_t n = tui_sidebar_entries(state, &e);
+  free(e);
+  return n;
 }
 
-/* Get actual table index from filtered index */
+/* The table index of entry filtered_idx; SIZE_MAX when it is not a table */
 size_t tui_get_filtered_table_index(TuiState *state, size_t filtered_idx) {
-  if (!state)
-    return 0;
-
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-
-  if (state->sidebar_filter_len == 0)
-    return filtered_idx;
-
-  size_t count = 0;
-  for (size_t i = 0; i < num_tables; i++) {
-    if (tables && tables[i] &&
-        tui_str_istr(tables[i], state->sidebar_filter)) {
-      if (count == filtered_idx)
-        return i;
-      count++;
-    }
-  }
-  return 0;
+  SidebarEntry e;
+  if (!tui_sidebar_entry_at(state, filtered_idx, &e) || e.kind != SB_TABLE)
+    return SIZE_MAX;
+  return e.idx;
 }
 
-/* Get sidebar highlight for a table index */
+/* The entry of a table index (0 when it is not listed) */
 size_t tui_get_sidebar_highlight_for_table(TuiState *state, size_t table_idx) {
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
-
-  if (state->sidebar_filter_len == 0)
-    return table_idx;
-
-  size_t count = 0;
-  for (size_t i = 0; i < num_tables; i++) {
-    if (tables && tables[i] &&
-        tui_str_istr(tables[i], state->sidebar_filter)) {
-      if (i == table_idx)
-        return count;
-      count++;
+  SidebarEntry *e;
+  size_t n = tui_sidebar_entries(state, &e);
+  size_t at = 0;
+  for (size_t i = 0; i < n; i++)
+    if (e[i].kind == SB_TABLE && e[i].idx == table_idx) {
+      at = i;
+      break;
     }
-  }
-  return 0; /* Table not in filtered list, default to first */
+  free(e);
+  return at;
 }
 
 /* Update sidebar name scroll animation */
@@ -152,81 +184,109 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
  * tab, turn a connection tab into a table tab, or replace the current tab's
  * table. Filters and sort refer to columns by index, so they are cleared when
  * the table changes. */
-void sidebar_open_table(TuiState *state, size_t actual_idx) {
-  if (!TUI_TABLES(state) || actual_idx >= TUI_NUM_TABLES(state))
-    return;
-
+/* The current tab shows the object (a table, view, routine or trigger) in
+ * place: a query tab switches to an open tab of it or creates one, a
+ * connection tab becomes it, a table tab replaces what it shows */
+static void open_in_current(TuiState *state, LaceObjectKind kind, const char *name, const char *table,
+                            const char *detail) {
   Workspace *ws = TUI_WORKSPACE(state);
   if (!ws || ws->num_tabs == 0) {
-    /* No tabs yet - create first one */
-    tab_create(state, actual_idx);
-  } else {
-    Tab *tab = TUI_TAB(state);
-    if (tab && tab->type == TAB_TYPE_QUERY) {
-      /* Query tab active - check if table tab already exists for same
-       * connection */
-      bool found = false;
-      size_t current_conn = tab->connection_index;
-      for (size_t i = 0; i < ws->num_tabs; i++) {
-        Tab *t = &ws->tabs[i];
-        if (t->type == TAB_TYPE_TABLE && t->table_name &&
-            str_eq(t->table_name, TUI_TABLES(state)[actual_idx]) &&
-            t->connection_index == current_conn) {
-          /* Found existing tab for same table and connection - switch to it
-           */
-          tab_switch(state, i);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        /* No existing tab - create new one */
-        tab_create(state, actual_idx);
-      }
-    } else if (tab && tab->type == TAB_TYPE_CONNECTION) {
-      /* Connection tab active - convert to table tab */
-      char **tables = TUI_TABLES(state);
-      undo_stack_clear(&tab->undo); /* another table: its own undo */
-      free(tab->table_name);
-      tab->table_name = tables ? str_dup(tables[actual_idx]) : NULL;
-      tab->type = TAB_TYPE_TABLE;
-
-      /* Load table - tui_load_table_data handles Tab data */
-      if (tables)
-        tui_load_table_data(state, tables[actual_idx]);
-    } else if (tab && !(tab->table_name &&
-                        str_eq(tab->table_name, TUI_TABLES(state)[actual_idx]))) {
-      /* Replace current tab's table */
-      char **tables = TUI_TABLES(state);
-      undo_stack_clear(&tab->undo); /* another table: its own undo */
-      /* Copy new name first to avoid use-after-free if aliased */
-      char *new_name = tables ? str_dup(tables[actual_idx]) : NULL;
-
-      /* Free old data - NULL out pointers first to avoid dangling refs */
-      ResultSet *old_data = tab->data;
-      TableSchema *old_schema = tab->schema;
-      tab->data = NULL;
-      tab->schema = NULL;
-      tab_data_replaced(tab);
-      db_result_free(old_data);
-      db_schema_free(old_schema);
-      free(tab->col_widths);
-      tab->col_widths = NULL;
-      free(tab->table_name);
-
-      /* Update tab */
-      tab->table_name = new_name;
-
-      /* Clear filters and sort when switching to a different table:
-       * both refer to columns of the old table by index */
-      filters_clear(&tab->filters);
-      tab->num_sort_entries = 0;
-
-      /* Load new table - tui_load_table_data handles Tab data */
-      if (tables)
-        tui_load_table_data(state, tables[actual_idx]);
-    }
+    tab_create_object(state, kind, name, table, detail);
+    return;
   }
+  Tab *tab = TUI_TAB(state);
+  bool relation = kind == LACE_OBJ_TABLE || kind == LACE_OBJ_VIEW;
+  if (tab && tab->type == TAB_TYPE_QUERY) {
+    /* Query tab active: an open tab of the same object on this connection, else a new one */
+    size_t current_conn = tab->connection_index;
+    for (size_t i = 0; i < ws->num_tabs; i++) {
+      Tab *t = &ws->tabs[i];
+      bool t_relation = t->object == LACE_OBJ_TABLE || t->object == LACE_OBJ_VIEW;
+      if (t->type == TAB_TYPE_TABLE && t->table_name && str_eq(t->table_name, name) &&
+          (relation ? t_relation : t->object == kind) && t->connection_index == current_conn) {
+        tab_switch(state, i);
+        return;
+      }
+    }
+    tab_create_object(state, kind, name, table, detail);
+    return;
+  }
+  if (!tab)
+    return;
+  bool same = tab->type == TAB_TYPE_TABLE && tab->table_name && str_eq(tab->table_name, name) &&
+              (relation ? (tab->object == LACE_OBJ_TABLE || tab->object == LACE_OBJ_VIEW) : tab->object == kind);
+  if (same)
+    return;
+  char *new_name = str_dup(name); /* copies first: name may live in what is freed below */
+  char *new_table = table ? str_dup(table) : NULL, *new_detail = detail ? str_dup(detail) : NULL;
+  undo_stack_clear(&tab->undo); /* another object: its own undo */
+  if (tab->type == TAB_TYPE_CONNECTION) {
+    tab->type = TAB_TYPE_TABLE;
+  } else {
+    /* Free old data - NULL out pointers first to avoid dangling refs */
+    ResultSet *old_data = tab->data;
+    TableSchema *old_schema = tab->schema;
+    tab->data = NULL;
+    tab->schema = NULL;
+    tab_data_replaced(tab);
+    db_result_free(old_data);
+    db_schema_free(old_schema);
+    free(tab->col_widths);
+    tab->col_widths = NULL;
+    /* Clear filters and sort when switching to a different table:
+     * both refer to columns of the old table by index */
+    filters_clear(&tab->filters);
+    tab->num_sort_entries = 0;
+  }
+  free(tab->table_name);
+  free(tab->object_table);
+  free(tab->object_detail);
+  tab->table_name = new_name;
+  tab->object = kind;
+  tab->object_table = new_table;
+  tab->object_detail = new_detail;
+  tab->subview = relation ? SUBVIEW_DATA : SUBVIEW_STRUCTURE;
+  memset(tab->sv_cursor, 0, sizeof tab->sv_cursor);
+  memset(tab->sv_scroll, 0, sizeof tab->sv_scroll);
+  tui_load_table_data(state, new_name);
+}
+
+void sidebar_open_entry(TuiState *state, const SidebarEntry *e, bool new_tab) {
+  if (e->kind == SB_HEADER) { /* fold or unfold the section */
+    state->sidebar_collapsed ^= 1u << e->section;
+    return;
+  }
+  if (e->kind == SB_TABLE) {
+    char **tables = TUI_TABLES(state);
+    if (!tables || e->idx >= TUI_NUM_TABLES(state))
+      return;
+    char *name = str_dup(tables[e->idx]); /* a refresh may replace the list */
+    if (new_tab)
+      tab_create_object(state, LACE_OBJ_TABLE, name, NULL, NULL);
+    else
+      open_in_current(state, LACE_OBJ_TABLE, name, NULL, NULL);
+    free(name);
+    return;
+  }
+  Connection *conn = TUI_TAB_CONNECTION(state);
+  if (!conn || e->idx >= conn->num_objects)
+    return;
+  const LaceObject *o = &conn->objects[e->idx];
+  LaceObjectKind kind = o->kind;
+  char *name = str_dup(o->name), *table = o->table ? str_dup(o->table) : NULL;
+  char *detail = o->detail ? str_dup(o->detail) : NULL;
+  if (new_tab)
+    tab_create_object(state, kind, name, table, detail);
+  else
+    open_in_current(state, kind, name, table, detail);
+  free(name);
+  free(table);
+  free(detail);
+}
+
+void sidebar_open_table(TuiState *state, size_t actual_idx) {
+  SidebarEntry e = {SB_TABLE, actual_idx, 0};
+  sidebar_open_entry(state, &e, false);
 }
 
 bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
@@ -324,25 +384,24 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
       tui_set_filters_focused(state, true);
     }
   }
-  /* Select table */
+  /* Select the entry: open in the current tab, create the first tab; a
+   * section header folds */
   else if (render_event_is_special(event, UI_KEY_ENTER)) {
-    /* Select the highlighted table - open in current tab or create first tab */
-    if (filtered_count > 0 && state->sidebar_highlight < filtered_count) {
-      size_t actual_idx =
-          tui_get_filtered_table_index(state, state->sidebar_highlight);
-
-      sidebar_open_table(state, actual_idx);
-      /* Save position before leaving sidebar */
-      state->sidebar_last_position = tui_sidebar_highlight(state);
-      tui_set_sidebar_focused(state, false);
+    SidebarEntry e;
+    if (tui_sidebar_entry_at(state, state->sidebar_highlight, &e)) {
+      sidebar_open_entry(state, &e, false);
+      if (e.kind != SB_HEADER) {
+        /* Save position before leaving sidebar */
+        state->sidebar_last_position = tui_sidebar_highlight(state);
+        tui_set_sidebar_focused(state, false);
+      }
     }
   }
   /* Open in new tab */
   else if (hotkey_matches(cfg, event, HOTKEY_NEW_TAB)) {
-    if (filtered_count > 0 && tui_sidebar_highlight(state) < filtered_count) {
-      size_t actual_idx =
-          tui_get_filtered_table_index(state, tui_sidebar_highlight(state));
-      tab_create(state, actual_idx);
+    SidebarEntry e;
+    if (tui_sidebar_entry_at(state, tui_sidebar_highlight(state), &e) && e.kind != SB_HEADER) {
+      sidebar_open_entry(state, &e, true);
       /* Save position before leaving sidebar */
       state->sidebar_last_position = tui_sidebar_highlight(state);
       tui_set_sidebar_focused(state, false);
@@ -427,7 +486,6 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_PREV_WORKSPACE) ||
            hotkey_matches(cfg, event, HOTKEY_NEXT_WORKSPACE) ||
            hotkey_matches(cfg, event, HOTKEY_CLOSE_TAB) ||
-           hotkey_matches(cfg, event, HOTKEY_SHOW_SCHEMA) ||
            hotkey_matches(cfg, event, HOTKEY_CONNECT_DIALOG) ||
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_HEADER) ||
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
@@ -480,11 +538,11 @@ void tui_draw_sidebar(TuiState *state) {
   wattroff(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
   y++;
 
-  char **tables = TUI_TABLES(state);
-  size_t num_tables = TUI_NUM_TABLES(state);
   Tab *current_tab = TUI_TAB(state);
+  SidebarEntry *entries;
+  size_t n = tui_sidebar_entries(state, &entries);
 
-  if (!tables || num_tables == 0) {
+  if (TUI_NUM_TABLES(state) == 0 && n == 0) {
     mvwprintw(state->sidebar_win, y, 2, "(no tables)");
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
@@ -492,6 +550,7 @@ void tui_draw_sidebar(TuiState *state) {
       wmove(state->sidebar_win, filter_y,
             2 + utf8_width(filter_text, filter_len));
     }
+    free(entries);
     wrefresh(state->sidebar_win);
     return;
   }
@@ -505,16 +564,7 @@ void tui_draw_sidebar(TuiState *state) {
    * separator(1), bottom border(1) */
   int list_height = win_height - 4;
 
-  /* Count filtered tables */
-  size_t filtered_count = 0;
-  for (size_t i = 0; i < num_tables; i++) {
-    if (tables[i] &&
-        (filter_len == 0 || tui_str_istr(tables[i], filter_text))) {
-      filtered_count++;
-    }
-  }
-
-  if (filtered_count == 0) {
+  if (n == 0) {
     mvwprintw(state->sidebar_win, y, 2, "(no matches)");
     /* Position cursor in filter field if active */
     if (state->sidebar_filter_active) {
@@ -522,6 +572,7 @@ void tui_draw_sidebar(TuiState *state) {
       wmove(state->sidebar_win, filter_y,
             2 + utf8_width(filter_text, filter_len));
     }
+    free(entries);
     wrefresh(state->sidebar_win);
     return;
   }
@@ -538,30 +589,30 @@ void tui_draw_sidebar(TuiState *state) {
     state->sidebar_scroll = draw_scroll;
   }
 
-  /* Draw filtered tables */
-  size_t filtered_idx = 0;
-  size_t current_table_idx = app_tab_table_position(state->app, current_tab);
-  for (size_t i = 0; i < num_tables && y < win_height - 1; i++) {
-    const char *name = tables[i];
-    if (!name)
-      continue;
-
-    /* Apply filter */
-    if (filter_len > 0 && !tui_str_istr(name, filter_text)) {
-      continue;
-    }
-
-    /* Skip items before scroll offset */
-    if (filtered_idx < draw_scroll) {
-      filtered_idx++;
+  /* Draw the entries from the scroll position */
+  for (size_t i = draw_scroll; i < n && y < win_height - 1; i++) {
+    const SidebarEntry *e = &entries[i];
+    bool is_highlighted = (i == highlight);
+    bool focused_hl = is_highlighted && state->sidebar_focused && !state->sidebar_filter_active;
+    if (e->kind == SB_HEADER) { /* a section: "▾ VIEWS", "▸ VIEWS" when folded */
+      char *title = str_printf("%s %s", state->sidebar_collapsed & (1u << e->section) ? "\xe2\x96\xb8" : "\xe2\x96\xbe",
+                               tui_sidebar_entry_name(state, e));
+      attr_t attr = A_BOLD | (focused_hl ? A_REVERSE : A_DIM);
+      wattron(state->sidebar_win, attr);
+      tui_print_fit(state->sidebar_win, y, 1, max_name_len + 1, title);
+      wattroff(state->sidebar_win, attr);
+      free(title);
+      y++;
       continue;
     }
+    const char *name = tui_sidebar_entry_name(state, e);
+    /* the current tab's entry: the same object */
+    bool is_current = current_tab && current_tab->type == TAB_TYPE_TABLE && current_tab->table_name &&
+                      str_eq(current_tab->table_name, name) &&
+                      (e->kind == SB_TABLE ? current_tab->object == LACE_OBJ_TABLE || current_tab->object == LACE_OBJ_VIEW
+                                           : section_of(current_tab->object) == e->section);
 
-    bool is_highlighted = (filtered_idx == highlight);
-    bool is_current = (i == current_table_idx);
-
-    if (is_highlighted && state->sidebar_focused &&
-        !state->sidebar_filter_active) {
+    if (focused_hl) {
       wattron(state->sidebar_win, A_REVERSE);
     }
 
@@ -570,8 +621,7 @@ void tui_draw_sidebar(TuiState *state) {
     int name_len = utf8_width(name, name_bytes);
     char *display_name = NULL;
     if (name_len > max_name_len) {
-      if (is_highlighted && state->sidebar_focused &&
-          !state->sidebar_filter_active) {
+      if (focused_hl) {
         /* Apply scroll animation for highlighted item (scroll is columns) */
         size_t name_scroll = state->sidebar_name_scroll;
         if (name_scroll > (size_t)(name_len - max_name_len)) {
@@ -598,14 +648,13 @@ void tui_draw_sidebar(TuiState *state) {
     if (is_current) {
       wattroff(state->sidebar_win, A_BOLD);
     }
-    if (is_highlighted && state->sidebar_focused &&
-        !state->sidebar_filter_active) {
+    if (focused_hl) {
       wattroff(state->sidebar_win, A_REVERSE);
     }
 
     y++;
-    filtered_idx++;
   }
+  free(entries);
 
   /* Position cursor in filter field if active, before refresh */
   if (state->sidebar_filter_active) {

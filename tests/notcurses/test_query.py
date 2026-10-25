@@ -1,6 +1,7 @@
 """The query view: editor, paged and unpaged statements, scripts, transactions, editable results"""
 import importlib.util
 import os
+import time
 
 from harness import sqlite_exec, sqlite_rows
 from nc import Nc
@@ -112,6 +113,37 @@ def test_kitty_protocol_shifted_keys(home):
         t.keys("Escape")
         t.type("\x1b[91;2;123u")       # Shift+[ → '{': previous workspace: with one, a message
         t.wait("Only one workspace")
+        t.keys("q"); assert t.quit() == 0
+
+
+def test_focus_reports_are_ignored(home):
+    """A terminal left reporting focus (mode 1004) sends CSI O / CSI I when a
+    click lands on another pane, and some emulators send a mouse release with
+    the pointer outside the pane, which notcurses cannot parse; notcurses hands
+    both over as Esc, '[' and the bytes, which must neither leave the editor
+    nor type anything (nor switch tabs with the '[' or close views with a
+    '-'). A real Esc still works, and an Esc followed by other keys stays in
+    order"""
+    t, db = open_query(home, 10)
+    with t:
+        t.type("SELECT 1")
+        t.type("\x1b[O"); t.type("\x1b[I")   # focus out, focus in
+        time.sleep(0.3)
+        t.type(" ")                             # still in the editor: typing goes on
+        t.wait("SELECT 1 ")
+        assert "[O" not in t.text() and "[I" not in t.text()
+        t.type("\x1b[<0;-6;-6m")              # a release outside the pane: a click on another pane
+        t.type("\x1b[<0;-6;-6M")              # (and a press there)
+        time.sleep(0.3)
+        t.type("!")
+        t.wait("SELECT 1 !")                    # still in the editor, nothing typed, the view still open
+        assert "[<0" not in t.text() and "SELECT 1 ! ×" in t.text().split("\n")[1]
+        t.keys("Escape")                        # a real Esc leaves the editor
+        t.type("\x1b[91;2;123u")               # Shift+[ → '{': a hotkey now
+        t.wait("Only one workspace")
+        t.keys("Enter")                         # back in the editor
+        t.type("\x1b]")                        # Esc then a key that opens no sequence: both, in order
+        t.wait("Only one tab")                  # Esc left the editor, ']' is the next-tab hotkey
         t.keys("q"); assert t.quit() == 0
 
 

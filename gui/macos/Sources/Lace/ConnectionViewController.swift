@@ -60,11 +60,14 @@ final class ConnectionViewController: NSSplitViewController {
     addSplitViewItem(side)
     addSplitViewItem(main)
 
-    sidebar.onPreview = { [weak self] table in self?.content.openTable(table, preview: true) }
-    sidebar.onOpen = { [weak self] table in self?.content.openTable(table, preview: false) }
-    sidebar.onStructure = { [weak self] table in self?.showStructure(of: table) }
+    sidebar.onPreview = { [weak self] object in self?.content.openObject(object, preview: true) }
+    sidebar.onOpen = { [weak self] object in self?.content.openObject(object, preview: false) }
+    sidebar.onStructure = { [weak self] object in
+      self?.content.openObject(object, preview: false).setSubView(.structure)
+    }
     sidebar.onNewQuery = { [weak self] text in self?.content.newQuery(text: text) }
     content.onTablesChanged = { [weak self] in self?.sidebar.reload() }
+    content.objectsProvider = { [weak self] in self?.sidebar.objects ?? [] }
 
     let events = connection.events
     eventsTask = Task { [weak self] in
@@ -119,20 +122,6 @@ final class ConnectionViewController: NSSplitViewController {
     }
   }
 
-  func showStructure(of table: String) {
-    let connection = self.connection
-    Task { [weak self] in
-      let outcome = await Result { try await connection.schema(of: table) }
-      guard let self else { return }
-      switch outcome {
-      case .success(let schema):
-        presentAsSheet(StructureViewController(table: table, schema: schema))
-      case .failure(let error):
-        Alerts.error("Structure", "\(error)", window: view.window)
-      }
-    }
-  }
-
   /// Stop everything and disconnect (the daemon rolls an open transaction back)
   func tearDown() {
     eventsTask?.cancel()
@@ -161,7 +150,9 @@ final class ContentViewController: NSViewController {
     let id: UUID
     var controller: NSViewController
     var isPreview: Bool
-    var table: String?
+    /// A table tab's object; nil for a query
+    var object: CatalogObject?
+    var table: String? { object?.name }
   }
 
   let connection: Connection
@@ -170,6 +161,8 @@ final class ContentViewController: NSViewController {
   var onTablesChanged: (() -> Void)?
   /// A statement to record in the connection's history
   var record: ((String) -> Void)?
+  /// The connection's objects (the sidebar's list), for the Information view
+  var objectsProvider: (() -> [CatalogObject])?
   private let strip = TabStripView(frame: .zero)
   private let container = NSView()
   private let emptyTitle = NSTextField(labelWithString: "Pick a table")
@@ -260,7 +253,29 @@ final class ContentViewController: NSViewController {
 
   @discardableResult
   func openTable(_ name: String, preview: Bool) -> TableViewController {
-    if let i = tabs.firstIndex(where: { $0.table == name }), let existing = tabs[i].controller as? TableViewController {
+    openObject(CatalogObject(kind: .table, name: name), preview: preview)
+  }
+
+  /// Tables and database views share a namespace; routines and triggers have their own
+  private func sameObject(_ a: CatalogObject, _ b: CatalogObject) -> Bool {
+    let relation = { (k: ObjectKind) in k == .table || k == .view }
+    return a.name == b.name && (relation(a.kind) ? relation(b.kind) : a.kind == b.kind)
+  }
+
+  /// Open a table filtered by a followed key: an open tab of it gets the
+  /// filters, else a new one; the tab is kept and shown
+  func openFiltered(_ table: String, filters: [Filter]) {
+    let vc = openObject(CatalogObject(kind: .table, name: table), preview: false)
+    vc.showFiltered(filters)
+    showNotice("\(table) where " + filters.map { "\($0.column ?? "") = \($0.value)" }.joined(separator: ", "))
+  }
+
+  @discardableResult
+  func openObject(_ object: CatalogObject, preview: Bool) -> TableViewController {
+    let name = object.name
+    if let i = tabs.firstIndex(where: { $0.object.map { sameObject($0, object) } ?? false }),
+      let existing = tabs[i].controller as? TableViewController
+    {
       if !preview && tabs[i].isPreview {
         tabs[i].isPreview = false
       }
@@ -271,9 +286,12 @@ final class ContentViewController: NSViewController {
       }
       return existing
     }
-    let vc = TableViewController(connection: connection, table: name, prefs: prefs)
+    let vc = TableViewController(connection: connection, object: object, prefs: prefs)
     vc.toast = { [weak self] in self?.showNotice($0) }
     vc.record = { [weak self] in self?.record?($0) }
+    vc.onOpenFiltered = { [weak self] table, filters in self?.openFiltered(table, filters: filters) }
+    vc.onOpenObject = { [weak self] object, sv in self?.openObject(object, preview: false).setSubView(sv) }
+    vc.objectsProvider = { [weak self] in self?.objectsProvider?() ?? [] }
     vc.onTouched = { [weak self, weak vc] in
       guard let self, let vc, let i = tabs.firstIndex(where: { $0.controller === vc }), tabs[i].isPreview
       else { return }
@@ -284,11 +302,11 @@ final class ContentViewController: NSViewController {
       // The preview tab stays where it is; only what it shows changes
       let old = tabs[i]
       detach(old.controller)
-      tabs[i] = Tab(id: old.id, controller: vc, isPreview: true, table: name)
+      tabs[i] = Tab(id: old.id, controller: vc, isPreview: true, object: object)
       addChild(vc)
       select(old.id)
     } else {
-      let tab = Tab(id: UUID(), controller: vc, isPreview: preview, table: name)
+      let tab = Tab(id: UUID(), controller: vc, isPreview: preview, object: object)
       tabs.append(tab)
       addChild(vc)
       select(tab.id)
@@ -309,7 +327,8 @@ final class ContentViewController: NSViewController {
     vc.record = { [weak self] in self?.record?($0) }
     vc.onTitleChanged = { [weak self] in self?.refreshStrip() }
     vc.onTablesChanged = { [weak self] in self?.onTablesChanged?() }
-    let tab = Tab(id: UUID(), controller: vc, isPreview: false, table: nil)
+    vc.onOpenFiltered = { [weak self] table, filters in self?.openFiltered(table, filters: filters) }
+    let tab = Tab(id: UUID(), controller: vc, isPreview: false, object: nil)
     tabs.append(tab)
     addChild(vc)
     select(tab.id)
@@ -355,7 +374,14 @@ final class ContentViewController: NSViewController {
     strip.items = tabs.map { tab in
       let query = tab.controller as? QueryViewController
       let title = query?.tabTitle ?? tab.table ?? "Query"
-      let symbol = tab.isPreview ? "eye" : (query != nil ? "terminal" : "tablecells")
+      let kindSymbol: String =
+        switch tab.object?.kind {
+        case .view: "rectangle.on.rectangle"
+        case .routine: "function"
+        case .trigger: "bolt"
+        default: "tablecells"
+        }
+      let symbol = tab.isPreview ? "eye" : (query != nil ? "terminal" : kindSymbol)
       let tip = tab.isPreview ? "\(title) (preview: double-click the table or edit to keep it)" : title
       return TabStripView.Item(id: tab.id, title: title, symbol: symbol, tooltip: tip, dimmed: tab.isPreview)
     }

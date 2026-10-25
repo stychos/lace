@@ -50,6 +50,16 @@ static void test_input_translate(void) {
   CHECK(e.type == UI_EVENT_KEY && !e.key.is_special && e.key.key == 'G' && e.key.mods == UI_MOD_CTRL);
   ni = key('G', NCKEY_MOD_CTRL);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == 'G' && e.key.mods == UI_MOD_CTRL);
+  /* a held key repeats: its repeat events are presses; a release is nothing */
+  ni = key('a', 0);
+  ni.evtype = NCTYPE_REPEAT;
+  CHECK(input_translate(&ni, ni.id, &e) && e.type == UI_EVENT_KEY && e.key.key == 'a');
+  ni = key(NCKEY_BACKSPACE, 0);
+  ni.evtype = NCTYPE_REPEAT;
+  CHECK(input_translate(&ni, ni.id, &e) && e.key.is_special && e.key.key == UI_KEY_BACKSPACE);
+  ni = key('a', 0);
+  ni.evtype = NCTYPE_RELEASE;
+  CHECK(!input_translate(&ni, ni.id, &e));
   ni = key('3', NCKEY_MOD_ALT);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == '3' && e.key.mods == UI_MOD_ALT);
   /* A legacy ESC-prefixed Alt sets only the deprecated bool */
@@ -124,12 +134,12 @@ static void test_input_translate(void) {
   /* Ctrl+Shift+letter keeps Shift */
   ni = key('p', NCKEY_MOD_CTRL | NCKEY_MOD_SHIFT);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == 'P' && e.key.mods == (UI_MOD_CTRL | UI_MOD_SHIFT));
-  /* A mouse release and a movement repeat pass; a letter repeat does not */
+  /* A mouse release passes, a key release does not; every repeat is a press */
   ni = key(NCKEY_BUTTON1, 0); ni.evtype = NCTYPE_RELEASE;
   CHECK(input_translate(&ni, ni.id, &e) && e.type == UI_EVENT_MOUSE && e.mouse.action == UI_MOUSE_RELEASE);
   ni = key(NCKEY_DOWN, 0); ni.evtype = NCTYPE_REPEAT;
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == UI_KEY_DOWN);
-  ni = key('a', 0); ni.evtype = NCTYPE_REPEAT;
+  ni = key(NCKEY_DOWN, 0); ni.evtype = NCTYPE_RELEASE;
   CHECK(!input_translate(&ni, ni.id, &e));
   /* A non-ASCII id with Ctrl keeps its text */
   ni = key(0xE9, NCKEY_MOD_CTRL);
@@ -1036,6 +1046,60 @@ static void test_conntab_preview(void) {
   workspace_free(w);
 }
 
+static void test_subviews_model(void) {
+  View *tv = view_new_table("orders");
+  CHECK(tv->subview == SV_DATA && tv->object == LACE_OBJ_TABLE);
+  for (int i = 0; i < SV_COUNT; i++) CHECK(view_has_subview(tv, (SubView)i));
+  /* a foreign key's first column is marked and followed */
+  LaceSchema *s = schema_id_name();
+  s->num_foreign_keys = 1;
+  s->foreign_keys = safe_calloc(1, sizeof(LaceForeignKey));
+  s->foreign_keys[0].num_columns = s->foreign_keys[0].num_ref_columns = 1;
+  s->foreign_keys[0].columns = safe_calloc(1, sizeof(char *));
+  s->foreign_keys[0].columns[0] = str_dup("v");
+  s->foreign_keys[0].ref_columns = safe_calloc(1, sizeof(char *));
+  s->foreign_keys[0].ref_columns[0] = str_dup("id");
+  s->foreign_keys[0].ref_table = str_dup("t");
+  view_set_schema(tv, s);
+  CHECK(view_fk_first_column(tv, "v") && !view_fk_first_column(tv, "id") && !view_fk_first_column(tv, NULL));
+  /* the session's names */
+  CHECK_STR(view_subview_key(tv, SV_FOREIGN_KEYS), "foreign_keys");
+  SubView sv;
+  CHECK(view_subview_from_key("indexes", &sv) && sv == SV_INDEXES);
+  CHECK(view_subview_from_key("definition", &sv) && sv == SV_STRUCTURE);
+  CHECK(!view_subview_from_key("rows", &sv));
+  LaceObjectKind k;
+  CHECK(view_object_from_key("trigger", &k) && k == LACE_OBJ_TRIGGER && !view_object_from_key("x", &k));
+  tv->subview = SV_INDEXES;
+  cJSON *j = view_to_json(tv, false);
+  CHECK_STR(json_get_string(j, "subview", ""), "indexes");
+  CHECK(!cJSON_GetObjectItem(j, "object"));
+  cJSON_Delete(j);
+  view_free(tv);
+  /* a database view has Data, Definition and Information; a trigger starts on Definition */
+  View *vv = view_new_object(LACE_OBJ_VIEW, "big", NULL, NULL);
+  CHECK(vv->subview == SV_DATA && view_has_subview(vv, SV_STRUCTURE) && !view_has_subview(vv, SV_INDEXES));
+  CHECK_STR(view_subview_key(vv, SV_STRUCTURE), "definition");
+  view_free(vv);
+  View *tr = view_new_object(LACE_OBJ_TRIGGER, "trg", "orders", NULL);
+  CHECK(tr->subview == SV_STRUCTURE && !view_has_subview(tr, SV_DATA) && view_has_subview(tr, SV_INFORMATION));
+  j = view_to_json(tr, false);
+  CHECK_STR(json_get_string(j, "object", ""), "trigger");
+  CHECK_STR(json_get_string(j, "object_table", ""), "orders");
+  CHECK_STR(json_get_string(j, "subview", ""), "definition");
+  cJSON_Delete(j);
+  view_free(tr);
+  /* tables and views share a namespace in a tab, routines and triggers do not */
+  NcWorkspace *w = workspace_new("W");
+  ConnTab *t = workspace_add_tab(w, NULL);
+  conntab_add_view(t, view_new_object(LACE_OBJ_VIEW, "big", NULL, NULL));
+  conntab_add_view(t, view_new_object(LACE_OBJ_TRIGGER, "big", "orders", NULL));
+  CHECK(conntab_find_table_view(t, "big") == 0);
+  CHECK(conntab_find_object_view(t, LACE_OBJ_TRIGGER, "big") == 1);
+  CHECK(conntab_find_object_view(t, LACE_OBJ_ROUTINE, "big") == SIZE_MAX);
+  workspace_free(w);
+}
+
 static void test_workspace_json(void) {
   NcWorkspace *w = workspace_new("W2");
   ConnTab *t = workspace_add_tab(w, NULL);
@@ -1281,40 +1345,53 @@ static void test_list_widget(void) {
 
 static void test_header_format(void) {
   const char *two[] = {"a.db", "b.db"};
-  size_t off = 99, len = 99;
-  char *h = header_format("Workspace", two, 2, 0, "big", 0, 3, 80, &off, &len);
-  CHECK_STR(h, "Workspace \xe2\x96\xb8 a.db \xe2\x96\xb8 big (1 of 3) \xe2\x94\x82 b.db");
+  size_t off = 99, len = 99, dboff = 99, dblen = 99;
+  char *h = header_format("Workspace", two, 2, 0, NULL, "big", 0, 3, 80, &off, &len, &dboff, &dblen);
+  CHECK_STR(h, "Workspace \xe2\x96\xb8 a.db \xe2\x96\xb8 big (1 of 3)"); /* the other tab is not listed */
   CHECK(off == strlen("Workspace \xe2\x96\xb8 ") && len == 4 && !strncmp(h + off, "a.db", len));
+  CHECK(dboff == 0 && dblen == 0);
   free(h);
+  CHECK_STR_FREE(header_format("Workspace", two, 2, 1, NULL, "big", 0, 0, 80, NULL, NULL, NULL, NULL),
+                 "Workspace \xe2\x96\xb8 b.db \xe2\x96\xb8 big"); /* no count with the tabs strip */
+  /* a server connection's database sits between the connection and the view */
+  h = header_format("W", two, 2, 0, "shop", "big", 0, 0, 80, &off, &len, &dboff, &dblen);
+  CHECK_STR(h, "W \xe2\x96\xb8 a.db \xe2\x96\xb8 shop \xe2\x96\xb8 big");
+  CHECK(dblen == 4 && !strncmp(h + dboff, "shop", dblen));
+  free(h);
+  CHECK_STR_FREE(header_format("W", two, 2, 0, "shop", NULL, 0, 0, 80, NULL, NULL, NULL, NULL),
+                 "W \xe2\x96\xb8 a.db \xe2\x96\xb8 shop");
+  CHECK_STR_FREE(header_format("W", two, 2, 0, "", "big", 0, 0, 80, NULL, NULL, NULL, NULL),
+                 "W \xe2\x96\xb8 a.db \xe2\x96\xb8 big"); /* empty: none */
   /* a repeated name gets its position among the equal ones */
   const char *same[] = {"t.sqlite", "t.sqlite", "x"};
-  CHECK_STR_FREE(header_format("W", same, 3, 1, NULL, 0, 0, 80, NULL, NULL),
-                 "W \xe2\x96\xb8 t.sqlite 2 \xe2\x94\x82 t.sqlite \xe2\x94\x82 x");
-  /* too narrow for the names: the other tabs become numbers */
+  CHECK_STR_FREE(header_format("W", same, 3, 1, NULL, NULL, 0, 0, 80, NULL, NULL, NULL, NULL), "W \xe2\x96\xb8 t.sqlite 2");
+  CHECK_STR_FREE(header_format("W", same, 3, 0, NULL, NULL, 0, 0, 80, NULL, NULL, NULL, NULL), "W \xe2\x96\xb8 t.sqlite");
+  /* too narrow: the workspace name goes */
   const char *three[] = {"alpha", "bravo", "charlie"};
-  CHECK_STR_FREE(header_format("WS", three, 3, 0, NULL, 0, 0, 27, NULL, NULL),
-                 "WS \xe2\x96\xb8 alpha \xe2\x94\x82 2 \xe2\x94\x82 3");
-  /* still too narrow: the workspace name goes too */
-  CHECK_STR_FREE(header_format("Workspace", three, 3, 1, NULL, 0, 0, 16, NULL, NULL),
-                 "bravo \xe2\x94\x82 1 \xe2\x94\x82 3");
+  CHECK_STR_FREE(header_format("Workspace", three, 3, 1, NULL, "big", 0, 0, 16, NULL, NULL, NULL, NULL),
+                 "bravo \xe2\x96\xb8 big");
   /* then the line is clipped on a column boundary, and the current name with it */
-  h = header_format("WS", three, 3, 0, NULL, 0, 0, 3, &off, &len);
+  h = header_format("WS", three, 3, 0, NULL, NULL, 0, 0, 3, &off, &len, NULL, NULL);
   CHECK_STR(h, "alp");
   CHECK(off == 0 && len == 3);
   free(h);
-  h = header_format("WS", three, 3, 2, NULL, 0, 0, 3, &off, &len);
+  h = header_format("WS", three, 3, 2, NULL, NULL, 0, 0, 3, &off, &len, NULL, NULL);
   CHECK_STR(h, "cha"); /* the current tab leads once the workspace name is gone */
   CHECK(off == 0 && len == 3);
   free(h);
-  h = header_format("WS", three, 3, 2, NULL, 0, 0, 0, &off, &len);
+  h = header_format("WS", three, 3, 2, "db", NULL, 0, 0, 9, &off, &len, &dboff, &dblen);
+  CHECK_STR(h, "charlie \xe2\x96\xb8"); /* the database clipped away: no range */
+  CHECK(dblen == 0);
+  free(h);
+  h = header_format("WS", three, 3, 2, NULL, NULL, 0, 0, 0, &off, &len, NULL, NULL);
   CHECK_STR(h, "");
   CHECK(len == 0);
   free(h);
   /* no tabs: just the workspace */
-  CHECK_STR_FREE(header_format("Workspace", NULL, 0, 0, NULL, 0, 0, 40, NULL, NULL), "Workspace \xe2\x96\xb8 ");
+  CHECK_STR_FREE(header_format("Workspace", NULL, 0, 0, NULL, NULL, 0, 0, 40, NULL, NULL, NULL, NULL), "Workspace \xe2\x96\xb8 ");
   /* wide characters count by display width */
   const char *wide[] = {"\xe6\x97\xa5\xe6\x9c\xac"};
-  h = header_format(NULL, wide, 1, 0, NULL, 0, 0, 3, &off, &len);
+  h = header_format(NULL, wide, 1, 0, NULL, NULL, 0, 0, 3, &off, &len, NULL, NULL);
   CHECK_STR(h, "\xe6\x97\xa5");
   free(h);
 }
@@ -1733,6 +1810,7 @@ int main(void) {
   test_sidebar_marquee();
   test_conntab_preview();
   test_workspace_json();
+  test_subviews_model();
   test_input_translate();
   test_page_cache();
   test_view_sql();

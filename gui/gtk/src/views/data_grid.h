@@ -32,6 +32,9 @@ LaceRowModel *lace_data_grid_get_model(LaceDataGrid *g);
 /* Borrowed: the owner keeps it alive and clears it (NULL) before freeing.
  * Marks primary-key columns and names types in the editor. */
 void lace_data_grid_set_schema(LaceDataGrid *g, const LaceSchema *schema);
+/* The first columns of the schema's foreign keys get ⇒ in their header and
+ * can be followed (Ctrl+click, the context menu); NULL clears */
+void lace_data_grid_set_fk_columns(LaceDataGrid *g, const LaceSchema *schema);
 
 void lace_data_grid_set_editable(LaceDataGrid *g, gboolean editable);
 gboolean lace_data_grid_get_editable(LaceDataGrid *g);
@@ -67,6 +70,8 @@ GtkColumnView *lace_data_grid_get_column_view(LaceDataGrid *g);
 void lace_data_grid_debug_counts(LaceDataGrid *g, guint *bound_cells, guint *row_widgets);
 
 /* Signals:
+ *   follow-fk ()                          Ctrl+click or the menu on a key column: the referenced row
+ *   referenced-by ()                      the menu: a table whose key points at the focused row
  *   sort-changed ()                       read lace_data_grid_get_sorts()
  *   edit-cell (guint row, guint col, const char *text, gboolean set_null)
  *   delete-rows ()                        read the selection

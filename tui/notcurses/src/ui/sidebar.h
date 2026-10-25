@@ -1,4 +1,5 @@
-/* The docked sidebar: the connection's tables and the tab's query views, in
+/* The docked sidebar: the connection's tables, views, routines and triggers
+ * (sections; the last three fold) and the tab's query views, in
  * the left columns of the content area, with a search field above them that
  * is hidden until the sidebar_filter key calls it. */
 #ifndef NC_SIDEBAR_H
@@ -14,9 +15,10 @@ void sidebar_show_search(ConnTab *t);
 /* Keys while the sidebar has the focus (and the list keys while no view is
  * open); false: not ours, the hotkeys may have it */
 bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev);
-/* The name of the table under the sidebar's cursor (freed by the caller), NULL
- * when the cursor is on a query view or the list is empty */
-char *sidebar_highlighted_table(ConnTab *t);
+/* The object under the sidebar's cursor: its name (freed by the caller; NULL
+ * when the cursor is on a query view, a section header or nothing), its kind,
+ * a trigger's table and a routine's kind (allocated, may be NULL) */
+char *sidebar_highlighted_object(ConnTab *t, LaceObjectKind *kind, char **table, char **detail);
 /* A click inside the sidebar (a single click on a table previews it, a
  * double click opens it for keeps); false: outside it */
 bool sidebar_handle_mouse(NcApp *app, ConnTab *t, const UiEvent *ev);

@@ -102,6 +102,9 @@ typedef struct {
   /* Tables list (from this connection) */
   char **tables;
   size_t num_tables;
+  /* Views, routines and triggers (lace_list_objects), with the tables */
+  LaceObject *objects;
+  size_t num_objects;
 
   /* Query history for this connection */
   QueryHistory *history;
@@ -119,10 +122,35 @@ typedef enum {
   TAB_TYPE_CONNECTION /* Connection placeholder (no table loaded) */
 } TabType;
 
+/* The sub-views of a table tab (core/catalog_rows.c builds their rows): a
+ * table has all five; a database view Data, Definition (the Structure slot)
+ * and Information; a routine or trigger Definition and Information */
+typedef enum { SUBVIEW_DATA, SUBVIEW_STRUCTURE, SUBVIEW_INDEXES, SUBVIEW_FOREIGN_KEYS, SUBVIEW_INFORMATION,
+               SUBVIEW_COUNT } TabSubView;
+
 /* Tab - holds per-tab state (table data or query) */
 typedef struct {
   TabType type; /* Type of tab content */
   bool active;  /* Is this tab active/used */
+  /* A TABLE tab shows a table, or a database view, routine or trigger (as
+   * lace_list_objects names them; a trigger's table, a routine's kind) */
+  LaceObjectKind object;
+  char *object_table;
+  char *object_detail;
+  TabSubView subview;                     /* saved in the session */
+  size_t sv_cursor[SUBVIEW_COUNT], sv_scroll[SUBVIEW_COUNT]; /* the lists' positions */
+  /* What the sub-views besides Data show, read when first shown (subviews.c);
+   * a refresh frees them */
+  LaceTableInfo *info;
+  LaceAutoInc *autoinc;
+  char *info_error;
+  int64_t info_count; /* the exact count asked for from Information, -1 unknown */
+  LaceDependent *deps;
+  size_t num_deps;
+  bool deps_loaded;
+  char *deps_error;
+  char *definition;
+  char *definition_error;
 
   /* Connection reference - which connection this tab uses */
   size_t connection_index; /* Index into app->connections[] */
@@ -411,6 +439,17 @@ void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
  * stored as row positions and would otherwise point at different rows
  * after a sort, filter, refresh or table switch (and `x` would delete
  * those). */
+/* Whether the tab's object has that sub-view */
+bool tab_has_subview(const Tab *tab, TabSubView sv);
+/* Drop what the sub-views read (info, dependents, definition): a refresh */
+void tab_drop_catalog(Tab *tab);
+/* The session's names: "data", "structure", ...; "definition" for an object
+ * whose Structure slot is its SQL; "table", "view", "routine", "trigger" */
+const char *tab_subview_key(const Tab *tab, TabSubView sv);
+bool tab_subview_from_key(const char *key, TabSubView *out);
+const char *tab_object_key(LaceObjectKind kind);
+bool tab_object_from_key(const char *key, LaceObjectKind *out);
+
 static inline void tab_data_replaced(Tab *tab) {
   if (tab) {
     tab->load_generation++;

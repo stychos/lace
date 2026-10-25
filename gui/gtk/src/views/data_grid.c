@@ -7,6 +7,7 @@
  */
 
 #include "data_grid.h"
+#include "core/catalog_rows.h"
 #include "cell_editor.h"
 #include "util.h"
 #include <stdlib.h>
@@ -31,6 +32,8 @@ struct _LaceDataGrid {
   LaceRowModel *model;
   GtkMultiSelection *selection;
   const LaceSchema *schema;
+  const LaceSchema *fk_schema; /* its foreign keys mark and follow columns */
+  gboolean *is_fk;
   gboolean editable;
   char *readonly_reason;
   gboolean sortable;
@@ -54,7 +57,7 @@ struct _LaceDataGrid {
 };
 
 enum { SIG_SORT_CHANGED, SIG_EDIT_CELL, SIG_DELETE_ROWS, SIG_CELL_FOCUSED,
-       SIG_ADD_ROW, SIG_REFRESH, SIG_FILTER_COLUMN, N_SIGNALS };
+       SIG_ADD_ROW, SIG_REFRESH, SIG_FILTER_COLUMN, SIG_FOLLOW_FK, SIG_REFERENCED_BY, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 G_DEFINE_TYPE(LaceDataGrid, lace_data_grid, GTK_TYPE_WIDGET)
@@ -191,6 +194,14 @@ static void on_view_pressed(GtkGestureClick *gesture, int n_press, double x,
   }
   if (button != GDK_BUTTON_PRIMARY)
     return;
+  GdkModifierType mods = gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(gesture));
+  if ((mods & GDK_CONTROL_MASK) && g->is_fk && col < g->num_columns && g->is_fk[col]) {
+    /* Ctrl+click on a key column: follow it from this cell */
+    set_focus_cell(g, row, col);
+    g_signal_emit(g, signals[SIG_FOLLOW_FK], 0);
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    return;
+  }
   ClickFocus *cf = g_new0(ClickFocus, 1);
   cf->grid = g_object_ref(g);
   cf->row = row;
@@ -357,6 +368,12 @@ static void clear_columns(LaceDataGrid *g) {
 static void compute_pk(LaceDataGrid *g) {
   g_free(g->is_pk);
   g->is_pk = g_new0(gboolean, g->num_columns ? g->num_columns : 1);
+  g_free(g->is_fk);
+  g->is_fk = g_new0(gboolean, g->num_columns ? g->num_columns : 1);
+  for (gsize i = 0; g->fk_schema && g->model && i < g->num_columns; i++) {
+    const LaceColumn *c = lace_row_model_get_column(g->model, i);
+    g->is_fk[i] = c && c->name && catalog_fk_first_column(g->fk_schema, c->name);
+  }
   if (!g->schema || !g->model)
     return;
   for (gsize i = 0; i < g->num_columns; i++) {
@@ -396,7 +413,7 @@ static void rebuild_columns(LaceDataGrid *g) {
   }
   for (gsize i = 0; i < g->num_columns; i++) {
     const LaceColumn *c = lace_row_model_get_column(g->model, i);
-    char *title = g_strdup_printf("%s%s", c->name ? c->name : "", g->is_pk[i] ? "  ⚿" : "");
+    char *title = g_strdup_printf("%s%s%s", c->name ? c->name : "", g->is_pk[i] ? "  ⚿" : "", g->is_fk[i] ? "  ⇒" : "");
     GtkColumnViewColumn *column = make_column(g, i, title);
     g_free(title);
     g_object_set_data_full(G_OBJECT(column), "name", g_strdup(c->name ? c->name : ""), g_free);
@@ -889,6 +906,16 @@ static void act_delete(GSimpleAction *a, GVariant *p, gpointer data) {
   g_signal_emit(data, signals[SIG_DELETE_ROWS], 0);
 }
 
+static void act_follow_fk(GSimpleAction *a, GVariant *p, gpointer data) {
+  (void)a; (void)p;
+  g_signal_emit(LACE_DATA_GRID(data), signals[SIG_FOLLOW_FK], 0);
+}
+
+static void act_referenced_by(GSimpleAction *a, GVariant *p, gpointer data) {
+  (void)a; (void)p;
+  g_signal_emit(LACE_DATA_GRID(data), signals[SIG_REFERENCED_BY], 0);
+}
+
 static void act_add_row(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   g_signal_emit(data, signals[SIG_ADD_ROW], 0);
@@ -922,6 +949,11 @@ static GMenuModel *cell_menu_model(void) {
   g_menu_append(s3, "Filter by this value", "grid.filter-value");
   g_menu_append(s3, "Select all", "grid.select-all");
   g_menu_append_section(menu, NULL, G_MENU_MODEL(s3));
+  GMenu *s5 = g_menu_new();
+  g_menu_append(s5, "Follow foreign key", "grid.follow-fk");
+  g_menu_append(s5, "Referenced by…", "grid.referenced-by");
+  g_menu_append_section(menu, NULL, G_MENU_MODEL(s5));
+  g_object_unref(s5);
   GMenu *s4 = g_menu_new();
   g_menu_append(s4, "Add row…", "grid.add-row");
   g_menu_append(s4, "Delete selected rows", "grid.delete-rows");
@@ -981,11 +1013,16 @@ void lace_data_grid_set_schema(LaceDataGrid *g, const LaceSchema *schema) {
     /* Retitle for the key marks */
     for (gsize i = 0; i < g->columns->len; i++) {
       const LaceColumn *c = lace_row_model_get_column(g->model, i);
-      char *title = g_strdup_printf("%s%s", c && c->name ? c->name : "", g->is_pk[i] ? "  ⚿" : "");
+      char *title = g_strdup_printf("%s%s%s", c && c->name ? c->name : "", g->is_pk[i] ? "  ⚿" : "", g->is_fk[i] ? "  ⇒" : "");
       gtk_column_view_column_set_title(g_ptr_array_index(g->columns, i), title);
       g_free(title);
     }
   }
+}
+
+void lace_data_grid_set_fk_columns(LaceDataGrid *g, const LaceSchema *schema) {
+  g->fk_schema = schema;
+  lace_data_grid_set_schema(g, g->schema); /* retitle */
 }
 
 void lace_data_grid_set_editable(LaceDataGrid *g, gboolean editable) {
@@ -1123,6 +1160,8 @@ static void lace_data_grid_dispose(GObject *obj) {
   g_clear_pointer(&g->columns, g_ptr_array_unref);
   g_free(g->is_pk);
   g->is_pk = NULL;
+  g_free(g->is_fk);
+  g->is_fk = NULL;
   g_clear_pointer(&g->readonly_reason, g_free);
   G_OBJECT_CLASS(lace_data_grid_parent_class)->dispose(obj);
 }
@@ -1177,6 +1216,10 @@ static void lace_data_grid_class_init(LaceDataGridClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   signals[SIG_FILTER_COLUMN] = g_signal_new("filter-column", LACE_TYPE_DATA_GRID,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
+  signals[SIG_FOLLOW_FK] = g_signal_new("follow-fk", LACE_TYPE_DATA_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+  signals[SIG_REFERENCED_BY] = g_signal_new("referenced-by", LACE_TYPE_DATA_GRID,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void lace_data_grid_init(LaceDataGrid *g) {
@@ -1248,6 +1291,8 @@ static void lace_data_grid_init(LaceDataGrid *g) {
       {"fit-column", act_fit_column, "t", NULL, NULL, {0}},
       {"delete-rows", act_delete, NULL, NULL, NULL, {0}},
       {"add-row", act_add_row, NULL, NULL, NULL, {0}},
+      {"follow-fk", act_follow_fk, NULL, NULL, NULL, {0}},
+      {"referenced-by", act_referenced_by, NULL, NULL, NULL, {0}},
       {"refresh", act_refresh, NULL, NULL, NULL, {0}},
       {"select-all", act_select_all, NULL, NULL, NULL, {0}},
   };

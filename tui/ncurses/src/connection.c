@@ -235,5 +235,25 @@ bool tui_load_tables(TuiState *state, Connection *conn_obj) {
   conn_obj->num_tables = op.result_count;
   async_free(&op);
 
+  /* The sidebar's other sections: views, routines and triggers (a catalog an
+   * older server cannot answer leaves them empty, the tables still list) */
+  lace_objects_free(conn_obj->objects, conn_obj->num_objects);
+  conn_obj->objects = NULL;
+  conn_obj->num_objects = 0;
+  AsyncOperation oop;
+  async_init(&oop);
+  oop.op_type = ASYNC_OP_LIST_OBJECTS;
+  oop.conn = db_conn;
+  if (async_start(&oop)) {
+    bool done = tui_show_processing_dialog(state, &oop, "Loading objects...");
+    if (done && oop.state == ASYNC_STATE_COMPLETED) {
+      conn_obj->objects = (LaceObject *)oop.result;
+      conn_obj->num_objects = oop.result_count;
+      oop.result = NULL;
+      oop.result_count = 0;
+    }
+    async_free(&oop);
+  }
+
   return true;
 }

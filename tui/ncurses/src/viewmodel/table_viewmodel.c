@@ -29,6 +29,7 @@ static Tab *vm_tab(const TableViewModel *vm) {
 }
 #define VM_T(v) vm_tab(v)
 #include "../core/constants.h"
+#include "../core/catalog_rows.h"
 #include "../core/utf8.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
@@ -261,6 +262,9 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
         VM_T(vm)->schema->columns[col].name) {
       int header_len = utf8_width(VM_T(vm)->schema->columns[col].name,
                                   strlen(VM_T(vm)->schema->columns[col].name));
+      /* room for the header's ⇒ on a foreign key's first column */
+      if (catalog_fk_first_column(VM_T(vm)->schema, VM_T(vm)->schema->columns[col].name))
+        header_len += 2;
       if (header_len > width)
         width = header_len;
     }

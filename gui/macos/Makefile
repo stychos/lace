@@ -48,7 +48,7 @@ TUI_SRC = ../../tui/ncurses/src
 SHARED_DIR = $(BUILD_DIR)/shared
 SHARED_LIB = $(SHARED_DIR)/liblaceshared.a
 SHARED_OBJS = $(SHARED_DIR)/connections.o $(SHARED_DIR)/recent.o $(SHARED_DIR)/history.o \
-  $(SHARED_DIR)/platform_posix.o
+  $(SHARED_DIR)/platform_posix.o $(SHARED_DIR)/catalog_rows.o $(SHARED_DIR)/utf8.o
 SHARED_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -mmacosx-version-min=$(MACOS_MIN) \
   -I../../liblace/include -I$(TUI_SRC) $(shell pkg-config --cflags libcjson 2>/dev/null) $(EXTRA_CFLAGS)
 
@@ -64,6 +64,12 @@ $(SHARED_DIR)/history.o: $(TUI_SRC)/core/history.c
 	@mkdir -p $(SHARED_DIR)
 	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
 $(SHARED_DIR)/platform_posix.o: $(TUI_SRC)/platform/posix/platform_posix.c
+	@mkdir -p $(SHARED_DIR)
+	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
+$(SHARED_DIR)/catalog_rows.o: $(TUI_SRC)/core/catalog_rows.c
+	@mkdir -p $(SHARED_DIR)
+	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
+$(SHARED_DIR)/utf8.o: $(TUI_SRC)/core/utf8.c
 	@mkdir -p $(SHARED_DIR)
 	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
 

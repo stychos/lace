@@ -259,7 +259,6 @@ typedef struct {
 } DialogHotkeyEntry;
 
 static const DialogHotkeyEntry dialog_hotkey_table[] = {
-    {HOTKEY_SHOW_SCHEMA, tui_show_schema},
     {HOTKEY_GOTO_ROW, tui_show_goto_dialog},
     {HOTKEY_CONNECT_DIALOG, tui_show_connect_dialog},
     {HOTKEY_TOGGLE_HISTORY, tui_show_history_dialog},
@@ -394,6 +393,8 @@ static bool handle_refresh(TuiState *state, Action *action);
 static bool handle_cycle_sort(TuiState *state, Action *action);
 static bool handle_help(TuiState *state, Action *action);
 static bool handle_undo(TuiState *state, Action *action);
+static bool handle_follow_fk(TuiState *state, Action *action);
+static bool handle_referenced_by(TuiState *state, Action *action);
 
 static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     /* Application */
@@ -407,6 +408,8 @@ static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     /* Table Operations */
     {HOTKEY_REFRESH, FOCUS_ANY, handle_refresh},
     {HOTKEY_UNDO, FOCUS_TABLE_ONLY, handle_undo},
+    {HOTKEY_FOLLOW_FK, FOCUS_TABLE_ONLY, handle_follow_fk},
+    {HOTKEY_REFERENCED_BY, FOCUS_TABLE_ONLY, handle_referenced_by},
     {HOTKEY_CYCLE_SORT, FOCUS_ANY, handle_cycle_sort},
     /* Help */
     {HOTKEY_HELP, FOCUS_ANY, handle_help},
@@ -616,6 +619,18 @@ static bool handle_undo(TuiState *state, Action *action) {
   return true;
 }
 
+static bool handle_follow_fk(TuiState *state, Action *action) {
+  (void)action;
+  tui_follow_fk(state);
+  return true;
+}
+
+static bool handle_referenced_by(TuiState *state, Action *action) {
+  (void)action;
+  tui_referenced_by(state);
+  return true;
+}
+
 static bool handle_cycle_sort(TuiState *state, Action *action) {
   Tab *tab = TUI_TAB(state);
   if (tab && tab->type == TAB_TYPE_TABLE && tab->schema && tab->data) {
@@ -689,9 +704,28 @@ void tui_run(TuiState *state) {
       input_win = stdscr; /* Terminal too small for any window */
     int ch = wgetch(input_win);
 
+    /* Alt+key arrives as Esc and the key in one write: a key already waiting
+     * right after a bare Esc carries Alt (ESCDELAY has let a sequence
+     * through by now; a second Esc stays an Esc) */
+    bool alt = false;
+    if (ch == 27) {
+      wtimeout(input_win, 0);
+      int next = wgetch(input_win);
+      wtimeout(input_win, 80);
+      if (next != ERR && next != 27 && next != KEY_MOUSE && next != KEY_RESIZE) {
+        alt = true;
+        ch = next;
+      }
+    }
+
     /* Translate ncurses key to platform-independent UiEvent */
     UiEvent event;
     bool has_event = render_translate_key(ch, &event);
+    if (has_event && alt && event.type == UI_EVENT_KEY) {
+      event.key.mods |= UI_MOD_ALT;
+      if (!event.key.is_special && event.key.key >= 'a' && event.key.key <= 'z')
+        event.key.key -= 'a' - 'A'; /* a letter with Alt has no case, as with Ctrl */
+    }
 
     /* Handle timeout - update animations and background operations */
     if (!has_event || event.type == UI_EVENT_NONE) {
@@ -797,6 +831,12 @@ void tui_run(TuiState *state) {
 
     /* Handle sidebar input (filter text or navigation) */
     if (state->sidebar_focused && tui_handle_sidebar_input(state, &event)) {
+      tui_refresh(state);
+      continue;
+    }
+
+    /* A table tab's sub-views: the switch keys, and a list's own keys */
+    if (tui_handle_subview_input(state, &event)) {
       tui_refresh(state);
       continue;
     }

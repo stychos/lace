@@ -24,7 +24,7 @@ def test_filter(home):
     db = make_db(home, rows=100)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
-        t.keys("Right", "f")  # A filter on column v, cursor on its value
+        t.keys("Right", "/")  # A filter on column v, cursor on its value
         t.wait("Filters")
         t.keys("Enter")
         t.type("42")
@@ -69,12 +69,15 @@ def test_dialogs_open_and_close(home):
         t.open_table("big")
         # "?" is the hotkey list of the configuration dialog
         for key, marker in [("w", "search, or type a URL"), (",", "Configuration"),
-                            ("?", "Previous tab"), ("s", "Schema"),
-                            ("i", "History")]:
+                            ("?", "Previous tab"), ("i", "History")]:
             t.keys(key)
             t.wait(marker)
             t.keys("Escape")
             t.wait(lambda s, m=marker: m not in s)
+        t.keys("s")                     # the Structure sub-view, not a dialog: `a` is the way back
+        t.wait("Extra")
+        t.keys("a")
+        t.wait(lambda s: "Extra" not in s)
         assert t.quit() == 0
 
 

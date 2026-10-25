@@ -23,6 +23,15 @@ bool screen_init(NcApp *app, char **error) {
   app->cols = (int)c;
   screen_apply_theme(app);
   notcurses_mice_enable(app->nc, NCMICE_BUTTON_EVENT | NCMICE_DRAG_EVENT);
+  /* Focus reports (mode 1004) are never wanted: a program that ran before
+   * may have left the mode on (a shell may keep it on), and notcurses 3.0
+   * knows no such key, so a report would arrive as Esc, `[` and a letter
+   * (pump_input holds those back, but only so long). notcurses writes to
+   * stdout and has flushed its own setup by now. */
+  if (isatty(STDOUT_FILENO)) {
+    static const char focus_off[] = "\x1b[?1004l";
+    if (write(STDOUT_FILENO, focus_off, sizeof focus_off - 1) < 0) { /* the terminal will tell */ }
+  }
   /* Ctrl+C, Ctrl+Z and Ctrl+\ are keys here, not SIGINT, SIGTSTP and SIGQUIT
    * (a slipped Ctrl+C must not end the session; Ctrl+C copies), and Ctrl+V is
    * a key, not the line discipline's "literal next", and Ctrl+S / Ctrl+Q are
@@ -37,7 +46,11 @@ bool screen_init(NcApp *app, char **error) {
     tcsetattr(fd, TCSANOW, &tio);
   }
   if (fd != STDIN_FILENO && isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &tio) == 0) {
-    tio.c_iflag &= ~(tcflag_t)IXON; /* the terminal itself, when input comes through another descriptor */
+    /* The terminal itself: notcurses' input-ready descriptor is a pipe, so
+     * the modes above never reached it, and the discipline kept eating
+     * Ctrl+V (literal next) and, on macOS, Ctrl+O (discard) */
+    tio.c_lflag &= ~(tcflag_t)IEXTEN;
+    tio.c_iflag &= ~(tcflag_t)IXON;
     tcsetattr(STDIN_FILENO, TCSANOW, &tio);
   }
   return true;

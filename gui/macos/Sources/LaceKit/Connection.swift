@@ -225,6 +225,12 @@ public final class Connection: @unchecked Sendable {
       })
   }
 
+  /// A catalog read (Catalog.swift): retried once after a reconnect, under a
+  /// savepoint inside an open PostgreSQL transaction
+  func submitRead<T: Sendable>(_ body: @escaping @Sendable (Int32) throws -> T) async throws -> T {
+    try await submit(Job(readOnly: true, savepoint: true, body: body))
+  }
+
   /// Cancel the statement running now (best effort; from any thread)
   @discardableResult
   public func cancel() -> Bool {

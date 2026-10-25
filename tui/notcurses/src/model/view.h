@@ -15,13 +15,39 @@
 #include <stdint.h>
 
 typedef enum { VIEW_TABLE, VIEW_QUERY } ViewKind;
+/* The sub-views of a VIEW_TABLE (ui/subviews.c): a table has all five; a
+ * database view Data, Definition (the Structure slot) and Information; a
+ * routine or trigger Definition and Information */
+typedef enum { SV_DATA, SV_STRUCTURE, SV_INDEXES, SV_FOREIGN_KEYS, SV_INFORMATION, SV_COUNT } SubView;
 /* The filter panel's fields, left to right */
 enum { FP_COLUMN, FP_OP, FP_VALUE, FP_VALUE2 };
 
 typedef struct View {
   ViewKind kind;
   uint64_t uid;
-  char *table; /* VIEW_TABLE: table reference */
+  char *table; /* VIEW_TABLE: table reference (a view's, a routine's or a trigger's name) */
+  LaceObjectKind object; /* VIEW_TABLE: what table names (a table, a database view, a routine, a trigger) */
+  char *object_table;    /* a trigger's table; NULL otherwise */
+  char *object_detail;   /* a routine's "function"/"procedure", a materialized view's "materialized" */
+  SubView subview;       /* VIEW_TABLE: the current sub-view (saved in the session) */
+  size_t sv_cursor[SV_COUNT], sv_scroll[SV_COUNT]; /* the lists' positions (runtime only) */
+  /* What the sub-views besides Data show, loaded when first drawn (ui/sv_*.c):
+   * the table's information and counter, the tables referencing it, the
+   * definition of a view, routine or trigger; a refresh frees them */
+  LaceTableInfo *info;
+  LaceAutoInc *autoinc;
+  bool info_loading;
+  char *info_error;
+  int64_t info_count;      /* the exact row count asked for from Information, -1 unknown */
+  bool info_count_pending;
+  LaceDependent *deps;
+  size_t num_deps;
+  bool deps_loaded, deps_loading;
+  char *deps_error;
+  bool referenced_by_pending; /* referenced_by waits for the dependents, then opens its list */
+  char *definition;
+  bool definition_loading;
+  char *definition_error;
   LaceFilter *filters;
   size_t num_filters;
   char *search;
@@ -98,6 +124,19 @@ typedef struct View {
 } View;
 
 View *view_new_table(const char *table);
+/* A view of a database view, routine or trigger (as lace_list_objects names
+ * it); a routine or trigger starts on Definition, the rest on Data */
+View *view_new_object(LaceObjectKind kind, const char *name, const char *table, const char *detail);
+/* Whether the object has that sub-view */
+bool view_has_subview(const View *v, SubView sv);
+/* Drop what the sub-views loaded (info, dependents, definition): a refresh */
+void view_drop_catalog(View *v);
+/* The session's names: "data", "structure", ...; "definition" for an object
+ * whose Structure slot is its definition */
+const char *view_subview_key(const View *v, SubView sv);
+bool view_subview_from_key(const char *key, SubView *out);
+const char *view_object_key(LaceObjectKind kind); /* "table", "view", "routine", "trigger" */
+bool view_object_from_key(const char *key, LaceObjectKind *out);
 View *view_new_query(const char *text);
 void view_free(View *v);
 void view_set_schema(View *v, LaceSchema *schema); /* adopts */
@@ -147,5 +186,8 @@ char *view_page_sql(const View *v, LaceDriver d, size_t page);
 char *view_count_sql(const View *v, LaceDriver d);
 const char *view_title(const View *v); /* table name or first line of the SQL, "New query" */
 bool view_row_numbers(const View *v, const Config *config);
+/* The column is the first column of one of the schema's foreign keys (the
+ * grid's header marks it, follow_fk follows it) */
+bool view_fk_first_column(const View *v, const char *name);
 
 #endif

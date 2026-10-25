@@ -25,7 +25,7 @@ int filter_panel_height(size_t num_filters, int avail) {
 }
 
 int filter_panel_rows(const NcApp *app, const View *v) {
-  if (!v || v->kind != VIEW_TABLE || !v->filters_visible || !filter_panel_enabled(app)) return 0;
+  if (!v || v->kind != VIEW_TABLE || v->subview != SV_DATA || !v->filters_visible || !filter_panel_enabled(app)) return 0;
   return filter_panel_height(v->num_filters, content_rect(app).rows);
 }
 
@@ -276,12 +276,7 @@ void filter_panel_add(NcApp *app, View *v) {
   }
   if (v->fp.editing) edit_commit(app, v);
   v->filters_visible = true;
-  ensure_row(v);
-  size_t row = v->fp.row;
-  if (view_filter_active(&v->filters[row]) || v->num_filters > 1 || is_raw(&v->filters[row]))
-    row = view_add_filter(v, cursor_column(v));
-  else
-    set_column(app, v, row, cursor_column(v)); /* the one blank row: use it */
+  size_t row = view_add_filter(v, cursor_column(v)); /* always a new row, blank ones included */
   focus_row(app, v, row, FP_VALUE);
   edit_start(v, "");
 }
@@ -295,7 +290,8 @@ void filter_panel_remove(NcApp *app, View *v) {
   char *before = where_now(v);
   view_remove_filter(v, v->fp.row);
   apply_if_changed(app, v, before);
-  ensure_row(v);
+  if (!v->num_filters) hide(app, v); /* the last filter went: the panel goes with it */
+  else ensure_row(v);
 }
 
 /* ---- pickers: list overlays anchored to the field ---- */
@@ -444,7 +440,7 @@ void filter_panel_draw(NcApp *app, View *v, Rect r) {
   char *ka = first_key(app->config, HOTKEY_ADD_FILTER, "+");
   char *kr = first_key(app->config, HOTKEY_REMOVE_FILTER, "-");
   char *kc = first_key(app->config, HOTKEY_CLEAR_FILTERS, "X");
-  char *kt = first_key(app->config, HOTKEY_TOGGLE_FILTERS, "f");
+  char *kt = first_key(app->config, HOTKEY_TOGGLE_FILTERS, "/");
   char *hints = str_printf("%s add  %s remove  %s clear  Enter edit  Tab next  Esc table  %s close", ka, kr, kc, kt);
   free(ka); free(kr); free(kc); free(kt);
   int vis = r.rows - 1;

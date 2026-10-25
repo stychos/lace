@@ -74,6 +74,12 @@ NcJob *nc_job_tables(void) {
   return j;
 }
 
+NcJob *nc_job_databases(void) {
+  NcJob *j = job_new(NC_JOB_DATABASES);
+  j->read_only = j->savepoint = true;
+  return j;
+}
+
 NcJob *nc_job_table_count(const char *table, const char *where, bool approximate) {
   NcJob *j = job_new(NC_JOB_COUNT);
   j->table = str_dup(table);
@@ -86,6 +92,23 @@ NcJob *nc_job_table_count(const char *table, const char *where, bool approximate
 NcJob *nc_job_dependents(const char *table) {
   NcJob *j = job_new(NC_JOB_DEPENDENTS);
   j->table = str_dup(table);
+  j->read_only = j->savepoint = true;
+  return j;
+}
+
+NcJob *nc_job_table_info(const char *table) {
+  NcJob *j = job_new(NC_JOB_TABLE_INFO);
+  j->table = str_dup(table);
+  j->read_only = j->savepoint = true;
+  return j;
+}
+
+NcJob *nc_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail) {
+  NcJob *j = job_new(NC_JOB_DEFINITION);
+  j->object_kind = (int)kind;
+  j->sql = str_dup(name ? name : "");
+  j->table = table ? str_dup(table) : NULL;
+  j->column = detail ? str_dup(detail) : NULL;
   j->read_only = j->savepoint = true;
   return j;
 }
@@ -167,6 +190,11 @@ void nc_job_unref(NcJob *j) {
   lace_schema_free(j->schema);
   lace_tables_free(j->tables, j->num_tables);
   lace_dependents_free(j->deps, j->num_deps);
+  lace_objects_free(j->objects, j->num_objects);
+  lace_table_info_free(j->info);
+  lace_autoinc_free(j->autoinc);
+  free(j->definition);
+  free(j->database);
   free(j->error);
   str_secure_free(j->last_sql);
   free(j);

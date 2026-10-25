@@ -365,9 +365,16 @@ static void test_hotkeys_connection_tab(void) {
   c->frontend = CONFIG_FE_NOTCURSES;
   static const HotkeyAction fresh[] = {HOTKEY_NEW_CONNECTION, HOTKEY_CONN_OPEN, HOTKEY_CONN_OPEN_BACKGROUND,
       HOTKEY_CONN_OPEN_NEW_WORKSPACE, HOTKEY_CONN_OPEN_TO_WORKSPACE, HOTKEY_CONN_SAVE_AS_NEW, HOTKEY_CONN_CLEAR};
-  static const char *keys[] = {"n", "ENTER", "CTRL+B", "CTRL+N", "CTRL+O", "CTRL+Y", "CTRL+L"};
+  static const char *keys[] = {"CTRL+T", "ENTER", "CTRL+B", "CTRL+N", "CTRL+O", "CTRL+Y", "CTRL+L"};
   for (size_t i = 0; i < 7; i++)
     CHECK(hotkey_find_conflict(c, fresh[i], keys[i]) == HOTKEY_COUNT);
+  /* The sub-views and following keys are every frontend's; an Alt letter
+   * matches regardless of case (the translators report it upper) */
+  CHECK(hotkey_action_frontends(HOTKEY_SUBVIEW_INDEXES) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_frontends(HOTKEY_FOLLOW_FK) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_from_key("show_schema") == HOTKEY_COUNT);
+  UiEvent alt_r = {.type = UI_EVENT_KEY, .key = {.key = 'R', .mods = UI_MOD_ALT}};
+  CHECK(hotkey_matches(c, &alt_r, HOTKEY_REFERENCED_BY));
   config_free(c);
 }
 

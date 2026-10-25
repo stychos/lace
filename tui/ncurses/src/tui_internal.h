@@ -121,7 +121,7 @@ static inline void scroll_clamp_to_max(size_t *scroll, size_t max_scroll) {
 typedef struct {
   int win_rows;       /* Total window height */
   int win_cols;       /* Total window width */
-  int filters_height; /* Height of filters panel (0 if hidden) */
+  int filters_height; /* Rows above the grid: the sub-view strip and the filters panel */
   int header_rows;    /* Number of header rows (typically 3) */
   int visible_rows;   /* Rows available for data display */
   int data_start_y;   /* Y offset where data rows begin */
@@ -137,9 +137,9 @@ static inline LayoutInfo tui_get_layout_info(TuiState *state) {
 
   getmaxyx(state->main_win, layout.win_rows, layout.win_cols);
 
-  /* Calculate filters panel height */
-  layout.filters_height =
-      tui_filters_visible(state) ? tui_get_filters_panel_height(state) : 0;
+  /* Rows above the grid: the sub-view strip and the filters panel */
+  layout.filters_height = tui_subview_strip_rows(state) +
+      (tui_filters_visible(state) ? tui_get_filters_panel_height(state) : 0);
 
   /* Header rows: border + column names + separator = 3
    * Add 1 more row when sorting is active (sort indicator row) */

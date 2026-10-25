@@ -4,8 +4,11 @@
 #include "ui/form_tab.h"
 #include "ui/overlay.h"
 #include "ui/sidebar.h"
+#include "ui/subviews.h"
 #include <notcurses/notcurses.h>
+#include "util/mem.h"
 #include "util/str.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,14 +34,24 @@ static const Hint H_RESULTS[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"Enter edi
                                  {"e edit", HOTKEY_EDIT_MODAL}, {"x delete", HOTKEY_DELETE_ROW},
                                  {"r refresh", HOTKEY_REFRESH}, {"p new query", HOTKEY_OPEN_QUERY},
                                  {"? keys", HOTKEY_HELP}, {NULL, 0}};
-static const Hint H_TABLE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"f filter", HOTKEY_TOGGLE_FILTERS},
+static const Hint H_TABLE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
                                {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
                                {"e editor", HOTKEY_EDIT_MODAL}, {"+ add", HOTKEY_ROW_ADD},
                                {"x delete", HOTKEY_DELETE_ROW}, {"t tables", HOTKEY_TOGGLE_SIDEBAR},
                                {"? keys", HOTKEY_HELP}, {NULL, 0}};
+/* the same with the cursor on a foreign key column */
+static const Hint H_TABLE_FK[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
+                                  {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
+                                  {CTRL "Enter follow", HOTKEY_FOLLOW_FK}, {"e editor", HOTKEY_EDIT_MODAL},
+                                  {"+ add", HOTKEY_ROW_ADD}, {"x delete", HOTKEY_DELETE_ROW},
+                                  {"t tables", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
+static const Hint H_RESULTS_FK[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"Enter editor", HINT_FOCUS_EDITOR},
+                                    {CTRL "Enter follow", HOTKEY_FOLLOW_FK}, {"e edit", HOTKEY_EDIT_MODAL},
+                                    {"x delete", HOTKEY_DELETE_ROW}, {"r refresh", HOTKEY_REFRESH},
+                                    {"p new query", HOTKEY_OPEN_QUERY}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
 static const Hint H_FILTERS[] = {{"+ add", HOTKEY_ADD_FILTER}, {"- remove", HOTKEY_REMOVE_FILTER},
                                  {"X clear", HOTKEY_CLEAR_FILTERS}, {"Enter edit", NOACT}, {"Tab next", NOACT},
-                                 {"Esc table", NOACT}, {"f close", HOTKEY_TOGGLE_FILTERS}, {NULL, 0}};
+                                 {"Esc table", NOACT}, {"/ close", HOTKEY_TOGGLE_FILTERS}, {NULL, 0}};
 static const Hint H_SIDEBAR[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ search", HOTKEY_SIDEBAR_FILTER},
                                  {"Enter open", NOACT}, {"+ new tab", HOTKEY_NEW_TAB}, {"Tab content", NOACT}, {"Esc back", NOACT},
                                  {"t hide", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
@@ -54,6 +67,38 @@ static const Hint H_FORM_LIST[] = {{"Enter open", HOTKEY_CONN_OPEN}, {"N folder"
                                    {CTRL "P palette", HOTKEY_PALETTE}, {NULL, 0}};
 static const Hint H_NONE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"? keys", HOTKEY_HELP},
                               {"q quit", HOTKEY_QUIT}, {NULL, 0}};
+
+/* The cursor column of the grid is a foreign key's first column */
+static bool on_fk_column(const View *v) {
+  if (!v || !v->schema || !page_cache_num_columns(v->cache)) return false;
+  const LaceColumn *c = page_cache_column(v->cache, v->cursor_col);
+  return c && c->name && view_column_is_fk(v, c->name);
+}
+
+/* The hints of a sub-view list: the switches by their keys, then Enter and refresh */
+static Hint *subview_hints(NcApp *app, const View *v, char **texts) {
+  static const HotkeyAction acts[SV_COUNT] = {HOTKEY_SUBVIEW_DATA, HOTKEY_SUBVIEW_STRUCTURE, HOTKEY_SUBVIEW_INDEXES,
+                                              HOTKEY_SUBVIEW_FOREIGN_KEYS, HOTKEY_SUBVIEW_INFORMATION};
+  Hint *hs = safe_calloc(SV_COUNT + 6, sizeof *hs);
+  size_t n = 0, nt = 0;
+  hs[n++] = (Hint){CTRL "P palette", HOTKEY_PALETTE};
+  for (int i = 0; i < SV_COUNT; i++) {
+    if (!view_has_subview(v, (SubView)i) || (SubView)i == v->subview) continue;
+    const HotkeyBinding *b = &app->config->hotkeys[acts[i]];
+    if (!b->num_keys || strlen(b->keys[0]) > 3) continue;
+    char *label = str_dup(subview_label(v, (SubView)i));
+    for (char *c = label; *c; c++) *c = (char)tolower((unsigned char)*c);
+    texts[nt] = str_printf("%s %s", b->keys[0], label);
+    free(label);
+    hs[n++] = (Hint){texts[nt++], acts[i]};
+  }
+  const char *enter = subview_enter_hint(v);
+  if (enter) hs[n++] = (Hint){enter, NOACT};
+  hs[n++] = (Hint){"r refresh", HOTKEY_REFRESH};
+  hs[n++] = (Hint){"? keys", HOTKEY_HELP};
+  hs[n] = (Hint){NULL, 0};
+  return hs;
+}
 
 static char *hints_join(const Hint *hs) {
   char *out = str_dup("");
@@ -90,9 +135,13 @@ void status_draw(NcApp *app) {
                    : tab && tab->sidebar_focused && sidebar_width(app) ? H_SIDEBAR
                    : view && view->kind == VIEW_TABLE && view->filters_visible && view->fp.focused ? H_FILTERS
                    : view && view->kind == VIEW_QUERY && !view->focus_results ? H_EDITOR
-                   : view && view->kind == VIEW_QUERY ? H_RESULTS
-                   : view && view->kind == VIEW_TABLE ? H_TABLE
+                   : view && view->kind == VIEW_QUERY ? (on_fk_column(view) ? H_RESULTS_FK : H_RESULTS)
+                   : view && view->kind == VIEW_TABLE && view->subview != SV_DATA ? NULL
+                   : view && view->kind == VIEW_TABLE ? (on_fk_column(view) ? H_TABLE_FK : H_TABLE)
                                                       : H_NONE;
+  char *sv_texts[SV_COUNT] = {0};
+  Hint *sv_hints = hs ? NULL : subview_hints(app, view, sv_texts);
+  if (!hs) hs = sv_hints;
   char *hints = hints_join(hs);
   bool tx_bad = !top && (tx == NC_TX_FAILED || tx == NC_TX_LOST);
   char *left_buf = top ? str_dup(top->footer ? top->footer : "") : str_printf("%s%s", tx_label(tx), hints);
@@ -127,4 +176,6 @@ void status_draw(NcApp *app) {
   free(left_buf);
   free(hints);
   free(right);
+  free(sv_hints);
+  for (int i = 0; i < SV_COUNT; i++) free(sv_texts[i]);
 }

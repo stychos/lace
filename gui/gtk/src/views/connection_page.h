@@ -15,6 +15,7 @@
 #include "conn/connection.h"
 #include "prefs.h"
 #include "query_view.h"
+#include "sidebar.h"
 #include "table_view.h"
 #include <adwaita.h>
 
@@ -31,6 +32,14 @@ LaceConnection *lace_connection_page_get_connection(LaceConnectionPage *p);
  * without preview, or changing its view, keeps it. */
 LaceTableView *lace_connection_page_open_table(LaceConnectionPage *p, const char *table);
 LaceTableView *lace_connection_page_preview_table(LaceConnectionPage *p, const char *table);
+/* The same for a database view, routine or trigger (as lace_list_objects
+ * names it; table: a trigger's, detail: a routine's kind) */
+LaceTableView *lace_connection_page_open_object(LaceConnectionPage *p, LaceObjectKind kind, const char *name,
+                                                const char *table, const char *detail, gboolean preview);
+/* Open a table filtered by a followed key: an open tab of it gets the filters, else a new one */
+LaceTableView *lace_connection_page_open_filtered(LaceConnectionPage *p, const char *table,
+                                                  const LaceFilter *filters, gsize n);
+LaceSidebar *lace_connection_page_get_sidebar(LaceConnectionPage *p);
 LaceQueryView *lace_connection_page_new_query(LaceConnectionPage *p, const char *text);
 /* The current inner tab's widget: a LaceTableView, a LaceQueryView or NULL */
 GtkWidget *lace_connection_page_current_view(LaceConnectionPage *p);

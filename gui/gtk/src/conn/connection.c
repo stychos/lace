@@ -37,6 +37,8 @@ struct _LaceConnection {
   /* Main thread */
   int tx_state;
   GtkStringList *tables;
+  LaceObject *objects; /* views, routines and triggers, with the tables */
+  size_t num_objects;
   gboolean tables_loaded;
   int pending;
   LaceJob *running;
@@ -127,7 +129,31 @@ static int run_once(LaceConnection *c, LaceJob *job, int conn_id) {
     break;
   case LACE_JOB_TABLES:
     rc = lace_list_tables(client, conn_id, &job->tables, &job->num_tables);
+    if (rc == LACE_OK) { /* the sidebar's other sections come with the list; a
+                          * catalog an older server cannot answer leaves them empty */
+      lace_objects_free(job->objects, job->num_objects);
+      job->objects = NULL;
+      job->num_objects = 0;
+      if (lace_list_objects(client, conn_id, &job->objects, &job->num_objects) != LACE_OK) {
+        job->objects = NULL;
+        job->num_objects = 0;
+      }
+    }
     break;
+  case LACE_JOB_TABLE_INFO:
+    rc = lace_table_info(client, conn_id, job->table, &job->info);
+    if (rc == LACE_OK && lace_autoincrement_get(client, conn_id, job->table, &job->autoinc) != LACE_OK)
+      job->autoinc = NULL; /* the counter is a detail: the rest still shows */
+    break;
+  case LACE_JOB_DEPENDENTS:
+    rc = lace_table_dependents(client, conn_id, job->table, &job->deps, &job->num_deps);
+    break;
+  case LACE_JOB_DEFINITION: {
+    LaceObject obj = {.kind = (LaceObjectKind)job->object_kind, .name = job->sql, .table = job->table,
+                      .detail = job->column};
+    rc = lace_object_definition(client, conn_id, &obj, &job->definition);
+    break;
+  }
   case LACE_JOB_COUNT: {
     if (job->table && !job->where && job->approximate) {
       size_t n = 0;
@@ -352,6 +378,11 @@ static gboolean job_done_idle(gpointer data) {
                              names);
       g_free(names);
       c->tables_loaded = TRUE;
+      lace_objects_free(c->objects, c->num_objects);
+      c->objects = job->objects;
+      c->num_objects = job->num_objects;
+      job->objects = NULL;
+      job->num_objects = 0;
     }
     g_signal_emit(c, signals[SIG_TABLES_CHANGED], 0);
   }
@@ -502,6 +533,9 @@ static void lace_connection_dispose(GObject *obj) {
     c->thread = NULL;
   }
   g_clear_object(&c->tables);
+  lace_objects_free(c->objects, c->num_objects);
+  c->objects = NULL;
+  c->num_objects = 0;
   G_OBJECT_CLASS(lace_connection_parent_class)->dispose(obj);
 }
 
@@ -638,6 +672,12 @@ GListModel *lace_connection_get_tables(LaceConnection *c) {
 }
 
 gboolean lace_connection_tables_loaded(LaceConnection *c) { return c->tables_loaded; }
+
+const LaceObject *lace_connection_get_objects(LaceConnection *c, size_t *n) {
+  if (n)
+    *n = c->num_objects;
+  return c->objects;
+}
 
 void lace_connection_refresh_tables(LaceConnection *c) {
   lace_connection_submit(c, lace_job_tables(), NULL, NULL, NULL);

@@ -836,6 +836,9 @@ bool form_tab_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev) {
 
 /* ---- mouse ---- */
 
+#define DOUBLE_CLICK_MS 400 /* two presses on the same panel row within this are a double click (as the sidebar's) */
+static struct { const FormTab *form; size_t row; int64_t at_ms; } g_click;
+
 bool form_tab_handle_mouse(NcApp *app, ConnTab *t, const UiEvent *ev) {
   FormTab *f = t ? t->form : NULL;
   if (!f || ev->type != UI_EVENT_MOUSE) return false;
@@ -847,7 +850,23 @@ bool form_tab_handle_mouse(NcApp *app, ConnTab *t, const UiEvent *ev) {
       y < f->list_y + f->list_rows) {
     if (press || wheel) {
       focus_set(f, FF_LIST);
-      list_move(app, t, f, ev);
+      list_move(app, t, f, ev); /* a press highlights the row (a dirty form asks first: the overlay takes the next press) */
+    }
+    if (press && f->highlighted) { /* a double click on a connection opens it here, on a folder toggles it */
+      size_t row = f->panel.list.cursor;
+      int64_t now = app_now_ms();
+      bool dbl = g_click.form == f && g_click.row == row && now - g_click.at_ms <= DOUBLE_CLICK_MS;
+      g_click.form = f;
+      g_click.row = row;
+      g_click.at_ms = dbl ? 0 : now; /* a third press starts over */
+      ListRow *r = dbl ? list_selected(&f->panel.list) : NULL;
+      ConnectionItem *it = r && r->kind == CPK_FOLDER ? row_item(app, f, r) : NULL;
+      if (it) {
+        connmgr_toggle_folder(it);
+        cp_rebuild(app, &f->panel);
+      } else if (r) {
+        return form_tab_do_action(app, t, HOTKEY_CONN_OPEN); /* may free f */
+      }
     }
     return true;
   }
@@ -1031,3 +1050,12 @@ bool form_tab_draw(NcApp *app, ConnTab *t, int y0, int rows, int *cursor_y, int 
 }
 
 bool form_tab_list_focused(const ConnTab *t) { return t && t->form && t->form->focus == FF_LIST; }
+
+void form_tab_set_connstr(FormTab *f, const char *connstr) {
+  conn_fields_clear(&f->fields);
+  conn_fields_set_uri(&f->fields, connstr);
+  conn_fields_mark_clean(&f->fields);
+  set_highlight(f, NULL, NULL);
+  f->highlighted = false;
+  sync_uri(f);
+}

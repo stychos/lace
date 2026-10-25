@@ -20,6 +20,15 @@
 //   expect-tabs N            N inner tabs in the current connection
 //   table NAME               open a table (kept, not a preview) and wait for
 //                            its first page and count
+//   object KIND NAME         open a view, routine or trigger from the sidebar's list
+//   subview NAME             show a sub-view of the table tab (data, structure,
+//                            indexes, foreign_keys, information) and wait for its rows
+//   expect-subview NAME      the table tab shows that sub-view
+//   expect-row TEXT          a row of the sub-view's list contains TEXT
+//   expect-sidebar TEXT      a sidebar row is TEXT ("▾ VIEWS", a name)
+//   sidebar-toggle KIND      fold or unfold a sidebar section (view, routine, trigger)
+//   follow                   follow the focused cell's foreign key
+//   referenced-by            open the first table referencing the focused row
 //   query SQL                a new query tab holding SQL (a literal \n is a newline)
 //   run | run-all | run-tx   run it (cursor / all / in a transaction) and wait
 //   cell R C                 focus a cell of the current grid
@@ -204,6 +213,70 @@ final class ScriptDriver {
         }
         let vc = connection.content.openTable(arg, preview: false)
         _ = await waitUntil("table \(arg) to load") { !vc.isLoading && (vc.model.totalKnown || vc.model.count > 0) }
+        await settle()
+      case "object":
+        guard let connection, words.count >= 2, let kind = ObjectKind(key: words[0]) else {
+          check(false, "object: bad arguments or no connection")
+          continue
+        }
+        let name = words[1...].joined(separator: " ")
+        _ = await waitUntil("the sidebar to list \(name)") { connection.sidebar.rowTexts.contains(name) }
+        check(connection.sidebar.open(kind: kind, name: name), "object \(arg): not in the sidebar")
+        await settle()
+      case "subview":
+        guard let table, let sv = SubView(key: arg) else {
+          check(false, "subview: bad arguments or no table")
+          continue
+        }
+        table.setSubView(sv)
+        if sv != .data {
+          _ = await waitUntil("the \(arg) rows") { !table.listRows.isEmpty && table.listRows != ["Loading…"] }
+        }
+        await settle()
+      case "expect-subview":
+        check(table?.subview.key(for: table?.object.kind ?? .table) == arg, "expect-subview \(arg): got \(table?.subview.key(for: table?.object.kind ?? .table) ?? "<no table>")")
+      case "expect-row":
+        guard let table else {
+          check(false, "expect-row: no table")
+          continue
+        }
+        let ok = await waitUntil("a row with \(arg)") { table.listRows.contains { $0.contains(arg) } }
+        check(ok, "expect-row \(arg): rows \(table.listRows)")
+      case "expect-sidebar":
+        guard let connection else {
+          check(false, "expect-sidebar: no connection")
+          continue
+        }
+        let ok = await waitUntil("sidebar row \(arg)") { connection.sidebar.rowTexts.contains(arg) }
+        check(ok, "expect-sidebar \(arg): rows \(connection.sidebar.rowTexts)")
+      case "sidebar-toggle":
+        guard let connection, let kind = ObjectKind(key: arg) else {
+          check(false, "sidebar-toggle: bad arguments")
+          continue
+        }
+        connection.sidebar.toggle(kind)
+      case "follow":
+        guard let grid else {
+          check(false, "follow: no grid")
+          continue
+        }
+        grid.delegate?.gridFollowForeignKey(grid)
+        try? await Task.sleep(for: .milliseconds(100))
+        await settle()
+      case "referenced-by":
+        guard let table else {
+          check(false, "referenced-by: no table")
+          continue
+        }
+        let deps = try? await table.connection.dependents(of: table.table)
+        guard let first = deps?.entries.first else {
+          check(false, "referenced-by: no table references \(table.table)")
+          continue
+        }
+        switch Follow.filters(for: first, grid: table.grid) {
+        case .failure(let why): check(false, "referenced-by: \(why.text)")
+        case .success(let t): connection?.content.openFiltered(t.table, filters: t.filters)
+        }
         await settle()
       case "query":
         guard let connection else {

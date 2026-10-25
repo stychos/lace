@@ -15,6 +15,7 @@
 #include "ui/panels.h"
 #include "ui/screen.h"
 #include "ui/sidebar.h"
+#include "ui/subviews.h"
 #include "ui/tabstrip.h"
 #include "util/mem.h"
 #include "util/str.h"
@@ -34,6 +35,7 @@
 /* Terminal-query replies (DA1 and friends) come back as input events right
  * after init: ignore everything for this long */
 #define STARTUP_DRAIN_MS 400
+#define FOCUS_HOLD_MS 40
 
 int64_t app_now_ms(void) {
   struct timespec ts;
@@ -340,15 +342,19 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
     else app_close_tab(app, ws->current);
     return true;
   }
-  case HOTKEY_NEW_TAB: { /* the sidebar's table, opened behind the current view */
+  case HOTKEY_NEW_TAB: { /* the sidebar's table (view, routine, trigger), opened behind the current view */
     ConnTab *t = app_current_tab(app);
-    char *name = t ? sidebar_highlighted_table(t) : NULL;
+    LaceObjectKind kind = LACE_OBJ_TABLE;
+    char *table = NULL, *detail = NULL;
+    char *name = t ? sidebar_highlighted_object(t, &kind, &table, &detail) : NULL;
     if (!name) {
       app_set_status(app, false, "Pick a table in the sidebar first");
       return true;
     }
-    app_open_table_background(app, name);
+    app_open_object_background(app, kind, name, table, detail);
     free(name);
+    free(table);
+    free(detail);
     return true;
   }
   case HOTKEY_OPEN_QUERY:
@@ -369,6 +375,12 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
   }
   case HOTKEY_TOGGLE_LOG:
     log_open(app);
+    return true;
+  case HOTKEY_SWITCH_DATABASE:
+    app_switch_database(app);
+    return true;
+  case HOTKEY_NEW_WORKSPACE:
+    app_new_workspace(app, NULL, true);
     return true;
   case HOTKEY_TOGGLE_HISTORY: {
     ConnTab *t = app_current_tab(app);
@@ -399,6 +411,8 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
     if (hotkey_get_category(action) == HOTKEY_CAT_CONNECT) return form_tab_do_action(app, app_current_tab(app), action);
     View *cv = app_current_view(app);
     if (cv && cv->kind == VIEW_QUERY && query_view_do_action(app, cv, action)) return true;
+    if (cv && cv->kind == VIEW_TABLE && subviews_do_action(app, cv, action)) return true;
+    if (cv && cv->kind == VIEW_TABLE && cv->subview != SV_DATA) return false; /* the grid is behind a list */
     return grid_do_action(app, cv, action);
   }
   }
@@ -419,6 +433,12 @@ bool app_action_applies(const NcApp *app, HotkeyAction action) {
   case HOTKEY_OPEN_QUERY: case HOTKEY_SIDEBAR_FILTER:
   case HOTKEY_TOGGLE_SIDEBAR: case HOTKEY_TOGGLE_HISTORY: case HOTKEY_VIEW_SWITCHER:
     return t != NULL && t->conn != NULL;
+  case HOTKEY_SWITCH_DATABASE: /* a server's databases; a SQLite file is one */
+    return t != NULL && t->conn != NULL && nc_connection_driver(t->conn) != LACE_DRIVER_SQLITE;
+  case HOTKEY_FOLLOW_FK: case HOTKEY_REFERENCED_BY: { /* a table's rows: Data, or results that are one table's */
+    const View *v = t ? conntab_current_view(t) : NULL;
+    return v && (v->kind == VIEW_TABLE ? v->subview == SV_DATA && view_has_subview(v, SV_DATA) : v->source_table != NULL);
+  }
   case HOTKEY_EXECUTE_QUERY: case HOTKEY_EXECUTE_ALL: case HOTKEY_EXECUTE_TRANSACTION:
   case HOTKEY_SPLIT_UP: case HOTKEY_SPLIT_DOWN: {
     const View *v = t ? conntab_current_view(t) : NULL;
@@ -440,7 +460,7 @@ bool app_action_applies(const NcApp *app, HotkeyAction action) {
   case HOTKEY_CAT_NAVIGATION:
   case HOTKEY_CAT_FILTERS: {
     const View *v = t ? conntab_current_view(t) : NULL;
-    return v && v->kind == VIEW_TABLE;
+    return v && v->kind == VIEW_TABLE && subview_action_applies(v, action);
   }
   case HOTKEY_CAT_QUERY:
   case HOTKEY_CAT_EDITOR:
@@ -508,10 +528,8 @@ static void handle_mouse(NcApp *app, const UiEvent *ev) {
   }
   if (!(cv && cv->editing)) {
     if (tabstrip_handle_mouse(app, ev)) return;
-    if (ev->mouse.y == 0) {
-      int tab = press ? hit_find(&app->header_spans, ev->mouse.x) : -1;
-      NcWorkspace *ws = app_current_workspace(app);
-      if (tab >= 0 && ws && (size_t)tab != ws->current) app_switch_tab(app, (size_t)tab);
+    if (ev->mouse.y == 0) { /* the header: its database segment opens the switch */
+      if (press && hit_find(&app->header_spans, ev->mouse.x) == 0) app_switch_database(app);
       return;
     }
     if (ev->mouse.y == app->rows - 1) {
@@ -562,8 +580,124 @@ void app_handle_event(NcApp *app, const UiEvent *ev) {
   }
 }
 
+static void flush_held(NcApp *app) {
+  int n = app->num_held;
+  app->num_held = 0;
+  for (int i = 0; i < n; i++) app_handle_event(app, &app->held[i]);
+}
+
+/* Escape sequences notcurses 3.0 does not know arrive as typed text: a focus
+ * report (`CSI I` / `CSI O`, mode 1004, which this app never asks for but a
+ * program before it may have left on) and an SGR mouse report with the
+ * pointer outside the pane (`CSI < 0 ; -6 ; -6 m`, which some emulators send
+ * when a click lands on another pane and notcurses cannot parse) came as a
+ * bare Esc, `[` and the bytes of the sequence, so one click elsewhere closed
+ * overlays, switched tabs (`[`) and closed views (`-`). An Esc is kept back
+ * for FOCUS_HOLD_MS; a `[` after it, then parameter and intermediate bytes
+ * (0x20..0x3f), extend the hold, and a final byte (0x40..0x7e) ends the
+ * sequence, which is dropped (a mouse release report becomes a real release,
+ * so a divider drag still ends). Anything else, or the time, lets the held
+ * keys through in order. */
+static bool plain_char_between(const UiEvent *ev, int lo, int hi) {
+  return ev->type == UI_EVENT_KEY && !ev->key.is_special && ev->key.mods == UI_MOD_NONE &&
+         ev->key.key >= lo && ev->key.key <= hi;
+}
+
+static void hold(NcApp *app, const UiEvent *ev) {
+  app->held[app->num_held++] = *ev;
+  app->held_since_ms = app_now_ms(); /* every byte gets its own FOCUS_HOLD_MS */
+}
+
+/* The held `CSI <text> <final>` is complete */
+static void csi_finish(NcApp *app, int final) {
+  char text[APP_HELD_MAX + 1];
+  int n = 0;
+  for (int i = 2; i < app->num_held; i++) text[n++] = (char)app->held[i].key.key;
+  text[n] = 0;
+  app->num_held = 0;
+  if ((final == 'I' || final == 'O') && n == 0) return; /* a focus report */
+  if (final == 'm' && text[0] == '<') { /* an SGR mouse release: < b ; x ; y, 1-based, clamped into the pane */
+    long b = 0, x = 0, y = 0;
+    if (sscanf(text, "<%ld;%ld;%ld", &b, &x, &y) == 3) {
+      UiEvent ev = {0};
+      ev.type = UI_EVENT_MOUSE;
+      ev.mouse.action = UI_MOUSE_RELEASE;
+      ev.mouse.button = (b & 3) == 1 ? UI_MOUSE_MIDDLE : (b & 3) == 2 ? UI_MOUSE_RIGHT : UI_MOUSE_LEFT;
+      ev.mouse.x = x < 1 ? 0 : x > app->cols ? app->cols - 1 : (int)x - 1;
+      ev.mouse.y = y < 1 ? 0 : y > app->rows ? app->rows - 1 : (int)y - 1;
+      app_handle_event(app, &ev);
+      return;
+    }
+  }
+  app_log(app, false, "dropped a terminal sequence: ESC [ %s %c", text, final);
+}
+
+static void handle_or_hold(NcApp *app, const UiEvent *ev) {
+  if (app->num_held == 0) {
+    if (ev->type == UI_EVENT_KEY && ev->key.is_special && ev->key.key == UI_KEY_ESCAPE && ev->key.mods == UI_MOD_NONE) {
+      hold(app, ev);
+      return;
+    }
+  } else if (app->num_held == 1) {
+    if (plain_char_between(ev, '[', '[')) {
+      hold(app, ev);
+      return;
+    }
+  } else {
+    if (plain_char_between(ev, 0x20, 0x3f) && app->num_held < APP_HELD_MAX) { /* parameters, intermediates */
+      hold(app, ev);
+      return;
+    }
+    if (plain_char_between(ev, 0x40, 0x7e)) { /* the final byte */
+      csi_finish(app, ev->key.key);
+      return;
+    }
+  }
+  flush_held(app);
+  app_handle_event(app, ev);
+}
+
+/* Milliseconds before a held Esc stands for itself; the poll timeout while one is held */
+static int app_input_hold_ms(const NcApp *app) {
+  if (!app->num_held) return -1;
+  int64_t left = FOCUS_HOLD_MS - (app_now_ms() - app->held_since_ms);
+  return left > 0 ? (int)left : 0;
+}
+
 /* Read and translate every pending input event; with dispatch false they are
  * discarded. Returns false when notcurses keeps failing to read. */
+/* LACE_NC_INPUT_TRACE=<file>: every event notcurses delivers, one line
+ * each, appended, so a terminal whose keys arrive strangely can be looked at:
+ *   <ms> id=<id> evtype=<0..3> mods=0x<hex> eff="<text>" -> <translated>
+ * mods are notcurses' (1 Shift, 2 Alt, 4 Ctrl, 8 Super, 16 Hyper, 32 Meta,
+ * 64 Caps, 128 Num); evtype 1 press, 2 repeat, 3 release; the translation
+ * is "key <code> special=<0/1> mods=<ui>", "mouse", "resize" or "dropped". */
+static void trace_input(const struct ncinput *ni, uint32_t id, bool ok, const UiEvent *ev) {
+  static FILE *f;
+  static bool looked;
+  if (!looked) {
+    looked = true;
+    const char *path = getenv("LACE_NC_INPUT_TRACE");
+    if (path && *path) f = fopen(path, "a");
+  }
+  if (!f) return;
+  char eff[NCINPUT_MAX_EFF_TEXT_CODEPOINTS * 4 + 1] = "";
+  size_t n = 0;
+  while (n < NCINPUT_MAX_EFF_TEXT_CODEPOINTS && ni->eff_text[n]) n++;
+  if (n) {
+    int len = notcurses_ucs32_to_utf8(ni->eff_text, n, (unsigned char *)eff, sizeof eff - 1);
+    eff[len > 0 ? len : 0] = 0;
+  }
+  fprintf(f, "%lld id=%u evtype=%d mods=0x%x eff=\"%s\" -> ", (long long)app_now_ms(), (unsigned)id,
+          (int)ni->evtype, ni->modifiers, eff);
+  if (!ok) fputs("dropped\n", f);
+  else if (ev->type == UI_EVENT_KEY)
+    fprintf(f, "key %d special=%d mods=%u\n", ev->key.key, ev->key.is_special, ev->key.mods);
+  else if (ev->type == UI_EVENT_MOUSE) fprintf(f, "mouse x=%d y=%d\n", ev->mouse.x, ev->mouse.y);
+  else fprintf(f, "event %d\n", (int)ev->type);
+  fflush(f);
+}
+
 static bool pump_input(NcApp *app, bool dispatch) {
   struct ncinput ni;
   struct timespec zero = {0, 0};
@@ -578,8 +712,11 @@ static bool pump_input(NcApp *app, bool dispatch) {
     }
     app->input_errors = 0;
     UiEvent ev;
-    if (dispatch && input_translate(&ni, id, &ev)) app_handle_event(app, &ev);
+    bool ok = input_translate(&ni, id, &ev);
+    trace_input(&ni, id, ok, &ev);
+    if (dispatch && ok) handle_or_hold(app, &ev);
   }
+  if (app->num_held && app_input_hold_ms(app) == 0) flush_held(app); /* nothing followed: a real Esc */
   return true;
 }
 
@@ -615,6 +752,8 @@ int app_run(NcApp *app) {
     struct pollfd fds[2] = {{notcurses_inputready_fd(app->nc), POLLIN, 0}, {mainq_fd(app->mainq), POLLIN, 0}};
     int timeout = app_busy(app) || app->status_until_ms || sidebar_animating() ? 100 : -1;
     if (app_now_ms() - start < STARTUP_DRAIN_MS) timeout = 50;
+    int hold = app_input_hold_ms(app);
+    if (hold >= 0 && (timeout < 0 || hold < timeout)) timeout = hold;
     int r = poll(fds, 2, timeout);
     if (r < 0 && errno != EINTR) break;
     bool done = app_now_ms() - start >= STARTUP_DRAIN_MS;

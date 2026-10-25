@@ -28,6 +28,7 @@ typedef struct ConnTab {
   uint64_t sidebar_view_uid; /* the view the sidebar cursor last followed (runtime) */
   bool sidebar_search_visible; /* the search field was called (sidebar_filter); it hides again
                                 * when the sidebar loses the focus with no text (runtime) */
+  unsigned sidebar_collapsed;  /* bit per sidebar section (ui/sidebar.c) folded away (runtime) */
 } ConnTab;
 
 typedef struct NcWorkspace {
@@ -54,7 +55,10 @@ ConnTab *workspace_current_tab(const NcWorkspace *w);
 View *conntab_add_view(ConnTab *t, View *v); /* becomes current */
 void conntab_remove_view(ConnTab *t, size_t i);
 View *conntab_current_view(const ConnTab *t);
-size_t conntab_find_table_view(const ConnTab *t, const char *table); /* SIZE_MAX when none */
+size_t conntab_find_table_view(const ConnTab *t, const char *table); /* a table's or a database view's; SIZE_MAX when none */
+/* The view showing that object: tables and database views share a namespace,
+ * routines and triggers have their own */
+size_t conntab_find_object_view(const ConnTab *t, LaceObjectKind kind, const char *name);
 size_t conntab_find_preview(const ConnTab *t);                        /* the preview view; SIZE_MAX when none */
 View *conntab_replace_view(ConnTab *t, size_t i, View *v); /* frees the view at i, v takes its place and becomes current */
 cJSON *workspace_to_json(const NcWorkspace *w, bool with_cursor);

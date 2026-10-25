@@ -223,8 +223,17 @@ static bool json_pair(const cJSON *arr, size_t *a, size_t *b) {
 static void restore_table(NcApp *app, const cJSON *tj) {
   const cJSON *tn = cJSON_GetObjectItem(tj, "table");
   if (!cJSON_IsString(tn) || !*tn->valuestring) return;
-  View *v = app_open_table(app, tn->valuestring);
+  /* "object": a database view, routine or trigger ("table", the default, for the rest) */
+  LaceObjectKind kind = LACE_OBJ_TABLE;
+  const cJSON *oj = cJSON_GetObjectItem(tj, "object");
+  if (cJSON_IsString(oj) && !view_object_from_key(oj->valuestring, &kind)) kind = LACE_OBJ_TABLE;
+  const cJSON *ot = cJSON_GetObjectItem(tj, "object_table"), *od = cJSON_GetObjectItem(tj, "object_detail");
+  View *v = app_open_object(app, kind, tn->valuestring, cJSON_IsString(ot) ? ot->valuestring : NULL,
+                            cJSON_IsString(od) ? od->valuestring : NULL);
   if (!v) return;
+  const cJSON *sj = cJSON_GetObjectItem(tj, "subview");
+  SubView sv;
+  if (cJSON_IsString(sj) && view_subview_from_key(sj->valuestring, &sv) && view_has_subview(v, sv)) v->subview = sv;
   /* Set before the schema lands: the first page is read with them */
   const cJSON *f;
   cJSON_ArrayForEach(f, cJSON_GetObjectItem(tj, "filters")) {

@@ -45,6 +45,9 @@ struct NcConnection {
   char **tables;
   size_t num_tables;
   bool tables_loaded;
+  char *database; /* the current database, with the table list (NULL: none or unknown) */
+  LaceObject *objects; /* views, routines and triggers, with the table list */
+  size_t num_objects;
   int pending;
   bool closing, closed;
   pthread_t thread;
@@ -119,6 +122,34 @@ static int run_once(NcConnection *c, NcJob *job, int conn_id) {
     break;
   case NC_JOB_TABLES:
     rc = lace_list_tables(client, conn_id, &job->tables, &job->num_tables);
+    if (rc == LACE_OK) { /* the header's database segment comes with the list */
+      free(job->database);
+      job->database = NULL;
+      if (lace_current_database(client, conn_id, &job->database) != LACE_OK) job->database = NULL;
+      /* the sidebar's other sections come with the list; a catalog an older
+       * server cannot answer leaves them empty */
+      lace_objects_free(job->objects, job->num_objects);
+      job->objects = NULL;
+      job->num_objects = 0;
+      if (lace_list_objects(client, conn_id, &job->objects, &job->num_objects) != LACE_OK) {
+        job->objects = NULL;
+        job->num_objects = 0;
+      }
+    }
+    break;
+  case NC_JOB_TABLE_INFO:
+    rc = lace_table_info(client, conn_id, job->table, &job->info);
+    if (rc == LACE_OK && lace_autoincrement_get(client, conn_id, job->table, &job->autoinc) != LACE_OK)
+      job->autoinc = NULL; /* the counter is a detail: the rest still shows */
+    break;
+  case NC_JOB_DEFINITION: {
+    LaceObject obj = {.kind = (LaceObjectKind)job->object_kind, .name = job->sql, .table = job->table,
+                      .detail = job->column};
+    rc = lace_object_definition(client, conn_id, &obj, &job->definition);
+    break;
+  }
+  case NC_JOB_DATABASES:
+    rc = lace_list_databases(client, conn_id, &job->tables, &job->num_tables);
     break;
   case NC_JOB_COUNT:
     if (job->table && !job->where && job->approximate) {
@@ -340,6 +371,14 @@ static void job_done_main(void *data) {
       job->tables = NULL;
       job->num_tables = 0;
       c->tables_loaded = true;
+      free(c->database);
+      c->database = job->database;
+      job->database = NULL;
+      lace_objects_free(c->objects, c->num_objects);
+      c->objects = job->objects;
+      c->num_objects = job->num_objects;
+      job->objects = NULL;
+      job->num_objects = 0;
     }
     emit(c, NC_CONN_EV_TABLES, NULL);
   }
@@ -465,6 +504,8 @@ NcConnection *nc_connection_ref(NcConnection *c) {
 
 static void connection_destroy(NcConnection *c) {
   lace_tables_free(c->tables, c->num_tables);
+  lace_objects_free(c->objects, c->num_objects);
+  free(c->database);
   pthread_mutex_destroy(&c->lock);
   pthread_cond_destroy(&c->cond);
   str_secure_free(c->connstr);
@@ -563,6 +604,19 @@ char **nc_connection_tables(const NcConnection *c, size_t *n) {
 }
 
 bool nc_connection_tables_loaded(const NcConnection *c) { return c->tables_loaded; }
+const char *nc_connection_database(const NcConnection *c) { return c->database; }
+
+LaceObject *nc_connection_objects(const NcConnection *c, size_t *n) {
+  if (n) *n = c->num_objects;
+  return c->objects;
+}
+
+const LaceObject *nc_connection_find_object(const NcConnection *c, LaceObjectKind kind, const char *name) {
+  for (size_t i = 0; name && i < c->num_objects; i++)
+    if (c->objects[i].kind == kind && c->objects[i].name && !strcmp(c->objects[i].name, name))
+      return &c->objects[i];
+  return NULL;
+}
 
 void nc_connection_refresh_tables(NcConnection *c) {
   nc_connection_submit(c, nc_job_tables(), NULL, NULL, NULL);

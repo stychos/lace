@@ -60,7 +60,6 @@ typedef enum {
   HOTKEY_DELETE_ROW,
   HOTKEY_TOGGLE_FILTERS,
   HOTKEY_TOGGLE_SIDEBAR,
-  HOTKEY_SHOW_SCHEMA,
   HOTKEY_REFRESH,
   HOTKEY_CYCLE_SORT,
   HOTKEY_CELL_COPY,
@@ -156,10 +155,20 @@ typedef enum {
   HOTKEY_CONN_TAB_9,
   HOTKEY_VIEW_SWITCHER,
   HOTKEY_TOGGLE_LOG,
+  HOTKEY_SWITCH_DATABASE, /* the header's database segment: another database of the server */
+  HOTKEY_NEW_WORKSPACE,   /* a new workspace with a connection form (a GUI's new window) */
   HOTKEY_COLUMN_NARROWER,
   HOTKEY_COLUMN_WIDER,
   HOTKEY_SPLIT_UP,
   HOTKEY_SPLIT_DOWN,
+  /* The sub-views of a table tab (HOTKEY_CAT_TABLE) and following a foreign key */
+  HOTKEY_SUBVIEW_DATA,
+  HOTKEY_SUBVIEW_STRUCTURE,
+  HOTKEY_SUBVIEW_INDEXES,
+  HOTKEY_SUBVIEW_FOREIGN_KEYS,
+  HOTKEY_SUBVIEW_INFORMATION,
+  HOTKEY_FOLLOW_FK,      /* the referenced table, filtered by the cursor row's key */
+  HOTKEY_REFERENCED_BY,  /* a table whose foreign key points at the cursor row */
   /* The connection tab (notcurses for now): a new form, and the form's buttons
    * (HOTKEY_CAT_CONNECT, chords so they work while a field is typed in) */
   HOTKEY_NEW_CONNECTION,

@@ -38,9 +38,11 @@ OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 # Shared with the TUI (see the header comment)
 SHARED_SRCS = $(TUI_SRC)/config/connections.c $(TUI_SRC)/core/history.c \
-              $(TUI_SRC)/platform/posix/platform_posix.c
+              $(TUI_SRC)/platform/posix/platform_posix.c $(TUI_SRC)/core/catalog_rows.c \
+              $(TUI_SRC)/core/utf8.c
 SHARED_OBJS = $(BUILD_DIR)/shared/connections.o $(BUILD_DIR)/shared/history.o \
-              $(BUILD_DIR)/shared/platform_posix.o
+              $(BUILD_DIR)/shared/platform_posix.o $(BUILD_DIR)/shared/catalog_rows.o \
+              $(BUILD_DIR)/shared/utf8.o
 
 GRESOURCE_XML = $(RES_DIR)/lace.gresource.xml
 GRESOURCE_C = $(BUILD_DIR)/resources.c
@@ -77,6 +79,12 @@ $(BUILD_DIR)/shared/history.o: $(TUI_SRC)/core/history.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 $(BUILD_DIR)/shared/platform_posix.o: $(TUI_SRC)/platform/posix/platform_posix.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+$(BUILD_DIR)/shared/catalog_rows.o: $(TUI_SRC)/core/catalog_rows.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+$(BUILD_DIR)/shared/utf8.o: $(TUI_SRC)/core/utf8.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 

@@ -20,6 +20,7 @@
 typedef enum {
   ASYNC_OP_CONNECT,
   ASYNC_OP_LIST_TABLES,
+  ASYNC_OP_LIST_OBJECTS, /* result: LaceObject*, result_count */
   ASYNC_OP_GET_SCHEMA,
   ASYNC_OP_QUERY_PAGE,
   ASYNC_OP_QUERY_PAGE_WHERE,

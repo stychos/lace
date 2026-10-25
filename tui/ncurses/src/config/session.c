@@ -168,6 +168,10 @@ static void session_tab_free(SessionTab *tab) {
   free(tab->connection_id);
   str_secure_free(tab->connstr);
   free(tab->table_name);
+  free(tab->object);
+  free(tab->object_table);
+  free(tab->object_detail);
+  free(tab->subview);
   free(tab->query_text);
 
   /* Free sort entry column names */
@@ -307,9 +311,15 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
     str_secure_free(bare);
   }
 
-  /* Table name (for TABLE tabs) */
+  /* Table name (for TABLE tabs); what differs from a table on Data */
   if (tab->type == TAB_TYPE_TABLE && tab->table_name) {
     JSON_ADD_STR(json, "table_name", tab->table_name);
+    if (tab->object != LACE_OBJ_TABLE) {
+      JSON_ADD_STR(json, "object", tab_object_key(tab->object));
+      if (tab->object_table) JSON_ADD_STR(json, "object_table", tab->object_table);
+      if (tab->object_detail) JSON_ADD_STR(json, "object_detail", tab->object_detail);
+    }
+    if (tab->subview != SUBVIEW_DATA) JSON_ADD_STR(json, "subview", tab_subview_key(tab, tab->subview));
   }
 
   /* Cursor/scroll state - only save if restore_cursor_position is enabled */
@@ -629,6 +639,10 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
 
   tab->connection_id = json_dup_string_or(json, "connection_id", "");
   tab->table_name = json_dup_string_or(json, "table_name", "");
+  tab->object = json_dup_string(json, "object");
+  tab->object_table = json_dup_string(json, "object_table");
+  tab->object_detail = json_dup_string(json, "object_detail");
+  tab->subview = json_dup_string(json, "subview");
   tab->connstr = json_dup_string(json, "connstr");
 
   /* Cursor/scroll - safely convert to size_t */
@@ -1065,6 +1079,15 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     err_setf(error, "Failed to create tab");
     return false;
   }
+  if (stab->type == TAB_TYPE_TABLE) { /* a database view, routine or trigger, and the sub-view shown */
+    LaceObjectKind kind = LACE_OBJ_TABLE;
+    if (stab->object && tab_object_from_key(stab->object, &kind)) tab->object = kind;
+    tab->object_table = stab->object_table ? str_dup(stab->object_table) : NULL;
+    tab->object_detail = stab->object_detail ? str_dup(stab->object_detail) : NULL;
+    TabSubView sv;
+    if (stab->subview && tab_subview_from_key(stab->subview, &sv) && tab_has_subview(tab, sv)) tab->subview = sv;
+    else if (!tab_has_subview(tab, SUBVIEW_DATA)) tab->subview = SUBVIEW_STRUCTURE;
+  }
 
   /* Check if we should restore cursor positions */
   bool restore_cursor = state->app->config &&
@@ -1101,8 +1124,8 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
     }
   }
 
-  /* Load table data for TABLE tabs */
-  if (stab->type == TAB_TYPE_TABLE && stab->table_name && stab->table_name[0]) {
+  /* Load table data for TABLE tabs (a routine or trigger has none: its definition is read when shown) */
+  if (stab->type == TAB_TYPE_TABLE && stab->table_name && stab->table_name[0] && tab_has_subview(tab, SUBVIEW_DATA)) {
     char *err = NULL;
 
     /* Get schema first */

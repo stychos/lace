@@ -1,10 +1,20 @@
 # Lace - Database Viewer and Manager
 # Top-level Makefile
 
-.PHONY: all laced liblace ncurses notcurses test-notcurses install-notcurses run-notcurses gtk macos test test-gtk test-macos smoke-macos dist-macos test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
+.PHONY: all no-gtk no-macos laced liblace ncurses notcurses test-notcurses install-notcurses run-notcurses gtk macos test test-gtk test-macos smoke-macos dist-macos test-tui test-integration test-windows fuzz stress clean distclean install install-gtk help
 
-# Default target
-all: laced liblace ncurses
+# Default target: every component, the GUI frontends included where their
+# toolkit is present (the GTK libraries through pkg-config; Swift on macOS).
+# A missing toolkit skips that frontend with a note instead of failing.
+HAVE_GTK := $(shell pkg-config --exists gtk4 libadwaita-1 gtksourceview-5 2>/dev/null && echo yes)
+HAVE_SWIFT := $(shell [ "$$(uname -s)" = Darwin ] && command -v swift >/dev/null 2>&1 && echo yes)
+GUI_TARGETS := $(if $(HAVE_GTK),gtk,no-gtk) $(if $(HAVE_SWIFT),macos,no-macos)
+all: laced liblace ncurses notcurses $(GUI_TARGETS)
+
+no-gtk:
+	@echo "lace-gtk skipped: gtk4, libadwaita-1 or gtksourceview-5 not found (pkg-config)"
+no-macos:
+	@echo "Lace.app skipped: not macOS, or no swift toolchain"
 
 # Build the daemon
 laced: liblace
@@ -18,8 +28,7 @@ liblace:
 ncurses: liblace
 	$(MAKE) -C tui/ncurses
 
-# Build the notcurses frontend (tui/notcurses; needs notcurses-core). Not part
-# of `all`.
+# Build the notcurses frontend (tui/notcurses; needs notcurses-core)
 notcurses: liblace laced
 	$(MAKE) -C tui/notcurses
 
@@ -29,7 +38,7 @@ test-notcurses: notcurses
 	python3 tests/notcurses/run.py $(TUI_ARGS)
 
 # Build the GTK4/libadwaita frontend (gui/gtk; needs gtk4, libadwaita-1,
-# gtksourceview-5). Not part of `all`: the TUI has no GTK dependency.
+# gtksourceview-5). Part of `all` when those are installed.
 gtk: liblace laced
 	$(MAKE) -C gui/gtk
 
@@ -38,7 +47,7 @@ test-gtk:
 	$(MAKE) -C gui/gtk test
 
 # Build the macOS frontend (gui/macos: a Swift package; needs the Command
-# Line Tools, no Xcode). Not part of `all`. Output: gui/macos/build/Lace.app
+# Line Tools, no Xcode). Part of `all` on macOS. Output: gui/macos/build/Lace.app
 macos: liblace laced
 	$(MAKE) -C gui/macos
 
@@ -55,11 +64,13 @@ smoke-macos: liblace laced
 dist-macos:
 	$(MAKE) -C gui/macos dist
 
-# Unit tests (tests/): liblace, then the TUI's SQL scanning and builders.
-# `make clean && make SANITIZE=1 test` runs them under ASan/UBSan.
-test: liblace ncurses
+# Unit tests (tests/): liblace, the TUI's SQL scanning and builders, then the
+# notcurses frontend's. `make clean && make SANITIZE=1 test` runs them under
+# ASan/UBSan.
+test: liblace ncurses notcurses
 	$(MAKE) -C liblace test
 	$(MAKE) -C tui/ncurses test
+	$(MAKE) -C tui/notcurses test
 
 # Integration tests against real databases in containers (tests/integration):
 # `make test-integration IT_ARGS="--only postgres -- keyset"`
@@ -110,15 +121,15 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 laced/build/laced $(DESTDIR)$(PREFIX)/bin/
 	install -m 755 tui/ncurses/build/lace $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 tui/notcurses/build/lace-nc $(DESTDIR)$(PREFIX)/bin/
 	$(MAKE) -C liblace install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 
 # Install the GTK frontend too (binary, desktop entry, icon)
 install-gtk: install gtk
 	$(MAKE) -C gui/gtk install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
 
-# Install the notcurses frontend too
-install-notcurses: install notcurses
-	$(MAKE) -C tui/notcurses install PREFIX=$(PREFIX) DESTDIR=$(DESTDIR)
+# The notcurses frontend is part of `install`; kept for scripts that call it
+install-notcurses: install
 
 # Run the notcurses frontend
 run-notcurses: notcurses
@@ -141,13 +152,12 @@ help:
 	@echo "Lace - Database Viewer and Manager"
 	@echo ""
 	@echo "Targets:"
-	@echo "  all       Build everything (default)"
+	@echo "  all       Build the daemon, liblace and both TUIs (default)"
 	@echo "  laced     Build the daemon"
 	@echo "  liblace   Build the client library"
 	@echo "  ncurses   Build the ncurses frontend"
 	@echo "  notcurses Build the notcurses frontend (tui/notcurses/build/lace-nc)"
 	@echo "  test-notcurses  notcurses unit tests and terminal tests (needs tmux)"
-	@echo "  install-notcurses  Install everything plus the notcurses frontend"
 	@echo "  run-notcurses  Build and run the notcurses frontend"
 	@echo "  gtk       Build the GTK4 frontend (gui/gtk/build/lace-gtk)"
 	@echo "  test-gtk  GTK frontend unit tests"
@@ -157,7 +167,7 @@ help:
 	@echo "  dist-macos  Shippable Lace.app and DMG (gui/macos/build/dist)"
 	@echo "  install-gtk  Install everything plus the GTK frontend"
 	@echo "  run-gtk   Build and run the GTK frontend"
-	@echo "  test      Build and run the unit tests"
+	@echo "  test      Build and run the unit tests (liblace, both TUIs)"
 	@echo "  test-tui  TUI tests in a real terminal (needs tmux)"
 	@echo "  test-integration  Integration tests on real databases (podman or docker)"
 	@echo "  test-windows  liblace built for Windows, tested under Wine (podman or docker)"

@@ -72,16 +72,36 @@ typedef struct {
   char *default_val;
   char *foreign_key;   /* "table.column" or NULL */
   int max_length;      /* For VARCHAR etc, -1 if unlimited */
+  char *collation;     /* The column's own collation; NULL for the type's or
+                          table's default (SQLite: read from the CREATE text) */
+  char *comment;       /* MySQL and PostgreSQL column comment; NULL when none */
+  int identity;        /* PostgreSQL identity column: 0 none, 1 ALWAYS, 2 BY DEFAULT */
+  char *generated_expr;/* The expression of a generated column, NULL otherwise */
+  int key_position;    /* 1-based position in the primary key, 0 when not part of it */
 } LaceColumn;
+
+/* What an index entry is: an index, or a constraint the catalog lists with
+ * the indexes (a check or exclusion constraint has no index of its own) */
+typedef enum {
+  LACE_INDEX_PLAIN = 0,
+  LACE_INDEX_UNIQUE,
+  LACE_INDEX_PRIMARY,
+  LACE_INDEX_CHECK,     /* columns empty; check holds the condition */
+  LACE_INDEX_EXCLUSION  /* PostgreSQL EXCLUDE; check holds the definition */
+} LaceIndexKind;
 
 /* Index definition */
 typedef struct {
   char *name;
-  char **columns;
+  char **columns;      /* in index order; an expression column is its text */
   size_t num_columns;
   bool unique;
   bool primary;
   char *type;          /* BTREE, HASH, etc */
+  LaceIndexKind kind;
+  char *where;         /* A partial index's predicate, NULL otherwise */
+  char *check;         /* LACE_INDEX_CHECK: the condition; EXCLUSION: the definition */
+  char *constraint;    /* The constraint this index backs (its name), NULL otherwise */
 } LaceIndex;
 
 /* Foreign key definition */
@@ -94,12 +114,18 @@ typedef struct {
   size_t num_ref_columns;
   char *on_delete;     /* CASCADE, SET NULL, etc */
   char *on_update;
+  bool deferrable;     /* PostgreSQL */
+  bool initially_deferred;
 } LaceForeignKey;
 
 /* A table whose foreign key references another (lace_table_dependents) */
 typedef struct {
   char *table;     /* table reference, as lace_list_tables gives it */
   char *on_delete; /* CASCADE, SET NULL, SET DEFAULT, RESTRICT or NO ACTION */
+  char *name;      /* the constraint's name; NULL on SQLite */
+  char **columns;  /* the referencing table's columns, in key order */
+  char **ref_columns; /* the referenced columns of this table, same order */
+  size_t num_columns;
 } LaceDependent;
 
 /* Complete table schema */
@@ -114,6 +140,46 @@ typedef struct {
   size_t num_foreign_keys;
   int64_t row_count;   /* Approximate row count, -1 if unknown */
 } LaceSchema;
+
+/* ---- Catalog objects besides tables (lace_list_objects) ---- */
+typedef enum { LACE_OBJ_TABLE = 0, LACE_OBJ_VIEW, LACE_OBJ_ROUTINE, LACE_OBJ_TRIGGER } LaceObjectKind;
+
+typedef struct {
+  LaceObjectKind kind;
+  char *name;   /* A view: a table reference. A routine: its name; PostgreSQL
+                   name(argtypes) as regprocedure spells it, schema-qualified
+                   outside the search path. A trigger: the trigger's name. */
+  char *table;  /* A trigger's table (a reference); NULL otherwise */
+  char *detail; /* A routine: "function" or "procedure"; a materialized view:
+                   "materialized"; else NULL */
+} LaceObject;
+
+/* What the Information view shows (lace_table_info); -1 / NULL: unknown */
+typedef struct {
+  int64_t row_estimate;  /* The catalog's estimate, not a count */
+  int64_t data_bytes, index_bytes, total_bytes;
+  bool size_is_file;     /* SQLite without dbstat: total_bytes is the whole file */
+  bool partitioned;
+  char *engine;          /* MySQL */
+  char *charset;         /* MySQL table default; PostgreSQL the database's encoding */
+  char *collation;       /* MySQL table default; PostgreSQL the database's */
+  char *comment;         /* MySQL, PostgreSQL */
+  char *owner;           /* PostgreSQL */
+  char *schema;          /* PostgreSQL schema, MySQL database, SQLite "main" */
+  char *tablespace;      /* PostgreSQL */
+  char *created, *updated;   /* MySQL CREATE_TIME / UPDATE_TIME */
+  char *stats_updated;       /* PostgreSQL: the last analyze or autoanalyze */
+} LaceTableInfo;
+
+/* A table's auto-increment or identity counter (lace_autoincrement_get) */
+typedef struct {
+  char *column;      /* NULL: the table has no such column */
+  char *sequence;    /* PostgreSQL: the sequence behind it; NULL otherwise */
+  bool has_counter;  /* false: SQLite INTEGER PRIMARY KEY without AUTOINCREMENT
+                        (the next rowid is max + 1, nothing to reset) */
+  int64_t next;      /* The value the database assigns next, -1 unknown */
+  int64_t max;       /* The column's current maximum, -1 when the table is empty */
+} LaceAutoInc;
 
 /* ==========================================================================
  * Result Set

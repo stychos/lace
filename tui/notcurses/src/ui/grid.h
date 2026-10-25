@@ -42,9 +42,8 @@ void grid_edit_begin_frame(void);
 bool grid_edit_cursor(int *y, int *x); /* where the terminal cursor goes, after grid_draw */
 void grid_edit_report(NcApp *app, const char *why); /* "No change" is a plain message, the rest errors */
 
-/* ui/dialogs/{filter_editor,sort_picker,goto,structure}.c */
+/* ui/dialogs/{filter_editor,sort_picker,goto}.c */
 void filter_editor_open(NcApp *app, View *v); /* the overlay, used when the filter panel is off */
 void sort_picker_open(NcApp *app, View *v);
 void goto_open(NcApp *app, View *v);
-void structure_open(NcApp *app, View *v);
 #endif

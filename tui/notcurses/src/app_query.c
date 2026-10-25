@@ -104,6 +104,7 @@ static void on_source_schema(NcJob *job, void *data) {
   View *v = qreq_view(rq);
   if (!v || job->error) return; /* the results simply stay read-only */
   view_set_schema(v, nc_job_steal_schema(job));
+  view_measure(v, 0, page_cache_extent(v->cache)); /* room for the key marks in the header */
 }
 
 /* ==========================================================================

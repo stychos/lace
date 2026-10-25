@@ -195,31 +195,25 @@ static bool mouse_click_sidebar(TuiState *state, const MouseClick *m) {
   int clicked_row = sidebar_row - list_start_y;
 
   if (clicked_row >= 0) {
-    size_t filtered_count = tui_count_filtered_tables(state);
-    char **tables = TUI_TABLES(state);
-    size_t num_tables = TUI_NUM_TABLES(state);
-
     size_t target_idx = tui_sidebar_scroll(state) + (size_t)clicked_row;
-    if (target_idx < filtered_count) {
-      /* Find the actual table index */
-      size_t actual_idx = tui_get_filtered_table_index(state, target_idx);
-      if (actual_idx < num_tables && tables) {
-        /* Update sidebar highlight */
-        tui_set_sidebar_highlight(state, target_idx);
-        tui_set_sidebar_focused(state, true);
-
-        if (m->is_double) {
-          /* Double-click: always open in new tab */
-          tab_create(state, actual_idx);
-          tui_set_sidebar_focused(state, false);
-        } else {
-          /* Single click: the same as Enter in the sidebar */
-          sidebar_open_table(state, actual_idx);
-          state->sidebar_last_position = target_idx;
-          tui_set_sidebar_focused(state, false);
-        }
-        return true;
+    SidebarEntry e;
+    if (tui_sidebar_entry_at(state, target_idx, &e)) {
+      /* Update sidebar highlight */
+      tui_set_sidebar_highlight(state, target_idx);
+      tui_set_sidebar_focused(state, true);
+      if (e.kind == SB_HEADER) { /* a click folds and unfolds the section */
+        sidebar_open_entry(state, &e, false);
+      } else if (m->is_double) {
+        /* Double-click: always open in new tab */
+        sidebar_open_entry(state, &e, true);
+        tui_set_sidebar_focused(state, false);
+      } else {
+        /* Single click: the same as Enter in the sidebar */
+        sidebar_open_entry(state, &e, false);
+        state->sidebar_last_position = target_idx;
+        tui_set_sidebar_focused(state, false);
       }
+      return true;
     }
   }
   return true;
@@ -311,7 +305,7 @@ static bool mouse_click_query(TuiState *state, const MouseClick *m,
 
 /* Filters panel. Returns false for a click below the panel (the table) */
 static bool mouse_click_filters(TuiState *state, const MouseClick *m) {
-  int rel_y = m->y - m->main_y;
+  int rel_y = m->y - m->main_y - tui_subview_strip_rows(state); /* the panel sits under the strip */
   int rel_x = m->x - m->sidebar_width;
   int filters_height = tui_get_filters_panel_height(state);
 
@@ -371,10 +365,10 @@ static bool mouse_click_table(TuiState *state, const MouseClick *m) {
     filters_height = tui_get_filters_panel_height(state);
   }
 
-  /* Data rows start after: filters panel + header line + column names +
-   * sort indicator row (if sorting) + separator */
+  /* Data rows start after: the sub-view strip + filters panel + header line
+   * + column names + sort indicator row (if sorting) + separator */
   int data_start_y =
-      filters_height + 3; /* +3 = header line + col names + separator */
+      tui_subview_strip_rows(state) + filters_height + 3; /* +3 = header line + col names + separator */
 
   /* Add extra row if sorting is active (sort indicator row) */
   if (click_tab && click_tab->num_sort_entries > 0) {
@@ -480,6 +474,18 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   if (mouse_x >= sidebar_width && query_click_tab && query_click_ui &&
       query_click_tab->type == TAB_TYPE_QUERY) {
     return mouse_click_query(state, &m, query_click_tab, query_click_ui);
+  }
+
+  /* The sub-view strip, or a sub-view's list (TABLE tabs) */
+  if (mouse_x >= sidebar_width && query_click_tab && query_click_tab->type == TAB_TYPE_TABLE) {
+    if (state->editing)
+      tui_confirm_edit(state);
+    if (tui_subview_click(state, mouse_x - sidebar_width, mouse_y - main_y)) {
+      state->sidebar_filter_active = false;
+      tui_set_sidebar_focused(state, false);
+      tui_set_filters_focused(state, false);
+      return true;
+    }
   }
 
   /* Check if click is in filters panel (TABLE tabs only, when filters visible)

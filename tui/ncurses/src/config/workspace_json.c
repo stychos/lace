@@ -105,6 +105,10 @@ static cJSON *nested_tab(cJSON *t, int order, char **error, bool *failed) {
     cJSON_AddBoolToObject(n, "filters_visible", ui && json_get_bool(ui, "filters_visible", false));
     copy_if(n, "cursor", t, "cursor");
     copy_if(n, "scroll", t, "scroll");
+    copy_if(n, "object", t, "object"); /* a database view, routine or trigger, and its sub-view */
+    copy_if(n, "object_table", t, "object_table");
+    copy_if(n, "object_detail", t, "object_detail");
+    copy_if(n, "subview", t, "subview");
   } else if (str_eq(type, "QUERY")) {
     cJSON_AddStringToObject(n, "type", "query");
     cJSON_AddStringToObject(n, "text", json_get_string(t, "query_text", ""));
@@ -254,6 +258,10 @@ static cJSON *flat_tab(cJSON *n, cJSON *conn, char **error) {
   cJSON_AddStringToObject(t, "table_name", json_get_string(n, "table", ""));
   copy_if(t, "cursor", n, "cursor");
   copy_if(t, "scroll", n, "scroll");
+  copy_if(t, "object", n, "object");
+  copy_if(t, "object_table", n, "object_table");
+  copy_if(t, "object_detail", n, "object_detail");
+  copy_if(t, "subview", n, "subview");
   cJSON *sorts = cJSON_AddArrayToObject(t, "sort");
   cJSON *s;
   cJSON_ArrayForEach(s, json_get_array(n, "sorts")) {

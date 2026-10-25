@@ -138,6 +138,11 @@ TableSchema *db_get_table_schema(DbConnection *conn, const char *table, char **e
 
 /* The tables referencing table and their ON DELETE rules (lace_table_dependents) */
 bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **deps, size_t *n, char **err);
+/* The catalog reads of the sub-views (lace_list_objects, lace_table_info +
+ * lace_autoincrement_get, lace_object_definition); reads, retried once */
+bool db_list_objects(DbConnection *conn, LaceObject **objects, size_t *n, char **err);
+bool db_table_info(DbConnection *conn, const char *table, LaceTableInfo **info, LaceAutoInc **autoinc, char **err);
+bool db_object_definition(DbConnection *conn, const LaceObject *obj, char **sql, char **err);
 
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err);

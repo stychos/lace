@@ -421,6 +421,9 @@ static void lace_column_free(LaceColumn *col) {
   free(col->type_name);
   free(col->default_val);
   free(col->foreign_key);
+  free(col->collation);
+  free(col->comment);
+  free(col->generated_expr);
   memset(col, 0, sizeof(LaceColumn));
 }
 
@@ -429,6 +432,9 @@ static void lace_index_free(LaceIndex *idx) {
 
   free(idx->name);
   free(idx->type);
+  free(idx->where);
+  free(idx->check);
+  free(idx->constraint);
   if (idx->columns) {
     for (size_t i = 0; i < idx->num_columns; i++) {
       free(idx->columns[i]);
@@ -465,8 +471,47 @@ void lace_dependents_free(LaceDependent *deps, size_t count) {
   for (size_t i = 0; i < count; i++) {
     free(deps[i].table);
     free(deps[i].on_delete);
+    free(deps[i].name);
+    for (size_t k = 0; k < deps[i].num_columns; k++) {
+      free(deps[i].columns ? deps[i].columns[k] : NULL);
+      free(deps[i].ref_columns ? deps[i].ref_columns[k] : NULL);
+    }
+    free(deps[i].columns);
+    free(deps[i].ref_columns);
   }
   free(deps);
+}
+
+void lace_objects_free(LaceObject *objects, size_t count) {
+  if (!objects) return;
+  for (size_t i = 0; i < count; i++) {
+    free(objects[i].name);
+    free(objects[i].table);
+    free(objects[i].detail);
+  }
+  free(objects);
+}
+
+void lace_table_info_free(LaceTableInfo *info) {
+  if (!info) return;
+  free(info->engine);
+  free(info->charset);
+  free(info->collation);
+  free(info->comment);
+  free(info->owner);
+  free(info->schema);
+  free(info->tablespace);
+  free(info->created);
+  free(info->updated);
+  free(info->stats_updated);
+  free(info);
+}
+
+void lace_autoinc_free(LaceAutoInc *a) {
+  if (!a) return;
+  free(a->column);
+  free(a->sequence);
+  free(a);
 }
 
 void lace_schema_free(LaceSchema *schema) {

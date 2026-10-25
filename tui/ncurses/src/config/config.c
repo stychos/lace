@@ -59,12 +59,11 @@ static const char *def_edit_inline[] = {"ENTER"};
 static const char *def_edit_modal[] = {"e", "F4"};
 /* Writes without a confirmation take a chord; the one plain key that writes a
  * cell is the cut, whose value the clipboard keeps */
-static const char *def_set_null[] = {"CTRL+N"};
+static const char *def_set_null[] = {"CTRL+SHIFT+N"}; /* Ctrl+N is a new workspace in the notcurses frontend */
 static const char *def_set_empty[] = {"CTRL+D"};
 static const char *def_delete_row[] = {"x", "DELETE"};
-static const char *def_toggle_filters[] = {"f", "/"};
+static const char *def_toggle_filters[] = {"/"};
 static const char *def_toggle_sidebar[] = {"t", "F9"};
-static const char *def_show_schema[] = {"s", "F3"};
 static const char *def_refresh[] = {"r", "F5"};
 static const char *def_cycle_sort[] = {"o"};
 /* Ctrl+C is a key (both TUIs turn ISIG off); CMD+ is Super, the Command key
@@ -159,11 +158,24 @@ static const char *def_conn_tab_8[] = {"ALT+8"};
 static const char *def_conn_tab_9[] = {"ALT+9"};
 static const char *def_view_switcher[] = {"CTRL+E"};
 static const char *def_toggle_log[] = {"CTRL+`", "F8"};
+static const char *def_switch_database[] = {"D"};
 static const char *def_column_narrower[] = {"ALT+LEFT", "<"};
 static const char *def_column_wider[] = {"ALT+RIGHT", ">"};
 static const char *def_split_up[] = {"CTRL+UP"};
 static const char *def_split_down[] = {"CTRL+DOWN"};
-static const char *def_new_connection[] = {"n"};
+/* The sub-views of a table tab (every frontend): k is Move up (the vim key)
+ * and the grid takes it first, so Indexes is y (as in keys) */
+static const char *def_subview_data[] = {"a"};
+static const char *def_subview_structure[] = {"s", "F3"};
+static const char *def_subview_indexes[] = {"y"};
+static const char *def_subview_foreign_keys[] = {"f"};
+static const char *def_subview_information[] = {"n"};
+/* Enter edits a cell; Ctrl+Enter is told from Enter only by a terminal
+ * running the kitty keyboard protocol, Alt+Enter by most */
+static const char *def_follow_fk[] = {"CTRL+ENTER", "ALT+ENTER"};
+static const char *def_referenced_by[] = {"CTRL+SHIFT+ENTER", "ALT+SHIFT+ENTER", "ALT+R"}; /* Shift+Enter is Enter on a legacy terminal: Alt+R serves there */
+static const char *def_new_connection[] = {"CTRL+T", "CMD+T"};
+static const char *def_new_workspace[] = {"CTRL+N", "CMD+N"};
 static const char *def_conn_open[] = {"ENTER"};
 static const char *def_conn_open_background[] = {"CTRL+B"};
 static const char *def_conn_open_new_workspace[] = {"CTRL+N"};
@@ -213,8 +225,6 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                                HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_filters), CONFIG_FE_ALL},
     [HOTKEY_TOGGLE_SIDEBAR] = {"toggle_sidebar", "Toggle sidebar",
                                HOTKEY_CAT_TABLE, DEF_KEYS(def_toggle_sidebar), CONFIG_FE_ALL},
-    [HOTKEY_SHOW_SCHEMA] = {"show_schema", "Show schema", HOTKEY_CAT_TABLE,
-                            DEF_KEYS(def_show_schema), CONFIG_FE_ALL},
     [HOTKEY_REFRESH] = {"refresh", "Refresh", HOTKEY_CAT_TABLE,
                         DEF_KEYS(def_refresh), CONFIG_FE_ALL},
     [HOTKEY_CYCLE_SORT] = {"cycle_sort", "Cycle sort", HOTKEY_CAT_TABLE,
@@ -375,10 +385,19 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_NOTCURSES},
     [HOTKEY_VIEW_SWITCHER] = {"view_switcher", "Switch view", HOTKEY_CAT_GENERAL, DEF_KEYS(def_view_switcher), CONFIG_FE_NOTCURSES},
     [HOTKEY_TOGGLE_LOG] = {"toggle_log", "Toggle log", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_log), CONFIG_FE_NOTCURSES},
+    [HOTKEY_SWITCH_DATABASE] = {"switch_database", "Switch database", HOTKEY_CAT_GENERAL, DEF_KEYS(def_switch_database), CONFIG_FE_NOTCURSES},
+    [HOTKEY_NEW_WORKSPACE] = {"new_workspace", "New workspace", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_workspace), CONFIG_FE_NOTCURSES},
     [HOTKEY_COLUMN_NARROWER] = {"column_narrower", "Narrow column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_narrower), CONFIG_FE_NOTCURSES},
     [HOTKEY_COLUMN_WIDER] = {"column_wider", "Widen column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_wider), CONFIG_FE_NOTCURSES},
     [HOTKEY_SPLIT_UP] = {"split_up", "Editor smaller", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_up), CONFIG_FE_NOTCURSES},
     [HOTKEY_SPLIT_DOWN] = {"split_down", "Editor larger", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_down), CONFIG_FE_NOTCURSES},
+    [HOTKEY_SUBVIEW_DATA] = {"subview_data", "Data", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_data), CONFIG_FE_ALL},
+    [HOTKEY_SUBVIEW_STRUCTURE] = {"subview_structure", "Structure", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_structure), CONFIG_FE_ALL},
+    [HOTKEY_SUBVIEW_INDEXES] = {"subview_indexes", "Indexes", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_indexes), CONFIG_FE_ALL},
+    [HOTKEY_SUBVIEW_FOREIGN_KEYS] = {"subview_foreign_keys", "Foreign keys", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_foreign_keys), CONFIG_FE_ALL},
+    [HOTKEY_SUBVIEW_INFORMATION] = {"subview_information", "Information", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_information), CONFIG_FE_ALL},
+    [HOTKEY_FOLLOW_FK] = {"follow_fk", "Follow foreign key", HOTKEY_CAT_TABLE, DEF_KEYS(def_follow_fk), CONFIG_FE_ALL},
+    [HOTKEY_REFERENCED_BY] = {"referenced_by", "Referenced by\xe2\x80\xa6", HOTKEY_CAT_TABLE, DEF_KEYS(def_referenced_by), CONFIG_FE_ALL},
     [HOTKEY_NEW_CONNECTION] = {"new_connection", "New connection", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_connection), CONFIG_FE_NOTCURSES},
     [HOTKEY_CONN_OPEN] = {"conn_open", "Open here", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open), CONFIG_FE_NOTCURSES},
     [HOTKEY_CONN_OPEN_BACKGROUND] = {"conn_open_background", "Open in background tab", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_background), CONFIG_FE_NOTCURSES},
@@ -533,8 +552,9 @@ static bool parse_key_string(const char *str, int *key_code, UiKeyMod *mods) {
   /* Single character */
   if (strlen(str) == 1) {
     char c = str[0];
-    /* Convert to uppercase for CTRL combinations */
-    if ((*mods & (UI_MOD_CTRL | UI_MOD_SHIFT | UI_MOD_SUPER)) && c >= 'a' && c <= 'z') {
+    /* Convert to uppercase for CTRL, ALT and CMD combinations (a letter with
+     * a modifier has no case: the translators report it upper) */
+    if ((*mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT | UI_MOD_SUPER)) && c >= 'a' && c <= 'z') {
       c = (char)(c - ('a' - 'A'));
     }
     /* Shift alone on a character is its case; with Ctrl, Alt or Cmd it stays

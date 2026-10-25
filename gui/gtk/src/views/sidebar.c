@@ -8,6 +8,7 @@
 
 #include "sidebar.h"
 #include "util.h"
+#include <string.h>
 
 struct _LaceSidebar {
   GtkWidget parent_instance;
@@ -20,30 +21,157 @@ struct _LaceSidebar {
   GtkWidget *list;
   GtkWidget *stack;
   GtkWidget *count_label;
-  GtkStringFilter *filter;
+  GListStore *rows;
   GtkSingleSelection *selection;
   GtkWidget *menu;
-  char *menu_table;
+  LaceSidebarEntry menu_entry; /* the entry the context menu is for */
+  unsigned collapsed;          /* bit per folded section (LaceObjectKind) */
 };
 
-enum { SIG_OPEN_TABLE, SIG_PREVIEW_TABLE, SIG_SHOW_STRUCTURE, SIG_NEW_QUERY, N_SIGNALS };
+/* One row of the list: a section header (folds), or an object */
+#define LACE_TYPE_SIDEBAR_ROW (lace_sidebar_row_get_type())
+G_DECLARE_FINAL_TYPE(LaceSidebarRow, lace_sidebar_row, LACE, SIDEBAR_ROW, GObject)
+struct _LaceSidebarRow {
+  GObject parent_instance;
+  gboolean header;
+  LaceSidebarEntry entry; /* a header: kind only */
+};
+G_DEFINE_TYPE(LaceSidebarRow, lace_sidebar_row, G_TYPE_OBJECT)
+static void lace_sidebar_row_finalize(GObject *obj) {
+  LaceSidebarRow *r = LACE_SIDEBAR_ROW(obj);
+  g_free(r->entry.name);
+  g_free(r->entry.table);
+  g_free(r->entry.detail);
+  G_OBJECT_CLASS(lace_sidebar_row_parent_class)->finalize(obj);
+}
+static void lace_sidebar_row_class_init(LaceSidebarRowClass *klass) {
+  G_OBJECT_CLASS(klass)->finalize = lace_sidebar_row_finalize;
+}
+static void lace_sidebar_row_init(LaceSidebarRow *r) { (void)r; }
+
+enum { SIG_OPEN_OBJECT, SIG_PREVIEW_OBJECT, SIG_SHOW_STRUCTURE, SIG_NEW_QUERY, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 G_DEFINE_TYPE(LaceSidebar, lace_sidebar, GTK_TYPE_WIDGET)
 
-static const char *selected_table(LaceSidebar *s) {
-  GtkStringObject *o = gtk_single_selection_get_selected_item(s->selection);
-  return o ? gtk_string_object_get_string(o) : NULL;
+static const char *const SECTION_TITLE[] = {"TABLES", "VIEWS", "FUNCTIONS", "TRIGGERS"};
+
+static const char *kind_icon(LaceObjectKind k) {
+  switch (k) {
+  case LACE_OBJ_VIEW: return "view-paged-symbolic";
+  case LACE_OBJ_ROUTINE: return "system-run-symbolic";
+  case LACE_OBJ_TRIGGER: return "lace-key-symbolic";
+  default: return "lace-table-symbolic";
+  }
+}
+
+static gboolean name_matches(LaceSidebar *s, const char *name) {
+  const char *q = gtk_editable_get_text(GTK_EDITABLE(s->search));
+  if (!q || !*q)
+    return TRUE;
+  char *n = g_utf8_casefold(name, -1), *qq = g_utf8_casefold(q, -1);
+  gboolean ok = strstr(n, qq) != NULL;
+  g_free(n);
+  g_free(qq);
+  return ok;
+}
+
+static LaceSidebarRow *row_new(gboolean header, LaceObjectKind kind, const char *name, const char *table,
+                               const char *detail) {
+  LaceSidebarRow *r = g_object_new(LACE_TYPE_SIDEBAR_ROW, NULL);
+  r->header = header;
+  r->entry.kind = kind;
+  r->entry.name = g_strdup(name ? name : "");
+  r->entry.table = table ? g_strdup(table) : NULL;
+  r->entry.detail = detail ? g_strdup(detail) : NULL;
+  return r;
+}
+
+/* The rows: the matching tables, then every object section with a match (a
+ * header, then its entries unless folded) */
+static void rebuild(LaceSidebar *s) {
+  g_list_store_remove_all(s->rows);
+  GListModel *tables = lace_connection_get_tables(s->conn);
+  guint nt = g_list_model_get_n_items(tables), shown = 0;
+  for (guint i = 0; i < nt; i++) {
+    GtkStringObject *o = g_list_model_get_item(tables, i);
+    const char *name = gtk_string_object_get_string(o);
+    if (name_matches(s, name)) {
+      LaceSidebarRow *r = row_new(FALSE, LACE_OBJ_TABLE, name, NULL, NULL);
+      g_list_store_append(s->rows, r);
+      g_object_unref(r);
+      shown++;
+    }
+    g_object_unref(o);
+  }
+  size_t no = 0;
+  const LaceObject *objs = lace_connection_get_objects(s->conn, &no);
+  for (int kind = LACE_OBJ_VIEW; kind <= LACE_OBJ_TRIGGER; kind++) {
+    gboolean any = FALSE;
+    for (size_t i = 0; i < no; i++)
+      if ((int)objs[i].kind == kind && objs[i].name && name_matches(s, objs[i].name))
+        any = TRUE;
+    if (!any)
+      continue;
+    LaceSidebarRow *h = row_new(TRUE, (LaceObjectKind)kind, SECTION_TITLE[kind], NULL, NULL);
+    g_list_store_append(s->rows, h);
+    g_object_unref(h);
+    if (s->collapsed & (1u << kind))
+      continue;
+    for (size_t i = 0; i < no; i++) {
+      if ((int)objs[i].kind != kind || !objs[i].name || !name_matches(s, objs[i].name))
+        continue;
+      LaceSidebarRow *r = row_new(FALSE, objs[i].kind, objs[i].name, objs[i].table, objs[i].detail);
+      g_list_store_append(s->rows, r);
+      g_object_unref(r);
+    }
+  }
+  char *t = shown == nt ? g_strdup_printf("%u table%s%s", nt, nt == 1 ? "" : "s", no ? "," : "")
+                        : g_strdup_printf("%u of %u tables", shown, nt);
+  if (no && shown == nt) {
+    char *t2 = g_strdup_printf("%s %zu object%s", t, no, no == 1 ? "" : "s");
+    g_free(t);
+    t = t2;
+  }
+  gtk_label_set_text(GTK_LABEL(s->count_label), t);
+  g_free(t);
+  if (!lace_connection_tables_loaded(s->conn))
+    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "loading");
+  else if (nt == 0 && no == 0)
+    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "empty");
+  else
+    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "list");
+}
+
+static LaceSidebarRow *row_at(LaceSidebar *s, guint pos) {
+  LaceSidebarRow *r = g_list_model_get_item(G_LIST_MODEL(s->rows), pos);
+  if (r)
+    g_object_unref(r); /* the store keeps it */
+  return r;
+}
+
+static LaceSidebarRow *selected_row(LaceSidebar *s) {
+  return gtk_single_selection_get_selected_item(s->selection);
+}
+
+void lace_sidebar_toggle_section(LaceSidebar *s, LaceObjectKind kind) {
+  s->collapsed ^= 1u << kind;
+  rebuild(s);
+}
+
+static void activate_row(LaceSidebar *s, LaceSidebarRow *r, guint sig) {
+  if (!r)
+    return;
+  if (r->header) {
+    lace_sidebar_toggle_section(s, r->entry.kind);
+    return;
+  }
+  g_signal_emit(s, signals[sig], 0, &r->entry);
 }
 
 static void on_activate(GtkListView *lv, guint pos, LaceSidebar *s) {
   (void)lv;
-  GListModel *m = G_LIST_MODEL(s->selection);
-  GtkStringObject *o = g_list_model_get_item(m, pos);
-  if (o) {
-    g_signal_emit(s, signals[SIG_OPEN_TABLE], 0, gtk_string_object_get_string(o));
-    g_object_unref(o);
-  }
+  activate_row(s, row_at(s, pos), SIG_OPEN_OBJECT);
 }
 
 static void item_setup(GtkSignalListItemFactory *f, GtkListItem *li, gpointer data) {
@@ -62,53 +190,70 @@ static void item_setup(GtkSignalListItemFactory *f, GtkListItem *li, gpointer da
 
 static void item_bind(GtkSignalListItemFactory *f, GtkListItem *li, gpointer data) {
   (void)f;
-  (void)data;
+  LaceSidebar *s = data;
   GtkWidget *box = gtk_list_item_get_child(li);
+  GtkWidget *icon = gtk_widget_get_first_child(box);
   GtkWidget *label = gtk_widget_get_last_child(box);
-  GtkStringObject *o = gtk_list_item_get_item(li);
-  gtk_label_set_text(GTK_LABEL(label), gtk_string_object_get_string(o));
-  gtk_widget_set_tooltip_text(box, gtk_string_object_get_string(o));
-}
-
-static void update_count(LaceSidebar *s) {
-  guint shown = g_list_model_get_n_items(G_LIST_MODEL(s->selection));
-  guint all = g_list_model_get_n_items(lace_connection_get_tables(s->conn));
-  char *t = shown == all ? g_strdup_printf("%u table%s", all, all == 1 ? "" : "s")
-                         : g_strdup_printf("%u of %u tables", shown, all);
-  gtk_label_set_text(GTK_LABEL(s->count_label), t);
-  g_free(t);
-  if (!lace_connection_tables_loaded(s->conn))
-    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "loading");
-  else if (all == 0)
-    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "empty");
-  else
-    gtk_stack_set_visible_child_name(GTK_STACK(s->stack), "list");
+  LaceSidebarRow *r = gtk_list_item_get_item(li);
+  gtk_label_set_text(GTK_LABEL(label), r->entry.name);
+  gtk_widget_set_tooltip_text(box, r->entry.name);
+  if (r->header) {
+    gtk_image_set_from_icon_name(GTK_IMAGE(icon), s->collapsed & (1u << r->entry.kind) ? "pan-end-symbolic" : "pan-down-symbolic");
+    gtk_widget_add_css_class(label, "heading");
+    gtk_widget_add_css_class(label, "dim-label");
+  } else {
+    gtk_image_set_from_icon_name(GTK_IMAGE(icon), kind_icon(r->entry.kind));
+    gtk_widget_remove_css_class(label, "heading");
+    gtk_widget_remove_css_class(label, "dim-label");
+  }
 }
 
 static void on_tables_changed(LaceConnection *c, LaceSidebar *s) {
   (void)c;
-  update_count(s);
-}
-
-static void on_items_changed(GListModel *m, guint p, guint r, guint a, LaceSidebar *s) {
-  (void)m; (void)p; (void)r; (void)a;
-  update_count(s);
+  rebuild(s);
 }
 
 static void on_search_changed(GtkSearchEntry *e, LaceSidebar *s) {
-  gtk_string_filter_set_search(s->filter, gtk_editable_get_text(GTK_EDITABLE(e)));
+  (void)e;
+  rebuild(s);
 }
 
 static void on_search_activate(GtkSearchEntry *e, LaceSidebar *s) {
-  /* Enter in the search opens the first match (the filter is debounced:
-   * apply the text now) */
-  gtk_string_filter_set_search(s->filter, gtk_editable_get_text(GTK_EDITABLE(e)));
-  GListModel *m = G_LIST_MODEL(s->selection);
-  if (g_list_model_get_n_items(m) > 0) {
-    GtkStringObject *o = g_list_model_get_item(m, 0);
-    g_signal_emit(s, signals[SIG_OPEN_TABLE], 0, gtk_string_object_get_string(o));
-    g_object_unref(o);
+  /* Enter in the search opens the first match */
+  (void)e;
+  rebuild(s);
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(s->rows));
+  for (guint i = 0; i < n; i++) {
+    LaceSidebarRow *r = row_at(s, i);
+    if (r && !r->header) {
+      g_signal_emit(s, signals[SIG_OPEN_OBJECT], 0, &r->entry);
+      return;
+    }
   }
+}
+
+/* The rows' text, top to bottom (the script driver); caller g_strfreev's */
+char **lace_sidebar_get_texts(LaceSidebar *s) {
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(s->rows));
+  char **out = g_new0(char *, n + 1);
+  for (guint i = 0; i < n; i++) {
+    LaceSidebarRow *r = row_at(s, i);
+    out[i] = r->header ? g_strdup_printf("%s %s", s->collapsed & (1u << r->entry.kind) ? "▸" : "▾", r->entry.name)
+                       : g_strdup(r->entry.name);
+  }
+  return out;
+}
+
+gboolean lace_sidebar_open(LaceSidebar *s, LaceObjectKind kind, const char *name) {
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(s->rows));
+  for (guint i = 0; i < n; i++) {
+    LaceSidebarRow *r = row_at(s, i);
+    if (r && !r->header && r->entry.kind == kind && g_str_equal(r->entry.name, name)) {
+      g_signal_emit(s, signals[SIG_OPEN_OBJECT], 0, &r->entry);
+      return TRUE;
+    }
+  }
+  return FALSE;
 }
 
 static void on_search_stop(GtkSearchEntry *e, LaceSidebar *s) {
@@ -143,41 +288,59 @@ static void on_refresh(GtkButton *b, LaceSidebar *s) {
   lace_connection_refresh_tables(s->conn);
 }
 
-/* The table name of the list row under (x, y), or NULL */
-static const char *table_at(LaceSidebar *s, double x, double y) {
+/* The row under (x, y), or NULL: the row widgets are in store order */
+static LaceSidebarRow *row_under(LaceSidebar *s, double x, double y) {
   GtkWidget *w = gtk_widget_pick(s->list, x, y, GTK_PICK_DEFAULT);
   while (w && w != s->list && !g_str_equal(gtk_widget_get_css_name(w), "row"))
     w = gtk_widget_get_parent(w);
   if (!w || w == s->list)
     return NULL;
-  /* The row widget's child is our box; its last child is the label */
   GtkWidget *box = gtk_widget_get_first_child(w);
   GtkWidget *label = box ? gtk_widget_get_last_child(box) : NULL;
-  return label && GTK_IS_LABEL(label) ? gtk_label_get_text(GTK_LABEL(label)) : NULL;
+  const char *text = label && GTK_IS_LABEL(label) ? gtk_label_get_text(GTK_LABEL(label)) : NULL;
+  if (!text)
+    return NULL;
+  /* the row by its text: a header's title or an entry's name, within its section */
+  guint n = g_list_model_get_n_items(G_LIST_MODEL(s->rows));
+  for (guint i = 0; i < n; i++) {
+    LaceSidebarRow *r = row_at(s, i);
+    if (r && g_str_equal(r->entry.name, text)) {
+      gboolean header_like = GTK_IS_LABEL(label) && gtk_widget_has_css_class(label, "heading");
+      if (r->header == header_like)
+        return r;
+    }
+  }
+  return NULL;
 }
 
-/* A single click previews the table (a double click activates the row,
- * which keeps it) */
+/* A single click previews the entry (a double click activates the row,
+ * which keeps it); a click on a header folds its section */
 static void on_list_released(GtkGestureClick *g, int n, double x, double y, LaceSidebar *s) {
   (void)g;
   if (n != 1)
     return;
-  const char *t = table_at(s, x, y);
-  if (t) {
-    char *copy = g_strdup(t);
-    g_signal_emit(s, signals[SIG_PREVIEW_TABLE], 0, copy);
-    g_free(copy);
-  }
+  LaceSidebarRow *r = row_under(s, x, y);
+  if (r)
+    activate_row(s, r, SIG_PREVIEW_OBJECT);
+}
+
+static void entry_copy(LaceSidebarEntry *dst, const LaceSidebarEntry *src) {
+  g_free(dst->name);
+  g_free(dst->table);
+  g_free(dst->detail);
+  dst->kind = src->kind;
+  dst->name = g_strdup(src->name);
+  dst->table = src->table ? g_strdup(src->table) : NULL;
+  dst->detail = src->detail ? g_strdup(src->detail) : NULL;
 }
 
 /* Context menu */
 static void on_list_pressed(GtkGestureClick *g, int n, double x, double y, LaceSidebar *s) {
   (void)n;
-  const char *t = table_at(s, x, y);
-  if (!t)
+  LaceSidebarRow *r = row_under(s, x, y);
+  if (!r || r->header)
     return;
-  g_free(s->menu_table);
-  s->menu_table = g_strdup(t);
+  entry_copy(&s->menu_entry, &r->entry);
   graphene_point_t p = {(float)x, (float)y}, out;
   if (!gtk_widget_compute_point(s->list, GTK_WIDGET(s), &p, &out))
     out = p;
@@ -187,36 +350,45 @@ static void on_list_pressed(GtkGestureClick *g, int n, double x, double y, LaceS
   gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
 }
 
+/* The entry the menu or the selection names */
+static const LaceSidebarEntry *menu_target(LaceSidebar *s) {
+  if (s->menu_entry.name)
+    return &s->menu_entry;
+  LaceSidebarRow *r = selected_row(s);
+  return r && !r->header ? &r->entry : NULL;
+}
+
 static void act_open(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   LaceSidebar *s = data;
-  const char *t = s->menu_table ? s->menu_table : selected_table(s);
-  if (t)
-    g_signal_emit(s, signals[SIG_OPEN_TABLE], 0, t);
+  const LaceSidebarEntry *e = menu_target(s);
+  if (e)
+    g_signal_emit(s, signals[SIG_OPEN_OBJECT], 0, e);
 }
 
 static void act_structure(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   LaceSidebar *s = data;
-  const char *t = s->menu_table ? s->menu_table : selected_table(s);
-  if (t)
-    g_signal_emit(s, signals[SIG_SHOW_STRUCTURE], 0, t);
+  const LaceSidebarEntry *e = menu_target(s);
+  if (e)
+    g_signal_emit(s, signals[SIG_SHOW_STRUCTURE], 0, e);
 }
 
 static void act_copy(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   LaceSidebar *s = data;
-  const char *t = s->menu_table ? s->menu_table : selected_table(s);
-  if (t)
-    lace_copy_text(GTK_WIDGET(s), t);
+  const LaceSidebarEntry *e = menu_target(s);
+  if (e)
+    lace_copy_text(GTK_WIDGET(s), e->name);
 }
 
 static void act_select_query(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   LaceSidebar *s = data;
-  const char *t = s->menu_table ? s->menu_table : selected_table(s);
-  if (!t)
+  const LaceSidebarEntry *e = menu_target(s);
+  if (!e || (e->kind != LACE_OBJ_TABLE && e->kind != LACE_OBJ_VIEW))
     return;
+  const char *t = e->name;
   char *q = lace_quote_table(lace_connection_get_driver(s->conn), t);
   char *sql = g_strdup_printf("SELECT * FROM %s", q ? q : t);
   g_object_set_data_full(G_OBJECT(s), "query-text", sql, g_free);
@@ -233,13 +405,14 @@ static void lace_sidebar_dispose(GObject *obj) {
     g_signal_handlers_disconnect_by_func(s->conn, on_tables_changed, s);
     g_signal_handlers_disconnect_by_func(s->conn, on_tx_changed, s);
   }
-  if (s->selection)
-    g_signal_handlers_disconnect_by_func(s->selection, on_items_changed, s);
   g_clear_pointer(&s->menu, gtk_widget_unparent);
   g_clear_pointer(&s->box, gtk_widget_unparent);
   g_clear_object(&s->selection);
+  g_clear_object(&s->rows);
   g_clear_object(&s->conn);
-  g_clear_pointer(&s->menu_table, g_free);
+  g_clear_pointer(&s->menu_entry.name, g_free);
+  g_clear_pointer(&s->menu_entry.table, g_free);
+  g_clear_pointer(&s->menu_entry.detail, g_free);
   G_OBJECT_CLASS(lace_sidebar_parent_class)->dispose(obj);
 }
 
@@ -247,12 +420,12 @@ static void lace_sidebar_class_init(LaceSidebarClass *klass) {
   G_OBJECT_CLASS(klass)->dispose = lace_sidebar_dispose;
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass), GTK_TYPE_BIN_LAYOUT);
   gtk_widget_class_set_css_name(GTK_WIDGET_CLASS(klass), "lace-sidebar");
-  signals[SIG_OPEN_TABLE] = g_signal_new("open-table", LACE_TYPE_SIDEBAR,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
-  signals[SIG_PREVIEW_TABLE] = g_signal_new("preview-table", LACE_TYPE_SIDEBAR,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+  signals[SIG_OPEN_OBJECT] = g_signal_new("open-object", LACE_TYPE_SIDEBAR,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
+  signals[SIG_PREVIEW_OBJECT] = g_signal_new("preview-object", LACE_TYPE_SIDEBAR,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
   signals[SIG_SHOW_STRUCTURE] = g_signal_new("show-structure", LACE_TYPE_SIDEBAR,
-      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
   signals[SIG_NEW_QUERY] = g_signal_new("new-query", LACE_TYPE_SIDEBAR,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
@@ -303,19 +476,15 @@ LaceSidebar *lace_sidebar_new(LaceConnection *conn) {
   g_signal_connect(s->search, "stop-search", G_CALLBACK(on_search_stop), s);
   gtk_box_append(GTK_BOX(s->box), s->search);
 
-  /* List over the connection's tables, filtered by the search */
-  GtkExpression *expr = gtk_property_expression_new(GTK_TYPE_STRING_OBJECT, NULL, "string");
-  s->filter = gtk_string_filter_new(expr);
-  gtk_string_filter_set_match_mode(s->filter, GTK_STRING_FILTER_MATCH_MODE_SUBSTRING);
-  gtk_string_filter_set_ignore_case(s->filter, TRUE);
-  GtkFilterListModel *filtered = gtk_filter_list_model_new(
-      g_object_ref(lace_connection_get_tables(conn)), GTK_FILTER(s->filter));
-  s->selection = gtk_single_selection_new(G_LIST_MODEL(filtered));
+  /* The list: the tables, then the sections of views, routines and
+   * triggers (each a header that folds), filtered by the search */
+  s->rows = g_list_store_new(LACE_TYPE_SIDEBAR_ROW);
+  s->selection = gtk_single_selection_new(G_LIST_MODEL(g_object_ref(s->rows)));
   gtk_single_selection_set_autoselect(s->selection, FALSE);
   gtk_single_selection_set_can_unselect(s->selection, TRUE);
   GtkListItemFactory *factory = gtk_signal_list_item_factory_new();
   g_signal_connect(factory, "setup", G_CALLBACK(item_setup), NULL);
-  g_signal_connect(factory, "bind", G_CALLBACK(item_bind), NULL);
+  g_signal_connect(factory, "bind", G_CALLBACK(item_bind), s);
   s->list = gtk_list_view_new(GTK_SELECTION_MODEL(g_object_ref(s->selection)), factory);
   gtk_list_view_set_single_click_activate(GTK_LIST_VIEW(s->list), FALSE);
   gtk_widget_add_css_class(s->list, "navigation-sidebar");
@@ -391,8 +560,7 @@ LaceSidebar *lace_sidebar_new(LaceConnection *conn) {
 
   g_signal_connect(conn, "tables-changed", G_CALLBACK(on_tables_changed), s);
   g_signal_connect(conn, "tx-changed", G_CALLBACK(on_tx_changed), s);
-  g_signal_connect(s->selection, "items-changed", G_CALLBACK(on_items_changed), s);
-  update_count(s);
+  rebuild(s);
   update_tx(s);
   if (!lace_connection_tables_loaded(conn))
     lace_connection_refresh_tables(conn);

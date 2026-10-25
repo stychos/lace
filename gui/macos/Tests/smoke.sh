@@ -58,6 +58,27 @@ script="$script;query SELEC nope;run;expect-status Failed;shot query"
 # kept in history/<id>.json and comes back on the next connect
 script="$script;saved-add demo sqlite://$db;expect-saved 1;connect-saved demo;expect-recent 1;query SELECT 1;run;expect-history 1 SELECT 1"
 script="$script;close-connection;connect-saved demo;expect-history 1 SELECT 1;shot welcome-saved"
+# The sub-views of a table tab, the sidebar's sections, following keys:
+# orders.customer_id references customers; a view and a trigger list under
+# the tables and open with their definitions (made with the sqlite3 CLI: a
+# trigger body holds ';', which the query tab's script splitter stops at)
+sqlite3 "$db" "CREATE TABLE customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE);
+CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE, total REAL CHECK (total >= 0));
+CREATE INDEX orders_customer ON orders(customer_id) WHERE customer_id IS NOT NULL;
+CREATE VIEW big_orders AS SELECT id, total FROM orders WHERE total > 10;
+CREATE TRIGGER trg_orders AFTER INSERT ON orders BEGIN UPDATE customers SET name = name WHERE id = NEW.customer_id; END;
+INSERT INTO customers (name) VALUES ('ann'), ('bob');
+INSERT INTO orders VALUES (1, 1, 5), (2, 1, 20), (3, 2, 30);" || exit 1
+script="$script;table orders;expect-total 3;expect-subview data"
+script="$script;subview structure;expect-subview structure;expect-row customer_id;expect-row → customers.id"
+script="$script;subview indexes;expect-row orders_customer;expect-row WHERE customer_id IS NOT NULL;expect-row total >= 0"
+script="$script;subview foreign_keys;expect-row customers (id);expect-row CASCADE;expect-row No table references this one"
+script="$script;subview information;expect-row Rows;expect-row Total size;expect-row trg_orders"
+script="$script;subview data;cell 0 1;follow;expect-total 1;expect-cell 0 1 ann;cell 0 0;referenced-by;expect-total 2;expect-cell 1 2 20"
+script="$script;expect-sidebar ▾ VIEWS;expect-sidebar big_orders;expect-sidebar ▾ TRIGGERS;expect-sidebar trg_orders"
+script="$script;object view big_orders;expect-total 2;subview structure;expect-row CREATE VIEW big_orders;expect-row Columns"
+script="$script;object trigger trg_orders;expect-subview definition;expect-row CREATE TRIGGER trg_orders;subview information;expect-row On table"
+script="$script;sidebar-toggle view;expect-sidebar ▸ VIEWS;sidebar-toggle view;expect-sidebar ▾ VIEWS;shot subviews"
 # The session: a table tab with a filter and a sort, a query tab, written
 # to macos-session.json by quitting as ⌘Q does (AppKit closes the windows
 # after applicationWillTerminate; those closes must not empty the file)
@@ -75,9 +96,12 @@ if [ $status -eq 0 ]; then
   # Second run: the session comes back (the first, unsaved connection and
   # the saved one with its two tabs, the table's filter and sort), and the
   # saved connection's history with it
-  script2="restore-session;expect-connections 2;expect-tabs 2;expect-history 2 SELECT 2"
+  # (the saved connection's six tabs: orders, customers, big_orders, the trigger
+  # on its Information, people, and the query)
+  script2="restore-session;expect-connections 2;expect-tabs 6;expect-history 2 SELECT 2"
+  script2="$script2;close-tab;expect-tabs 5;object trigger trg_orders;expect-subview information;expect-row On table"
   # Closing the last window keeps its session for the next launch
-  script2="$script2;close-tab;expect-tabs 1;expect-total 3;expect-cell 0 1 dave;shot restored"
+  script2="$script2;table people;expect-total 3;expect-cell 0 1 dave;shot restored"
   script2="$script2;expect-session-windows 1;close-window;expect-session-windows 1;quit"
   run_app "$script2"
   status=$?

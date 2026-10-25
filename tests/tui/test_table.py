@@ -142,9 +142,9 @@ def test_edit_null_empty(home):
         t.type("edited")
         t.keys("Enter")
         t.wait_status("Cell updated")
-        t.keys("Down", "C-n")                  # the writes without a confirmation take a chord
-        t.wait_status("Cell set to NULL")
-        t.keys("Down", "C-d")
+        t.keys("Down", "Enter", "C-n")         # the editor's NULL chord confirms at once (the grid's
+        t.wait(lambda s: "NULL" in s)          # own set_null is Ctrl+Shift+N, which ncurses cannot see)
+        t.keys("Down", "C-d")                  # the grid's set_empty chord
         t.wait_status("Cell set to empty")
         # Opening a cell and confirming it unchanged writes nothing
         t.keys("Down", "Enter")

@@ -106,6 +106,7 @@ struct TuiState {
   bool sidebar_filter_active;
   char sidebar_filter[64];
   size_t sidebar_filter_len;
+  unsigned sidebar_collapsed; /* bit per folded sidebar section (VIEWS 1, FUNCTIONS 2, TRIGGERS 3) */
 
   /* Sidebar name scroll animation */
   size_t sidebar_name_scroll;
@@ -414,6 +415,28 @@ void tui_draw_tabs(TuiState *state);
 
 bool tui_load_tables(TuiState *state, Connection *conn_obj);
 bool tui_load_table_data(TuiState *state, const char *table);
+
+/* subviews.c: the sub-views of a table tab */
+int tui_subview_strip_rows(TuiState *state); /* 1 on a table tab: the strip's row at the top of main_win */
+void tui_draw_subview_strip(TuiState *state);
+void tui_draw_subview(TuiState *state);      /* the current list (not Data) under the strip */
+void tui_set_subview(TuiState *state, TabSubView sv);
+bool tui_handle_subview_input(TuiState *state, const UiEvent *event); /* the switch keys; a list's keys */
+bool tui_subview_click(TuiState *state, int rel_x, int rel_y);       /* the strip, a list row */
+void tui_subview_refresh(TuiState *state); /* drop what the lists read, load the schema again */
+void tui_follow_fk(TuiState *state);       /* the referenced table, filtered by the cursor row's key */
+void tui_referenced_by(TuiState *state);   /* a pick list of the tables referencing this one */
+/* A new tab of an object (as lace_list_objects names it; a table is LACE_OBJ_TABLE) */
+bool tab_create_object(TuiState *state, LaceObjectKind kind, const char *name, const char *table, const char *detail);
+/* The sidebar's entries: tables, then the VIEWS, FUNCTIONS and TRIGGERS
+ * sections (headers fold), filtered by the search text */
+typedef enum { SB_TABLE, SB_OBJECT, SB_HEADER } SidebarEntryKind;
+typedef struct { SidebarEntryKind kind; size_t idx; int section; } SidebarEntry; /* section 1 views, 2 routines, 3 triggers */
+size_t tui_sidebar_entries(TuiState *state, SidebarEntry **out);
+bool tui_sidebar_entry_at(TuiState *state, size_t i, SidebarEntry *out);
+const char *tui_sidebar_entry_name(TuiState *state, const SidebarEntry *e);
+/* Open the entry in the current tab (Enter, a click); keep: a new tab */
+void sidebar_open_entry(TuiState *state, const SidebarEntry *e, bool new_tab);
 bool tui_refresh_table(TuiState *state);
 bool tui_load_schema(TuiState *state, const char *table);
 
@@ -435,7 +458,6 @@ void tui_column_last(TuiState *state);
  * ============================================================================
  */
 
-void tui_show_schema(TuiState *state);
 void tui_show_connect_dialog(TuiState *state);
 void tui_show_history_dialog(TuiState *state);
 void tui_show_config(TuiState *state);

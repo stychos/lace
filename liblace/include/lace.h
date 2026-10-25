@@ -37,6 +37,7 @@
 #include "keyset.h"
 #include "sql_builder.h"
 #include "row_key.h"
+#include "ddl.h"
 
 LACE_BEGIN_DECLS
 
@@ -303,6 +304,25 @@ int lace_list_tables(lace_client_t *client, int conn_id, char ***tables, size_t 
 void lace_tables_free(char **tables, size_t count);
 
 /*
+ * The database the connection is in: PostgreSQL current_database(), MySQL
+ * DATABASE(). *name is NULL (with LACE_OK) when there is none: SQLite, or a
+ * MySQL session without a database.
+ *
+ * @param name     Output: the name (caller frees), or NULL
+ */
+int lace_current_database(lace_client_t *client, int conn_id, char **name);
+
+/*
+ * The databases of the server the connection may use, by name: PostgreSQL
+ * every database that allows connections, is no template and that the user
+ * may CONNECT to; MySQL SHOW DATABASES. SQLite lists none.
+ *
+ * @param names    Output: array of names (caller frees with lace_tables_free), NULL when none
+ * @param count    Output: number of names
+ */
+int lace_list_databases(lace_client_t *client, int conn_id, char ***names, size_t *count);
+
+/*
  * Get table schema.
  *
  * @param client   Client handle
@@ -316,8 +336,9 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table, LaceS
 /*
  * The tables whose foreign keys reference `table`, with what their rows do
  * when a referenced row is deleted (what a DELETE takes with it: CASCADE
- * removes them, SET NULL and SET DEFAULT change them). One entry per
- * constraint, so a table may appear twice.
+ * removes them, SET NULL and SET DEFAULT change them), the constraint's
+ * name and its columns on both sides. One entry per constraint, so a table
+ * may appear twice.
  *
  * @param deps     Output: array (caller frees with lace_dependents_free), NULL when none
  * @param count    Output: number of entries
@@ -326,6 +347,66 @@ int lace_get_schema(lace_client_t *client, int conn_id, const char *table, LaceS
 int lace_table_dependents(lace_client_t *client, int conn_id, const char *table,
                           LaceDependent **deps, size_t *count);
 void lace_dependents_free(LaceDependent *deps, size_t count);
+
+/*
+ * lace_get_schema also fills LaceSchema.indexes (indexes, the primary key,
+ * unique, check and exclusion constraints: LaceIndex.kind) and
+ * LaceSchema.foreign_keys, and the columns' collation, comment, identity,
+ * generated expression and key position. A read an older server cannot
+ * answer (MySQL before 8.0.16 has no CHECK_CONSTRAINTS) leaves its part
+ * empty. SQLite's collations and checks come from the CREATE TABLE text.
+ */
+
+/*
+ * The database's views, routines (functions and procedures) and triggers,
+ * as the sidebar lists them below the tables (tables: lace_list_tables).
+ * PostgreSQL lists every usable non-system schema, names qualified as
+ * lace_list_tables does; MySQL the current database; SQLite has no
+ * routines. Sorted by kind, then name.
+ *
+ * @param objects  Output: array (caller frees with lace_objects_free), NULL when none
+ */
+int lace_list_objects(lace_client_t *client, int conn_id, LaceObject **objects, size_t *count);
+void lace_objects_free(LaceObject *objects, size_t count);
+
+/*
+ * What the Information view shows for a table: the catalog's size and row
+ * estimate, engine, charset, collation, comment, owner, times. Never counts
+ * rows (lace_count does). Fields a driver does not know are -1 or NULL.
+ */
+int lace_table_info(lace_client_t *client, int conn_id, const char *table, LaceTableInfo **info);
+void lace_table_info_free(LaceTableInfo *info);
+
+/*
+ * The CREATE statement of a view, routine or trigger as the server gives it
+ * (pg_get_viewdef wrapped in CREATE OR REPLACE VIEW, pg_get_functiondef,
+ * pg_get_triggerdef; SHOW CREATE ...; sqlite_master.sql). obj is an entry of
+ * lace_list_objects (kind, name and table are read).
+ *
+ * @param sql      Output: the statement (caller frees)
+ */
+int lace_object_definition(lace_client_t *client, int conn_id, const LaceObject *obj, char **sql);
+
+/*
+ * The auto-increment or identity counter of a table: which column, the next
+ * value and the column's current maximum. A table without such a column
+ * gives column NULL (and LACE_OK).
+ */
+int lace_autoincrement_get(lace_client_t *client, int conn_id, const char *table, LaceAutoInc **out);
+void lace_autoinc_free(LaceAutoInc *a);
+
+/*
+ * Pickers for the structure editors: names only, sorted, freed with
+ * lace_tables_free. Collations: SQLite's built-in three; PostgreSQL
+ * pg_collation (usable ones, "default" first); MySQL SHOW COLLATION, the
+ * ones of charset when given (NULL: all). Types: a fixed list of the
+ * driver's common types, plus PostgreSQL's user-defined enums, domains and
+ * composite types. Engines: MySQL SHOW ENGINES (the supported ones, the
+ * default first); empty elsewhere.
+ */
+int lace_list_collations(lace_client_t *client, int conn_id, const char *charset, char ***names, size_t *count);
+int lace_list_types(lace_client_t *client, int conn_id, char ***names, size_t *count);
+int lace_list_engines(lace_client_t *client, int conn_id, char ***names, size_t *count);
 
 /* ==========================================================================
  * Data Queries

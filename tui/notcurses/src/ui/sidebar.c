@@ -15,7 +15,19 @@
 #define MARQUEE_PAUSE_MS 1500 /* a long name rests at each end this long... */
 #define MARQUEE_STEP_MS 200   /* ...and moves one column every this */
 
-typedef struct { bool query; size_t idx; } Item;
+/* The sections, in order: TABLES is always open, the next three fold (a
+ * header row is selectable and Enter or a click toggles it), QUERIES lists
+ * the tab's query views */
+typedef enum { SEC_TABLES, SEC_VIEWS, SEC_ROUTINES, SEC_TRIGGERS, SEC_QUERIES, SEC_COUNT } Section;
+static const char *const SECTION_TITLE[SEC_COUNT] = {"TABLES", "VIEWS", "FUNCTIONS", "TRIGGERS", "QUERIES"};
+static bool folds(Section s) { return s == SEC_VIEWS || s == SEC_ROUTINES || s == SEC_TRIGGERS; }
+
+/* One line of the sidebar: a section header, or an entry of a section (idx:
+ * a table's index in the connection's list, an object's in its object list,
+ * a query view's among the tab's views) */
+typedef struct { bool header; Section sec; size_t idx; } Line;
+/* The selectable lines (headers that fold, every entry) by cursor position */
+typedef struct { Line *lines; size_t num_lines; size_t *items; size_t num_items; } Layout;
 
 static struct { bool set; int y, x; } g_cursor;
 static bool g_animating; /* the last draw scrolled a long name: keep the loop ticking */
@@ -40,19 +52,62 @@ static bool matches(const char *name, const char *needle) {
   return !needle || !*needle || strcasestr(name, needle) != NULL;
 }
 
-/* The shown entries: matching tables, then matching query views */
-static size_t build_items(ConnTab *t, Item **out, size_t *num_tables) {
-  size_t nt = 0;
+static Section section_of(LaceObjectKind k) {
+  return k == LACE_OBJ_VIEW ? SEC_VIEWS : k == LACE_OBJ_ROUTINE ? SEC_ROUTINES : k == LACE_OBJ_TRIGGER ? SEC_TRIGGERS : SEC_TABLES;
+}
+
+static void add_line(Layout *L, Line l, bool selectable) {
+  L->lines = safe_realloc(L->lines, (L->num_lines + 1) * sizeof *L->lines);
+  L->lines[L->num_lines] = l;
+  if (selectable) {
+    L->items = safe_realloc(L->items, (L->num_items + 1) * sizeof *L->items);
+    L->items[L->num_items++] = L->num_lines;
+  }
+  L->num_lines++;
+}
+
+/* The lines: TABLES and its matching tables (loading/none/no match as a
+ * note), each object section that has matching entries (folded: only its
+ * header), QUERIES with the matching query views */
+static void build(ConnTab *t, Layout *L) {
+  memset(L, 0, sizeof *L);
+  size_t nt = 0, no = 0;
   char **tables = t->conn ? nc_connection_tables(t->conn, &nt) : NULL;
-  Item *items = safe_calloc(nt + t->num_views + 1, sizeof *items);
-  size_t n = 0;
+  const LaceObject *objs = t->conn ? nc_connection_objects(t->conn, &no) : NULL;
+  add_line(L, (Line){true, SEC_TABLES, 0}, false);
   for (size_t i = 0; i < nt; i++)
-    if (matches(tables[i], t->sidebar_search)) items[n++] = (Item){false, i};
-  *num_tables = n;
+    if (matches(tables[i], t->sidebar_search)) add_line(L, (Line){false, SEC_TABLES, i}, true);
+  for (Section s = SEC_VIEWS; s <= SEC_TRIGGERS; s++) {
+    bool any = false;
+    for (size_t i = 0; i < no; i++)
+      if (section_of(objs[i].kind) == s && objs[i].name && matches(objs[i].name, t->sidebar_search)) any = true;
+    if (!any) continue;
+    add_line(L, (Line){true, s, 0}, true);
+    if (t->sidebar_collapsed & (1u << s)) continue;
+    for (size_t i = 0; i < no; i++)
+      if (section_of(objs[i].kind) == s && objs[i].name && matches(objs[i].name, t->sidebar_search))
+        add_line(L, (Line){false, s, i}, true);
+  }
+  bool queries = false;
   for (size_t i = 0; i < t->num_views; i++)
-    if (t->views[i]->kind == VIEW_QUERY && matches(view_title(t->views[i]), t->sidebar_search))
-      items[n++] = (Item){true, i};
-  *out = items;
+    if (t->views[i]->kind == VIEW_QUERY && matches(view_title(t->views[i]), t->sidebar_search)) queries = true;
+  if (queries) {
+    add_line(L, (Line){true, SEC_QUERIES, 0}, false);
+    for (size_t i = 0; i < t->num_views; i++)
+      if (t->views[i]->kind == VIEW_QUERY && matches(view_title(t->views[i]), t->sidebar_search))
+        add_line(L, (Line){false, SEC_QUERIES, i}, true);
+  }
+}
+
+static void layout_free(Layout *L) {
+  free(L->lines);
+  free(L->items);
+}
+
+static size_t num_tables_shown(const Layout *L) {
+  size_t n = 0;
+  for (size_t i = 0; i < L->num_lines; i++)
+    if (!L->lines[i].header && L->lines[i].sec == SEC_TABLES) n++;
   return n;
 }
 
@@ -67,8 +122,6 @@ static void store_input(ConnTab *t, TextInput *in) {
   t->sidebar_search_pos = in->cursor;
   text_input_free(in);
 }
-
-static size_t line_of(size_t item, size_t num_tables) { return item < num_tables ? item : item + 1; }
 
 int sidebar_marquee_offset(int overflow, int64_t now_ms) {
   if (overflow <= 0) return 0;
@@ -107,13 +160,31 @@ static const char *skip_cols(const char *s, int cols) {
   return s + pos;
 }
 
-/* The entry of the current view: a query's own row, a table's by name */
-static size_t open_item_of(const ConnTab *t, const Item *items, size_t n, char **tables) {
+/* The name a line shows */
+static const char *line_name(const ConnTab *t, const Line *l) {
+  if (l->header) return SECTION_TITLE[l->sec];
+  if (l->sec == SEC_QUERIES) return l->idx < t->num_views ? view_title(t->views[l->idx]) : "";
+  if (l->sec == SEC_TABLES) {
+    size_t nt = 0;
+    char **tables = nc_connection_tables(t->conn, &nt);
+    return l->idx < nt ? tables[l->idx] : "";
+  }
+  size_t no = 0;
+  const LaceObject *objs = nc_connection_objects(t->conn, &no);
+  return l->idx < no && objs[l->idx].name ? objs[l->idx].name : "";
+}
+
+/* The item (cursor position) of the current view: a query's own row, an
+ * object's by kind and name */
+static size_t open_item_of(const ConnTab *t, const Layout *L) {
   const View *cv = conntab_current_view(t);
-  for (size_t i = 0; cv && i < n; i++) {
-    const Item *it = &items[i];
-    if (it->query ? it->idx == t->current
-                  : cv->kind == VIEW_TABLE && cv->table && !strcmp(tables[it->idx], cv->table))
+  if (!cv) return SIZE_MAX;
+  for (size_t i = 0; i < L->num_items; i++) {
+    const Line *l = &L->lines[L->items[i]];
+    if (l->header) continue;
+    if (l->sec == SEC_QUERIES ? l->idx == t->current
+                              : cv->kind == VIEW_TABLE && cv->table && section_of(cv->object) == l->sec &&
+                                    !strcmp(line_name(t, l), cv->table))
       return i;
   }
   return SIZE_MAX;
@@ -125,15 +196,13 @@ void sidebar_draw(NcApp *app, ConnTab *t, Rect r) {
   struct ncplane *p = app->std;
   int cw = r.cols - 1;
   if (cw < 4 || r.rows < 3) return;
-  Item *items;
-  size_t nt_items = 0;
-  size_t n = build_items(t, &items, &nt_items);
+  Layout L;
+  build(t, &L);
+  size_t n = L.num_items;
   if (t->sidebar_cursor >= n) t->sidebar_cursor = n ? n - 1 : 0;
   bool loaded = t->conn && nc_connection_tables_loaded(t->conn);
-  size_t nt = 0;
-  char **tables = t->conn ? nc_connection_tables(t->conn, &nt) : NULL;
   const View *cv = conntab_current_view(t);
-  size_t open_item = open_item_of(t, items, n, tables);
+  size_t open_item = open_item_of(t, &L);
   /* The cursor follows the current view when it changes (a tab click, the
    * keys, a new view): its entry is highlighted and scrolled into view */
   uint64_t uid = cv ? cv->uid : 0;
@@ -154,38 +223,50 @@ void sidebar_draw(NcApp *app, ConnTab *t, Rect r) {
     text_input_free(&in);
     top = 1;
   }
-  /* TABLES */
+  /* a note under TABLES while there is nothing to list */
+  const char *note = !loaded ? "loading\xe2\x80\xa6"
+                     : !num_tables_shown(&L) ? (t->sidebar_search && *t->sidebar_search ? "no match" : "none")
+                                             : NULL;
+  /* TABLES stays at the top; the lines under it scroll (the note is the first of them) */
   nc_style(p, &app->theme, TC_DIM, TC_BG, NCSTYLE_BOLD);
-  nc_put(p, r.y + top, r.x + 1, cw - 1, "TABLES");
-  if (!loaded) {
-    nc_style(p, &app->theme, TC_DIM, TC_BG, 0);
-    nc_put(p, r.y + top + 1, r.x + 1, cw - 1, "loading\xe2\x80\xa6");
-  } else if (!nt_items) {
-    nc_style(p, &app->theme, TC_DIM, TC_BG, 0);
-    nc_put(p, r.y + top + 1, r.x + 1, cw - 1, t->sidebar_search && *t->sidebar_search ? "no match" : "none");
-  }
-  size_t lines = n + (n > nt_items ? 1 : 0);
+  nc_put(p, r.y + top, r.x + 1, cw - 1, SECTION_TITLE[SEC_TABLES]);
+  size_t lines = L.num_lines + (note ? 1 : 0);
+  size_t body = lines - 1;
   int vis = r.rows - 1 - top;
-  size_t cur_line = n ? line_of(t->sidebar_cursor, nt_items) : 0;
-  if (cur_line < t->sidebar_scroll) t->sidebar_scroll = cur_line;
-  if (vis > 0 && cur_line >= t->sidebar_scroll + (size_t)vis) t->sidebar_scroll = cur_line - (size_t)vis + 1;
-  if (t->sidebar_scroll > 0 && lines <= (size_t)vis) t->sidebar_scroll = 0;
+  size_t cur_line = n ? L.items[t->sidebar_cursor] + (note ? 1 : 0) : 1; /* every item is under the header */
+  size_t cur_body = cur_line ? cur_line - 1 : 0;
+  if (cur_body < t->sidebar_scroll) t->sidebar_scroll = cur_body;
+  if (vis > 0 && cur_body >= t->sidebar_scroll + (size_t)vis) t->sidebar_scroll = cur_body - (size_t)vis + 1;
+  if (t->sidebar_scroll > 0 && body <= (size_t)vis) t->sidebar_scroll = 0;
   int row = 0;
-  for (size_t line = t->sidebar_scroll; line < lines && row < vis; line++, row++) {
+  for (size_t line = 1 + t->sidebar_scroll; line < lines && row < vis; line++, row++) {
     int y = r.y + 1 + top + row;
-    if (n > nt_items && line == nt_items) { /* the QUERIES header */
-      nc_style(p, &app->theme, TC_DIM, TC_BG, NCSTYLE_BOLD);
-      nc_put(p, y, r.x + 1, cw - 1, "QUERIES");
+    if (note && line == 1) { /* right under TABLES */
+      nc_style(p, &app->theme, TC_DIM, TC_BG, 0);
+      nc_put(p, y, r.x + 1, cw - 1, note);
       continue;
     }
-    size_t item = line < nt_items ? line : line - (n > nt_items ? 1 : 0);
-    const Item *it = &items[item];
+    size_t li = note && line > 1 ? line - 1 : line;
+    const Line *l = &L.lines[li];
+    size_t item = SIZE_MAX;
+    for (size_t i = 0; i < n; i++)
+      if (L.items[i] == li) { item = i; break; }
     /* the selection shows while the list is driven (focused, or nothing else to
      * drive); the open view's entry is highlighted as the strip's current tab,
      * also when the selection is on it */
-    bool cur = item == t->sidebar_cursor && (t->sidebar_focused || !cv);
-    bool open = item == open_item;
-    const char *name = it->query ? view_title(t->views[it->idx]) : tables[it->idx];
+    bool cur = item != SIZE_MAX && item == t->sidebar_cursor && (t->sidebar_focused || !cv);
+    bool open = item != SIZE_MAX && item == open_item;
+    if (l->header) {
+      nc_style(p, &app->theme, cur ? TC_CURSOR_FG : TC_DIM, cur ? TC_CURSOR_BG : TC_BG, NCSTYLE_BOLD);
+      nc_put(p, y, r.x, cw, "");
+      char *title = folds(l->sec) ? str_printf("%s %s", t->sidebar_collapsed & (1u << l->sec) ? "\xe2\x96\xb8" : "\xe2\x96\xbe",
+                                               SECTION_TITLE[l->sec])
+                                  : str_dup(SECTION_TITLE[l->sec]);
+      nc_put(p, y, r.x + 1, cw - 1, title);
+      free(title);
+      continue;
+    }
+    const char *name = line_name(t, l);
     if (open) nc_style(p, &app->theme, TC_ACCENT, TC_BG, NCSTYLE_BOLD);
     else nc_style(p, &app->theme, cur ? TC_CURSOR_FG : TC_FG, cur ? TC_CURSOR_BG : TC_BG, 0);
     nc_put(p, y, r.x, cw, "");
@@ -197,62 +278,84 @@ void sidebar_draw(NcApp *app, ConnTab *t, Rect r) {
     }
     nc_put(p, y, r.x + 1, cw - 1, name);
   }
-  free(items);
+  layout_free(&L);
 }
 
-/* Open the entry: a query view is switched to; a table opens for keeps
- * (Enter, a double click) or in the preview tab (a single click) */
+/* Open the entry: a query view is switched to; a section header folds; a
+ * table (view, routine, trigger) opens for keeps (Enter, a double click) or
+ * in the preview tab (a single click) */
 static void activate(NcApp *app, ConnTab *t, size_t item, bool keep) {
-  Item *items;
-  size_t nt = 0;
-  size_t n = build_items(t, &items, &nt);
-  if (item < n) {
-    Item it = items[item];
-    t->sidebar_focused = false;
-    if (it.query) {
-      app_switch_view(app, it.idx);
+  Layout L;
+  build(t, &L);
+  if (item < L.num_items) {
+    Line l = L.lines[L.items[item]];
+    if (l.header) {
+      t->sidebar_collapsed ^= 1u << l.sec;
+    } else if (l.sec == SEC_QUERIES) {
+      t->sidebar_focused = false;
+      app_switch_view(app, l.idx);
+    } else if (l.sec == SEC_TABLES) {
+      t->sidebar_focused = false;
+      char *name = str_dup(line_name(t, &l)); /* a refresh may replace the list */
+      if (keep) app_open_table(app, name);
+      else app_preview_table(app, name);
+      free(name);
     } else {
-      size_t cnt = 0;
-      char **tables = nc_connection_tables(t->conn, &cnt);
-      if (it.idx < cnt) {
-        char *name = str_dup(tables[it.idx]); /* a refresh may replace the list */
-        if (keep) app_open_table(app, name);
-        else app_preview_table(app, name);
+      size_t no = 0;
+      const LaceObject *objs = nc_connection_objects(t->conn, &no);
+      if (l.idx < no) {
+        t->sidebar_focused = false;
+        LaceObjectKind kind = objs[l.idx].kind;
+        char *name = str_dup(objs[l.idx].name), *table = objs[l.idx].table ? str_dup(objs[l.idx].table) : NULL;
+        char *detail = objs[l.idx].detail ? str_dup(objs[l.idx].detail) : NULL;
+        if (keep) app_open_object(app, kind, name, table, detail);
+        else app_preview_object(app, kind, name, table, detail);
         free(name);
+        free(table);
+        free(detail);
       }
     }
   }
-  free(items);
+  layout_free(&L);
 }
 
-char *sidebar_highlighted_table(ConnTab *t) {
+char *sidebar_highlighted_object(ConnTab *t, LaceObjectKind *kind, char **table, char **detail) {
+  if (table) *table = NULL;
+  if (detail) *detail = NULL;
+  if (kind) *kind = LACE_OBJ_TABLE;
   if (!t->conn) return NULL;
-  Item *items;
-  size_t nt = 0;
-  size_t n = build_items(t, &items, &nt);
+  Layout L;
+  build(t, &L);
   char *name = NULL;
-  if (t->sidebar_cursor < n && !items[t->sidebar_cursor].query) {
-    size_t cnt = 0;
-    char **tables = nc_connection_tables(t->conn, &cnt);
-    if (items[t->sidebar_cursor].idx < cnt) name = str_dup(tables[items[t->sidebar_cursor].idx]);
+  if (t->sidebar_cursor < L.num_items) {
+    const Line *l = &L.lines[L.items[t->sidebar_cursor]];
+    if (!l->header && l->sec == SEC_TABLES) {
+      name = str_dup(line_name(t, l));
+    } else if (!l->header && l->sec != SEC_QUERIES) {
+      size_t no = 0;
+      const LaceObject *objs = nc_connection_objects(t->conn, &no);
+      if (l->idx < no) {
+        name = str_dup(objs[l->idx].name);
+        if (kind) *kind = objs[l->idx].kind;
+        if (table && objs[l->idx].table) *table = str_dup(objs[l->idx].table);
+        if (detail && objs[l->idx].detail) *detail = str_dup(objs[l->idx].detail);
+      }
+    }
   }
-  free(items);
+  layout_free(&L);
   return name;
 }
 
 static size_t count_items(ConnTab *t) {
-  Item *items;
-  size_t nt = 0;
-  size_t n = build_items(t, &items, &nt);
-  free(items);
+  Layout L;
+  build(t, &L);
+  size_t n = L.num_items;
+  layout_free(&L);
   return n;
 }
 
 static void move(ConnTab *t, long delta) {
-  Item *items;
-  size_t nt = 0;
-  size_t n = build_items(t, &items, &nt);
-  free(items);
+  size_t n = count_items(t);
   if (!n) return;
   long c = (long)t->sidebar_cursor + delta;
   if (c < 0) c = 0;
@@ -318,7 +421,7 @@ bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev) {
 bool sidebar_handle_mouse(NcApp *app, ConnTab *t, const UiEvent *ev) {
   int sw = sidebar_width(app);
   if (!sw || ev->type != UI_EVENT_MOUSE) return false;
-  Rect c = content_rect(app); /* the sidebar's rows: the search (when shown), TABLES, the entries */
+  Rect c = content_rect(app); /* the sidebar's rows: the search (when shown), the sections */
   int x = ev->mouse.x, y = ev->mouse.y;
   if (x >= sw || y < c.y || y >= c.y + c.rows) return false;
   if (ev->mouse.button == UI_MOUSE_SCROLL_UP) { move(t, -3); return true; }
@@ -329,22 +432,28 @@ bool sidebar_handle_mouse(NcApp *app, ConnTab *t, const UiEvent *ev) {
     sidebar_show_search(t);
     return true;
   }
-  if (y < c.y + 1 + top) return true; /* the TABLES header */
-  Item *items;
-  size_t nt = 0;
-  size_t n = build_items(t, &items, &nt);
-  free(items);
-  size_t line = t->sidebar_scroll + (size_t)(y - c.y - 1 - top);
-  if (n > nt && line == nt) return true; /* the QUERIES header */
-  size_t item = line < nt ? line : line - (n > nt ? 1 : 0);
-  if (item < n) {
+  if (y == c.y + top) return true; /* the TABLES header, pinned */
+  Layout L;
+  build(t, &L);
+  bool loaded = t->conn && nc_connection_tables_loaded(t->conn);
+  bool note = !loaded || !num_tables_shown(&L);
+  size_t line = 1 + t->sidebar_scroll + (size_t)(y - c.y - top - 1);
+  if (note && line == 1) { layout_free(&L); return true; } /* the note under TABLES */
+  size_t li = note && line > 1 ? line - 1 : line;
+  size_t item = SIZE_MAX;
+  for (size_t i = 0; li < L.num_lines && i < L.num_items; i++)
+    if (L.items[i] == li) { item = i; break; }
+  bool header = item != SIZE_MAX && L.lines[li].header;
+  layout_free(&L);
+  if (item != SIZE_MAX) {
     int64_t now = app_now_ms();
     bool dbl = g_click.tab == t && g_click.item == item && now - g_click.at_ms <= DOUBLE_CLICK_MS;
     g_click.at_ms = dbl ? 0 : now; /* a third press starts over */
     g_click.item = item;
     g_click.tab = t;
     t->sidebar_cursor = item;
-    activate(app, t, item, dbl);
+    if (header) activate(app, t, item, true); /* a click folds and unfolds */
+    else activate(app, t, item, dbl);
   }
   return true;
 }

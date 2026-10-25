@@ -38,6 +38,14 @@ static cJSON *tab_json(GtkWidget *view) {
     LaceTableView *tv = LACE_TABLE_VIEW(view);
     cJSON_AddStringToObject(t, "type", "table");
     cJSON_AddStringToObject(t, "table", lace_table_view_get_table(tv));
+    /* what differs from a table on Data, so other frontends read the file as before */
+    if (lace_table_view_get_object_kind(tv) != LACE_OBJ_TABLE) {
+      cJSON_AddStringToObject(t, "object", lace_object_kind_key(lace_table_view_get_object_kind(tv)));
+      JSON_ADD_STR(t, "object_table", lace_table_view_get_object_table(tv));
+      JSON_ADD_STR(t, "object_detail", lace_table_view_get_object_detail(tv));
+    }
+    if (lace_table_view_get_subview(tv) != LACE_SUBVIEW_DATA)
+      cJSON_AddStringToObject(t, "subview", lace_subview_key(lace_table_view_get_subview(tv), lace_table_view_get_object_kind(tv)));
     gsize n;
     const LaceFilter *f = lace_table_view_get_filters(tv, &n);
     cJSON *filters = cJSON_AddArrayToObject(t, "filters");
@@ -173,8 +181,15 @@ static void restore_tabs(LaceConnectionPage *cp, cJSON *conn_json) {
       const char *table = json_get_string(t, "table", NULL);
       if (!table)
         continue;
-      LaceTableView *tv = lace_connection_page_open_table(cp, table);
+      LaceObjectKind kind = LACE_OBJ_TABLE;
+      if (!lace_object_kind_from_key(json_get_string(t, "object", "table"), &kind))
+        kind = LACE_OBJ_TABLE;
+      LaceTableView *tv = lace_connection_page_open_object(cp, kind, table, json_get_string(t, "object_table", NULL),
+                                                           json_get_string(t, "object_detail", NULL), FALSE);
       view = GTK_WIDGET(tv);
+      LaceSubView sv;
+      if (lace_subview_from_key(json_get_string(t, "subview", NULL), &sv) && lace_object_has_subview(kind, sv))
+        lace_table_view_set_subview(tv, sv);
       /* Filters, search, sorts */
       cJSON *filters = json_get_array(t, "filters");
       int nf = json_array_size(filters);

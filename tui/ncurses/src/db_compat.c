@@ -370,6 +370,56 @@ bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **
   return true;
 }
 
+/* One catalog read with the connection's guard, savepoint and retry */
+#define CATALOG_READ(conn, err, call)                                          \
+  do {                                                                         \
+    conn_refresh(conn);                                                        \
+    if (!conn_guard(conn, NULL, err, NULL)) return false;                      \
+    bool sp_ = read_savepoint_begin(conn);                                     \
+    int rc_ = (call);                                                          \
+    if (rc_ != LACE_OK && conn_should_retry(conn, rc_)) rc_ = (call);          \
+    if (rc_ != LACE_OK) {                                                      \
+      if (err) *err = conn_error(conn);                                        \
+      read_savepoint_end(conn, sp_, false);                                    \
+      return false;                                                            \
+    }                                                                          \
+    read_savepoint_end(conn, sp_, true);                                       \
+  } while (0)
+
+bool db_list_objects(DbConnection *conn, LaceObject **objects, size_t *n, char **err) {
+  if (objects) *objects = NULL;
+  if (n) *n = 0;
+  if (!conn || !objects || !n) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  CATALOG_READ(conn, err, lace_list_objects(conn->client, conn->conn_id, objects, n));
+  return true;
+}
+
+bool db_table_info(DbConnection *conn, const char *table, LaceTableInfo **info, LaceAutoInc **autoinc, char **err) {
+  if (info) *info = NULL;
+  if (autoinc) *autoinc = NULL;
+  if (!conn || !table || !info) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  CATALOG_READ(conn, err, lace_table_info(conn->client, conn->conn_id, table, info));
+  if (autoinc && lace_autoincrement_get(conn->client, conn->conn_id, table, autoinc) != LACE_OK)
+    *autoinc = NULL; /* the counter is a detail: the rest still shows */
+  return true;
+}
+
+bool db_object_definition(DbConnection *conn, const LaceObject *obj, char **sql, char **err) {
+  if (sql) *sql = NULL;
+  if (!conn || !obj || !sql) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  CATALOG_READ(conn, err, lace_object_definition(conn->client, conn->conn_id, obj, sql));
+  return true;
+}
+
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
   if (!conn || !sql) {

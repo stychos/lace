@@ -1,0 +1,1 @@
+ALTER TABLE `we"ird``` MODIFY COLUMN `a b` bigint NOT NULL DEFAULT 0 COMMENT 'x; -- y' AFTER `id`

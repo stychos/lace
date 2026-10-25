@@ -32,12 +32,12 @@ def test_sidebar_toggle_search_open(home):
         t.wait(lambda s: s.split("\n")[2].startswith(" TABLES"))
         t.keys("e")                            # a table key does nothing from the sidebar (no editor opens)
         t.keys("Escape")                       # leaves the sidebar
-        t.wait("f filter")
+        t.wait("/ filter")
         t.keys("C-p"); t.type("filter tables"); t.keys("Enter")   # the palette calls the field too
         t.wait("/ search")
         t.wait(lambda s: not s.split("\n")[2].startswith(" TABLES"))
         t.keys("Escape", "Escape")             # hides it, leaves the sidebar
-        t.wait("f filter")
+        t.wait("/ filter")
         t.keys("q"); assert t.quit() == 0
 
 
@@ -110,7 +110,7 @@ def test_hotkeys_editor_adds_removes_and_resets(home):
         t.keys("Escape")                       # cancels the capture only
         t.wait(lambda s: "Press the key" not in s and "Next tab" in s)
         t.keys("Escape")                       # closes the editor
-        t.wait("f filter")
+        t.wait("/ filter")
         t.keys("F12")                          # the new key works at once: Previous tab, with one view
         t.wait_status("Only one tab")
         t.keys("?"); t.wait("Hotkeys")
