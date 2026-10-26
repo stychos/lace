@@ -80,7 +80,7 @@ static const char *def_close_tab[] = {"-", "CTRL+W"};
 static const char *def_new_tab[] = {"+", "=", "INSERT"};
 static const char *def_prev_workspace[] = {"{"};
 static const char *def_next_workspace[] = {"}"};
-static const char *def_toggle_header[] = {"m"};
+static const char *def_toggle_header[] = {"H"}; /* m is the table actions menu (table_menu) */
 static const char *def_toggle_status[] = {"b"};
 static const char *def_connect_dialog[] = {"w", "F2"};
 static const char *def_help[] = {"?", "F1"};
@@ -176,6 +176,17 @@ static const char *def_follow_fk[] = {"CTRL+ENTER", "ALT+ENTER"};
 static const char *def_referenced_by[] = {"CTRL+SHIFT+ENTER", "ALT+SHIFT+ENTER", "ALT+R"}; /* Shift+Enter is Enter on a legacy terminal: Alt+R serves there */
 static const char *def_new_connection[] = {"CTRL+T", "CMD+T"};
 static const char *def_new_workspace[] = {"CTRL+N", "CMD+N"};
+/* The table actions menu and the structure editors (every frontend): in a
+ * sub-view list r renames (F5 refreshes there) and p opens the key editor,
+ * as the spec says */
+static const char *def_table_menu[] = {"m"};
+static const char *def_struct_add[] = {"+", "=", "INSERT"};
+static const char *def_struct_edit[] = {"e"};
+static const char *def_struct_drop[] = {"x", "DELETE"};
+static const char *def_struct_rename[] = {"R"}; /* r refreshes in a list too */
+static const char *def_struct_primary_key[] = {"P"}; /* p opens a query tab anywhere */
+static const char *def_struct_move[] = {"SPACE"};
+static const char *def_struct_check[] = {"c"};
 static const char *def_conn_open[] = {"ENTER"};
 static const char *def_conn_open_background[] = {"CTRL+B"};
 static const char *def_conn_open_new_workspace[] = {"CTRL+N"};
@@ -405,6 +416,14 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_CONN_OPEN_TO_WORKSPACE] = {"conn_open_to_workspace", "Open in workspace\xe2\x80\xa6", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_to_workspace), CONFIG_FE_NOTCURSES},
     [HOTKEY_CONN_SAVE_AS_NEW] = {"conn_save_as_new", "Save as new", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_save_as_new), CONFIG_FE_NOTCURSES},
     [HOTKEY_CONN_CLEAR] = {"conn_clear", "Clear form", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_clear), CONFIG_FE_NOTCURSES},
+    [HOTKEY_TABLE_MENU] = {"table_menu", "Table actions\xe2\x80\xa6", HOTKEY_CAT_TABLE, DEF_KEYS(def_table_menu), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_ADD] = {"struct_add", "Add\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_add), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_EDIT] = {"struct_edit", "Edit\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_edit), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_DROP] = {"struct_drop", "Drop\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_drop), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_RENAME] = {"struct_rename", "Rename\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_rename), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_PRIMARY_KEY] = {"struct_primary_key", "Primary key\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_primary_key), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_MOVE] = {"struct_move", "Move column\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_move), CONFIG_FE_ALL},
+    [HOTKEY_STRUCT_CHECK] = {"struct_check", "Add check constraint\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_check), CONFIG_FE_ALL},
 };
 
 /* Category names for display */
@@ -418,6 +437,7 @@ static const char *category_names[HOTKEY_CAT_COUNT] = {
     [HOTKEY_CAT_CONNECT] = "Connect Dialog",
     [HOTKEY_CAT_EDITOR] = "Modal Editor",
     [HOTKEY_CAT_HISTORY] = "Query History",
+    [HOTKEY_CAT_STRUCTURE] = "Structure Editors",
 };
 
 /* ============================================================================
@@ -1321,6 +1341,57 @@ char *hotkey_get_display(const Config *config, HotkeyAction action) {
   return result ? result : str_dup("");
 }
 
+unsigned hotkey_action_contexts(HotkeyAction a) {
+  const unsigned GRID_RESULTS = HOTKEY_CTX_GRID | HOTKEY_CTX_RESULTS;
+  const unsigned TABS = HOTKEY_CTX_GRID | HOTKEY_CTX_LIST | HOTKEY_CTX_RESULTS | HOTKEY_CTX_UNFOCUSED;
+  switch (a) {
+  /* the table tab's keys that reach past the grid */
+  case HOTKEY_TOGGLE_FILTERS: case HOTKEY_TABLE_MENU:
+  case HOTKEY_SUBVIEW_DATA: case HOTKEY_SUBVIEW_STRUCTURE: case HOTKEY_SUBVIEW_INDEXES:
+  case HOTKEY_SUBVIEW_FOREIGN_KEYS: case HOTKEY_SUBVIEW_INFORMATION:
+    return HOTKEY_CTX_GRID | HOTKEY_CTX_LIST;
+  case HOTKEY_TOGGLE_SIDEBAR: case HOTKEY_REFRESH: return TABS;
+  case HOTKEY_CLEAR_SELECTIONS: return HOTKEY_CTX_GRID;
+  case HOTKEY_ROW_SAVE: return HOTKEY_CTX_ADD_ROW;
+  case HOTKEY_CLEAR_FILTERS: return HOTKEY_CTX_FILTERS | HOTKEY_CTX_GRID;
+  /* general keys with a narrower reach */
+  case HOTKEY_NEW_TAB: return HOTKEY_CTX_SIDEBAR;
+  case HOTKEY_CLOSE_TAB: return TABS | HOTKEY_CTX_SIDEBAR;
+  case HOTKEY_CONNECT_DIALOG: return HOTKEY_CTX_MAIN;
+  case HOTKEY_CONFIG_RESET: case HOTKEY_CONFIG_RESET_ALL: return HOTKEY_CTX_CONFIG;
+  case HOTKEY_NEW_CONNECTION: /* a query view's Ctrl+T runs the transaction, a form's tests */
+    return HOTKEY_CTX_GRID | HOTKEY_CTX_LIST | HOTKEY_CTX_SIDEBAR | HOTKEY_CTX_FILTERS;
+  case HOTKEY_NEW_WORKSPACE: /* a form's Ctrl+N opens its connection in a new workspace */
+    return HOTKEY_CTX_MAIN | HOTKEY_CTX_EDITOR;
+  case HOTKEY_VIEW_SWITCHER: return HOTKEY_CTX_MAIN | HOTKEY_CTX_CONNECT; /* Ctrl+E is End in the editor */
+  /* the query tab */
+  case HOTKEY_OPEN_QUERY: return TABS;
+  case HOTKEY_EXECUTE_QUERY: case HOTKEY_EXECUTE_ALL: case HOTKEY_EXECUTE_TRANSACTION:
+    return HOTKEY_CTX_EDITOR | HOTKEY_CTX_RESULTS | HOTKEY_CTX_UNFOCUSED;
+  case HOTKEY_QUERY_FOCUS_EDITOR: return HOTKEY_CTX_UNFOCUSED;
+  case HOTKEY_QUERY_SWITCH_FOCUS: case HOTKEY_QUERY_UNFOCUS: case HOTKEY_SPLIT_UP: case HOTKEY_SPLIT_DOWN:
+    return HOTKEY_CTX_EDITOR | HOTKEY_CTX_RESULTS;
+  /* the editors */
+  case HOTKEY_CUT_LINE: case HOTKEY_PASTE: return HOTKEY_CTX_EDITOR | HOTKEY_CTX_CELL;
+  case HOTKEY_EDITOR_SAVE: case HOTKEY_EDITOR_NULL: case HOTKEY_EDITOR_EMPTY: case HOTKEY_EDITOR_CANCEL:
+    return HOTKEY_CTX_CELL;
+  default: break;
+  }
+  switch (action_meta[a].category) {
+  case HOTKEY_CAT_NAVIGATION: return GRID_RESULTS | HOTKEY_CTX_LIST | HOTKEY_CTX_SIDEBAR;
+  case HOTKEY_CAT_TABLE: return GRID_RESULTS;
+  case HOTKEY_CAT_GENERAL: return HOTKEY_CTX_MAIN | HOTKEY_CTX_CONNECT | HOTKEY_CTX_EDITOR;
+  case HOTKEY_CAT_FILTERS: return HOTKEY_CTX_FILTERS;
+  case HOTKEY_CAT_SIDEBAR: return HOTKEY_CTX_SIDEBAR;
+  case HOTKEY_CAT_QUERY: return HOTKEY_CTX_EDITOR | HOTKEY_CTX_RESULTS;
+  case HOTKEY_CAT_CONNECT: return HOTKEY_CTX_CONNECT;
+  case HOTKEY_CAT_EDITOR: return HOTKEY_CTX_CELL;
+  case HOTKEY_CAT_HISTORY: return HOTKEY_CTX_HISTORY;
+  case HOTKEY_CAT_STRUCTURE: return HOTKEY_CTX_LIST;
+  default: return 0;
+  }
+}
+
 HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
                                   const char *key) {
   if (!config || !key || action < 0 || action >= HOTKEY_COUNT)
@@ -1335,8 +1406,8 @@ HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
   if (!(action_meta[action].frontends & config->frontend))
     return HOTKEY_COUNT;
 
-  /* Only check for conflicts within the same category */
-  HotkeyCategory category = action_meta[action].category;
+  /* Only actions live in one of the same places conflict */
+  unsigned ctx = hotkey_action_contexts(action);
 
   for (HotkeyAction i = 0; i < HOTKEY_COUNT; i++) {
     if (i == action)
@@ -1346,8 +1417,8 @@ HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
     if (!(action_meta[i].frontends & config->frontend))
       continue;
 
-    /* Skip if different category - same key allowed in different contexts */
-    if (action_meta[i].category != category)
+    /* The same key in another place is no conflict */
+    if (!(hotkey_action_contexts(i) & ctx))
       continue;
 
     const HotkeyBinding *binding = &config->hotkeys[i];
@@ -1364,6 +1435,41 @@ HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
   }
 
   return HOTKEY_COUNT;
+}
+
+size_t config_hotkey_conflicts(const Config *config, HotkeyConflict *out, size_t max) {
+  size_t n = 0;
+  if (!config) return 0;
+  for (int i = 0; i < HOTKEY_COUNT; i++) {
+    if (!(action_meta[i].frontends & config->frontend)) continue;
+    const HotkeyBinding *b = &config->hotkeys[i];
+    for (size_t k = 0; k < b->num_keys; k++) {
+      HotkeyAction other = hotkey_find_conflict(config, (HotkeyAction)i, b->keys[k]);
+      if (other == HOTKEY_COUNT || (int)other < i) continue; /* each pair once: from its lower action */
+      if (n < max) out[n] = (HotkeyConflict){(HotkeyAction)i, other, b->keys[k]};
+      n++;
+    }
+  }
+  return n;
+}
+
+char *config_hotkey_conflicts_text(const Config *config) {
+  HotkeyConflict c[32];
+  size_t n = config_hotkey_conflicts(config, c, 32);
+  if (!n) return NULL;
+  char *out = str_dup("");
+  for (size_t i = 0; i < n && i < 32; i++) {
+    char *next = str_printf("%s%s%s: %s and %s", out, *out ? "; " : "", c[i].key, action_meta[c[i].a].name,
+                            action_meta[c[i].b].name);
+    free(out);
+    out = next;
+  }
+  if (n > 32) {
+    char *next = str_printf("%s; and %zu more", out, n - 32);
+    free(out);
+    out = next;
+  }
+  return out;
 }
 
 bool hotkey_add_key(Config *config, HotkeyAction action, const char *key) {

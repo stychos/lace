@@ -39,6 +39,7 @@ checkSavedConnections(tmp: tmp)
 checkHistory(tmp: tmp)
 checkRecents()
 checkKeyset()
+checkDdl()
 if let laced = findLaced() {
   await checkConnection(laced: laced, tmp: tmp)
 } else {

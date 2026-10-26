@@ -421,6 +421,14 @@ static int run_tui_mode(AppConfig *config) {
     tui_show_connect_dialog(&state);
   }
 
+  /* An older config.json may carry defaults that are now other actions' keys */
+  char *conflicts = config_hotkey_conflicts_text(app.config);
+  if (conflicts) {
+    tui_set_status(&state, "Hotkey conflicts in config.json (%s lists them, R resets all): %s",
+                   "the configuration dialog", conflicts);
+    free(conflicts);
+  }
+
   tui_run(&state);
   tui_cleanup(&state);
   lace_client_destroy(client);

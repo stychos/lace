@@ -30,11 +30,20 @@ public struct Column: Sendable, Hashable {
   public let foreignKey: String?
   /// For VARCHAR and friends; -1 when unlimited or unknown
   public let maxLength: Int32
+  /// The column's own collation; nil for the type's or table's default
+  public let collation: String?
+  /// MySQL and PostgreSQL column comment; nil when none
+  public let comment: String?
+  /// PostgreSQL identity column: 0 none, 1 ALWAYS, 2 BY DEFAULT
+  public let identity: Int32
+  /// 1-based position in the primary key, 0 when not part of it
+  public let keyPosition: Int32
 
   public init(
     name: String, type: ValueType, typeName: String? = nil, nullable: Bool = true,
     primaryKey: Bool = false, autoIncrement: Bool = false, generated: Bool = false,
-    defaultValue: String? = nil, foreignKey: String? = nil, maxLength: Int32 = -1
+    defaultValue: String? = nil, foreignKey: String? = nil, maxLength: Int32 = -1,
+    collation: String? = nil, comment: String? = nil, identity: Int32 = 0, keyPosition: Int32 = 0
   ) {
     self.name = name
     self.type = type
@@ -46,6 +55,10 @@ public struct Column: Sendable, Hashable {
     self.defaultValue = defaultValue
     self.foreignKey = foreignKey
     self.maxLength = maxLength
+    self.collation = collation
+    self.comment = comment
+    self.identity = identity
+    self.keyPosition = keyPosition
   }
 
   init(_ c: LaceColumn) {
@@ -59,6 +72,10 @@ public struct Column: Sendable, Hashable {
     defaultValue = borrowCString(c.default_val)
     foreignKey = borrowCString(c.foreign_key)
     maxLength = c.max_length
+    collation = borrowCString(c.collation)
+    comment = borrowCString(c.comment)
+    identity = c.identity
+    keyPosition = c.key_position
   }
 
   /// Fill a LaceColumn (strings strdup'ed; lace_schema_free frees them)
@@ -73,6 +90,10 @@ public struct Column: Sendable, Hashable {
     c.default_val = defaultValue.map { strdup($0) }
     c.foreign_key = foreignKey.map { strdup($0) }
     c.max_length = maxLength
+    c.collation = collation.map { strdup($0) }
+    c.comment = comment.map { strdup($0) }
+    c.identity = identity
+    c.key_position = keyPosition
   }
 }
 
@@ -122,6 +143,15 @@ public final class Schema: @unchecked Sendable {
 
   public func index(ofColumn name: String) -> Int? {
     columns.firstIndex { $0.name == name }
+  }
+
+  /// The column as liblace read it (Ddl.alterColumn compares against it)
+  func rawColumn(named name: String) -> UnsafePointer<LaceColumn>? {
+    let s = raw.pointee
+    for i in 0..<Int(s.num_columns) where borrowCString(s.columns[i].name) == name {
+      return UnsafePointer(s.columns + i)
+    }
+    return nil
   }
 }
 

@@ -61,7 +61,7 @@ typedef struct NcApp {
   size_t num_conns;
   NcConnection **closing; size_t num_closing; /* disconnecting; freed on NC_CONN_EV_CLOSED */
   char *clipboard;                         /* the app's own copy (edit_ops.c) */
-  HitSpans header_spans;                   /* value 0: the database segment; set by header_draw */
+  HitSpans header_spans;                   /* value 0: the database segment, 1: the view's name; set by header_draw */
   HitSpans status_spans;                   /* value: a HotkeyAction; set by status_draw */
   HitSpans strip_spans, strip_close_spans; /* value: the view index; set by tabstrip_draw */
   HitSpans subview_spans;                  /* value: a SubView; set by subviews_draw */
@@ -212,6 +212,13 @@ void app_detach_connection(NcApp *app, NcConnection *c);
 void app_conn_event(NcConnection *c, NcConnEvent ev, const char *msg, void *data); /* the listener */
 void app_connect_cleanup(NcApp *app); /* app_free: join attempts, free closing connections */
 
+/* ---- the table's actions (app_table_menu.c): rename, truncate, drop, new
+ * table/view/function, edit in a query view; the shared table_menu action,
+ * the palette, a click on the header's view segment ---- */
+void app_table_menu(NcApp *app);
+/* The dependents a drop waited for are in (app_catalog.c): the confirmation */
+void app_table_drop_continue(NcApp *app, View *v);
+
 /* ---- the header's database segment (app_database.c) ---- */
 /* List the server's databases and switch the current tab to the picked one
  * (the shared switch_database action, the palette, a click on the segment) */
@@ -234,6 +241,11 @@ void app_close_tab(NcApp *app, size_t i);
 void header_draw(NcApp *app);
 void status_draw(NcApp *app);
 void content_draw(NcApp *app); /* the form, or the sidebar and the current view's grid or editor */
+/* The lock banner on the content's first row while a statement the user
+ * asked for runs on the tab's connection; true when drawn */
+bool content_banner_draw(NcApp *app, ConnTab *t);
+/* Its text: the statement's first line cut to fit, the elapsed time, "Esc cancels" (allocated) */
+char *content_banner_text(const char *what, int64_t elapsed_ms, int width);
 bool content_handle_key(NcApp *app, const UiEvent *ev);
 bool content_handle_mouse(NcApp *app, const UiEvent *ev);
 #endif

@@ -170,7 +170,20 @@ private func roundTrip(client: LaceClient, url: String) async throws {
   for await e in conn.events {
     events.append(e)
   }
-  Checks.equal(events, [.transactionChanged(.open), .transactionChanged(.none), .closed])
+  // The user's statements (exec, the writes) start and end the lock banner's
+  // state in pairs; the reads (pages, counts, schema) raise none
+  let busy = events.compactMap { e -> Bool? in
+    if case .userBusyChanged(let on) = e { return on }
+    return nil
+  }
+  Checks.expect(!busy.isEmpty && busy.first == true && busy.last == false, "user statements start and end: \(busy)")
+  Checks.equal(busy.filter { $0 }.count, busy.filter { !$0 }.count, "every start has its end")
+  Checks.expect(conn.userStatement == nil, "no user statement after close")
+  let rest = events.filter { e in
+    if case .userBusyChanged = e { return false }
+    return true
+  }
+  Checks.equal(rest, [.transactionChanged(.open), .transactionChanged(.none), .closed])
 }
 
 private func cancelAndRecover(client: LaceClient, url: String) async throws {

@@ -33,6 +33,7 @@ typedef enum {
   LACE_JOB_TABLE_INFO, /* table -> info, autoinc (lace_table_info, lace_autoincrement_get) */
   LACE_JOB_DEPENDENTS, /* table -> deps (lace_table_dependents) */
   LACE_JOB_DEFINITION, /* an object (object_kind, sql = name, table, column = detail) -> definition */
+  LACE_JOB_NAMES,      /* a picker's names (column = "types"/"collations"/"engines", table = a charset) -> tables */
 } LaceJobKind;
 
 typedef struct _LaceJob LaceJob;
@@ -51,6 +52,8 @@ struct _LaceJob {
   gboolean read_only;   /* May be retried after a reconnect */
   gboolean savepoint;   /* Wrap in SAVEPOINT inside a PostgreSQL transaction */
   gboolean record;      /* Record the statement in history on success */
+  gboolean user_statement; /* A statement the user asked for (a query view's, an edit, a structure
+                            * change, a count asked for): the lock banner shows while it runs */
   gboolean was_running; /* Set when the worker picked it up */
 
   /* Inputs */
@@ -114,6 +117,9 @@ LaceJob *lace_job_disconnect(void);
 LaceJob *lace_job_table_info(const char *table);
 LaceJob *lace_job_dependents(const char *table);
 LaceJob *lace_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail);
+/* The names a picker lists (a read): what is "types", "collations" (arg: a
+ * charset, or NULL) or "engines"; they land in tables/num_tables */
+LaceJob *lace_job_names(const char *what, const char *arg);
 
 LaceJob *lace_job_ref(LaceJob *job);
 void lace_job_unref(LaceJob *job);

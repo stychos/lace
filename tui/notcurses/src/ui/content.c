@@ -7,7 +7,11 @@
 #include "ui/query_view.h"
 #include "ui/sidebar.h"
 #include "ui/subviews.h"
+#include "core/utf8.h"
+#include "util/str.h"
 #include <notcurses/notcurses.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* The current connection tab: the sidebar on the left (when shown) and the
  * open view's grid or editor, else a hint. */
@@ -51,11 +55,53 @@ void content_draw(NcApp *app) {
     if (x + 2 < app->cols)
       nc_put(app->std, 2, x, app->cols - x - 1, sw ? "Pick a table from the list" : "Press t to show the sidebar");
   }
+  if (content_banner_draw(app, t)) cursor = false; /* the content is not driven meanwhile */
   if (!app->num_overlays) {
     if (sw && t->sidebar_focused && sidebar_cursor(&cy, &cx)) cursor = true;
     if (cursor) notcurses_cursor_enable(app->nc, cy, cx);
     else notcurses_cursor_disable(app->nc);
   }
+}
+
+char *content_banner_text(const char *what, int64_t elapsed_ms, int width) {
+  char *first = str_dup(what ? what : "");
+  char *nl = strpbrk(first, "\r\n");
+  if (nl) *nl = '\0';
+  for (char *c = first; *c; c++)
+    if (*c == '\t') *c = ' ';
+  char *tail = elapsed_ms >= 60000 ? str_printf("  %lld:%02lld  Esc cancels", (long long)(elapsed_ms / 60000), (long long)(elapsed_ms / 1000 % 60))
+                                   : str_printf("  %lld.%lld s  Esc cancels", (long long)(elapsed_ms / 1000), (long long)(elapsed_ms / 100 % 10));
+  int room = width - nc_text_width(tail) - 2; /* the spinner and a space */
+  if (room < 4) room = 4;
+  if (nc_text_width(first) > room) {
+    size_t keep = utf8_fit(first, strlen(first), room - 1, NULL);
+    first[keep] = '\0';
+    char *cut = str_printf("%s\xe2\x80\xa6", first);
+    free(first);
+    first = cut;
+  }
+  char *out = str_printf("%s%s", first, tail);
+  free(first);
+  free(tail);
+  return out;
+}
+
+bool content_banner_draw(NcApp *app, ConnTab *t) {
+  const char *what = NULL;
+  int64_t since = 0;
+  if (!t || !t->conn || !nc_connection_user_busy(t->conn, &what, &since)) return false;
+  Rect c = content_rect(app);
+  int sw = sidebar_width(app);
+  int x = sw, w = c.cols - sw;
+  if (w < 8 || c.rows < 1) return true;
+  char *text = content_banner_text(what, app_now_ms() - since, w - 2);
+  nc_style(app->std, &app->theme, TC_CURSOR_FG, TC_CURSOR_BG, NCSTYLE_BOLD);
+  nc_put(app->std, c.y, x, w, "");
+  char spin[2] = {"|/-\\"[app->spinner % 4], 0};
+  nc_put(app->std, c.y, x + 1, 1, spin);
+  nc_put(app->std, c.y, x + 3, w - 3, text);
+  free(text);
+  return true;
 }
 
 bool content_handle_key(NcApp *app, const UiEvent *ev) {

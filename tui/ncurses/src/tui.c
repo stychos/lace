@@ -10,6 +10,7 @@
 #include "core/actions.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
+#include "ddl_edit.h"
 #include "views/config_view.h"
 #include <ctype.h>
 #include <locale.h>
@@ -395,6 +396,7 @@ static bool handle_help(TuiState *state, Action *action);
 static bool handle_undo(TuiState *state, Action *action);
 static bool handle_follow_fk(TuiState *state, Action *action);
 static bool handle_referenced_by(TuiState *state, Action *action);
+static bool handle_table_menu(TuiState *state, Action *action);
 
 static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     /* Application */
@@ -410,6 +412,7 @@ static const StatefulHotkeyEntry stateful_hotkey_table[] = {
     {HOTKEY_UNDO, FOCUS_TABLE_ONLY, handle_undo},
     {HOTKEY_FOLLOW_FK, FOCUS_TABLE_ONLY, handle_follow_fk},
     {HOTKEY_REFERENCED_BY, FOCUS_TABLE_ONLY, handle_referenced_by},
+    {HOTKEY_TABLE_MENU, FOCUS_TABLE_ONLY, handle_table_menu},
     {HOTKEY_CYCLE_SORT, FOCUS_ANY, handle_cycle_sort},
     /* Help */
     {HOTKEY_HELP, FOCUS_ANY, handle_help},
@@ -631,6 +634,15 @@ static bool handle_referenced_by(TuiState *state, Action *action) {
   return true;
 }
 
+static bool handle_table_menu(TuiState *state, Action *action) {
+  (void)action;
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_TABLE)
+    return false;
+  tui_table_menu(state);
+  return true;
+}
+
 static bool handle_cycle_sort(TuiState *state, Action *action) {
   Tab *tab = TUI_TAB(state);
   if (tab && tab->type == TAB_TYPE_TABLE && tab->schema && tab->data) {
@@ -839,6 +851,18 @@ void tui_run(TuiState *state) {
     if (tui_handle_subview_input(state, &event)) {
       tui_refresh(state);
       continue;
+    }
+
+    /* The table's actions (table_menu) on a table tab, before the general
+     * keys: its default m is toggle_header's too, which keeps it elsewhere */
+    {
+      Tab *mt = TUI_TAB(state);
+      if (mt && mt->type == TAB_TYPE_TABLE && !tui_sidebar_focused(state) && !tui_filters_focused(state) &&
+          hotkey_matches(state->app->config, &event, HOTKEY_TABLE_MENU)) {
+        tui_table_menu(state);
+        tui_refresh(state);
+        continue;
+      }
     }
 
     /* Handle filters panel input if visible */

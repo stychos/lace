@@ -13,7 +13,15 @@
  *   sidebar-toggle KIND fold or unfold a sidebar section (view, routine, trigger)
  *   follow              follow the focused cell's foreign key
  *   referenced-by       open the first table referencing the focused row
- *   dump                log the sidebar's rows and the sub-view's rows
+ *   dump                log the sidebar's rows and the sub-view's rows (and whether the view is locked)
+ *   ddl ACTION          a structure or table action of the current table view: struct-add, struct-edit,
+ *                       struct-drop, struct-rename, struct-key, struct-move, struct-check, rename-object,
+ *                       truncate, drop-object, new-table, new-view, new-function, edit-definition
+ *   list-row N          select the N-th row of the current sub-view list
+ *   field KEY VALUE     set a field of the open structure editor (ddl_editors.h names the keys)
+ *   save                press the open editor's Save
+ *   answer go|cancel [TEXT]   answer the open confirmation or prompt (TEXT fills a prompt first)
+ *   cancel              cancel the statement running on the current connection
  *   query SQL           open a SQL editor with the text
  *   run | run-all       run in the current editor
  *   action NAME         activate a window action (win.filter) or app action
@@ -38,7 +46,9 @@
 #include "views/filter_bar.h"
 #include "views/query_view.h"
 #include "views/sidebar.h"
+#include "views/ddl_editors.h"
 #include "views/table_view.h"
+#include "util.h"
 #include "window.h"
 #include <stdlib.h>
 #include <string.h>
@@ -150,7 +160,35 @@ static gboolean step(gpointer data) {
         g_message("subview data: %u rows",
                   g_list_model_get_n_items(G_LIST_MODEL(lace_data_grid_get_model(lace_table_view_get_grid(LACE_TABLE_VIEW(v))))));
       }
+      g_message("locked: %s", lace_table_view_is_locked(LACE_TABLE_VIEW(v)) ? "yes" : "no");
+    } else if (LACE_IS_QUERY_VIEW(v)) {
+      g_message("query: %s", lace_query_view_get_status_text(LACE_QUERY_VIEW(v)));
+      g_message("locked: %s", lace_query_view_is_locked(LACE_QUERY_VIEW(v)) ? "yes" : "no");
     }
+  } else if (g_str_equal(cmd, "ddl") && arg && LACE_IS_TABLE_VIEW(current_view(s->app))) {
+    lace_table_view_run_action(LACE_TABLE_VIEW(current_view(s->app)), arg);
+    delay = 300;
+  } else if (g_str_equal(cmd, "list-row") && arg && LACE_IS_TABLE_VIEW(current_view(s->app))) {
+    if (!lace_table_view_select_list_row(LACE_TABLE_VIEW(current_view(s->app)), (guint)atoi(arg)))
+      g_warning("script: no list row %s", arg);
+  } else if (g_str_equal(cmd, "field") && arg) {
+    char **parts = g_strsplit(arg, " ", 2);
+    if (!parts[0] || !lace_ddl_editor_set_field(parts[0], parts[1] ? parts[1] : ""))
+      g_warning("script: no editor field %s", parts[0] ? parts[0] : "");
+    g_strfreev(parts);
+  } else if (g_str_equal(cmd, "save")) {
+    if (!lace_ddl_editor_save())
+      g_warning("script: no editor is open");
+    delay = 300;
+  } else if (g_str_equal(cmd, "cancel") && cp) {
+    lace_connection_cancel(lace_connection_page_get_connection(cp));
+    delay = 500;
+  } else if (g_str_equal(cmd, "answer") && arg) {
+    char **parts = g_strsplit(arg, " ", 2);
+    if (!lace_debug_answer_alert(parts[0], parts[1]))
+      g_warning("script: no alert is open");
+    g_strfreev(parts);
+    delay = 500;
   } else if (g_str_equal(cmd, "query") && cp) {
     lace_connection_page_new_query(cp, arg ? arg : "");
   } else if ((g_str_equal(cmd, "run") || g_str_equal(cmd, "run-all")) && LACE_IS_QUERY_VIEW(current_view(s->app))) {

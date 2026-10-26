@@ -87,6 +87,12 @@ NcApp *app_new(int argc, char **argv, char **error) {
     app_log(app, true, "config: %s", err);
     free(err);
   }
+  char *conflicts = config_hotkey_conflicts_text(app->config);
+  if (conflicts) { /* an older config.json may carry defaults that are now other actions' keys */
+    app_set_status(app, true, "Hotkey conflicts in config.json (? lists them, R resets all): %s", conflicts);
+    app->status_until_ms += 15000;
+    free(conflicts);
+  }
 
   err = NULL;
   app->connmgr = connmgr_load(&err);
@@ -379,6 +385,9 @@ bool app_do_action(NcApp *app, HotkeyAction action) {
   case HOTKEY_SWITCH_DATABASE:
     app_switch_database(app);
     return true;
+  case HOTKEY_TABLE_MENU:
+    app_table_menu(app);
+    return true;
   case HOTKEY_NEW_WORKSPACE:
     app_new_workspace(app, NULL, true);
     return true;
@@ -458,7 +467,8 @@ bool app_action_applies(const NcApp *app, HotkeyAction action) {
   switch (hotkey_get_category(action)) {
   case HOTKEY_CAT_TABLE:
   case HOTKEY_CAT_NAVIGATION:
-  case HOTKEY_CAT_FILTERS: {
+  case HOTKEY_CAT_FILTERS:
+  case HOTKEY_CAT_STRUCTURE: { /* the editors' keys: a sub-view list of a table view */
     const View *v = t ? conntab_current_view(t) : NULL;
     return v && v->kind == VIEW_TABLE && subview_action_applies(v, action);
   }
@@ -501,19 +511,44 @@ static bool sidebar_keeps(HotkeyAction act) {
   }
 }
 
-/* Every action a key press can run (the palette lists the rest) */
+/* Every action a key press can run (the palette lists the rest). The
+ * structure editors' keys come first: in a sub-view list r renames and p
+ * opens the key editor, before refresh and open_query could take them. */
 static bool dispatch_hotkeys(NcApp *app, const UiEvent *ev) {
   const ConnTab *t = app_current_tab(app);
   bool in_sidebar = t && t->sidebar_focused && sidebar_width(app);
-  for (int a = 0; a < HOTKEY_COUNT; a++) {
-    HotkeyAction act = (HotkeyAction)a;
-    if (!(hotkey_action_frontends(act) & CONFIG_FE_NOTCURSES)) continue;
-    if (in_sidebar && sidebar_keeps(act)) continue;
-    if (hotkey_get_category(act) == HOTKEY_CAT_CONNECT) continue; /* the form takes its own keys */
-    if (!hotkey_matches(app->config, ev, act) || !app_action_applies(app, act)) continue;
-    if (app_do_action(app, act)) return true;
-  }
+  for (int pass = 0; pass < 2; pass++)
+    for (int a = 0; a < HOTKEY_COUNT; a++) {
+      HotkeyAction act = (HotkeyAction)a;
+      if ((hotkey_get_category(act) == HOTKEY_CAT_STRUCTURE) != (pass == 0)) continue;
+      if (!(hotkey_action_frontends(act) & CONFIG_FE_NOTCURSES)) continue;
+      if (in_sidebar && sidebar_keeps(act)) continue;
+      if (!in_sidebar && hotkey_get_category(act) == HOTKEY_CAT_SIDEBAR) continue; /* its keys are the sidebar's (the palette reaches them) */
+      if (hotkey_get_category(act) == HOTKEY_CAT_CONNECT) continue; /* the form takes its own keys */
+      if (!hotkey_matches(app->config, ev, act) || !app_action_applies(app, act)) continue;
+      if (app_do_action(app, act)) return true;
+    }
   return false;
+}
+
+/* While a statement the user asked for runs on the current tab's connection
+ * (the lock banner), only these actions are heard besides Esc: moving
+ * between tabs and workspaces, the palette, the log, help and quit */
+static bool locked_action(HotkeyAction a) {
+  switch (a) {
+  case HOTKEY_PREV_TAB: case HOTKEY_NEXT_TAB: case HOTKEY_NEXT_CONN_TAB: case HOTKEY_PREV_CONN_TAB:
+  case HOTKEY_CONN_TAB_1: case HOTKEY_CONN_TAB_2: case HOTKEY_CONN_TAB_3: case HOTKEY_CONN_TAB_4:
+  case HOTKEY_CONN_TAB_5: case HOTKEY_CONN_TAB_6: case HOTKEY_CONN_TAB_7: case HOTKEY_CONN_TAB_8:
+  case HOTKEY_CONN_TAB_9: case HOTKEY_PREV_WORKSPACE: case HOTKEY_NEXT_WORKSPACE: case HOTKEY_VIEW_SWITCHER:
+  case HOTKEY_PALETTE: case HOTKEY_TOGGLE_LOG: case HOTKEY_HELP: case HOTKEY_QUIT: case HOTKEY_CONNECT_DIALOG:
+    return true;
+  default: return false;
+  }
+}
+
+static bool tab_locked(NcApp *app) {
+  const ConnTab *t = app_current_tab(app);
+  return t && t->conn && nc_connection_user_busy(t->conn, NULL, NULL);
 }
 
 /* A mouse event with no overlay open: a left press on the header's tab names
@@ -522,26 +557,32 @@ static bool dispatch_hotkeys(NcApp *app, const UiEvent *ev) {
 static void handle_mouse(NcApp *app, const UiEvent *ev) {
   View *cv = app_current_view(app);
   bool press = ev->mouse.action == UI_MOUSE_PRESS && ev->mouse.button == UI_MOUSE_LEFT;
-  if (cv && cv->split_drag) { /* a divider drag owns the mouse until the release, wherever it goes */
+  bool locked = tab_locked(app); /* the banner: the content is not driven */
+  if (cv && cv->split_drag && !locked) { /* a divider drag owns the mouse until the release, wherever it goes */
     query_view_handle_mouse(app, cv, ev, grid_content_rect(app));
     return;
   }
   if (!(cv && cv->editing)) {
     if (tabstrip_handle_mouse(app, ev)) return;
-    if (ev->mouse.y == 0) { /* the header: its database segment opens the switch */
-      if (press && hit_find(&app->header_spans, ev->mouse.x) == 0) app_switch_database(app);
+    if (ev->mouse.y == 0) { /* the header: its database segment opens the switch, the view's name the actions */
+      int seg = press ? hit_find(&app->header_spans, ev->mouse.x) : -1;
+      int value = seg >= 0 ? app->header_spans.v[seg].value : -1;
+      if (value == 0) app_switch_database(app);
+      else if (value == 1 && !locked) app_table_menu(app);
       return;
     }
     if (ev->mouse.y == app->rows - 1) {
       int act = press ? hit_find(&app->status_spans, ev->mouse.x) : -1;
       if (act == HINT_FOCUS_EDITOR || act == HINT_FOCUS_RESULTS) {
-        if (cv && cv->kind == VIEW_QUERY) cv->focus_results = act == HINT_FOCUS_RESULTS;
-      } else if (act >= 0 && act < HOTKEY_COUNT && app_action_applies(app, (HotkeyAction)act)) {
+        if (cv && cv->kind == VIEW_QUERY && !locked) cv->focus_results = act == HINT_FOCUS_RESULTS;
+      } else if (act >= 0 && act < HOTKEY_COUNT && app_action_applies(app, (HotkeyAction)act) &&
+                 (!locked || locked_action((HotkeyAction)act))) {
         app_do_action(app, (HotkeyAction)act);
       }
       return;
     }
   }
+  if (locked) return;
   content_handle_mouse(app, ev);
 }
 
@@ -572,6 +613,18 @@ void app_handle_event(NcApp *app, const UiEvent *ev) {
   if (ev->type == UI_EVENT_KEY) {
     View *cv = app_current_view(app);
     if (cv) cv->split_drag = false; /* a key ends a drag whose release was lost */
+    if (tab_locked(app)) { /* the banner: Esc cancels, the rest waits (tabs, the palette, quit excepted) */
+      if (ev->key.is_special && ev->key.key == UI_KEY_ESCAPE) {
+        app_cancel_running(app);
+        return;
+      }
+      for (int a = 0; a < HOTKEY_COUNT; a++)
+        if (locked_action((HotkeyAction)a) && (hotkey_action_frontends((HotkeyAction)a) & CONFIG_FE_NOTCURSES) &&
+            hotkey_matches(app->config, ev, (HotkeyAction)a) && app_action_applies(app, (HotkeyAction)a) &&
+            app_do_action(app, (HotkeyAction)a))
+          return;
+      return;
+    }
     if (cv && cv->editing && grid_edit_key(app, cv, ev)) return; /* the field owns every key */
     /* Esc stops the statement that is running; the rows stay */
     if (ev->key.is_special && ev->key.key == UI_KEY_ESCAPE && app_cancel_running(app)) return;

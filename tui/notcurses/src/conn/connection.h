@@ -64,6 +64,10 @@ const LaceObject *nc_connection_find_object(const NcConnection *c, LaceObjectKin
 void nc_connection_refresh_tables(NcConnection *c);
 NcTxState nc_connection_tx_state(const NcConnection *c);
 bool nc_connection_busy(const NcConnection *c);
+/* A statement the user asked for (NcJob.user_statement) is queued or running:
+ * what it is (the oldest one's SQL, or a word for a write; owned by c) and
+ * when it was queued (app_now_ms clock), for the lock banner */
+bool nc_connection_user_busy(const NcConnection *c, const char **what, int64_t *since_ms);
 bool nc_connection_closed(const NcConnection *c);
 
 LaceHistory *nc_connection_history(NcConnection *c);

@@ -159,6 +159,18 @@ char **lace_catalog_list_get_texts(LaceCatalogList *l) {
 
 void lace_catalog_list_focus(LaceCatalogList *l) { gtk_widget_grab_focus(l->view); }
 
+int lace_catalog_list_get_selected_tag(LaceCatalogList *l) {
+  LaceCatalogRow *r = gtk_single_selection_get_selected_item(l->selection);
+  return r && !r->heading ? r->tag : CATALOG_TAG_NONE;
+}
+
+gboolean lace_catalog_list_select_row(LaceCatalogList *l, guint n) {
+  if (n >= g_list_model_get_n_items(G_LIST_MODEL(l->store)))
+    return FALSE;
+  gtk_single_selection_set_selected(l->selection, n);
+  return TRUE;
+}
+
 static void lace_catalog_list_dispose(GObject *obj) {
   LaceCatalogList *l = LACE_CATALOG_LIST(obj);
   g_clear_pointer(&l->stack, gtk_widget_unparent);

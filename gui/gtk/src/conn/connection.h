@@ -67,6 +67,10 @@ const LaceObject *lace_connection_get_objects(LaceConnection *c, size_t *n);
 
 LaceTxState lace_connection_get_tx_state(LaceConnection *c);
 gboolean lace_connection_is_busy(LaceConnection *c);
+/* A statement the user asked for (LaceJob.user_statement) is queued or
+ * running: what it is (the oldest one's SQL, or a word for a write; owned
+ * by c) and when it was queued (g_get_monotonic_time), for the lock banner */
+gboolean lace_connection_user_busy(LaceConnection *c, const char **what, gint64 *since_us);
 gboolean lace_connection_is_closed(LaceConnection *c);
 
 /* Queue a job. owner (may be NULL): the done callback is skipped once it is

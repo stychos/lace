@@ -143,6 +143,9 @@ bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **
 bool db_list_objects(DbConnection *conn, LaceObject **objects, size_t *n, char **err);
 bool db_table_info(DbConnection *conn, const char *table, LaceTableInfo **info, LaceAutoInc **autoinc, char **err);
 bool db_object_definition(DbConnection *conn, const LaceObject *obj, char **sql, char **err);
+/* The names a structure editor's picker lists: what is "types", "collations"
+ * (arg: a charset or NULL) or "engines" (lace_list_*); freed with lace_tables_free */
+bool db_list_names(DbConnection *conn, const char *what, const char *arg, char ***names, size_t *n, char **err);
 
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err);

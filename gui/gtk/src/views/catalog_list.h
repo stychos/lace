@@ -26,6 +26,10 @@ void lace_catalog_list_show(LaceCatalogList *l, const CatalogRows *rows, const c
 /* The rows' text, one line each (the script driver); caller g_strfreev's */
 char **lace_catalog_list_get_texts(LaceCatalogList *l);
 void lace_catalog_list_focus(LaceCatalogList *l);
+/* The selected row's tag, CATALOG_TAG_NONE when none is selected */
+int lace_catalog_list_get_selected_tag(LaceCatalogList *l);
+/* Select the n-th row (scripts); false when there is none */
+gboolean lace_catalog_list_select_row(LaceCatalogList *l, guint n);
 
 /* Signal: activate-row (int tag) */
 

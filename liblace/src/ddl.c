@@ -403,6 +403,19 @@ char *lace_ddl_drop_constraint(LaceDriver d, const char *table, const char *name
   return sql;
 }
 
+char *lace_ddl_rename_constraint(LaceDriver d, const char *table, const char *name, const char *new_name,
+                                 char **error) {
+  if (error) *error = NULL;
+  if (blank(table) || blank(name) || blank(new_name)) return refuse(error, "A table, a constraint and a new name are needed");
+  if (d != LACE_DRIVER_POSTGRES) return refuse(error, "Only PostgreSQL renames a constraint; drop it and add it again");
+  char *t = tbl(d, table), *a = ident(d, name), *b = ident(d, new_name);
+  char *sql = str_printf("ALTER TABLE %s RENAME CONSTRAINT %s TO %s", t, a, b);
+  free(t);
+  free(a);
+  free(b);
+  return sql;
+}
+
 char *lace_ddl_add_foreign_key(LaceDriver d, const char *table, const LaceDdlForeignKey *fk, char **error) {
   if (error) *error = NULL;
   if (blank(table) || !fk || fk->num_columns == 0 || blank(fk->ref_table) || fk->num_ref_columns != fk->num_columns)
@@ -499,6 +512,18 @@ char *lace_ddl_drop_view(LaceDriver d, const char *name, char **error) {
   char *t = tbl(d, name);
   char *sql = str_printf("DROP VIEW %s", t);
   free(t);
+  return sql;
+}
+
+char *lace_ddl_rename_view(LaceDriver d, const char *name, const char *new_name, char **error) {
+  if (error) *error = NULL;
+  if (blank(name) || blank(new_name)) return refuse(error, "A view and a new name are needed");
+  if (d == LACE_DRIVER_SQLITE) return refuse(error, "SQLite cannot rename a view; drop it and create it again");
+  char *t = tbl(d, name), *n = ident(d, new_name);
+  char *sql = d == LACE_DRIVER_POSTGRES ? str_printf("ALTER VIEW %s RENAME TO %s", t, n)
+                                        : str_printf("RENAME TABLE %s TO %s", t, n);
+  free(t);
+  free(n);
   return sql;
 }
 

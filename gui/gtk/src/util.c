@@ -77,10 +77,34 @@ static void confirm_done(GObject *src, GAsyncResult *res, gpointer data) {
   g_free(cd);
 }
 
+/* The alert opened last (a weak pointer) and its entry, for lace_debug_answer_alert */
+static AdwDialog *g_last_alert;
+static GtkWidget *g_last_alert_entry;
+
+static void note_alert(AdwDialog *d, GtkWidget *entry) {
+  if (g_last_alert)
+    g_object_remove_weak_pointer(G_OBJECT(g_last_alert), (gpointer *)&g_last_alert);
+  g_last_alert = d;
+  g_last_alert_entry = entry;
+  g_object_add_weak_pointer(G_OBJECT(d), (gpointer *)&g_last_alert);
+}
+
+gboolean lace_debug_answer_alert(const char *response, const char *text) {
+  if (!g_last_alert)
+    return FALSE;
+  AdwDialog *d = g_last_alert;
+  if (text && g_last_alert_entry)
+    gtk_editable_set_text(GTK_EDITABLE(g_last_alert_entry), text);
+  g_signal_emit_by_name(d, "response", response ? response : "cancel");
+  adw_dialog_close(d);
+  return TRUE;
+}
+
 void lace_confirm(GtkWidget *widget, const char *heading, const char *body,
                   const char *action_label, gboolean destructive,
                   LaceConfirmCb cb, gpointer user_data) {
   AdwDialog *d = adw_alert_dialog_new(heading, body);
+  note_alert(d, NULL);
   adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(d), "cancel", "_Cancel", "go",
                                  action_label, NULL);
   adw_alert_dialog_set_response_appearance(
@@ -124,6 +148,7 @@ void lace_prompt(GtkWidget *widget, const char *heading, const char *body,
                  LacePromptCb cb, gpointer user_data) {
   AdwDialog *d = adw_alert_dialog_new(heading, body);
   GtkWidget *entry = password ? gtk_password_entry_new() : gtk_entry_new();
+  note_alert(d, entry);
   if (password) {
     gtk_password_entry_set_show_peek_icon(GTK_PASSWORD_ENTRY(entry), TRUE);
     g_object_set(entry, "activates-default", TRUE, NULL);

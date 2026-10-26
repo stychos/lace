@@ -33,7 +33,14 @@ static void fill(HelpState *s, NcApp *app) {
       if (n + 2 > cap) { cap = cap ? cap * 2 : 64; rows = safe_realloc(rows, cap * sizeof *rows); }
       if (n == first)
         rows[n++] = (ListRow){str_dup(hotkey_category_name((HotkeyCategory)c)), NULL, NULL, -1, NULL, true};
-      rows[n++] = (ListRow){str_dup(hotkey_action_name((HotkeyAction)a)), NULL,
+      /* a key another action of the same place has is marked */
+      const HotkeyBinding *b = &app->config->hotkeys[a];
+      HotkeyAction other = HOTKEY_COUNT;
+      for (size_t k = 0; k < b->num_keys && other == HOTKEY_COUNT; k++)
+        other = hotkey_find_conflict(app->config, (HotkeyAction)a, b->keys[k]);
+      char *detail = other == HOTKEY_COUNT ? NULL
+                     : str_printf("\xe2\x9a\xa0 also %s", hotkey_action_name(other)); /* ⚠ */
+      rows[n++] = (ListRow){str_dup(hotkey_action_name((HotkeyAction)a)), detail,
                             hotkey_get_display(app->config, (HotkeyAction)a), a, NULL, false};
     }
   }

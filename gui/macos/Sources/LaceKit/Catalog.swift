@@ -91,6 +91,112 @@ public struct ForeignKey: Sendable, Hashable {
   public let onUpdate: String?
 }
 
+/// What an index entry is (LaceIndexKind)
+public enum IndexKind: Int32, Sendable, Hashable {
+  case plain = 0, unique, primary, check, exclusion
+}
+
+/// An index or constraint of a schema (LaceSchema.indexes)
+public struct IndexInfo: Sendable, Hashable {
+  public let name: String?
+  /// In index order; an expression column is its text
+  public let columns: [String]
+  public let unique: Bool
+  public let primary: Bool
+  /// BTREE, HASH, ...
+  public let type: String?
+  public let kind: IndexKind
+  /// A partial index's predicate
+  public let whereClause: String?
+  /// A check's condition, an exclusion's definition
+  public let check: String?
+  /// The constraint the index backs
+  public let constraint: String?
+
+  public init(
+    name: String?, columns: [String], unique: Bool, primary: Bool, type: String?, kind: IndexKind, whereClause: String?,
+    check: String?, constraint: String?
+  ) {
+    self.name = name
+    self.columns = columns
+    self.unique = unique
+    self.primary = primary
+    self.type = type
+    self.kind = kind
+    self.whereClause = whereClause
+    self.check = check
+    self.constraint = constraint
+  }
+
+  /// A LaceIndex that lives for one call (lace_ddl_rename_index)
+  func withLaceIndex<T>(_ body: (UnsafePointer<LaceIndex>) throws -> T) rethrows -> T {
+    var ix = LaceIndex()
+    ix.name = name.map { strdup($0) }
+    let cols = columns.map { strdup($0) }
+    let arr = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: max(cols.count, 1))
+    for (i, c) in cols.enumerated() {
+      arr[i] = c
+    }
+    ix.columns = arr
+    ix.num_columns = cols.count
+    ix.unique = unique
+    ix.primary = primary
+    ix.type = type.map { strdup($0) }
+    ix.kind = LaceIndexKind(rawValue: UInt32(kind.rawValue))
+    ix.where = whereClause.map { strdup($0) }
+    ix.check = check.map { strdup($0) }
+    ix.constraint = constraint.map { strdup($0) }
+    defer {
+      free(ix.name)
+      for c in cols {
+        free(c)
+      }
+      arr.deallocate()
+      free(ix.type)
+      free(ix.where)
+      free(ix.check)
+      free(ix.constraint)
+    }
+    return try withUnsafePointer(to: &ix, body)
+  }
+}
+
+extension Schema {
+  /// The indexes, the primary key and the other constraints, in the order
+  /// the Indexes rows list them (CatalogTable.Tag.index + i)
+  public var indexes: [IndexInfo] {
+    let s = raw.pointee
+    return (0..<Int(s.num_indexes)).map { i in
+      let ix = s.indexes[i]
+      return IndexInfo(
+        name: borrowCString(ix.name), columns: strings(ix.columns, ix.num_columns), unique: ix.unique,
+        primary: ix.primary, type: borrowCString(ix.type), kind: IndexKind(rawValue: Int32(ix.kind.rawValue)) ?? .plain,
+        whereClause: borrowCString(ix.where), check: borrowCString(ix.check), constraint: borrowCString(ix.constraint))
+    }
+  }
+}
+
+/// A table's auto-increment or identity counter (lace_autoincrement_get)
+public struct AutoIncrement: Sendable, Hashable {
+  public let column: String
+  /// PostgreSQL: the sequence behind it
+  public let sequence: String?
+  /// false: SQLite INTEGER PRIMARY KEY without AUTOINCREMENT (nothing to set)
+  public let hasCounter: Bool
+  /// The value assigned next, -1 unknown
+  public let next: Int64
+  /// The column's maximum, -1 when the table is empty
+  public let max: Int64
+
+  public init(column: String, sequence: String? = nil, hasCounter: Bool = true, next: Int64 = -1, max: Int64 = -1) {
+    self.column = column
+    self.sequence = sequence
+    self.hasCounter = hasCounter
+    self.next = next
+    self.max = max
+  }
+}
+
 /// A table whose foreign key references another (lace_table_dependents)
 public struct Dependent: Sendable, Hashable {
   public let table: String
@@ -140,6 +246,16 @@ public final class TableInfo: @unchecked Sendable {
   }
 
   public var rowEstimate: Int64 { raw.pointee.row_estimate }
+  public var engine: String? { borrowCString(raw.pointee.engine) }
+  public var charset: String? { borrowCString(raw.pointee.charset) }
+  public var collation: String? { borrowCString(raw.pointee.collation) }
+  public var comment: String? { borrowCString(raw.pointee.comment) }
+
+  /// The counter, when the table has one
+  public var autoIncrement: AutoIncrement? {
+    guard let a = autoinc?.pointee, let column = borrowCString(a.column) else { return nil }
+    return AutoIncrement(column: column, sequence: borrowCString(a.sequence), hasCounter: a.has_counter, next: a.next, max: a.max)
+  }
 }
 
 /// The tables referencing one, kept as liblace gave them
@@ -174,6 +290,13 @@ public struct CatalogRow: Sendable, Hashable {
   public let heading: Bool
   /// What Enter means (CatalogTable.Tag)
   public let tag: Int
+
+  public init(cells: [String], span: Bool = false, heading: Bool = false, tag: Int = 0) {
+    self.cells = cells
+    self.span = span
+    self.heading = heading
+    self.tag = tag
+  }
 }
 
 /// A sub-view's list: an optional header and its rows, from core/catalog_rows.c
@@ -189,6 +312,17 @@ public struct CatalogTable: Sendable {
     public static let dependent = 1000
     public static let trigger = 2000
     public static let column = 3000
+    public static let index = 4000
+  }
+
+  public init(head: [String]?, rows: [CatalogRow]) {
+    self.head = head
+    self.rows = rows
+  }
+
+  /// The same rows followed by more (a frontend's own action rows)
+  public func appending(_ more: [CatalogRow]) -> CatalogTable {
+    CatalogTable(head: head, rows: rows + more)
   }
 
   init(_ t: inout CatalogRows) {
@@ -241,7 +375,7 @@ public struct CatalogTable: Sendable {
     objects: [CatalogObject]
   ) -> CatalogTable {
     // The trigger rows name the objects by index: give the builder the same list
-    var raw = objects.map { o -> LaceObject in
+    let raw = objects.map { o -> LaceObject in
       var l = LaceObject()
       l.kind = LaceObjectKind(rawValue: UInt32(o.kind.rawValue))
       l.name = strdup(o.name)

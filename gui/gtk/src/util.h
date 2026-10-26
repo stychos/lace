@@ -33,6 +33,11 @@ void lace_prompt(GtkWidget *widget, const char *heading, const char *body,
                  const char *initial, const char *action_label, gboolean password,
                  LacePromptCb cb, gpointer user_data);
 
+/* The script driver: answer the alert dialog opened last by lace_confirm
+ * or lace_prompt ("go" or "cancel"; text fills a prompt's entry first);
+ * false when none is open */
+gboolean lace_debug_answer_alert(const char *response, const char *text);
+
 /* Put text on the clipboard */
 void lace_copy_text(GtkWidget *widget, const char *text);
 

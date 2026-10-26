@@ -49,6 +49,9 @@ struct NcConnection {
   LaceObject *objects; /* views, routines and triggers, with the table list */
   size_t num_objects;
   int pending;
+  NcJob **user_jobs; /* the user's statements queued or running, oldest first (referenced) */
+  size_t num_user_jobs;
+  int64_t user_since_ms;
   bool closing, closed;
   pthread_t thread;
   bool started;
@@ -150,6 +153,14 @@ static int run_once(NcConnection *c, NcJob *job, int conn_id) {
   }
   case NC_JOB_DATABASES:
     rc = lace_list_databases(client, conn_id, &job->tables, &job->num_tables);
+    break;
+  case NC_JOB_NAMES:
+    if (job->column && !strcmp(job->column, "types"))
+      rc = lace_list_types(client, conn_id, &job->tables, &job->num_tables);
+    else if (job->column && !strcmp(job->column, "engines"))
+      rc = lace_list_engines(client, conn_id, &job->tables, &job->num_tables);
+    else
+      rc = lace_list_collations(client, conn_id, job->table, &job->tables, &job->num_tables);
     break;
   case NC_JOB_COUNT:
     if (job->table && !job->where && job->approximate) {
@@ -344,12 +355,24 @@ static void history_persist(NcConnection *c) {
   free(err);
 }
 
+static void user_job_remove(NcConnection *c, NcJob *job) {
+  for (size_t i = 0; i < c->num_user_jobs; i++) {
+    if (c->user_jobs[i] != job) continue;
+    memmove(c->user_jobs + i, c->user_jobs + i + 1, (c->num_user_jobs - i - 1) * sizeof *c->user_jobs);
+    c->num_user_jobs--;
+    nc_job_unref(job);
+    c->user_since_ms = (int64_t)now_ms(); /* the next one starts about now */
+    return;
+  }
+}
+
 static void job_done_main(void *data) {
   Queued *q = data;
   NcJob *job = q->job;
   NcConnection *c = q->conn;
 
   c->pending--;
+  if (job->user_statement) user_job_remove(c, job);
   if (job->tx_state >= 0 && job->tx_state != c->tx_state) {
     c->tx_state = job->tx_state;
     emit(c, NC_CONN_EV_TX, NULL);
@@ -414,6 +437,11 @@ void nc_connection_submit_full(NcConnection *c, NcJob *job, NcOwner *owner, NcJo
   q->job = job;
   q->conn = nc_connection_ref(c);
   c->pending++;
+  if (job->user_statement) {
+    c->user_jobs = safe_realloc(c->user_jobs, (c->num_user_jobs + 1) * sizeof *c->user_jobs);
+    c->user_jobs[c->num_user_jobs++] = nc_job_ref(job);
+    if (c->num_user_jobs == 1) c->user_since_ms = (int64_t)now_ms();
+  }
   if (c->closed || (c->closing && job->kind != NC_JOB_DISCONNECT)) {
     job_fail_msg(job, LACE_ERR_CONNECTION_CLOSED, "The connection is closed");
     mainq_post(c->mainq, job_done_main, q);
@@ -503,6 +531,8 @@ NcConnection *nc_connection_ref(NcConnection *c) {
 }
 
 static void connection_destroy(NcConnection *c) {
+  for (size_t i = 0; i < c->num_user_jobs; i++) nc_job_unref(c->user_jobs[i]);
+  free(c->user_jobs);
   lace_tables_free(c->tables, c->num_tables);
   lace_objects_free(c->objects, c->num_objects);
   free(c->database);
@@ -538,6 +568,7 @@ void nc_connection_free(NcConnection *c) {
   for (Queued *q = c->queue_head; q;) {
     Queued *next = q->next;
     if (q->job->destroy_data) q->job->destroy_data(q->job->data);
+    if (q->job->user_statement) user_job_remove(c, q->job);
     nc_job_unref(q->job);
     free(q);
     c->refs--; /* the owner's reference keeps the count above zero */
@@ -624,6 +655,22 @@ void nc_connection_refresh_tables(NcConnection *c) {
 
 NcTxState nc_connection_tx_state(const NcConnection *c) { return (NcTxState)c->tx_state; }
 bool nc_connection_busy(const NcConnection *c) { return c->pending > 0; }
+
+bool nc_connection_user_busy(const NcConnection *c, const char **what, int64_t *since_ms) {
+  if (!c->num_user_jobs) return false;
+  const NcJob *j = c->user_jobs[0];
+  if (what) {
+    switch (j->kind) {
+    case NC_JOB_UPDATE: *what = "UPDATE"; break;
+    case NC_JOB_DELETE: *what = "DELETE"; break;
+    case NC_JOB_INSERT: *what = "INSERT"; break;
+    case NC_JOB_COUNT: *what = "COUNT"; break;
+    default: *what = j->sql && *j->sql ? j->sql : "statement"; break;
+    }
+  }
+  if (since_ms) *since_ms = c->user_since_ms;
+  return true;
+}
 bool nc_connection_closed(const NcConnection *c) { return c->closed || c->closing; }
 
 LaceHistory *nc_connection_history(NcConnection *c) { return c->history; }

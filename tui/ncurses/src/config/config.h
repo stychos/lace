@@ -30,6 +30,7 @@ typedef enum {
   HOTKEY_CAT_CONNECT,    /* Connection dialog operations */
   HOTKEY_CAT_EDITOR,     /* Modal editor operations */
   HOTKEY_CAT_HISTORY,    /* History dialog operations */
+  HOTKEY_CAT_STRUCTURE,  /* The structure editors (the sub-view lists of a table tab) */
   HOTKEY_CAT_COUNT
 } HotkeyCategory;
 
@@ -178,6 +179,17 @@ typedef enum {
   HOTKEY_CONN_OPEN_TO_WORKSPACE,
   HOTKEY_CONN_SAVE_AS_NEW,
   HOTKEY_CONN_CLEAR,
+  /* The table's actions (HOTKEY_CAT_TABLE) and the editors of the Structure,
+   * Indexes, Foreign keys and Information sub-views (HOTKEY_CAT_STRUCTURE:
+   * their keys mean something only in those lists) */
+  HOTKEY_TABLE_MENU,        /* rename, truncate, drop, new table/view/function */
+  HOTKEY_STRUCT_ADD,        /* a column, an index, a foreign key */
+  HOTKEY_STRUCT_EDIT,       /* the row under the cursor (Enter does too) */
+  HOTKEY_STRUCT_DROP,
+  HOTKEY_STRUCT_RENAME,
+  HOTKEY_STRUCT_PRIMARY_KEY,/* Structure: the key editor */
+  HOTKEY_STRUCT_MOVE,       /* Structure: reorder a column (MySQL) */
+  HOTKEY_STRUCT_CHECK,      /* Indexes: a check constraint */
   HOTKEY_COUNT
 } HotkeyAction;
 
@@ -313,9 +325,40 @@ const char *hotkey_action_name(HotkeyAction action);
 /* Find action by JSON key, returns ACTION_COUNT if not found */
 HotkeyAction hotkey_action_from_key(const char *key);
 
-/* Check for conflicts - returns conflicting action or ACTION_COUNT if none */
+/* Where an action's keys are live. Two actions conflict when a key of one
+ * is a key of the other and they share a context in the running frontend;
+ * the same key in different places (x deletes a row in the grid, drops a
+ * column in the Structure list, removes a filter in the panel) is fine. */
+typedef enum {
+  HOTKEY_CTX_GRID = 1u << 0,      /* a table tab's Data grid */
+  HOTKEY_CTX_LIST = 1u << 1,      /* a table tab's Structure, Indexes, Foreign keys or Information list */
+  HOTKEY_CTX_RESULTS = 1u << 2,   /* a query tab's results */
+  HOTKEY_CTX_EDITOR = 1u << 3,    /* a query tab's SQL editor (only chords are live) */
+  HOTKEY_CTX_UNFOCUSED = 1u << 4, /* a query tab with neither pane focused (ncurses) */
+  HOTKEY_CTX_FILTERS = 1u << 5,   /* the filters panel */
+  HOTKEY_CTX_SIDEBAR = 1u << 6,   /* the sidebar */
+  HOTKEY_CTX_CONNECT = 1u << 7,   /* the Workspaces window, the connection form */
+  HOTKEY_CTX_CELL = 1u << 8,      /* a cell editor (inline, modal, the add-row form's fields) */
+  HOTKEY_CTX_ADD_ROW = 1u << 9,   /* the add-row form */
+  HOTKEY_CTX_HISTORY = 1u << 10,  /* the history dialog */
+  HOTKEY_CTX_CONFIG = 1u << 11    /* the hotkeys editor */
+} HotkeyContext;
+/* The main screen with a connection open */
+#define HOTKEY_CTX_MAIN (HOTKEY_CTX_GRID | HOTKEY_CTX_LIST | HOTKEY_CTX_RESULTS | HOTKEY_CTX_UNFOCUSED | \
+                         HOTKEY_CTX_FILTERS | HOTKEY_CTX_SIDEBAR)
+unsigned hotkey_action_contexts(HotkeyAction action);
+
+/* Check for conflicts: the first other action of the running frontend that
+ * is live in one of the action's contexts and bound to key; HOTKEY_COUNT
+ * when none */
 HotkeyAction hotkey_find_conflict(const Config *config, HotkeyAction action,
                                   const char *key);
+/* Every conflict among the running frontend's bindings, each pair once */
+typedef struct { HotkeyAction a, b; const char *key; } HotkeyConflict;
+size_t config_hotkey_conflicts(const Config *config, HotkeyConflict *out, size_t max);
+/* "f: Toggle filters and Foreign keys; a: First row and Data" (allocated),
+ * NULL when there is none; for the status line at startup */
+char *config_hotkey_conflicts_text(const Config *config);
 
 /* Add a key to an action's bindings */
 bool hotkey_add_key(Config *config, HotkeyAction action, const char *key);

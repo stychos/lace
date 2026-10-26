@@ -187,6 +187,15 @@ static void test_indexes(ItDb *db) {
     const LaceIndex *chk = index_named(s, "it_ddl_pos");
     CHECK(chk && chk->kind == LACE_INDEX_CHECK && chk->check);
     lace_schema_free(s);
+    if (d == LACE_DRIVER_POSTGRES) {
+      DDL(db, lace_ddl_rename_constraint(d, "it_ddl", "it_ddl_pos", "it_ddl_pos2", &err_));
+      s = schema_of(db, "it_ddl");
+      CHECK(index_named(s, "it_ddl_pos2") && !index_named(s, "it_ddl_pos"));
+      lace_schema_free(s);
+      DDL(db, lace_ddl_rename_constraint(d, "it_ddl", "it_ddl_pos2", "it_ddl_pos", &err_));
+    } else {
+      REFUSED(db, lace_ddl_rename_constraint(d, "it_ddl", "it_ddl_pos", "it_ddl_pos2", &err_));
+    }
     DDL(db, lace_ddl_drop_constraint(d, "it_ddl", "it_ddl_pos", &err_));
     CHECK(it_ex(db, "INSERT INTO it_ddl (v) VALUES (-1)"));
   }
@@ -362,7 +371,14 @@ static void test_table_ops(ItDb *db) {
     if (objs[i].kind == LACE_OBJ_VIEW && objs[i].name && strcasecmp(objs[i].name, "it_ddl_view") == 0) seen = true;
   CHECK(seen);
   lace_objects_free(objs, no);
-  DDL(db, lace_ddl_drop_view(d, "it_ddl_view", &err_));
+  if (d == LACE_DRIVER_SQLITE) {
+    REFUSED(db, lace_ddl_rename_view(d, "it_ddl_view", "it_ddl_view2", &err_));
+    DDL(db, lace_ddl_drop_view(d, "it_ddl_view", &err_));
+  } else {
+    DDL(db, lace_ddl_rename_view(d, "it_ddl_view", "it_ddl_view2", &err_));
+    CHECK(it_scalar(db, "SELECT COUNT(*) FROM it_ddl_view2") == 1);
+    DDL(db, lace_ddl_drop_view(d, "it_ddl_view2", &err_));
+  }
 
   /* a trigger */
   bool have_trigger = true;

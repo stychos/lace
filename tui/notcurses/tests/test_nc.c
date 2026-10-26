@@ -23,6 +23,7 @@
 #include "ui/sidebar.h"
 #include "ui/tabstrip.h"
 #include "ui/filter_panel.h"
+#include "ui/form.h"
 #include "util/mem.h"
 #include "util/str.h"
 #include <fcntl.h>
@@ -1757,6 +1758,51 @@ static void test_tabstrip_layout(void) {
   CHECK(tabstrip_layout(w, 0, 0, 30, x0, x1) == 0);
 }
 
+/* The structure editors' pure parts: the form's name lists, the lock
+ * banner's text, the header's view segment */
+static void test_structure_helpers(void) {
+  char **names = NULL;
+  CHECK_SIZE(form_split_names(" a, b ,,c ", &names), 3);
+  CHECK_STR(names[0], "a");
+  CHECK_STR(names[1], "b");
+  CHECK_STR(names[2], "c");
+  lace_tables_free(names, 3);
+  CHECK_SIZE(form_split_names("", &names), 0);
+  CHECK(names == NULL);
+  CHECK_SIZE(form_split_names(NULL, &names), 0);
+  CHECK_SIZE(form_split_names("solo", &names), 1);
+  CHECK_STR(names[0], "solo");
+  lace_tables_free(names, 1);
+
+  /* the first line, cut to fit before the time and "Esc cancels" */
+  CHECK_STR_FREE(content_banner_text("SELECT 1\nFROM t", 1500, 80), "SELECT 1  1.5 s  Esc cancels");
+  CHECK_STR_FREE(content_banner_text("UPDATE", 61000, 80), "UPDATE  1:01  Esc cancels");
+  char *cut = content_banner_text("SELECT a_very_long_column_name_indeed FROM somewhere", 100, 40);
+  CHECK(nc_text_width(cut) <= 40);
+  CHECK(strstr(cut, "\xe2\x80\xa6  0.1 s  Esc cancels") != NULL);
+  free(cut);
+  CHECK_STR_FREE(content_banner_text("a\tb", 0, 80), "a b  0.0 s  Esc cancels");
+
+  /* the view's name is a byte range of the line, after the database's */
+  const char *one[] = {"db"};
+  size_t voff = 0, vlen = 0, dboff = 0, dblen = 0;
+  char *h = header_format_ex("W", one, 1, 0, "shop", "orders", 0, 0, 80, NULL, NULL, &dboff, &dblen, &voff, &vlen);
+  CHECK_STR(h, "W \xe2\x96\xb8 db \xe2\x96\xb8 shop \xe2\x96\xb8 orders");
+  CHECK(vlen == 6 && strncmp(h + voff, "orders", 6) == 0);
+  CHECK(dblen == 4 && strncmp(h + dboff, "shop", 4) == 0);
+  free(h);
+  h = header_format_ex("W", one, 1, 0, NULL, "orders", 2, 5, 80, NULL, NULL, NULL, NULL, &voff, &vlen);
+  CHECK_STR(h, "W \xe2\x96\xb8 db \xe2\x96\xb8 orders (3 of 5)");
+  CHECK(vlen == 6 && strncmp(h + voff, "orders", 6) == 0);
+  free(h);
+  h = header_format_ex("W", one, 1, 0, NULL, "orders", 0, 0, 8, NULL, NULL, NULL, NULL, &voff, &vlen); /* cut: "db \xe2\x96\xb8 ord" */
+  CHECK(vlen == 3 && strncmp(h + voff, "ord", 3) == 0);
+  free(h);
+  h = header_format_ex("W", one, 1, 0, NULL, "orders", 0, 0, 4, NULL, NULL, NULL, NULL, &voff, &vlen); /* cut away */
+  CHECK(vlen == 0);
+  free(h);
+}
+
 static void test_filter_panel_helpers(void) {
   /* height: title + rows, at most FP_MAX_ROWS rows, and FP_GRID_KEEP grid rows kept */
   CHECK(filter_panel_height(0, 30) == 2);
@@ -1847,5 +1893,6 @@ int main(void) {
   test_tabstrip_entries();
   test_undo_stack();
   test_filter_panel_helpers();
+  test_structure_helpers();
   return test_report("nc");
 }

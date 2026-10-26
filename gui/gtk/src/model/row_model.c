@@ -447,6 +447,11 @@ void lace_row_model_request(LaceRowModel *m, gsize row) {
   m->fetch(m, page, m->fetch_data);
 }
 
+void lace_row_model_mark_pending(LaceRowModel *m, gsize page) {
+  if (!g_hash_table_contains(m->pages, GSIZE_TO_POINTER(page)))
+    g_hash_table_insert(m->pending, GSIZE_TO_POINTER(page), GINT_TO_POINTER(1));
+}
+
 gboolean lace_row_model_page_loaded_p(LaceRowModel *m, gsize page) {
   return g_hash_table_contains(m->pages, GSIZE_TO_POINTER(page));
 }

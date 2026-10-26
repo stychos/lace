@@ -170,6 +170,7 @@ void app_view_request_page(NcApp *app, View *v, size_t page) {
   NcJob *job = nc_job_read(sql);
   free(sql);
   job->tag = (void *)(uintptr_t)page;
+  if (v->kind == VIEW_QUERY && page == 0 && v->first_page_pending) job->user_statement = true; /* the lock banner */
   nc_connection_submit_full(t->conn, job, t->owner, on_page, req_new(app, v, page), free);
 }
 

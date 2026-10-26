@@ -7,6 +7,7 @@
  */
 
 #include "query_internal.h"
+#include "ddl_edit.h"
 #include "../../liblace/include/util/mem.h"
 #include <ctype.h>
 #include <errno.h>
@@ -236,6 +237,7 @@ void query_execute(TuiState *state, const char *sql) {
   Tab *tab = TUI_TAB(state);
   if (!g_last_execute_cancelled && tab && !tab->query_error && TUI_CONN(state)) {
     app_record_history(state->app, TUI_CONN(state), sql, history_detect_type(sql));
+    tui_ddl_query_ran(state); /* a tab opened from "New view/function" reloads the table list */
   }
 }
 

@@ -42,6 +42,8 @@ struct _LaceConnection {
   gboolean tables_loaded;
   int pending;
   LaceJob *running;
+  GPtrArray *user_jobs; /* the user's statements queued or running, oldest first (referenced) */
+  gint64 user_since;
   gboolean closing;
   gboolean closed;
 
@@ -147,6 +149,14 @@ static int run_once(LaceConnection *c, LaceJob *job, int conn_id) {
     break;
   case LACE_JOB_DEPENDENTS:
     rc = lace_table_dependents(client, conn_id, job->table, &job->deps, &job->num_deps);
+    break;
+  case LACE_JOB_NAMES:
+    if (job->column && g_str_equal(job->column, "types"))
+      rc = lace_list_types(client, conn_id, &job->tables, &job->num_tables);
+    else if (job->column && g_str_equal(job->column, "engines"))
+      rc = lace_list_engines(client, conn_id, &job->tables, &job->num_tables);
+    else
+      rc = lace_list_collations(client, conn_id, job->table, &job->tables, &job->num_tables);
     break;
   case LACE_JOB_DEFINITION: {
     LaceObject obj = {.kind = (LaceObjectKind)job->object_kind, .name = job->sql, .table = job->table,
@@ -352,6 +362,10 @@ static gboolean job_done_idle(gpointer data) {
   c->pending--;
   if (c->running == job)
     c->running = NULL;
+  if (job->user_statement && c->user_jobs && g_ptr_array_remove(c->user_jobs, job)) {
+    lace_job_unref(job);
+    c->user_since = g_get_monotonic_time(); /* the next one starts about now */
+  }
 
   if (job->tx_state >= 0 && job->tx_state != c->tx_state) {
     c->tx_state = job->tx_state;
@@ -449,6 +463,13 @@ void lace_connection_submit_full(LaceConnection *c, LaceJob *job, GObject *owner
   c->pending++;
   if (!c->running)
     c->running = job;
+  if (job->user_statement) {
+    if (!c->user_jobs)
+      c->user_jobs = g_ptr_array_new();
+    g_ptr_array_add(c->user_jobs, lace_job_ref(job));
+    if (c->user_jobs->len == 1)
+      c->user_since = g_get_monotonic_time();
+  }
   g_async_queue_push(c->queue, q);
   g_signal_emit(c, signals[SIG_BUSY_CHANGED], 0);
 }
@@ -541,6 +562,11 @@ static void lace_connection_dispose(GObject *obj) {
 
 static void lace_connection_finalize(GObject *obj) {
   LaceConnection *c = LACE_CONNECTION(obj);
+  if (c->user_jobs) {
+    for (guint i = 0; i < c->user_jobs->len; i++)
+      lace_job_unref(g_ptr_array_index(c->user_jobs, i));
+    g_ptr_array_free(c->user_jobs, TRUE);
+  }
   g_async_queue_unref(c->queue);
   g_mutex_clear(&c->lock);
   str_secure_free(c->connstr);
@@ -685,6 +711,24 @@ void lace_connection_refresh_tables(LaceConnection *c) {
 
 LaceTxState lace_connection_get_tx_state(LaceConnection *c) { return c->tx_state; }
 gboolean lace_connection_is_busy(LaceConnection *c) { return c->pending > 0; }
+
+gboolean lace_connection_user_busy(LaceConnection *c, const char **what, gint64 *since_us) {
+  if (!c->user_jobs || !c->user_jobs->len)
+    return FALSE;
+  const LaceJob *j = g_ptr_array_index(c->user_jobs, 0);
+  if (what) {
+    switch (j->kind) {
+    case LACE_JOB_UPDATE: *what = "UPDATE"; break;
+    case LACE_JOB_DELETE: *what = "DELETE"; break;
+    case LACE_JOB_INSERT: *what = "INSERT"; break;
+    case LACE_JOB_COUNT: *what = "COUNT"; break;
+    default: *what = j->sql && *j->sql ? j->sql : "statement"; break;
+    }
+  }
+  if (since_us)
+    *since_us = c->user_since;
+  return TRUE;
+}
 gboolean lace_connection_is_closed(LaceConnection *c) { return c->closed || c->closing; }
 
 LaceHistory *lace_connection_get_history(LaceConnection *c) { return c->history; }

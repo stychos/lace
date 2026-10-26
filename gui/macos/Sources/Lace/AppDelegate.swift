@@ -183,6 +183,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       keyEquivalent: "{")
     main.addItem(submenu(view, title: "View"))
 
+    // The table's actions and the editors of the Structure, Indexes, Foreign
+    // Keys and Information sub-views (⌥⌘ keys; Return edits, Delete drops in a list)
+    let table = NSMenu(title: "Table")
+    table.addItem(withTitle: "Rename Table…", action: #selector(TableViewController.renameTable(_:)), keyEquivalent: "")
+    table.addItem(withTitle: "Truncate Table…", action: #selector(TableViewController.truncateTable(_:)), keyEquivalent: "")
+    table.addItem(withTitle: "Drop Table…", action: #selector(TableViewController.dropTable(_:)), keyEquivalent: "")
+    table.addItem(.separator())
+    table.addItem(withTitle: "New Table…", action: #selector(TableViewController.newTable(_:)), keyEquivalent: "")
+    table.addItem(withTitle: "New View…", action: #selector(TableViewController.newView(_:)), keyEquivalent: "")
+    table.addItem(withTitle: "New Function…", action: #selector(TableViewController.newFunction(_:)), keyEquivalent: "")
+    table.addItem(withTitle: "Edit in a Query View", action: #selector(TableViewController.editInQuery(_:)), keyEquivalent: "")
+    table.addItem(.separator())
+    for (title, sel, key) in [
+      ("Add…", #selector(TableViewController.structureAdd(_:)), "="),
+      ("Edit…", #selector(TableViewController.structureEdit(_:)), "e"),
+      ("Drop…", #selector(TableViewController.structureDrop(_:)), "-"),
+      ("Rename…", #selector(TableViewController.structureRename(_:)), "r"),
+      ("Primary Key…", #selector(TableViewController.structurePrimaryKey(_:)), "p"),
+      ("Move Column…", #selector(TableViewController.structureMove(_:)), "m"),
+      ("Add Check Constraint…", #selector(TableViewController.structureCheck(_:)), "k"),
+    ] as [(String, Selector, String)] {
+      let item = table.addItem(withTitle: title, action: sel, keyEquivalent: key)
+      item.keyEquivalentModifierMask = [.command, .option]
+    }
+    main.addItem(submenu(table, title: "Table"))
+
     let query = NSMenu(title: "Query")
     query.addItem(withTitle: "Run", action: #selector(QueryViewController.run(_:)), keyEquivalent: "\r")
     let runAll = query.addItem(withTitle: "Run All", action: #selector(QueryViewController.runAll(_:)), keyEquivalent: "\r")

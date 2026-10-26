@@ -34,6 +34,8 @@ bool subviews_do_action(NcApp *app, View *v, HotkeyAction a);
 /* Whether an action makes sense in a list (a non-Data sub-view): the
  * switches, the navigation, refresh, the sidebar and filter keys */
 bool subview_action_applies(const View *v, HotkeyAction a);
+/* The current list's own keys for the status line; NULL: none */
+const char *subview_keys_hint(const View *v);
 /* What Enter does in the current list, for the status line; NULL: nothing */
 const char *subview_enter_hint(const View *v);
 /* Lay out the cells of the strip in width columns: n labels of the given
@@ -49,6 +51,25 @@ typedef struct {
   bool (*build)(NcApp *app, View *v, CatalogRows *t, char **message);
   void (*activate)(NcApp *app, View *v, int tag); /* Enter on a row with that tag; NULL: none */
   const char *hint; /* what Enter does, for the status line; NULL: nothing */
+  /* A STRUCTURE-category action (add, edit, drop, rename, ...) on the row
+   * with that tag (CATALOG_TAG_NONE: no row); false: not one of this list's */
+  bool (*action)(NcApp *app, View *v, HotkeyAction a, int tag);
+  const char *keys_hint; /* the list's own keys, for the status line ("+ add  x drop  r rename") */
 } SvOps;
+/* The driver of the view's connection (SQLite when there is none) */
+LaceDriver subview_driver(NcApp *app, const View *v);
+static inline bool subview_mysql(LaceDriver d) { return d == LACE_DRIVER_MYSQL || d == LACE_DRIVER_MARIADB; }
+/* The column of the view's schema with that name, or NULL */
+const LaceColumn *subview_column(const View *v, const char *name);
+/* The table's column names (not copied: the schema's) into an array the caller frees */
+size_t subview_column_names(const View *v, const char ***out);
+/* The tag under the cursor of the current list, CATALOG_TAG_NONE when none */
+int subview_cursor_tag(NcApp *app, View *v);
+/* Notcurses-only tags of rows its lists add beyond the shared builders'
+ * (the Information actions); above every shared range */
+enum {
+  SV_TAG_AUTOINC = 90001, SV_TAG_COMMENT, SV_TAG_ENGINE, SV_TAG_CHARSET, SV_TAG_ANALYZE, SV_TAG_VACUUM,
+  SV_TAG_OPTIMIZE, SV_TAG_EDIT_DEFINITION
+};
 extern const SvOps sv_structure_ops, sv_definition_ops, sv_indexes_ops, sv_fks_ops, sv_info_ops;
 #endif

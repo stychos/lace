@@ -95,6 +95,9 @@ char *lace_ddl_rename_index(LaceDriver driver, const char *table, const LaceInde
 char *lace_ddl_add_check(LaceDriver driver, const char *table, const char *name, const char *condition,
                          char **error);
 char *lace_ddl_drop_constraint(LaceDriver driver, const char *table, const char *name, char **error);
+/* PostgreSQL ALTER TABLE ... RENAME CONSTRAINT; MySQL and SQLite refused (drop and add it again) */
+char *lace_ddl_rename_constraint(LaceDriver driver, const char *table, const char *name, const char *new_name,
+                                 char **error);
 char *lace_ddl_add_foreign_key(LaceDriver driver, const char *table, const LaceDdlForeignKey *fk, char **error);
 char *lace_ddl_drop_foreign_key(LaceDriver driver, const char *table, const char *name, char **error);
 
@@ -107,6 +110,8 @@ char *lace_ddl_drop_table(LaceDriver driver, const char *table, bool cascade, ch
  * BIGINT AUTO_INCREMENT PRIMARY KEY */
 char *lace_ddl_create_table_with_id(LaceDriver driver, const char *table, char **error);
 char *lace_ddl_drop_view(LaceDriver driver, const char *name, char **error);
+/* PostgreSQL ALTER VIEW ... RENAME TO, MySQL RENAME TABLE; SQLite refused */
+char *lace_ddl_rename_view(LaceDriver driver, const char *name, const char *new_name, char **error);
 /* routine: an entry of lace_list_objects (PostgreSQL names carry their argument types) */
 char *lace_ddl_drop_routine(LaceDriver driver, const LaceObject *routine, char **error);
 char *lace_ddl_drop_trigger(LaceDriver driver, const char *name, const char *table, char **error);

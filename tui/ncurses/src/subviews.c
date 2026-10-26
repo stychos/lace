@@ -12,6 +12,7 @@
  */
 
 #include "core/catalog_rows.h"
+#include "ddl_edit.h"
 #include "tui_internal.h"
 #include "util/mem.h"
 #include "views/list_picker.h"
@@ -242,6 +243,7 @@ static bool build_rows(TuiState *state, Tab *tab, CatalogRows *t, char **message
                         : -1;
     catalog_rows_info(t, tab->object, tab->table_name, tab->object_table, tab->object_detail, tab->info, tab->autoinc,
                       tab->info_error, exact, false, conn ? conn->objects : NULL, conn ? conn->num_objects : 0);
+    tui_info_action_rows(state, tab, t);
     return true;
   }
   default:
@@ -393,6 +395,8 @@ static void open_in_new_tab(TuiState *state, LaceObjectKind kind, const char *na
 }
 
 static void activate(TuiState *state, Tab *tab, int tag) {
+  if (tui_structure_activate(state, tab, tag)) /* the editors, rename, an Information action */
+    return;
   if (tag == CATALOG_TAG_ROWS && tab->subview == SUBVIEW_INFORMATION) {
     DbConnection *conn = TUI_CONN(state);
     size_t count = 0;
@@ -406,7 +410,7 @@ static void activate(TuiState *state, Tab *tab, int tag) {
     free(err);
     return;
   }
-  if (tag >= CATALOG_TAG_TRIGGER) {
+  if (tag >= CATALOG_TAG_TRIGGER && tag < CATALOG_TAG_COLUMN) {
     Connection *conn = TUI_TAB_CONNECTION(state);
     size_t i = (size_t)(tag - CATALOG_TAG_TRIGGER);
     if (!conn || i >= conn->num_objects || conn->objects[i].kind != LACE_OBJ_TRIGGER)
@@ -488,7 +492,31 @@ bool tui_handle_subview_input(TuiState *state, const UiEvent *event) {
     }
   if (tab->subview == SUBVIEW_DATA)
     return false;
-  /* a list: the moves, Enter, refresh; the filter keys go back to Data */
+  /* a list: the editors' keys first (r renames here, F5 refreshes), then the
+   * table's actions, the moves, Enter, refresh; the filter keys go back to Data */
+  for (int a = 0; a < HOTKEY_COUNT; a++) {
+    HotkeyAction act = (HotkeyAction)a;
+    if (hotkey_get_category(act) != HOTKEY_CAT_STRUCTURE || !hotkey_matches(cfg, event, act))
+      continue;
+    CatalogRows t;
+    char *msg = NULL;
+    bool ok = build_rows(state, tab, &t, &msg);
+    free(msg);
+    int tag = CATALOG_TAG_NONE;
+    size_t cursor = tab->sv_cursor[tab->subview];
+    if (ok) {
+      clamp_cursor(&t, &cursor);
+      if (cursor < t.nrows && catalog_rows_selectable(&t, cursor))
+        tag = t.tag[cursor];
+    }
+    catalog_rows_free(&t);
+    if (tui_structure_action(state, tab, act, tag))
+      return true;
+  }
+  if (hotkey_matches(cfg, event, HOTKEY_TABLE_MENU)) {
+    tui_table_menu(state);
+    return true;
+  }
   int page = 1;
   if (state->main_win) {
     int r, c;

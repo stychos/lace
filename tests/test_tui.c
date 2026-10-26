@@ -10,6 +10,7 @@
 #include "query_internal.h"
 #include "core/app_state.h"
 #include "views/text_input.h"
+#include "views/form_dialog.h"
 #include "core/connstr_display.h"
 #include "row_key.h"
 #include "config/connections.h"
@@ -848,6 +849,47 @@ static void test_hotkey_key_string(void) {
   config_free(c);
 }
 
+/* Conflicts are by place: the same key in different places is fine, two
+ * actions live together with one key are not; the defaults have none */
+static void test_hotkey_contexts(void) {
+  for (int fe = 1; fe <= 2; fe++) {
+    Config *c = config_get_defaults();
+    c->frontend = (unsigned)fe;
+    HotkeyConflict found[8];
+    size_t n = config_hotkey_conflicts(c, found, 8);
+    if (n) fprintf(stderr, "  default conflict (frontend %d): %s: %s and %s\n", fe, found[0].key,
+                   hotkey_action_name(found[0].a), hotkey_action_name(found[0].b));
+    CHECK(n == 0);
+    CHECK(config_hotkey_conflicts_text(c) == NULL);
+    config_free(c);
+  }
+  Config *c = config_get_defaults();
+  c->frontend = CONFIG_FE_NOTCURSES;
+  /* x: delete a row, drop a column, remove a filter, delete a connection: different places */
+  CHECK(hotkey_find_conflict(c, HOTKEY_DELETE_ROW, "x") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_STRUCT_DROP, "x") == HOTKEY_COUNT);
+  /* an old config.json's f on toggle_filters meets the Foreign keys sub-view in the grid */
+  CHECK(hotkey_add_key(c, HOTKEY_TOGGLE_FILTERS, "f"));
+  CHECK(hotkey_find_conflict(c, HOTKEY_TOGGLE_FILTERS, "f") == HOTKEY_SUBVIEW_FOREIGN_KEYS);
+  CHECK(hotkey_find_conflict(c, HOTKEY_SUBVIEW_FOREIGN_KEYS, "f") == HOTKEY_TOGGLE_FILTERS);
+  HotkeyConflict found[8];
+  CHECK_SIZE(config_hotkey_conflicts(c, found, 8), 1);
+  CHECK(found[0].a == HOTKEY_TOGGLE_FILTERS && found[0].b == HOTKEY_SUBVIEW_FOREIGN_KEYS);
+  CHECK_STR(found[0].key, "f");
+  char *text = config_hotkey_conflicts_text(c);
+  CHECK(text && strstr(text, "f: Toggle filters and Foreign keys"));
+  free(text);
+  /* r renames in a list and refreshes everywhere: one place in common */
+  CHECK(hotkey_find_conflict(c, HOTKEY_STRUCT_RENAME, "r") == HOTKEY_REFRESH);
+  /* the cell editor's Ctrl+N and the new workspace's are different places */
+  CHECK(hotkey_find_conflict(c, HOTKEY_EDITOR_NULL, "CTRL+N") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_NEW_WORKSPACE, "CTRL+N") == HOTKEY_COUNT);
+  /* the structure keys live only in the lists */
+  CHECK(hotkey_action_contexts(HOTKEY_STRUCT_ADD) == HOTKEY_CTX_LIST);
+  CHECK(hotkey_action_contexts(HOTKEY_SUBVIEW_DATA) == (HOTKEY_CTX_GRID | HOTKEY_CTX_LIST));
+  config_free(c);
+}
+
 static void test_hotkey_frontend_mask(void) {
   char *err = NULL;
   Config *c = config_get_defaults();
@@ -1276,6 +1318,39 @@ static void test_session_connstr_password(void) {
   CHECK(session_connstr_with_password(NULL, "p", NULL) == NULL);
 }
 
+/* The form dialog's list fields: comma-separated names, trimmed */
+static void test_form_names(void) {
+  char **names = NULL;
+  CHECK_SIZE(fd_split_names(" a, b ,,c ", &names), 3);
+  CHECK_STR(names[0], "a");
+  CHECK_STR(names[1], "b");
+  CHECK_STR(names[2], "c");
+  for (int i = 0; i < 3; i++) free(names[i]);
+  free(names);
+  CHECK_SIZE(fd_split_names("", &names), 0);
+  CHECK(names == NULL);
+  CHECK_SIZE(fd_split_names(NULL, &names), 0);
+  CHECK_SIZE(fd_split_names("solo", &names), 1);
+  CHECK_STR(names[0], "solo");
+  free(names[0]);
+  free(names);
+  FormDialog f;
+  fd_init(&f, NULL, "t");
+  fd_add_text(&f, 1, "Name", "  x  ", NULL);
+  fd_add_list(&f, 2, "Cols", "a, b", NULL, 0);
+  fd_add_toggle(&f, 3, "On", true);
+  CHECK_STR(fd_text(&f, 1), "x");
+  CHECK(fd_on(&f, 3));
+  CHECK_SIZE(fd_names(&f, 2, &names), 2);
+  free(names[0]);
+  free(names[1]);
+  free(names);
+  const char *a = fd_text(&f, 1), *b = fd_text(&f, 2); /* two values read in a row stay valid */
+  CHECK_STR(a, "x");
+  CHECK_STR(b, "a, b");
+  form_dialog_free(&f);
+}
+
 int main(void) {
   test_recent_passwords();
   test_session_connstr_password();
@@ -1298,10 +1373,12 @@ int main(void) {
   test_filters_where();
   test_order_by();
   test_text_input();
+  test_form_names();
   test_connstr_display();
   test_row_key();
   test_hotkey_parse();
   test_hotkey_frontend_mask();
+  test_hotkey_contexts();
   test_hotkey_key_string();
   test_workspace_json();
   test_workspace_json_forms();

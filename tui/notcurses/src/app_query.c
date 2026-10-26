@@ -111,6 +111,8 @@ static void on_source_schema(NcJob *job, void *data) {
  * One statement
  * ========================================================================== */
 
+static void after_run(NcApp *app, View *v);
+
 static void on_exec(NcJob *job, void *data) {
   QReq *rq = data;
   app_log_job(rq->app, job, "statement");
@@ -122,11 +124,23 @@ static void on_exec(NcJob *job, void *data) {
     return;
   }
   show_result(rq->app, v, nc_job_steal_result(job));
+  after_run(rq->app, v);
+}
+
+/* A statement ran (or its first page landed): a view opened from "New
+ * view/function" reloads the sidebar, since the statement may have created
+ * something */
+static void after_run(NcApp *app, View *v) {
+  if (!v->reload_tables_on_run) return;
+  ConnTab *t = app_view_tab(app, v);
+  if (t && t->conn && !nc_connection_closed(t->conn)) nc_connection_refresh_tables(t->conn);
 }
 
 static void exec_once(NcApp *app, View *v, ConnTab *t, const char *sql) {
   v->paged = false;
-  nc_connection_submit_full(t->conn, nc_job_exec(sql), t->owner, on_exec, qreq_new(app, v), free);
+  NcJob *job = nc_job_exec(sql);
+  job->user_statement = true; /* the lock banner */
+  nc_connection_submit_full(t->conn, job, t->owner, on_exec, qreq_new(app, v), free);
 }
 
 void app_query_first_page_failed(NcApp *app, View *v) {
@@ -149,6 +163,7 @@ void app_query_first_page_ok(NcApp *app, View *v) {
   if (t && t->conn && v->base_sql)
     nc_connection_record_history(t->conn, v->base_sql, lace_history_detect_type(v->base_sql));
   if (!page_cache_total_known(v->cache)) app_view_count(app, v);
+  after_run(app, v);
 }
 
 /* Starts one statement; the caller has checked that nothing runs */
@@ -328,7 +343,9 @@ static void script_next(NcApp *app, View *v, Script *s) {
       v->base_sql = str_dup(stmt);
       v->paged = false;
     }
-    script_submit(s, t->conn, t->owner, nc_job_exec(stmt), on_step);
+    NcJob *job = nc_job_exec(stmt);
+    job->user_statement = true;
+    script_submit(s, t->conn, t->owner, job, on_step);
   }
   str_secure_free(stmt);
 }
@@ -363,6 +380,7 @@ static void on_step(NcJob *job, void *data) {
   }
   /* The last statement of a transaction: keep its result, then COMMIT */
   show_result(app, v, nc_job_steal_result(job));
+  after_run(app, v);
   ConnTab *t = app_view_tab(app, v);
   if (!t || !t->conn) {
     v->running = false;

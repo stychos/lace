@@ -44,6 +44,11 @@ void lace_query_view_show_history(LaceQueryView *v);
 void lace_query_view_goto_row(LaceQueryView *v);
 void lace_query_view_delete_selected(LaceQueryView *v);
 void lace_query_view_refresh(LaceQueryView *v);
+/* A view opened from "New view/function": the sidebar reloads once a statement ran */
+void lace_query_view_set_reload_tables(LaceQueryView *v, gboolean reload);
+/* The lock banner shows (a user statement runs on the connection) */
+gboolean lace_query_view_is_locked(LaceQueryView *v);
+const char *lace_query_view_get_status_text(LaceQueryView *v); /* the toolbar's status (scripts) */
 
 /* Signal: title-changed () when the tab title (first words) changes */
 char *lace_query_view_get_title(LaceQueryView *v); /* g_free */

@@ -21,10 +21,11 @@
 import AppKit
 import LaceKit
 
-final class TableViewController: NSViewController, GridDelegate {
+final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate {
   let connection: Connection
   /// What the tab shows: a table, a database view, a routine or a trigger
-  let object: CatalogObject
+  /// (a rename changes the name: rename(to:))
+  private(set) var object: CatalogObject
   var table: String { object.name }
   let prefs: Prefs
   let model: RowModel
@@ -38,6 +39,13 @@ final class TableViewController: NSViewController, GridDelegate {
   var onOpenObject: ((CatalogObject, SubView) -> Void)?
   /// The connection's objects for the Information view (the sidebar's list)
   var objectsProvider: (() -> [CatalogObject])?
+  /// The connection's tables (the foreign key editor's referenced table)
+  var tablesProvider: (() -> [String])?
+  /// A structure change or table action ran: the connection page reloads,
+  /// renames or closes the object's tabs and the sidebar (DdlRunner)
+  var onDdlApplied: ((DdlAfter) -> Void)?
+  /// Open a query view holding text (a template, a definition)
+  var onNewQuery: ((String) -> Void)?
   var toast: ((String) -> Void)? {
     didSet {
       grid.toast = toast
@@ -46,14 +54,16 @@ final class TableViewController: NSViewController, GridDelegate {
   }
 
   private let strip = NSSegmentedControl()
-  private let list = CatalogListController()
-  private let filterBar = FilterBarView(frame: .zero)
+  private let actionsButton = NSPopUpButton(frame: .zero, pullsDown: true)
+  let list = CatalogListController()
+  let filterBar = FilterBarView(frame: .zero)
   private let banner = BannerView(frame: .zero)
+  private let lockBanner = LockBannerView(frame: .zero)
   private let statusLabel = NSTextField(labelWithString: "")
   private let cellLabel = NSTextField(labelWithString: "")
   private let spinner = NSProgressIndicator()
   private let edit: EditController
-  private var schema: Schema?
+  private(set) var schema: Schema?
   private var whereBody: String?
   private var orderBy: String?
   private var keyset: Keyset?
@@ -67,13 +77,13 @@ final class TableViewController: NSViewController, GridDelegate {
   /// The sub-view shown (saved in the session)
   private(set) var subview: SubView
   /// What the other sub-views read when first shown; a refresh drops them
-  private var info: TableInfo?
+  private(set) var info: TableInfo?
   private var infoError: String?
   private var infoCount: Int64 = -1
   private var counting = false
-  private var dependents: Dependents?
+  var dependents: Dependents?
   private var dependentsError: String?
-  private var definition: String?
+  private(set) var definition: String?
   private var definitionError: String?
   private var catalogLoading = 0
 
@@ -140,14 +150,25 @@ final class TableViewController: NSViewController, GridDelegate {
     strip.selectedSegment = available.firstIndex(of: subview) ?? 0
     strip.target = self
     strip.action = #selector(stripChanged(_:))
-    let stripRow = NSStackView(views: [strip])
+    actionsButton.controlSize = .small
+    actionsButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+    actionsButton.menu = NSMenu()
+    actionsButton.menu?.delegate = self
+    actionsButton.menu?.addItem(withTitle: "Actions", action: nil, keyEquivalent: "")
+    actionsButton.toolTip = "The table's actions and the sub-view's editors"
+    let stripSpacer = NSView()
+    stripSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let stripRow = NSStackView(views: [strip, stripSpacer, actionsButton])
     stripRow.orientation = .horizontal
     stripRow.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
     stripRow.setContentHuggingPriority(.required, for: .vertical)
     list.onActivate = { [weak self] tag in self?.activate(tag: tag) }
+    list.onDelete = { [weak self] in self?.runStructureAction(.drop) }
+    list.menuProvider = { [weak self] in self?.structureMenu() }
     list.scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
+    lockBanner.onCancel = { [weak self] in self?.connection.cancel() }
 
-    let stack = NSStackView(views: [stripRow, banner, filterBar, grid.scrollView, list.scrollView, SeparatorView(), footer])
+    let stack = NSStackView(views: [lockBanner, stripRow, banner, filterBar, grid.scrollView, list.scrollView, SeparatorView(), footer])
     stack.orientation = .vertical
     stack.alignment = .width
     stack.spacing = 0
@@ -175,6 +196,36 @@ final class TableViewController: NSViewController, GridDelegate {
   func tearDown() {
     model.fetch = nil
   }
+
+  /// The object was renamed (a rename ran): the tab follows
+  func rename(to name: String) {
+    object = CatalogObject(kind: object.kind, name: name, table: object.table, detail: object.detail)
+    edit.table = name
+  }
+
+  /// A change to the object ran: everything is read again
+  func reloadAfterChange() {
+    dropCatalog()
+    if SubView.available(for: object.kind).contains(.data) {
+      loadSchema()
+    } else {
+      renderList()
+    }
+  }
+
+  /// The lock banner: a statement the user asked for runs on the connection
+  func setLocked(_ statement: Connection.UserStatement?) {
+    lockBanner.statement = statement
+    let locked = statement != nil
+    grid.tableView.isEnabled = !locked
+    list.tableView.isEnabled = !locked
+    filterBar.isHidden = filterBar.isHidden || locked ? filterBar.isHidden : false
+    strip.isEnabled = !locked
+    actionsButton.isEnabled = !locked
+  }
+
+  /// The lock banner's text, for scripts; nil when hidden
+  var lockBannerText: String? { lockBanner.isHidden ? nil : lockBanner.text }
 
   // MARK: Loading
 
@@ -401,7 +452,7 @@ final class TableViewController: NSViewController, GridDelegate {
 
   // MARK: Sub-views
 
-  private func dropCatalog() {
+  func dropCatalog() {
     info = nil
     infoError = nil
     infoCount = -1
@@ -446,7 +497,7 @@ final class TableViewController: NSViewController, GridDelegate {
   }
 
   /// The list of the current sub-view, from what is loaded; asks for what is not
-  private func renderList() {
+  func renderList() {
     guard subview != .data else { return }
     let dataLike = SubView.available(for: object.kind).contains(.data)
     if dataLike && schema == nil {
@@ -486,7 +537,8 @@ final class TableViewController: NSViewController, GridDelegate {
         : (dataLike && model.totalKnown && !model.totalApproximate && filterBar.isEmpty ? Int64(model.total) : -1)
       list.show(
         CatalogTable.info(
-          object, info: info, error: infoError, exact: exact, counting: counting, objects: objectsProvider?() ?? []))
+          object, info: info, error: infoError, exact: exact, counting: counting, objects: objectsProvider?() ?? []
+        ).appending(infoActionRows()))
     case .data:
       break
     }
@@ -527,7 +579,7 @@ final class TableViewController: NSViewController, GridDelegate {
     }
   }
 
-  private func loadDefinition() {
+  func loadDefinition() {
     guard definition == nil, definitionError == nil, catalogLoading == 0 else { return }
     catalogLoading += 1
     let connection = self.connection
@@ -551,6 +603,23 @@ final class TableViewController: NSViewController, GridDelegate {
 
   /// Return or a double click on a list row
   private func activate(tag: Int) {
+    if runInfoTag(tag) { return }
+    if subview == .structure, object.kind == .table, tag >= CatalogTable.Tag.column {
+      runStructureAction(.edit)
+      return
+    }
+    if subview == .structure, object.kind != .table {
+      editDefinitionInQuery()
+      return
+    }
+    if subview == .indexes, tag >= CatalogTable.Tag.index {
+      runStructureAction(.rename)
+      return
+    }
+    if subview == .foreignKeys, tag >= CatalogTable.Tag.foreignKey, tag < CatalogTable.Tag.dependent {
+      runStructureAction(.edit)
+      return
+    }
     if tag == CatalogTable.Tag.rows, subview == .information {
       guard !counting else { return }
       counting = true
@@ -558,7 +627,7 @@ final class TableViewController: NSViewController, GridDelegate {
       let connection = self.connection
       let table = self.table
       Task { [weak self] in
-        let outcome = await Result { try await connection.count(table: table, approximate: false) }
+        let outcome = await Result { try await connection.count(table: table, approximate: false, user: true) }
         guard let self else { return }
         counting = false
         if case .success(let c) = outcome { infoCount = c.count } else { toast?("The count failed") }
@@ -635,6 +704,24 @@ final class TableViewController: NSViewController, GridDelegate {
       case .failure(let error):
         toast?("\(error)")
       }
+    }
+  }
+
+  /// The Table menu: the object's actions always, the editors in their lists
+  func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+    switch item.action {
+    case #selector(structureAdd(_:)): return availableStructureActions().contains(.add)
+    case #selector(structureEdit(_:)): return availableStructureActions().contains(.edit)
+    case #selector(structureDrop(_:)): return availableStructureActions().contains(.drop)
+    case #selector(structureRename(_:)): return availableStructureActions().contains(.rename)
+    case #selector(structurePrimaryKey(_:)): return availableStructureActions().contains(.primaryKey)
+    case #selector(structureMove(_:)): return availableStructureActions().contains(.move)
+    case #selector(structureCheck(_:)): return availableStructureActions().contains(.check)
+    case #selector(truncateTable(_:)): return object.kind == .table
+    case #selector(renameTable(_:)): return object.kind == .table || object.kind == .view
+    case #selector(editInQuery(_:)): return object.kind != .table
+    case #selector(newFunction(_:)): return connection.driver != .sqlite
+    default: return true
     }
   }
 
@@ -722,6 +809,17 @@ final class TableViewController: NSViewController, GridDelegate {
     }
     onTouched?()
     startLoad()
+  }
+
+  // MARK: NSMenuDelegate (the strip's actions button)
+
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    guard menu === actionsButton.menu else { return }
+    menu.removeAllItems()
+    menu.addItem(withTitle: "Actions", action: nil, keyEquivalent: "")  // the pull-down's title
+    for item in structureMenu().items {
+      menu.addItem(item.copy() as! NSMenuItem)
+    }
   }
 
   // MARK: GridDelegate

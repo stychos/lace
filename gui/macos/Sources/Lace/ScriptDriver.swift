@@ -45,6 +45,24 @@
 //                            last one containing TEXT
 //   sheet add-row|history|connect|preferences   open that sheet or window
 //   dismiss-sheet            close it again
+//   answer TEXT              what the next name prompt (rename, new table, the
+//                            counter, a comment) answers; empty: cancel
+//   ddl ACTION [ARG]         a table action or editor: rename-table NAME,
+//                            truncate, drop, new-table NAME, new-view NAME,
+//                            new-function NAME, edit-definition, autoinc N,
+//                            comment TEXT, maintenance analyze|vacuum|optimize,
+//                            action add|edit|drop|rename|primary-key|move|check
+//                            (the sub-view's editor on the selected row).
+//                            Confirmations are answered yes; the SQL is logged.
+//   select-row TEXT          select the sub-view list's row containing TEXT
+//   ddl-field ID VALUE       a field of the open editor sheet (name, type, ...)
+//   ddl-save                 submit the editor and wait for it to close
+//   expect-no-row TEXT       no row of the sub-view's list contains TEXT
+//   expect-table NAME        the current table tab shows NAME
+//   expect-no-sidebar TEXT   no sidebar row is TEXT (waits for a reload)
+//   run-async                run the statement at the cursor without waiting
+//   cancel                   cancel the connection's running statement
+//   expect-banner | expect-no-banner   the lock banner shows / is gone (waits)
 //   shot NAME                NAME.png of the window's content into $LACE_MACOS_SHOTS
 //                            (NAME-sheet.png of an open sheet or the preferences)
 //   quit                     exit 0, or 1 when an expectation failed
@@ -76,6 +94,13 @@ final class ScriptDriver {
   private var checks = 0
   private var failures = 0
   private let timeout: Double = 30
+  /// The answers queued for the name prompts (the `answer` command)
+  nonisolated(unsafe) private static var promptAnswers: [String] = []
+
+  /// The next scripted answer, taken; nil when the script gave none
+  static func takePromptAnswer() -> String? {
+    promptAnswers.isEmpty ? nil : promptAnswers.removeFirst()
+  }
 
   private init(workspace: WorkspaceViewController, script: String) {
     self.workspace = workspace
@@ -87,6 +112,8 @@ final class ScriptDriver {
     // Keychain would ask too: passwords stay in the private HOME's file.
     LaceApp.shared.prefs.confirmDelete = false
     LaceApp.shared.prefs.keychainPasswords = false
+    DdlRunner.autoConfirm = true
+    DdlRunner.logger = { line in FileHandle.standardError.write(Data("script: \(line)\n".utf8)) }
     Alerts.logger = { title, message in
       FileHandle.standardError.write(Data("script: alert \(title): \(message)\n".utf8))
     }
@@ -411,6 +438,113 @@ final class ScriptDriver {
           w.close()
         }
         try? await Task.sleep(for: .milliseconds(100))
+      case "answer":
+        Self.promptAnswers.append(arg)
+      case "ddl":
+        guard let table else {
+          check(false, "ddl: no table tab")
+          continue
+        }
+        let what = words.first ?? ""
+        let rest = words.count > 1 ? words[1...].joined(separator: " ") : ""
+        switch what {
+        case "rename-table":
+          Self.promptAnswers.append(rest)
+          table.renameTable(nil)
+        case "truncate": table.truncateTable(nil)
+        case "drop": table.dropTable(nil)
+        case "new-table":
+          Self.promptAnswers.append(rest)
+          table.newTable(nil)
+        case "new-view":
+          Self.promptAnswers.append(rest)
+          table.newView(nil)
+        case "new-function":
+          Self.promptAnswers.append(rest)
+          table.newFunction(nil)
+        case "edit-definition": table.editInQuery(nil)
+        case "autoinc":
+          Self.promptAnswers.append(rest)
+          table.setAutoincrement()
+        case "comment":
+          Self.promptAnswers.append(rest)
+          table.setComment()
+        case "maintenance":
+          table.maintenance(rest == "vacuum" ? .vacuum : rest == "optimize" ? .optimize : .analyze)
+        case "action":
+          let actions: [String: StructureAction] = [
+            "add": .add, "edit": .edit, "drop": .drop, "rename": .rename, "primary-key": .primaryKey, "move": .move,
+            "check": .check,
+          ]
+          guard let a = actions[rest] else {
+            check(false, "ddl action: unknown \(rest)")
+            continue
+          }
+          table.runStructureAction(a)
+        default:
+          check(false, "ddl: unknown \(what)")
+        }
+        try? await Task.sleep(for: .milliseconds(200))
+        await settle()
+      case "select-row":
+        guard let table else {
+          check(false, "select-row: no table")
+          continue
+        }
+        let ok = await waitUntil("a row with \(arg)") { table.list.selectRow(containing: arg) }
+        check(ok, "select-row \(arg): rows \(table.listRows)")
+      case "ddl-field":
+        guard let sheet = table?.presentedViewControllers?.compactMap({ $0 as? FormSheetController }).first,
+          words.count >= 1
+        else {
+          check(false, "ddl-field: no editor sheet")
+          continue
+        }
+        let value = words.count > 1 ? words[1...].joined(separator: " ") : ""
+        check(sheet.set(words[0], value), "ddl-field \(words[0]): no such field")
+      case "ddl-save":
+        guard let table, let sheet = table.presentedViewControllers?.compactMap({ $0 as? FormSheetController }).first
+        else {
+          check(false, "ddl-save: no editor sheet")
+          continue
+        }
+        sheet.onSubmit?(sheet)
+        let closed = await waitUntil("the editor to close") {
+          table.presentedViewControllers?.contains { $0 === sheet } != true
+        }
+        check(closed, "ddl-save: the editor stayed open")
+        await settle()
+      case "expect-no-row":
+        guard let table else {
+          check(false, "expect-no-row: no table")
+          continue
+        }
+        let ok = await waitUntil("no row with \(arg)") { !table.listRows.contains { $0.contains(arg) } }
+        check(ok, "expect-no-row \(arg): rows \(table.listRows)")
+      case "expect-table":
+        check(table?.table == arg, "expect-table \(arg): got \(table?.table ?? "<no table>")")
+      case "expect-no-sidebar":
+        guard let connection else {
+          check(false, "expect-no-sidebar: no connection")
+          continue
+        }
+        let ok = await waitUntil("no sidebar row \(arg)") { !connection.sidebar.rowTexts.contains(arg) }
+        check(ok, "expect-no-sidebar \(arg): rows \(connection.sidebar.rowTexts)")
+      case "run-async":
+        guard let query else {
+          check(false, "run-async: no query view")
+          continue
+        }
+        query.run(mode: .atCursor)
+      case "cancel":
+        connection?.connection.cancel()
+      case "expect-banner", "expect-no-banner":
+        let want = verb == "expect-banner"
+        let ok = await waitUntil(want ? "the lock banner" : "the lock banner to go") {
+          let text = table?.lockBannerText ?? query?.lockBannerText
+          return (text != nil) == want
+        }
+        check(ok, "\(verb): banner \(table?.lockBannerText ?? query?.lockBannerText ?? "<none>")")
       case "shot":
         shot(arg)
       case "terminate":

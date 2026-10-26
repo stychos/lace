@@ -264,7 +264,7 @@ bool catalog_rows_indexes(CatalogRows *t, const LaceSchema *sc) {
     char *cond = ix->check && *ix->check ? str_dup(ix->check)
                  : ix->where && *ix->where ? str_printf("WHERE %s", ix->where)
                                            : str_dup("");
-    catalog_rows_add(t, (int)i, ix->name ? ix->name : "", index_kind(ix), cols, cond, ix->type ? ix->type : "",
+    catalog_rows_add(t, CATALOG_TAG_INDEX + (int)i, ix->name ? ix->name : "", index_kind(ix), cols, cond, ix->type ? ix->type : "",
                      ix->constraint ? ix->constraint : "");
     free(cols);
     free(cond);

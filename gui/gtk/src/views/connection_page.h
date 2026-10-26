@@ -44,10 +44,14 @@ LaceQueryView *lace_connection_page_new_query(LaceConnectionPage *p, const char 
 /* The current inner tab's widget: a LaceTableView, a LaceQueryView or NULL */
 GtkWidget *lace_connection_page_current_view(LaceConnectionPage *p);
 gboolean lace_connection_page_close_current(LaceConnectionPage *p);
+/* Close the tab showing that view (a dropped table's); false when it is not here */
+gboolean lace_connection_page_close_view(LaceConnectionPage *p, GtkWidget *view);
 void lace_connection_page_select_tab(LaceConnectionPage *p, int offset);
 AdwTabView *lace_connection_page_get_tab_view(LaceConnectionPage *p);
 /* The view a page of that tab view shows (a preview page wraps its view) */
 GtkWidget *lace_connection_page_view_of(AdwTabPage *page);
+/* The page showing that view, or NULL */
+AdwTabPage *lace_connection_page_page_of(LaceConnectionPage *p, GtkWidget *view);
 
 gboolean lace_connection_page_sidebar_visible(LaceConnectionPage *p);
 void lace_connection_page_set_sidebar_visible(LaceConnectionPage *p, gboolean visible);

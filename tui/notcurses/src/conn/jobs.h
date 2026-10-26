@@ -13,6 +13,7 @@ typedef enum {
   NC_JOB_DATABASES, /* lace_list_databases(): the names land in tables/num_tables */
   NC_JOB_TABLE_INFO, /* lace_table_info() and lace_autoincrement_get(): info, autoinc */
   NC_JOB_DEFINITION, /* lace_object_definition(): definition */
+  NC_JOB_NAMES,      /* a picker's names (lace_list_collations/types/engines): tables/num_tables */
 } NcJobKind;
 
 /* Main-thread token: the done callback is skipped once it is released */
@@ -34,6 +35,8 @@ struct NcJob {
   bool read_only;   /* may be retried after a reconnect */
   bool savepoint;   /* wrap in SAVEPOINT inside a PostgreSQL transaction */
   bool record;      /* record the statement in history on success */
+  bool user_statement; /* a statement the user asked for (a query view's, an edit, a structure
+                        * change, a count asked for): the lock banner shows while it runs */
   bool was_running; /* set when the worker picked it up */
 
   /* Inputs */
@@ -82,6 +85,9 @@ NcJob *nc_job_dependents(const char *table); /* lace_table_dependents(): a read 
 NcJob *nc_job_table_info(const char *table); /* lace_table_info() + lace_autoincrement_get(): a read */
 /* lace_object_definition() of a view, routine or trigger (table: a trigger's; detail: a routine's kind) */
 NcJob *nc_job_definition(LaceObjectKind kind, const char *name, const char *table, const char *detail);
+/* The names a picker lists (a read): what is "collations" (arg: a charset, or
+ * NULL), "types" or "engines"; they land in tables/num_tables */
+NcJob *nc_job_names(const char *what, const char *arg);
 NcJob *nc_job_table_count(const char *table, const char *where, bool approximate);
 NcJob *nc_job_count_sql(const char *sql);
 NcJob *nc_job_update(const char *table, const LaceRowKey *key, const LaceRowSnapshot *snap,

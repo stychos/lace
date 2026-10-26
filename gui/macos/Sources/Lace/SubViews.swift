@@ -65,6 +65,10 @@ final class CatalogListController: NSObject, NSTableViewDataSource, NSTableViewD
   let tableView = KeyTableView()
   /// Return or a double click on a row with a tag
   var onActivate: ((Int) -> Void)?
+  /// Delete or Backspace on a row
+  var onDelete: (() -> Void)?
+  /// The context menu (the editors' actions)
+  var menuProvider: (() -> NSMenu?)?
   private(set) var table: CatalogTable?
   private var message: String?
   private let messageLabel = NSTextField(labelWithString: "")
@@ -85,6 +89,11 @@ final class CatalogListController: NSObject, NSTableViewDataSource, NSTableViewD
     tableView.target = self
     tableView.doubleAction = #selector(doubleClicked(_:))
     tableView.onReturn = { [weak self] in self?.activateSelected() }
+    tableView.onDelete = { [weak self] in self?.onDelete?() }
+    tableView.menuProvider = { [weak self] row in
+      if row >= 0 { self?.selectRow(row) }
+      return self?.menuProvider?()
+    }
     scrollView.documentView = tableView
     scrollView.hasVerticalScroller = true
     scrollView.hasHorizontalScroller = true
@@ -152,6 +161,23 @@ final class CatalogListController: NSObject, NSTableViewDataSource, NSTableViewD
   }
 
   var rowCount: Int { table?.rows.count ?? 0 }
+
+  /// The selected row's tag; nil without a selection
+  var selectedTag: Int? {
+    let row = tableView.selectedRow
+    guard let table, row >= 0, row < table.rows.count else { return nil }
+    return table.rows[row].tag
+  }
+
+  /// Select the first row whose text contains text (scripts); false when none
+  @discardableResult
+  func selectRow(containing text: String) -> Bool {
+    guard let table, let i = table.rows.firstIndex(where: { !$0.heading && $0.cells.contains { $0.contains(text) } }) else {
+      return false
+    }
+    selectRow(i)
+    return true
+  }
 
   func selectRow(_ row: Int) {
     guard let table, row < table.rows.count, !table.rows[row].heading else { return }

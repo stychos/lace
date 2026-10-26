@@ -75,6 +75,10 @@ static void on_deps(NcJob *job, void *data) {
     free(v->deps_error);
     v->deps_error = str_dup(job->cancelled ? "Cancelled" : job->error);
     v->referenced_by_pending = false;
+    if (v->pending_action == 1) { /* the drop goes on without the list */
+      v->pending_action = 0;
+      app_table_drop_continue(app, v);
+    }
     return;
   }
   lace_dependents_free(v->deps, v->num_deps);
@@ -86,6 +90,10 @@ static void on_deps(NcJob *job, void *data) {
   if (v->referenced_by_pending) {
     v->referenced_by_pending = false;
     app_referenced_by(app, v); /* the pick list that waited for the list */
+  }
+  if (v->pending_action == 1) {
+    v->pending_action = 0;
+    app_table_drop_continue(app, v); /* the drop's confirmation names them */
   }
 }
 
@@ -164,8 +172,9 @@ void app_view_count_exact(NcApp *app, View *v) {
   ConnTab *t = live_tab(app, v);
   if (!t || !v->table || v->info_count_pending) return;
   v->info_count_pending = true;
-  nc_connection_submit_full(t->conn, nc_job_table_count(v->table, NULL, false), t->owner, on_exact, req_new(app, v),
-                            free);
+  NcJob *job = nc_job_table_count(v->table, NULL, false);
+  job->user_statement = true; /* asked for: the lock banner shows while it counts */
+  nc_connection_submit_full(t->conn, job, t->owner, on_exact, req_new(app, v), free);
 }
 
 /* ---- refresh ---- */

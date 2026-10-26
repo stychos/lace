@@ -12,6 +12,10 @@
 #include "filter_bar.h"
 #include "catalog_list.h"
 #include "core/catalog_rows.h"
+#include "ddl_editors.h"
+#include "ddl_helpers.h"
+#include "ddl_ops.h"
+#include "connection_page.h"
 #include "util.h"
 #include <stdlib.h>
 #include <string.h>
@@ -55,6 +59,12 @@ struct _LaceTableView {
   GtkWidget *spinner;
   GtkWidget *delete_button;
   GtkWidget *filter_button;
+  GtkWidget *lock_banner;     /* a user statement runs on the connection: the content waits */
+  GtkWidget *footer;
+  GtkWidget *struct_box;      /* the sub-view lists' buttons (add, edit, drop, rename, ...) */
+  GtkWidget *struct_buttons[8];
+  const char *struct_names[8];
+  guint lock_timer;
 
   char *where;
   char *order_by;
@@ -72,7 +82,7 @@ typedef struct {
   gsize page;
 } PageReq;
 
-enum { SIG_TOUCHED, SIG_OPEN_FILTERED, SIG_OPEN_OBJECT, N_SIGNALS };
+enum { SIG_TOUCHED, SIG_OPEN_FILTERED, SIG_OPEN_OBJECT, SIG_DEPS_LOADED, N_SIGNALS };
 static guint signals[N_SIGNALS];
 
 G_DEFINE_TYPE(LaceTableView, lace_table_view, GTK_TYPE_WIDGET)
@@ -82,6 +92,8 @@ static void touched(LaceTableView *v) { g_signal_emit(v, signals[SIG_TOUCHED], 0
 static void start_load(LaceTableView *v);
 static void update_status(LaceTableView *v);
 static void render_list(LaceTableView *v);
+static void update_lock(LaceTableView *v);
+static void update_struct_buttons(LaceTableView *v);
 
 /* ==========================================================================
  * Sub-view names
@@ -205,6 +217,43 @@ static void on_selection_changed(GtkSelectionModel *m, guint pos, guint n, LaceT
 static void on_busy_changed(LaceConnection *c, LaceTableView *v) {
   (void)c;
   gtk_widget_set_visible(v->spinner, lace_connection_is_busy(v->conn));
+  update_lock(v);
+}
+
+/* ---- the lock banner: a statement the user asked for runs on the connection ---- */
+
+static gboolean lock_tick(gpointer data) {
+  update_lock(LACE_TABLE_VIEW(data));
+  return G_SOURCE_CONTINUE;
+}
+
+static void update_lock(LaceTableView *v) {
+  const char *what = NULL;
+  gint64 since = 0;
+  gboolean locked = v->conn && lace_connection_user_busy(v->conn, &what, &since);
+  if (locked) {
+    char *text = lace_ddl_banner_text(what, (g_get_monotonic_time() - since) / 1000, 60);
+    adw_banner_set_title(ADW_BANNER(v->lock_banner), text);
+    g_free(text);
+    if (!v->lock_timer)
+      v->lock_timer = g_timeout_add(1000, lock_tick, v);
+  } else if (v->lock_timer) {
+    g_source_remove(v->lock_timer);
+    v->lock_timer = 0;
+  }
+  adw_banner_set_revealed(ADW_BANNER(v->lock_banner), locked);
+  gtk_widget_set_sensitive(v->stack, !locked);
+  gtk_widget_set_sensitive(v->footer, !locked);
+}
+
+static void on_lock_cancel(AdwBanner *b, LaceTableView *v) {
+  (void)b;
+  if (v->conn)
+    lace_connection_cancel(v->conn);
+}
+
+gboolean lace_table_view_is_locked(LaceTableView *v) {
+  return v->conn && lace_connection_user_busy(v->conn, NULL, NULL);
 }
 
 static void on_cell_focused(LaceDataGrid *g, guint row, guint col, LaceTableView *v) {
@@ -420,6 +469,7 @@ static void deps_done(LaceJob *job, gpointer data) {
     }
   }
   render_list(v);
+  g_signal_emit(v, signals[SIG_DEPS_LOADED], 0); /* a drop that waited for the list */
 }
 
 static void definition_done(LaceJob *job, gpointer data) {
@@ -523,6 +573,7 @@ static void render_list(LaceTableView *v) {
                        : -1;
     catalog_rows_info(&rows, v->object, v->table, v->object_table, v->object_detail, v->info, v->autoinc,
                       v->info_error, exact, v->counting, objs, n);
+    lace_ddl_info_actions(&rows, v);
     lace_catalog_list_show(l, &rows, NULL);
     break;
   }
@@ -553,7 +604,7 @@ static void on_list_activate(LaceCatalogList *l, int tag, LaceTableView *v) {
     lace_connection_submit(v->conn, lace_job_table_count(v->table, NULL, FALSE), G_OBJECT(v), exact_count_done, v);
     return;
   }
-  if (tag >= CATALOG_TAG_TRIGGER) {
+  if (tag >= CATALOG_TAG_TRIGGER && tag < CATALOG_TAG_COLUMN) {
     size_t n = 0;
     const LaceObject *objs = lace_connection_get_objects(v->conn, &n);
     size_t i = (size_t)(tag - CATALOG_TAG_TRIGGER);
@@ -567,7 +618,9 @@ static void on_list_activate(LaceCatalogList *l, int tag, LaceTableView *v) {
     if (i < v->num_deps && v->deps[i].table)
       g_signal_emit(v, signals[SIG_OPEN_OBJECT], 0, (int)LACE_OBJ_TABLE, v->deps[i].table, NULL,
                     (int)LACE_SUBVIEW_FOREIGN_KEYS);
+    return;
   }
+  lace_ddl_activate(v, tag); /* a column, an index, a key, an Information action */
 }
 
 static void on_stack_page_changed(GObject *stack, GParamSpec *ps, LaceTableView *v) {
@@ -577,6 +630,7 @@ static void on_stack_page_changed(GObject *stack, GParamSpec *ps, LaceTableView 
   if (name && lace_subview_from_key(name, &sv) && sv != v->subview) {
     v->subview = sv;
     render_list(v);
+    update_struct_buttons(v);
   }
 }
 
@@ -590,6 +644,136 @@ void lace_table_view_set_subview(LaceTableView *v, LaceSubView sv) {
   v->subview = sv;
   adw_view_stack_set_visible_child_name(ADW_VIEW_STACK(v->stack), lace_subview_key(sv, v->object));
   render_list(v);
+  update_struct_buttons(v);
+}
+
+/* ==========================================================================
+ * What the structure editors read, and what a change does to the view
+ * ========================================================================== */
+
+const LaceSchema *lace_table_view_get_schema(LaceTableView *v) { return v->schema; }
+const LaceTableInfo *lace_table_view_get_info(LaceTableView *v) { return v->info; }
+const LaceAutoInc *lace_table_view_get_autoinc(LaceTableView *v) { return v->autoinc; }
+
+const char *lace_table_view_get_definition(LaceTableView *v) {
+  if (!v->definition)
+    load_definition(v);
+  return v->definition;
+}
+
+const LaceDependent *lace_table_view_get_dependents(LaceTableView *v, size_t *n, gboolean *loaded) {
+  if (n)
+    *n = v->num_deps;
+  if (loaded)
+    *loaded = v->deps_loaded;
+  return v->deps;
+}
+
+void lace_table_view_load_dependents(LaceTableView *v) {
+  if (v->deps_loaded) {
+    g_signal_emit(v, signals[SIG_DEPS_LOADED], 0);
+    return;
+  }
+  g_clear_pointer(&v->deps_error, g_free);
+  load_deps(v);
+}
+
+gint64 lace_table_view_get_total(LaceTableView *v, gboolean *known, gboolean *approximate) {
+  if (known)
+    *known = lace_row_model_total_known(v->model);
+  if (approximate)
+    *approximate = lace_row_model_total_approximate(v->model);
+  return (gint64)lace_row_model_get_total(v->model);
+}
+
+int lace_table_view_get_selected_tag(LaceTableView *v) {
+  if (v->subview == LACE_SUBVIEW_DATA || !v->lists[v->subview])
+    return CATALOG_TAG_NONE;
+  return lace_catalog_list_get_selected_tag(v->lists[v->subview]);
+}
+
+gboolean lace_table_view_select_list_row(LaceTableView *v, guint n) {
+  if (v->subview == LACE_SUBVIEW_DATA || !v->lists[v->subview])
+    return FALSE;
+  return lace_catalog_list_select_row(v->lists[v->subview], n);
+}
+
+void lace_table_view_run_action(LaceTableView *v, const char *action) {
+  lace_ddl_action(v, action, lace_table_view_get_selected_tag(v));
+}
+
+void lace_table_view_after_ddl(LaceTableView *v, const char *new_name) {
+  if (new_name && g_strcmp0(new_name, v->table) != 0) {
+    g_free(v->table);
+    v->table = g_strdup(new_name);
+    v->edit.table = v->table;
+    GtkWidget *cp = gtk_widget_get_ancestor(GTK_WIDGET(v), LACE_TYPE_CONNECTION_PAGE);
+    AdwTabPage *page = cp ? lace_connection_page_page_of(LACE_CONNECTION_PAGE(cp), GTK_WIDGET(v)) : NULL;
+    if (page)
+      adw_tab_page_set_title(page, new_name);
+  }
+  drop_catalog(v);
+  if (lace_object_has_subview(v->object, LACE_SUBVIEW_DATA))
+    load_schema(v); /* then page 0 and the count; the lists redraw from the new schema */
+  else
+    render_list(v);
+}
+
+static void act_run(GSimpleAction *a, GVariant *p, gpointer data) {
+  (void)a;
+  lace_table_view_run_action(LACE_TABLE_VIEW(data), g_variant_get_string(p, NULL));
+}
+
+/* The buttons of the current sub-view list; none on Data */
+static void update_struct_buttons(LaceTableView *v) {
+  gboolean list = v->subview != LACE_SUBVIEW_DATA;
+  gtk_widget_set_visible(v->struct_box, list);
+  for (int i = 0; i < 8 && v->struct_buttons[i]; i++)
+    gtk_widget_set_visible(v->struct_buttons[i], list && lace_ddl_action_applies(v, v->struct_names[i]));
+}
+
+/* The table's actions: a menu by object kind */
+static GMenu *table_menu(LaceTableView *v) {
+  GMenu *menu = g_menu_new();
+  GMenu *s1 = g_menu_new(), *s2 = g_menu_new();
+  const char *items[8][2];
+  size_t n = 0;
+  switch (v->object) {
+  case LACE_OBJ_TABLE:
+    items[n][0] = "Rename table…"; items[n++][1] = "rename-object";
+    items[n][0] = "Truncate table…"; items[n++][1] = "truncate";
+    items[n][0] = "Drop table…"; items[n++][1] = "drop-object";
+    break;
+  case LACE_OBJ_VIEW:
+    items[n][0] = "Rename view…"; items[n++][1] = "rename-object";
+    items[n][0] = "Drop view…"; items[n++][1] = "drop-object";
+    items[n][0] = "Edit in a query view"; items[n++][1] = "edit-definition";
+    break;
+  default:
+    items[n][0] = v->object == LACE_OBJ_ROUTINE ? "Drop routine…" : "Drop trigger…"; items[n++][1] = "drop-object";
+    items[n][0] = "Edit in a query view"; items[n++][1] = "edit-definition";
+    break;
+  }
+  for (size_t i = 0; i < n; i++) {
+    GMenuItem *it = g_menu_item_new(items[i][0], NULL);
+    g_menu_item_set_action_and_target(it, "view.run", "s", items[i][1]);
+    g_menu_append_item(s1, it);
+    g_object_unref(it);
+  }
+  const char *news[3][2] = {{"New table…", "new-table"}, {"New view…", "new-view"}, {"New function…", "new-function"}};
+  for (size_t i = 0; i < 3; i++) {
+    if (i == 2 && lace_connection_get_driver(v->conn) == LACE_DRIVER_SQLITE)
+      break;
+    GMenuItem *it = g_menu_item_new(news[i][0], NULL);
+    g_menu_item_set_action_and_target(it, "view.run", "s", news[i][1]);
+    g_menu_append_item(s2, it);
+    g_object_unref(it);
+  }
+  g_menu_append_section(menu, NULL, G_MENU_MODEL(s1));
+  g_menu_append_section(menu, NULL, G_MENU_MODEL(s2));
+  g_object_unref(s1);
+  g_object_unref(s2);
+  return menu;
 }
 
 char **lace_table_view_get_subview_texts(LaceTableView *v) {
@@ -1013,6 +1197,10 @@ static void on_busy_or_notice(LaceConnection *c, const char *msg, LaceTableView 
 
 static void lace_table_view_dispose(GObject *obj) {
   LaceTableView *v = LACE_TABLE_VIEW(obj);
+  if (v->lock_timer) {
+    g_source_remove(v->lock_timer);
+    v->lock_timer = 0;
+  }
   if (v->conn) {
     g_signal_handlers_disconnect_by_func(v->conn, on_busy_changed, v);
     g_signal_handlers_disconnect_by_func(v->conn, on_busy_or_notice, v);
@@ -1050,6 +1238,8 @@ static void lace_table_view_class_init(LaceTableViewClass *klass) {
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_POINTER, G_TYPE_UINT);
   signals[SIG_OPEN_OBJECT] = g_signal_new("open-object", LACE_TYPE_TABLE_VIEW,
       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 4, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
+  signals[SIG_DEPS_LOADED] = g_signal_new("dependents-loaded", LACE_TYPE_TABLE_VIEW,
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass), GTK_TYPE_BIN_LAYOUT);
   gtk_widget_class_set_css_name(GTK_WIDGET_CLASS(klass), "lace-tableview");
 }
@@ -1073,6 +1263,11 @@ static void lace_table_view_init(LaceTableView *v) {
 
   v->banner = adw_banner_new("");
   gtk_box_append(GTK_BOX(v->box), v->banner);
+  v->lock_banner = adw_banner_new("");
+  adw_banner_set_button_label(ADW_BANNER(v->lock_banner), "Cancel");
+  gtk_widget_add_css_class(v->lock_banner, "lock-banner");
+  g_signal_connect(v->lock_banner, "button-clicked", G_CALLBACK(on_lock_cancel), v);
+  gtk_box_append(GTK_BOX(v->box), v->lock_banner);
 
   GtkWidget *data = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   v->filters = lace_filter_bar_new();
@@ -1088,6 +1283,7 @@ static void lace_table_view_init(LaceTableView *v) {
   gtk_box_append(GTK_BOX(v->box), v->stack);
 
   GtkWidget *bar = gtk_action_bar_new();
+  v->footer = bar;
   gtk_widget_add_css_class(bar, "table-footer");
   v->status_label = gtk_label_new("");
   gtk_widget_add_css_class(v->status_label, "caption");
@@ -1098,6 +1294,26 @@ static void lace_table_view_init(LaceTableView *v) {
   gtk_widget_set_size_request(v->spinner, 16, 16);
   gtk_widget_set_visible(v->spinner, FALSE);
   gtk_action_bar_pack_start(GTK_ACTION_BAR(bar), v->spinner);
+  /* the sub-view lists' buttons (shown off Data) */
+  v->struct_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2);
+  gtk_widget_set_visible(v->struct_box, FALSE);
+  static const char *const struct_defs[8][3] = {
+      {"struct-add", "list-add-symbolic", "Add a column, index or foreign key"},
+      {"struct-edit", "document-edit-symbolic", "Edit the selected row (Enter)"},
+      {"struct-drop", "user-trash-symbolic", "Drop the selected row"},
+      {"struct-rename", "insert-text-symbolic", "Rename the selected row"},
+      {"struct-key", "lace-key-symbolic", "The primary key…"},
+      {"struct-move", "view-sort-descending-symbolic", "Move the column (MySQL)"},
+      {"struct-check", "emblem-ok-symbolic", "Add a check constraint…"},
+      {NULL, NULL, NULL}};
+  for (int i = 0; struct_defs[i][0]; i++) {
+    v->struct_names[i] = struct_defs[i][0];
+    v->struct_buttons[i] = lace_icon_button(struct_defs[i][1], struct_defs[i][2], NULL);
+    gtk_actionable_set_action_name(GTK_ACTIONABLE(v->struct_buttons[i]), "view.run");
+    gtk_actionable_set_action_target(GTK_ACTIONABLE(v->struct_buttons[i]), "s", struct_defs[i][0]);
+    gtk_box_append(GTK_BOX(v->struct_box), v->struct_buttons[i]);
+  }
+  gtk_action_bar_pack_start(GTK_ACTION_BAR(bar), v->struct_box);
   v->cell_label = gtk_label_new("");
   gtk_widget_add_css_class(v->cell_label, "caption");
   gtk_widget_add_css_class(v->cell_label, "dim-label");
@@ -1116,6 +1332,12 @@ static void lace_table_view_init(LaceTableView *v) {
   gtk_action_bar_pack_end(GTK_ACTION_BAR(bar), v->delete_button);
   b = lace_icon_button("list-add-symbolic", "Add row (Ctrl+Shift+N)", "view.add-row");
   gtk_action_bar_pack_end(GTK_ACTION_BAR(bar), b);
+  GtkWidget *mb = gtk_menu_button_new();
+  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(mb), "view-more-symbolic");
+  gtk_widget_set_tooltip_text(mb, "Table actions");
+  gtk_widget_add_css_class(mb, "flat");
+  g_object_set_data(G_OBJECT(v), "menu-button", mb);
+  gtk_action_bar_pack_end(GTK_ACTION_BAR(bar), mb);
   gtk_box_append(GTK_BOX(v->box), bar);
 
   g_signal_connect(v->grid, "sort-changed", G_CALLBACK(on_sort_changed), v);
@@ -1218,11 +1440,18 @@ LaceTableView *lace_table_view_new_object(LaceConnection *conn, LaceObjectKind k
       {"referenced-by", act_view, NULL, NULL, NULL, {0}},
       {"follow-key", act_follow_key, "t", NULL, NULL, {0}},
       {"follow-dep", act_follow_dep, "t", NULL, NULL, {0}},
+      {"run", act_run, "s", NULL, NULL, {0}},
   };
   GSimpleActionGroup *group = g_simple_action_group_new();
   g_action_map_add_action_entries(G_ACTION_MAP(group), entries, G_N_ELEMENTS(entries), v);
   gtk_widget_insert_action_group(GTK_WIDGET(v), "view", G_ACTION_GROUP(group));
   g_object_unref(group);
+
+  GMenu *menu = table_menu(v);
+  gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(g_object_get_data(G_OBJECT(v), "menu-button")), G_MENU_MODEL(menu));
+  g_object_unref(menu);
+  update_struct_buttons(v);
+  update_lock(v);
 
   if (lace_object_has_subview(kind, LACE_SUBVIEW_DATA))
     load_schema(v);

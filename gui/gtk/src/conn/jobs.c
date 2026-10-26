@@ -39,6 +39,15 @@ LaceJob *lace_job_read(const char *sql) {
   return job;
 }
 
+LaceJob *lace_job_names(const char *what, const char *arg) {
+  LaceJob *job = job_new(LACE_JOB_NAMES);
+  job->column = str_dup(what ? what : "");
+  job->table = arg ? str_dup(arg) : NULL;
+  job->read_only = TRUE;
+  job->savepoint = TRUE;
+  return job;
+}
+
 LaceJob *lace_job_schema(const char *table) {
   LaceJob *job = job_new(LACE_JOB_SCHEMA);
   job->table = str_dup(table);
@@ -115,6 +124,7 @@ LaceJob *lace_job_insert(const char *table, const char *const *columns,
     job->values[i] = lace_value_copy(&values[i]);
   }
   job->record = TRUE;
+  job->user_statement = TRUE;
   return job;
 }
 

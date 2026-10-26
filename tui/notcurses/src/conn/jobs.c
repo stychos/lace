@@ -74,6 +74,14 @@ NcJob *nc_job_tables(void) {
   return j;
 }
 
+NcJob *nc_job_names(const char *what, const char *arg) {
+  NcJob *j = job_new(NC_JOB_NAMES);
+  j->column = str_dup(what ? what : "");
+  j->table = arg ? str_dup(arg) : NULL;
+  j->read_only = j->savepoint = true;
+  return j;
+}
+
 NcJob *nc_job_databases(void) {
   NcJob *j = job_new(NC_JOB_DATABASES);
   j->read_only = j->savepoint = true;
@@ -137,6 +145,7 @@ NcJob *nc_job_update(const char *table, const LaceRowKey *key, const LaceRowSnap
   j->column = str_dup(column);
   j->value = value ? lace_value_copy(value) : lace_value_null();
   j->record = true;
+  j->user_statement = true;
   return j;
 }
 
@@ -160,6 +169,7 @@ NcJob *nc_job_insert(const char *table, const char *const *columns, const LaceVa
     j->values[i] = lace_value_copy(&values[i]);
   }
   j->record = true;
+  j->user_statement = true;
   return j;
 }
 

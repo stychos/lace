@@ -393,6 +393,7 @@ static size_t build_hotkey_display_list(HotkeyDisplayItem *items,
       HOTKEY_CAT_GENERAL, HOTKEY_CAT_NAVIGATION, HOTKEY_CAT_TABLE,
       HOTKEY_CAT_EDITOR,  HOTKEY_CAT_QUERY,      HOTKEY_CAT_HISTORY,
       HOTKEY_CAT_FILTERS, HOTKEY_CAT_SIDEBAR,    HOTKEY_CAT_CONNECT,
+      HOTKEY_CAT_STRUCTURE,
   };
 
   for (size_t c = 0; c < sizeof(display_order) / sizeof(display_order[0]);
@@ -530,11 +531,21 @@ static void draw_hotkeys_tab(WINDOW *win, DialogState *ds, int start_y,
       const char *name = hotkey_action_name(item->action);
       mvwprintw(win, y, start_x + 2, "%-23s", name ? name : "???");
 
-      /* Keys display */
+      /* Keys display; a key another action of the same place has is marked */
       char *keys = hotkey_get_display(ds->config, item->action);
       if (keys) {
         mvwprintw(win, y, start_x + 27, "%s", keys);
         free(keys);
+      }
+      const HotkeyBinding *b = &ds->config->hotkeys[item->action];
+      for (size_t k = 0; k < b->num_keys; k++) {
+        HotkeyAction other = hotkey_find_conflict(ds->config, item->action, b->keys[k]);
+        if (other == HOTKEY_COUNT) continue;
+        char *mark = str_printf("! also %s", hotkey_action_name(other));
+        int mx = start_x + 48;
+        if (mx + 4 < start_x + width - 2) mvwprintw(win, y, mx, "%.*s", start_x + width - 3 - mx, mark);
+        free(mark);
+        break;
       }
 
       if (selected && focused) {

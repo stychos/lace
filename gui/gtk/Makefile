@@ -117,8 +117,14 @@ MODEL_OBJS = $(filter $(BUILD_DIR)/src/model/%.o,$(OBJS))
 $(TEST_MODEL): tests/test_model.c tests/test.h $(MODEL_OBJS) ../../liblace/build/liblace.a
 	$(CC) $(CFLAGS) -Itests $< $(MODEL_OBJS) -o $@ $(LDFLAGS) $(LIBS)
 
-test: $(TEST_MODEL)
+# The structure editors' pure helpers (GLib only)
+TEST_DDL = $(BUILD_DIR)/test_ddl
+$(TEST_DDL): tests/test_ddl.c tests/test.h $(BUILD_DIR)/src/views/ddl_helpers.o ../../liblace/build/liblace.a
+	$(CC) $(CFLAGS) -Itests $< $(BUILD_DIR)/src/views/ddl_helpers.o -o $@ $(LDFLAGS) $(LIBS)
+
+test: $(TEST_MODEL) $(TEST_DDL)
 	./$(TEST_MODEL)
+	./$(TEST_DDL)
 
 # Install the binary, the desktop entry and the icon (PREFIX, DESTDIR as
 # the top-level Makefile)

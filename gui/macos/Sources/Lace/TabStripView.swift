@@ -31,6 +31,8 @@ final class TabStripView: NSView {
   var onClose: ((UUID) -> Void)?
   var onCloseOthers: ((UUID) -> Void)?
   var onCloseAll: (() -> Void)?
+  /// More items for a tab's context menu (the table's actions)
+  var menuItemsProvider: ((UUID) -> [NSMenuItem])?
 
   private let scroll = NSScrollView()
   private let stack = NSStackView()
@@ -86,6 +88,7 @@ final class TabStripView: NSView {
       button.onClose = { [weak self] in self?.onClose?(item.id) }
       button.onCloseOthers = { [weak self] in self?.onCloseOthers?(item.id) }
       button.onCloseAll = { [weak self] in self?.onCloseAll?() }
+      button.extraMenuItems = { [weak self] in self?.menuItemsProvider?(item.id) ?? [] }
       stack.addArrangedSubview(button)
       kept[item.id] = button
     }
@@ -111,6 +114,7 @@ final class TabButton: NSView {
   var onClose: (() -> Void)?
   var onCloseOthers: (() -> Void)?
   var onCloseAll: (() -> Void)?
+  var extraMenuItems: (() -> [NSMenuItem])?
   var isSelected = false {
     didSet {
       if isSelected != oldValue {
@@ -248,6 +252,9 @@ final class TabButton: NSView {
       .target = self
     menu.addItem(withTitle: "Close All Tabs", action: #selector(closeAllTapped), keyEquivalent: "").target =
       self
+    for item in extraMenuItems?() ?? [] {
+      menu.addItem(item)
+    }
     return menu
   }
 

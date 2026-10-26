@@ -49,7 +49,7 @@ def test_strip_and_lists(home):
         t.wait("Total size")                    # Information: sizes, the count, the triggers
         t.wait("trg_orders")
         assert "Row 1/3" not in t.text().split("\n")[-1] or True   # the grid is behind the list
-        t.keys("End", "Enter")                  # Enter on the trigger opens its tab
+        t.keys("End", "Up", "Up", "Up", "Enter")   # above the Actions rows: Enter on the trigger opens its tab
         t.wait("CREATE TRIGGER trg_orders")
         t.wait(lambda s: "Definition" in s.split("\n")[2] and "Indexes" not in s.split("\n")[2])
         t.keys("[")                             # back to orders, still on Information

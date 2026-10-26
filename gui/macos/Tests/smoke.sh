@@ -79,6 +79,24 @@ script="$script;expect-sidebar ▾ VIEWS;expect-sidebar big_orders;expect-sideba
 script="$script;object view big_orders;expect-total 2;subview structure;expect-row CREATE VIEW big_orders;expect-row Columns"
 script="$script;object trigger trg_orders;expect-subview definition;expect-row CREATE TRIGGER trg_orders;subview information;expect-row On table"
 script="$script;sidebar-toggle view;expect-sidebar ▸ VIEWS;sidebar-toggle view;expect-sidebar ▾ VIEWS;shot subviews"
+# The structure editors (every change through DdlRunner: confirmed by the
+# script, run, the tab reloaded): a column added through the editor sheet,
+# renamed through the prompt, dropped; an index created and dropped; the
+# counter set from Information; the table actions: a new table opened on
+# Structure, renamed (the tab follows), dropped (the tab closes); a
+# truncate; and the lock banner over a slow statement, cancelled
+script="$script;table customers;subview structure;ddl action add;ddl-field name note;ddl-field type TEXT;ddl-field default 'x';ddl-save"
+script="$script;expect-row note;expect-row 'x';select-row note;answer memo;ddl action rename;expect-row memo;expect-no-row note"
+script="$script;select-row memo;ddl action drop;expect-no-row memo;shot structure"
+script="$script;subview indexes;ddl action add;ddl-field name ix_cust;ddl-field columns name;ddl-field where name <> '';ddl-save"
+script="$script;expect-row ix_cust;expect-row WHERE name <> '';select-row ix_cust;ddl action drop;expect-no-row ix_cust"
+script="$script;subview information;expect-row Set the next auto-increment;ddl autoinc 10;expect-row next 10"
+script="$script;ddl new-table things;expect-table things;expect-subview structure;expect-row auto-increment;expect-sidebar things"
+script="$script;ddl rename-table stuff;expect-table stuff;expect-sidebar stuff;expect-no-sidebar things"
+script="$script;ddl drop;expect-no-sidebar stuff;expect-tabs 4"
+script="$script;table orders;ddl truncate;expect-total 0"
+script="$script;query SELECT count(*) FROM (WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c LIMIT 80000000) SELECT x FROM c)"
+script="$script;run-async;expect-banner;shot banner;cancel;expect-no-banner;expect-status Cancelled;close-tab"
 # The session: a table tab with a filter and a sort, a query tab, written
 # to macos-session.json by quitting as ⌘Q does (AppKit closes the windows
 # after applicationWillTerminate; those closes must not empty the file)
@@ -96,9 +114,10 @@ if [ $status -eq 0 ]; then
   # Second run: the session comes back (the first, unsaved connection and
   # the saved one with its two tabs, the table's filter and sort), and the
   # saved connection's history with it
-  # (the saved connection's six tabs: orders, customers, big_orders, the trigger
+  # (the ten structure changes of the first run are in the history too; the
+  # saved connection's six tabs: orders, customers, big_orders, the trigger
   # on its Information, people, and the query)
-  script2="restore-session;expect-connections 2;expect-tabs 6;expect-history 2 SELECT 2"
+  script2="restore-session;expect-connections 2;expect-tabs 6;expect-history 12 SELECT 2"
   script2="$script2;close-tab;expect-tabs 5;object trigger trg_orders;expect-subview information;expect-row On table"
   # Closing the last window keeps its session for the next launch
   script2="$script2;table people;expect-total 3;expect-cell 0 1 dave;shot restored"

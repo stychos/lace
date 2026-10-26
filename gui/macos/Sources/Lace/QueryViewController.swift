@@ -55,6 +55,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
   private let stopButton = NSButton()
   private let statusLabel = NSTextField(labelWithString: "")
   private let banner = BannerView(frame: .zero)
+  private let lockBanner = LockBannerView(frame: .zero)
   private let emptyLabel = NSTextField(labelWithString: "Results appear here. ⌘↩ runs the statement at the cursor.")
   private let messageLabel = NSTextField(wrappingLabelWithString: "")
   private let footerLabel = NSTextField(labelWithString: "")
@@ -158,7 +159,8 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     toolbar.spacing = 6
     toolbar.edgeInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
 
-    let editorPane = NSStackView(views: [toolbar, SeparatorView(), editorScroll])
+    lockBanner.onCancel = { [weak self] in self?.connection.cancel() }
+    let editorPane = NSStackView(views: [lockBanner, toolbar, SeparatorView(), editorScroll])
     editorPane.orientation = .vertical
     editorPane.alignment = .width
     editorPane.spacing = 0
@@ -247,6 +249,18 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
       connection.cancel()
     }
   }
+
+  /// The lock banner: a statement the user asked for runs on the connection
+  /// (this view's own, or another tab's); the editor and the grid wait
+  func setLocked(_ statement: Connection.UserStatement?) {
+    lockBanner.statement = statement
+    let locked = statement != nil
+    editor.isEditable = !locked
+    grid.tableView.isEnabled = !locked
+  }
+
+  /// The lock banner's text, for scripts; nil when hidden
+  var lockBannerText: String? { lockBanner.isHidden ? nil : lockBanner.text }
 
   // MARK: Text
 
@@ -490,7 +504,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
 
     if script.mode == .transaction {
       do {
-        _ = try await connection.exec("BEGIN")
+        _ = try await connection.exec("BEGIN", user: false)
         began = true
       } catch {
         banner.show("\(error)")
@@ -527,7 +541,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
         }
         if began {
           do {
-            _ = try await connection.exec("ROLLBACK")
+            _ = try await connection.exec("ROLLBACK", user: false)
             toast?("Rolled back")
           } catch {
             banner.show("\(error)")
@@ -538,7 +552,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     }
     if began {
       do {
-        _ = try await connection.exec("COMMIT")
+        _ = try await connection.exec("COMMIT", user: false)
         toast?("Committed \(Format.plural(script.ran, "statement"))")
       } catch {
         banner.show("\(error)")
@@ -586,7 +600,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     model.notePending(page: 0)
     let sql = SQL.page(of: base, wrap: wrap, limit: model.pageSize, offset: 0)
     do {
-      let result = try await connection.read(sql)
+      let result = try await connection.read(sql, user: true)
       guard generation == model.generation else { return .success(()) }
       model.pageLoaded(generation: generation, page: 0, result: result)
       grid.measureColumns()

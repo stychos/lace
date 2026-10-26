@@ -68,6 +68,8 @@ void lace_row_model_page_failed(LaceRowModel *m, guint64 generation, gsize page)
 
 /* Ask for the page holding row (no-op if loaded or pending) */
 void lace_row_model_request(LaceRowModel *m, gsize row);
+/* Mark a page pending without asking the fetch callback: the caller fetches it itself */
+void lace_row_model_mark_pending(LaceRowModel *m, gsize page);
 gboolean lace_row_model_page_loaded_p(LaceRowModel *m, gsize page);
 gboolean lace_row_model_page_pending(LaceRowModel *m, gsize page);
 gboolean lace_row_model_row_loaded(LaceRowModel *m, gsize row);

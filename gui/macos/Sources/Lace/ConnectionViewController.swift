@@ -68,6 +68,7 @@ final class ConnectionViewController: NSSplitViewController {
     sidebar.onNewQuery = { [weak self] text in self?.content.newQuery(text: text) }
     content.onTablesChanged = { [weak self] in self?.sidebar.reload() }
     content.objectsProvider = { [weak self] in self?.sidebar.objects ?? [] }
+    content.tablesProvider = { [weak self] in self?.sidebar.tables ?? [] }
 
     let events = connection.events
     eventsTask = Task { [weak self] in
@@ -85,6 +86,8 @@ final class ConnectionViewController: NSSplitViewController {
       onStateChanged?()
     case .notice(let message):
       content.showNotice(message)
+    case .userBusyChanged:
+      content.setLocked(connection.userStatement)  // the lock banner on every tab
     case .closed:
       break
     }
@@ -163,6 +166,8 @@ final class ContentViewController: NSViewController {
   var record: ((String) -> Void)?
   /// The connection's objects (the sidebar's list), for the Information view
   var objectsProvider: (() -> [CatalogObject])?
+  /// The connection's tables (the foreign key editor)
+  var tablesProvider: (() -> [String])?
   private let strip = TabStripView(frame: .zero)
   private let container = NSView()
   private let emptyTitle = NSTextField(labelWithString: "Pick a table")
@@ -188,6 +193,12 @@ final class ContentViewController: NSViewController {
     strip.onClose = { [weak self] id in self?.closeTab(id: id) }
     strip.onCloseOthers = { [weak self] id in self?.closeOtherTabs(keeping: id) }
     strip.onCloseAll = { [weak self] in self?.closeAllTabs() }
+    strip.menuItemsProvider = { [weak self] id in
+      // the tab's object actions, after the close items
+      guard let self, let tab = tabs.first(where: { $0.id == id }), let vc = tab.controller as? TableViewController
+      else { return [] }
+      return [NSMenuItem.separator()] + vc.tableActionsMenu().items.map { $0.copy() as! NSMenuItem }
+    }
     container.translatesAutoresizingMaskIntoConstraints = false
     emptyTitle.font = .systemFont(ofSize: 18, weight: .medium)
     emptyTitle.textColor = .secondaryLabelColor
@@ -292,6 +303,13 @@ final class ContentViewController: NSViewController {
     vc.onOpenFiltered = { [weak self] table, filters in self?.openFiltered(table, filters: filters) }
     vc.onOpenObject = { [weak self] object, sv in self?.openObject(object, preview: false).setSubView(sv) }
     vc.objectsProvider = { [weak self] in self?.objectsProvider?() ?? [] }
+    vc.tablesProvider = { [weak self] in self?.tablesProvider?() ?? [] }
+    vc.onNewQuery = { [weak self] text in self?.newQuery(text: text) }
+    vc.onDdlApplied = { [weak self, weak vc] after in
+      guard let self, let vc else { return }
+      ddlApplied(to: vc.object, after: after)
+    }
+    vc.setLocked(connection.userStatement)
     vc.onTouched = { [weak self, weak vc] in
       guard let self, let vc, let i = tabs.firstIndex(where: { $0.controller === vc }), tabs[i].isPreview
       else { return }
@@ -332,12 +350,56 @@ final class ContentViewController: NSViewController {
     tabs.append(tab)
     addChild(vc)
     select(tab.id)
+    vc.setLocked(connection.userStatement)
     if let text, !text.isEmpty {
       vc.text = text
     }
     refreshStrip()
     vc.focusEditor()
     return vc
+  }
+
+  /// A structure change or table action ran on object: every tab of it
+  /// reloads, follows a rename or closes; the sidebar reloads after a
+  /// rename, create or drop; a new table opens on Structure
+  func ddlApplied(to object: CatalogObject, after: DdlAfter) {
+    var sidebar = false
+    for tab in tabs where tab.object.map({ sameObject($0, object) }) ?? false {
+      guard let vc = tab.controller as? TableViewController else { continue }
+      switch after {
+      case .drop:
+        closeTab(id: tab.id)
+        sidebar = true
+      case .rename(let name):
+        vc.rename(to: name)
+        if let i = tabs.firstIndex(where: { $0.id == tab.id }) {
+          tabs[i].object = vc.object
+        }
+        vc.reloadAfterChange()
+        sidebar = true
+      case .tables, .createTable:
+        vc.reloadAfterChange()
+        sidebar = true
+      case .schema:
+        vc.reloadAfterChange()
+      }
+    }
+    if case .createTable(let name) = after {
+      sidebar = true
+      openObject(CatalogObject(kind: .table, name: name), preview: false).setSubView(.structure)
+    }
+    refreshStrip()
+    if sidebar {
+      onTablesChanged?()
+    }
+  }
+
+  /// The lock banner on every tab (the connection's user statement, or nil)
+  func setLocked(_ statement: Connection.UserStatement?) {
+    for tab in tabs {
+      (tab.controller as? TableViewController)?.setLocked(statement)
+      (tab.controller as? QueryViewController)?.setLocked(statement)
+    }
   }
 
   private func select(_ id: UUID?) {

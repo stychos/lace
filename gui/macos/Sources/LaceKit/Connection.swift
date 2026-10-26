@@ -34,7 +34,17 @@ public final class Connection: @unchecked Sendable {
     case transactionChanged(TxState)
     /// Something the user should see (the daemon was replaced)
     case notice(String)
+    /// A statement the user asked for started (true) or the last one ended
+    /// (false): the lock banner (see userStatement)
+    case userBusyChanged(Bool)
     case closed
+  }
+
+  /// What a statement the user asked for looks like while queued or running
+  public struct UserStatement: Sendable, Equatable {
+    /// The SQL, or a word for a write ("UPDATE")
+    public let what: String
+    public let since: Date
   }
 
   public let client: LaceClient
@@ -52,6 +62,10 @@ public final class Connection: @unchecked Sendable {
   private var txState: TxState = .none
   private var reportedTx: TxState = .none
   private var pending = 0
+  /// The user's statements queued or running, oldest first (the banner's)
+  private var userJobs: [(serial: Int, what: String)] = []
+  private var userSince = Date()
+  private var userSerial = 0
   private var closing = false
   private var closed = false
 
@@ -87,26 +101,35 @@ public final class Connection: @unchecked Sendable {
   public var transactionState: TxState { lock.withLock { txState } }
   /// Jobs queued or running
   public var isBusy: Bool { lock.withLock { pending > 0 } }
+  /// The oldest statement the user asked for that is queued or running, or nil
+  public var userStatement: UserStatement? {
+    lock.withLock { userJobs.first.map { UserStatement(what: $0.what, since: userSince) } }
+  }
   public var isClosed: Bool { lock.withLock { closed || closing } }
 
   // MARK: Jobs
 
-  /// A statement the user wrote: run once as written, never retried
-  public func exec(_ sql: String) async throws -> ResultSet {
+  /// A statement the user wrote: run once as written, never retried. user:
+  /// the user asked for it (the lock banner shows); false for the BEGIN,
+  /// COMMIT and ROLLBACK around a script.
+  public func exec(_ sql: String, user: Bool = true) async throws -> ResultSet {
     var job = Job<ResultSet> { [client] id in try Connection.execSQL(client, id, sql) }
     if SQL.isRollback(sql) {
       job.rollbackAck = { ResultSet.empty() }
     }
+    job.user = user ? sql : nil
     return try await submit(job)
   }
 
   /// A read run on the user's behalf (a page, a count): retried once after a
-  /// reconnect, under a savepoint inside an open PostgreSQL transaction
-  public func read(_ sql: String) async throws -> ResultSet {
-    try await submit(
-      Job(readOnly: true, savepoint: true) { [client] id in
-        try Connection.execSQL(client, id, sql)
-      })
+  /// reconnect, under a savepoint inside an open PostgreSQL transaction.
+  /// user: the first page of a statement the user ran (the lock banner).
+  public func read(_ sql: String, user: Bool = false) async throws -> ResultSet {
+    var job = Job(readOnly: true, savepoint: true) { [client] id in
+      try Connection.execSQL(client, id, sql)
+    }
+    job.user = user ? sql : nil
+    return try await submit(job)
   }
 
   public func tables() async throws -> [String] {
@@ -134,12 +157,12 @@ public final class Connection: @unchecked Sendable {
 
   /// COUNT(*) of a table with an optional WHERE body. With approximate and no
   /// WHERE, a large PostgreSQL/MySQL table may answer with a catalog estimate.
-  public func count(table: String, where whereBody: String? = nil, approximate: Bool = false)
+  /// user: asked for by the user (Information's exact count: the lock banner).
+  public func count(table: String, where whereBody: String? = nil, approximate: Bool = false, user: Bool = false)
     async throws -> (count: Int64, approximate: Bool)
   {
     let driver = self.driver
-    return try await submit(
-      Job(readOnly: true, savepoint: true) { [client] id in
+    var job = Job(readOnly: true, savepoint: true) { [client] id -> (count: Int64, approximate: Bool) in
         if whereBody == nil && approximate {
           var n = 0
           var approx = true
@@ -150,7 +173,9 @@ public final class Connection: @unchecked Sendable {
           throw LaceError(code: LACE_ERR_INVALID_PARAMS, message: "Bad table reference: \(table)")
         }
         return (Connection.firstInt(try Connection.execSQL(client, id, sql)), false)
-      })
+      }
+    job.user = user ? "COUNT" : nil
+    return try await submit(job)
   }
 
   /// A SELECT COUNT(*) ... the caller built (SQL.count(of:))
@@ -166,28 +191,30 @@ public final class Connection: @unchecked Sendable {
   public func update(
     table: String, key: RowKey, snapshot: RowSnapshot?, column: String, value: Value
   ) async throws -> String? {
-    try await submit(
-      Job { [client] id in
-        try Connection.verify(client, id, table, key, snapshot)
-        let pk = lace_row_key_to_pk(&key.raw)
-        defer { free(pk) }
-        try value.withLaceValue { v in
-          try client.check(lace_update(client.raw, id, table, pk, key.raw.count, column, v))
-        }
-        return borrowCString(lace_last_sql())
-      })
+    var job = Job { [client] id -> String? in
+      try Connection.verify(client, id, table, key, snapshot)
+      let pk = lace_row_key_to_pk(&key.raw)
+      defer { free(pk) }
+      try value.withLaceValue { v in
+        try client.check(lace_update(client.raw, id, table, pk, key.raw.count, column, v))
+      }
+      return borrowCString(lace_last_sql())
+    }
+    job.user = "UPDATE"
+    return try await submit(job)
   }
 
   /// Verify the row, then DELETE it. Returns the SQL liblace sent.
   public func delete(table: String, key: RowKey, snapshot: RowSnapshot?) async throws -> String? {
-    try await submit(
-      Job { [client] id in
-        try Connection.verify(client, id, table, key, snapshot)
-        let pk = lace_row_key_to_pk(&key.raw)
-        defer { free(pk) }
-        try client.check(lace_delete(client.raw, id, table, pk, key.raw.count))
-        return borrowCString(lace_last_sql())
-      })
+    var job = Job { [client] id -> String? in
+      try Connection.verify(client, id, table, key, snapshot)
+      let pk = lace_row_key_to_pk(&key.raw)
+      defer { free(pk) }
+      try client.check(lace_delete(client.raw, id, table, pk, key.raw.count))
+      return borrowCString(lace_last_sql())
+    }
+    job.user = "DELETE"
+    return try await submit(job)
   }
 
   /// INSERT a row; no columns inserts a row of defaults. Returns the SQL sent.
@@ -195,8 +222,7 @@ public final class Connection: @unchecked Sendable {
     -> String?
   {
     precondition(columns.count == values.count, "one value per column")
-    return try await submit(
-      Job { [client] id in
+    var job = Job { [client] id -> String? in
         var cvalues = values.map { $0.makeLaceValue() }
         defer {
           for i in cvalues.indices {
@@ -222,7 +248,9 @@ public final class Connection: @unchecked Sendable {
           }
         }
         return borrowCString(lace_last_sql())
-      })
+      }
+    job.user = "INSERT"
+    return try await submit(job)
   }
 
   /// A catalog read (Catalog.swift): retried once after a reconnect, under a
@@ -323,22 +351,43 @@ public final class Connection: @unchecked Sendable {
     var disconnect = false
     /// For a ROLLBACK: the answer that acknowledges a lost transaction
     var rollbackAck: (@Sendable () -> T)? = nil
+    /// A statement the user asked for: what the lock banner shows
+    var user: String? = nil
     let body: @Sendable (Int32) throws -> T
   }
 
   private func submit<T>(_ job: Job<T>) async throws -> T {
-    let accepted = lock.withLock { () -> Bool in
-      if closed || (closing && !job.disconnect) { return false }
+    let (accepted, userSerial, firstUser) = lock.withLock { () -> (Bool, Int, Bool) in
+      if closed || (closing && !job.disconnect) { return (false, 0, false) }
       pending += 1
-      return true
+      guard let what = job.user else { return (true, 0, false) }
+      self.userSerial += 1
+      let first = userJobs.isEmpty
+      if first { userSince = Date() }
+      userJobs.append((self.userSerial, what))
+      return (true, self.userSerial, first)
     }
     guard accepted else {
       throw LaceError(code: LACE_ERR_CONNECTION_CLOSED, message: "The connection is closed")
     }
+    if firstUser {
+      eventSink.yield(.userBusyChanged(true))
+    }
     return try await withCheckedThrowingContinuation { cont in
       queue.async { [self] in
         let outcome = Result { try self.run(job) }
-        self.lock.withLock { self.pending -= 1 }
+        let lastUser: Bool = self.lock.withLock {
+          self.pending -= 1
+          guard job.user != nil, let i = self.userJobs.firstIndex(where: { $0.serial == userSerial }) else {
+            return false
+          }
+          self.userJobs.remove(at: i)
+          self.userSince = Date()  // the next one starts about now
+          return self.userJobs.isEmpty
+        }
+        if lastUser {
+          self.eventSink.yield(.userBusyChanged(false))
+        }
         cont.resume(with: outcome)
       }
     }

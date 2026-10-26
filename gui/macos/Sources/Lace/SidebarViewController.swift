@@ -32,7 +32,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
   private let search = NSSearchField()
   private let tableView = KeyTableView()
   private let footer = NSTextField(labelWithString: "")
-  private var tables: [String] = []
+  private(set) var tables: [String] = []
   /// The views, routines and triggers (lace_list_objects)
   private(set) var objects: [CatalogObject] = []
   private var filtered: [Row] = []
@@ -332,15 +332,28 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
   }
 }
 
-/// A table view whose Return key opens the selection
+/// A table view whose Return key opens the selection, Delete acts on it,
+/// and whose context menu comes from the owner (the clicked row selected first)
 final class KeyTableView: NSTableView {
   var onReturn: (() -> Void)?
+  var onDelete: (() -> Void)?
+  var menuProvider: ((Int) -> NSMenu?)?
 
   override func keyDown(with event: NSEvent) {
     if event.keyCode == 36 || event.keyCode == 76 {
       onReturn?()
       return
     }
+    if event.keyCode == 51 || event.keyCode == 117, let onDelete {
+      onDelete()
+      return
+    }
     super.keyDown(with: event)
+  }
+
+  override func menu(for event: NSEvent) -> NSMenu? {
+    guard let menuProvider else { return super.menu(for: event) }
+    let point = convert(event.locationInWindow, from: nil)
+    return menuProvider(row(at: point))
   }
 }

@@ -56,6 +56,28 @@ LaceConnection *lace_table_view_get_connection(LaceTableView *v);
 LaceDataGrid *lace_table_view_get_grid(LaceTableView *v);
 
 void lace_table_view_refresh(LaceTableView *v);
+
+/* ---- what the structure editors read (views/ddl_editors.c) ---- */
+const LaceSchema *lace_table_view_get_schema(LaceTableView *v); /* NULL until loaded */
+const LaceTableInfo *lace_table_view_get_info(LaceTableView *v);
+const LaceAutoInc *lace_table_view_get_autoinc(LaceTableView *v);
+const char *lace_table_view_get_definition(LaceTableView *v); /* NULL until loaded (asks for it) */
+/* The tables referencing this one; *loaded says whether the list is in
+ * (lace_table_view_load_dependents asks; "dependents-loaded" is emitted then) */
+const LaceDependent *lace_table_view_get_dependents(LaceTableView *v, size_t *n, gboolean *loaded);
+void lace_table_view_load_dependents(LaceTableView *v);
+/* The row total as the model knows it */
+gint64 lace_table_view_get_total(LaceTableView *v, gboolean *known, gboolean *approximate);
+/* The current sub-view list's selected row tag (CATALOG_TAG_NONE: none, or Data) */
+int lace_table_view_get_selected_tag(LaceTableView *v);
+gboolean lace_table_view_select_list_row(LaceTableView *v, guint n); /* scripts */
+/* Run a structure or table action by name (the toolbar, the tab menu, scripts): see ddl_editors.h */
+void lace_table_view_run_action(LaceTableView *v, const char *action);
+/* After a change to the object ran (views/ddl_ops.c): reload everything; a
+ * new name renames the view (new_name NULL: the same) */
+void lace_table_view_after_ddl(LaceTableView *v, const char *new_name);
+/* The lock banner shows (a user statement runs on the connection) */
+gboolean lace_table_view_is_locked(LaceTableView *v);
 void lace_table_view_toggle_filters(LaceTableView *v);
 void lace_table_view_goto_row(LaceTableView *v);
 void lace_table_view_add_row(LaceTableView *v);
@@ -73,6 +95,7 @@ void lace_table_view_restore(LaceTableView *v, const LaceFilter *filters, gsize 
                              gsize num_sorts, gboolean filters_visible);
 
 /* Signals:
+ *   dependents-loaded ()                         the referencing tables are in
  *   touched ()                                   the user filtered, sorted or edited the view
  *   open-filtered (const char *table, gpointer filters, guint n)   a followed key: LaceFilter[n]
  *   open-object (int kind, const char *name, const char *table, int subview)  a trigger, a referencing table */

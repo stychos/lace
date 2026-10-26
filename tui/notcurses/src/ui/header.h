@@ -15,6 +15,11 @@ struct View;
  * db_off/db_len (each may be NULL) give the byte ranges of the connection
  * name and of the database in the result (len 0 when absent or clipped
  * away). Allocated. */
+/* The same, also giving the byte range of the view's name */
+char *header_format_ex(const char *workspace, const char *const *names, size_t num_names,
+                       size_t current, const char *database, const char *view, size_t view_pos,
+                       size_t view_count, int width, size_t *cur_off, size_t *cur_len,
+                       size_t *db_off, size_t *db_len, size_t *view_off, size_t *view_len);
 char *header_format(const char *workspace, const char *const *names, size_t num_names,
                     size_t current, const char *database, const char *view, size_t view_pos,
                     size_t view_count, int width, size_t *cur_off, size_t *cur_len,

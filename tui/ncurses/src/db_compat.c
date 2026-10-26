@@ -420,6 +420,23 @@ bool db_object_definition(DbConnection *conn, const LaceObject *obj, char **sql,
   return true;
 }
 
+bool db_list_names(DbConnection *conn, const char *what, const char *arg, char ***names, size_t *n, char **err) {
+  if (names) *names = NULL;
+  if (n) *n = 0;
+  if (!conn || !what || !names || !n) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  if (!strcmp(what, "types")) {
+    CATALOG_READ(conn, err, lace_list_types(conn->client, conn->conn_id, names, n));
+  } else if (!strcmp(what, "engines")) {
+    CATALOG_READ(conn, err, lace_list_engines(conn->client, conn->conn_id, names, n));
+  } else {
+    CATALOG_READ(conn, err, lace_list_collations(conn->client, conn->conn_id, arg, names, n));
+  }
+  return true;
+}
+
 /* Execute query */
 ResultSet *db_query(DbConnection *conn, const char *sql, char **err) {
   if (!conn || !sql) {

@@ -27,7 +27,8 @@ enum {
   CATALOG_TAG_FK = 100,        /* + i: foreign key i of the table */
   CATALOG_TAG_DEP = 1000,      /* + i: dependent i (Referenced by; Enter opens the table) */
   CATALOG_TAG_TRIGGER = 2000,  /* + i: object i of the connection's list (Enter opens it) */
-  CATALOG_TAG_COLUMN = 3000    /* + i: column i (Structure) */
+  CATALOG_TAG_COLUMN = 3000,   /* + i: column i (Structure) */
+  CATALOG_TAG_INDEX = 4000     /* + i: index or constraint i of the schema (Indexes) */
 };
 
 void catalog_rows_init(CatalogRows *t, size_t ncols, const char *const *head);

@@ -32,13 +32,14 @@ static char *tab_label(const char *const *names, size_t k) {
   return same ? str_printf("%s %zu", names[k], same + 1) : str_dup(names[k]);
 }
 
-/* off/len get the byte range of the connection name, dboff/dblen the database's */
+/* off/len get the byte range of the connection name, dboff/dblen the
+ * database's, voff/vlen the view's name */
 static char *build(const char *workspace, const char *const *names, size_t n, size_t current,
                    const char *database, const char *view, size_t vpos, size_t vcount,
-                   size_t *off, size_t *len, size_t *dboff, size_t *dblen) {
+                   size_t *off, size_t *len, size_t *dboff, size_t *dblen, size_t *voff, size_t *vlen) {
   Buf b = {0};
   put(&b, "");
-  *off = *len = *dboff = *dblen = 0;
+  *off = *len = *dboff = *dblen = *voff = *vlen = 0;
   if (workspace) {
     put(&b, workspace);
     put(&b, " \xe2\x96\xb8 ");
@@ -56,10 +57,15 @@ static char *build(const char *workspace, const char *const *names, size_t n, si
       put(&b, database);
     }
     if (view && *view) {
-      char *v = vcount ? str_printf(" \xe2\x96\xb8 %s (%zu of %zu)", view, vpos + 1, vcount)
-                       : str_printf(" \xe2\x96\xb8 %s", view);
-      put(&b, v);
-      free(v);
+      put(&b, " \xe2\x96\xb8 ");
+      *voff = b.len;
+      *vlen = strlen(view);
+      put(&b, view);
+      if (vcount) {
+        char *v = str_printf(" (%zu of %zu)", vpos + 1, vcount);
+        put(&b, v);
+        free(v);
+      }
     }
   }
   return b.s;
@@ -71,27 +77,38 @@ static void clip_range(size_t *off, size_t *len, size_t keep) {
   else if (*off + *len > keep) *len = keep - *off;
 }
 
-char *header_format(const char *workspace, const char *const *names, size_t num_names,
-                    size_t current, const char *database, const char *view, size_t view_pos,
-                    size_t view_count, int width, size_t *cur_off, size_t *cur_len,
-                    size_t *db_off, size_t *db_len) {
-  size_t off, len, dboff, dblen;
+char *header_format_ex(const char *workspace, const char *const *names, size_t num_names,
+                       size_t current, const char *database, const char *view, size_t view_pos,
+                       size_t view_count, int width, size_t *cur_off, size_t *cur_len,
+                       size_t *db_off, size_t *db_len, size_t *view_off, size_t *view_len) {
+  size_t off, len, dboff, dblen, voff, vlen;
   char *out = build(workspace, names, num_names, current, database, view, view_pos, view_count,
-                    &off, &len, &dboff, &dblen);
+                    &off, &len, &dboff, &dblen, &voff, &vlen);
   if (workspace && utf8_width(out, strlen(out)) > width) { /* too wide: the workspace name goes */
     free(out);
     out = build(NULL, names, num_names, current, database, view, view_pos, view_count, &off, &len,
-                &dboff, &dblen);
+                &dboff, &dblen, &voff, &vlen);
   }
   size_t keep = utf8_fit(out, strlen(out), width > 0 ? width : 0, NULL);
   if (keep < strlen(out)) out[keep] = 0;
   clip_range(&off, &len, keep);
   clip_range(&dboff, &dblen, keep);
+  clip_range(&voff, &vlen, keep);
   if (cur_off) *cur_off = off;
   if (cur_len) *cur_len = len;
   if (db_off) *db_off = dboff;
   if (db_len) *db_len = dblen;
+  if (view_off) *view_off = voff;
+  if (view_len) *view_len = vlen;
   return out;
+}
+
+char *header_format(const char *workspace, const char *const *names, size_t num_names,
+                    size_t current, const char *database, const char *view, size_t view_pos,
+                    size_t view_count, int width, size_t *cur_off, size_t *cur_len,
+                    size_t *db_off, size_t *db_len) {
+  return header_format_ex(workspace, names, num_names, current, database, view, view_pos, view_count, width,
+                          cur_off, cur_len, db_off, db_len, NULL, NULL);
 }
 
 /* 12345 -> "12,345" */
@@ -178,7 +195,7 @@ void header_draw(NcApp *app) {
   }
   ConnTab *t = workspace_current_tab(ws);
   View *v = conntab_current_view(t);
-  size_t off = 0, len = 0, db_off = 0, db_len = 0;
+  size_t off = 0, len = 0, db_off = 0, db_len = 0, v_off = 0, v_len = 0;
   const char *database = t && t->conn ? nc_connection_database(t->conn) : NULL;
   /* The right side: sorts and filters (cut first), then the cursor position */
   char *pos = NULL;
@@ -219,13 +236,20 @@ void header_draw(NcApp *app) {
   int right_w = right ? nc_text_width(right) : 0;
   int left_w = app->cols - 1 - (right_w ? right_w + 2 : 0);
   /* the view count only without the tabs strip, which shows the views */
-  char *line = header_format(wname, names, ws->num_tabs, ws->current, database, v ? view_title(v) : NULL,
-                             t ? t->current : 0, t && !tabstrip_rows(app) ? t->num_views : 0,
-                             left_w, &off, &len, &db_off, &db_len);
+  char *line = header_format_ex(wname, names, ws->num_tabs, ws->current, database, v ? view_title(v) : NULL,
+                                t ? t->current : 0, t && !tabstrip_rows(app) ? t->num_views : 0,
+                                left_w, &off, &len, &db_off, &db_len, &v_off, &v_len);
   if (db_len) { /* a click on the database segment switches databases */
     char *head = str_ndup(line, db_off), *seg = str_ndup(line + db_off, db_len);
     int x0 = 1 + nc_text_width(head);
     hit_add(&app->header_spans, x0, x0 + nc_text_width(seg), 0);
+    free(head);
+    free(seg);
+  }
+  if (v_len && v && v->kind == VIEW_TABLE) { /* a click on the view's name opens the table's actions */
+    char *head = str_ndup(line, v_off), *seg = str_ndup(line + v_off, v_len);
+    int x0 = 1 + nc_text_width(head);
+    hit_add(&app->header_spans, x0, x0 + nc_text_width(seg), 1);
     free(head);
     free(seg);
   }

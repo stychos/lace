@@ -37,8 +37,8 @@ static const Hint H_RESULTS[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"Enter edi
 static const Hint H_TABLE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
                                {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
                                {"e editor", HOTKEY_EDIT_MODAL}, {"+ add", HOTKEY_ROW_ADD},
-                               {"x delete", HOTKEY_DELETE_ROW}, {"t tables", HOTKEY_TOGGLE_SIDEBAR},
-                               {"? keys", HOTKEY_HELP}, {NULL, 0}};
+                               {"x delete", HOTKEY_DELETE_ROW}, {"m actions", HOTKEY_TABLE_MENU},
+                               {"t tables", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
 /* the same with the cursor on a foreign key column */
 static const Hint H_TABLE_FK[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
                                   {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
@@ -79,7 +79,7 @@ static bool on_fk_column(const View *v) {
 static Hint *subview_hints(NcApp *app, const View *v, char **texts) {
   static const HotkeyAction acts[SV_COUNT] = {HOTKEY_SUBVIEW_DATA, HOTKEY_SUBVIEW_STRUCTURE, HOTKEY_SUBVIEW_INDEXES,
                                               HOTKEY_SUBVIEW_FOREIGN_KEYS, HOTKEY_SUBVIEW_INFORMATION};
-  Hint *hs = safe_calloc(SV_COUNT + 6, sizeof *hs);
+  Hint *hs = safe_calloc(SV_COUNT + 8, sizeof *hs);
   size_t n = 0, nt = 0;
   hs[n++] = (Hint){CTRL "P palette", HOTKEY_PALETTE};
   for (int i = 0; i < SV_COUNT; i++) {
@@ -94,7 +94,10 @@ static Hint *subview_hints(NcApp *app, const View *v, char **texts) {
   }
   const char *enter = subview_enter_hint(v);
   if (enter) hs[n++] = (Hint){enter, NOACT};
-  hs[n++] = (Hint){"r refresh", HOTKEY_REFRESH};
+  const char *keys = subview_keys_hint(v);
+  if (keys) hs[n++] = (Hint){keys, NOACT};
+  hs[n++] = (Hint){"m actions", HOTKEY_TABLE_MENU};
+  hs[n++] = (Hint){"F5 refresh", HOTKEY_REFRESH};
   hs[n++] = (Hint){"? keys", HOTKEY_HELP};
   hs[n] = (Hint){NULL, 0};
   return hs;

@@ -21,6 +21,7 @@ struct _LaceConnectionPage {
   GtkWidget *tab_view;
   guint query_counter;
   guint style_idle;
+  AdwTabPage *menu_page; /* the page the tab context menu opened on */
 };
 
 G_DEFINE_TYPE(LaceConnectionPage, lace_connection_page, GTK_TYPE_WIDGET)
@@ -297,6 +298,15 @@ GtkWidget *lace_connection_page_current_view(LaceConnectionPage *p) {
 }
 
 GtkWidget *lace_connection_page_view_of(AdwTabPage *page) { return page_view(page); }
+AdwTabPage *lace_connection_page_page_of(LaceConnectionPage *p, GtkWidget *view) { return page_of_view(p, view); }
+
+gboolean lace_connection_page_close_view(LaceConnectionPage *p, GtkWidget *view) {
+  AdwTabPage *page = page_of_view(p, view);
+  if (!page)
+    return FALSE;
+  adw_tab_view_close_page(ADW_TAB_VIEW(p->tab_view), page);
+  return TRUE;
+}
 
 gboolean lace_connection_page_close_current(LaceConnectionPage *p) {
   AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(p->tab_view));
@@ -403,6 +413,23 @@ static void act_close(GSimpleAction *a, GVariant *v, gpointer data) {
   lace_connection_page_close_current(LACE_CONNECTION_PAGE(data));
 }
 
+/* The tab menu's table actions run on the page the menu opened on */
+static void act_table(GSimpleAction *a, GVariant *param, gpointer data) {
+  (void)a;
+  LaceConnectionPage *p = data;
+  AdwTabPage *page = p->menu_page ? p->menu_page : adw_tab_view_get_selected_page(ADW_TAB_VIEW(p->tab_view));
+  GtkWidget *view = page ? page_view(page) : NULL;
+  if (LACE_IS_TABLE_VIEW(view))
+    lace_table_view_run_action(LACE_TABLE_VIEW(view), g_variant_get_string(param, NULL));
+  else
+    lace_toast(GTK_WIDGET(p), "The table actions need a table tab");
+}
+
+static void on_setup_menu(AdwTabView *tv, AdwTabPage *page, LaceConnectionPage *p) {
+  (void)tv;
+  p->menu_page = page; /* NULL once the menu closed */
+}
+
 static void lace_connection_page_dispose(GObject *obj) {
   LaceConnectionPage *p = LACE_CONNECTION_PAGE(obj);
   if (p->style_idle) {
@@ -463,15 +490,29 @@ LaceConnectionPage *lace_connection_page_new(LaceConnection *conn, const LacePre
   adw_overlay_split_view_set_content(ADW_OVERLAY_SPLIT_VIEW(p->split), tv);
 
   GMenu *menu = g_menu_new();
+  GMenu *table = g_menu_new();
+  const char *items[][2] = {{"Rename…", "rename-object"}, {"Truncate…", "truncate"}, {"Drop…", "drop-object"},
+                            {"Edit in a query view", "edit-definition"}, {"New table…", "new-table"},
+                            {"New view…", "new-view"}, {"New function…", "new-function"}};
+  for (size_t i = 0; i < G_N_ELEMENTS(items); i++) {
+    GMenuItem *it = g_menu_item_new(items[i][0], NULL);
+    g_menu_item_set_action_and_target(it, "tabs.table", "s", items[i][1]);
+    g_menu_append_item(table, it);
+    g_object_unref(it);
+  }
+  g_menu_append_submenu(menu, "Table", G_MENU_MODEL(table));
+  g_object_unref(table);
   g_menu_append(menu, "Close tab", "tabs.close");
   g_menu_append(menu, "Close other tabs", "tabs.close-others");
   g_menu_append(menu, "Close all tabs", "tabs.close-all");
   adw_tab_view_set_menu_model(ADW_TAB_VIEW(p->tab_view), G_MENU_MODEL(menu));
   g_object_unref(menu);
+  g_signal_connect(p->tab_view, "setup-menu", G_CALLBACK(on_setup_menu), p);
   static const GActionEntry entries[] = {
       {"close", act_close, NULL, NULL, NULL, {0}},
       {"close-others", act_close_others, NULL, NULL, NULL, {0}},
       {"close-all", act_close_all, NULL, NULL, NULL, {0}},
+      {"table", act_table, "s", NULL, NULL, {0}},
   };
   GSimpleActionGroup *group = g_simple_action_group_new();
   g_action_map_add_action_entries(G_ACTION_MAP(group), entries, G_N_ELEMENTS(entries), p);

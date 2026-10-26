@@ -45,6 +45,9 @@ typedef struct View {
   bool deps_loaded, deps_loading;
   char *deps_error;
   bool referenced_by_pending; /* referenced_by waits for the dependents, then opens its list */
+  int pending_action;         /* a table action waiting for the dependents (app_table_menu.c), 0 none */
+  bool reload_tables_on_run;  /* VIEW_QUERY opened from "New view/function": the sidebar reloads
+                               * once a statement ran (runtime) */
   char *definition;
   bool definition_loading;
   char *definition_error;

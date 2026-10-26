@@ -7,6 +7,7 @@
  */
 
 #include "query_view.h"
+#include "ddl_helpers.h"
 #include "core/catalog_rows.h"
 #include "edit_ops.h"
 #include "history_dialog.h"
@@ -49,6 +50,10 @@ struct _LaceQueryView {
 
   Script *script;
   gboolean running;
+  gboolean reload_tables; /* opened from "New view/function": the sidebar reloads once a statement ran */
+  GtkWidget *box;         /* the lock banner over the paned */
+  GtkWidget *lock_banner;
+  guint lock_timer;
 
   /* The paged statement shown in the grid */
   char *base_sql;
@@ -76,6 +81,8 @@ G_DEFINE_TYPE(LaceQueryView, lace_query_view, GTK_TYPE_WIDGET)
 static void run_next(LaceQueryView *v);
 static void finish_script(LaceQueryView *v);
 static void update_footer(LaceQueryView *v);
+static void update_lock(LaceQueryView *v);
+static void on_conn_busy(LaceConnection *c, LaceQueryView *v);
 
 /* ==========================================================================
  * Status
@@ -351,6 +358,7 @@ static void page_done(LaceJob *job, gpointer data) {
       const char *sql = g_ptr_array_index(s->statements, s->index - 1);
       LaceJob *whole = lace_job_exec(sql);
       whole->tag = GSIZE_TO_POINTER(1);
+      whole->user_statement = TRUE;
       extern void lace_query_view_exec_done(LaceJob *job, gpointer data);
       lace_connection_submit(v->conn, whole, G_OBJECT(v), lace_query_view_exec_done, v);
     } else if (current && !job->cancelled) {
@@ -426,9 +434,11 @@ static void start_paged(LaceQueryView *v, const char *base, gboolean wrap) {
   req->page = 0;
   req->first_of_run = TRUE;
   LaceJob *job = lace_job_read(sql);
+  job->user_statement = TRUE; /* the statement itself: the lock banner */
   free(sql);
-  /* Mark the page pending so the model does not ask again */
-  lace_row_model_request(v->model, 0);
+  /* Mark the page pending so the model does not ask again (a request
+   * would fetch it a second time: the cancel would then hit that copy) */
+  lace_row_model_mark_pending(v->model, 0);
   lace_connection_submit_full(v->conn, job, G_OBJECT(v), page_done, req, g_free);
 }
 
@@ -496,8 +506,11 @@ static void finish_script(LaceQueryView *v) {
   else if (v->paged)
     set_status(v, "First page in %s", el);
   g_free(el);
+  gboolean ran = s->ran > 0 && !s->failed;
   v->script = NULL;
   script_free(s);
+  if (ran && v->reload_tables && !lace_connection_is_closed(v->conn))
+    lace_connection_refresh_tables(v->conn); /* the statement may have created something */
   set_running(v, FALSE);
 }
 
@@ -595,6 +608,7 @@ static void run_next(LaceQueryView *v) {
   }
   LaceJob *job = lace_job_exec(sql);
   job->tag = GSIZE_TO_POINTER(0);
+  job->user_statement = TRUE;
   lace_connection_submit(v->conn, job, G_OBJECT(v), lace_query_view_exec_done, v);
 }
 
@@ -963,7 +977,14 @@ static void lace_query_view_dispose(GObject *obj) {
     lace_data_grid_set_schema(v->grid, NULL);
     lace_data_grid_set_model(v->grid, NULL);
   }
-  g_clear_pointer(&v->paned, gtk_widget_unparent);
+  if (v->lock_timer) {
+    g_source_remove(v->lock_timer);
+    v->lock_timer = 0;
+  }
+  if (v->conn)
+    g_signal_handlers_disconnect_by_func(v->conn, on_conn_busy, v);
+  g_clear_pointer(&v->box, gtk_widget_unparent);
+  v->paned = NULL;
   v->grid = NULL;
   g_clear_object(&v->model);
   g_clear_object(&v->buffer);
@@ -991,6 +1012,50 @@ static void lace_query_view_class_init(LaceQueryViewClass *klass) {
 
 static void lace_query_view_init(LaceQueryView *v) { (void)v; }
 
+/* ---- the lock banner: a statement the user asked for runs on the connection ---- */
+
+static gboolean lock_tick(gpointer data) {
+  update_lock(LACE_QUERY_VIEW(data));
+  return G_SOURCE_CONTINUE;
+}
+
+static void update_lock(LaceQueryView *v) {
+  const char *what = NULL;
+  gint64 since = 0;
+  gboolean locked = v->conn && lace_connection_user_busy(v->conn, &what, &since);
+  if (locked) {
+    char *text = lace_ddl_banner_text(what, (g_get_monotonic_time() - since) / 1000, 60);
+    adw_banner_set_title(ADW_BANNER(v->lock_banner), text);
+    g_free(text);
+    if (!v->lock_timer)
+      v->lock_timer = g_timeout_add(1000, lock_tick, v);
+  } else if (v->lock_timer) {
+    g_source_remove(v->lock_timer);
+    v->lock_timer = 0;
+  }
+  adw_banner_set_revealed(ADW_BANNER(v->lock_banner), locked);
+  gtk_widget_set_sensitive(v->paned, !locked);
+}
+
+static void on_conn_busy(LaceConnection *c, LaceQueryView *v) {
+  (void)c;
+  update_lock(v);
+}
+
+static void on_lock_cancel(AdwBanner *b, LaceQueryView *v) {
+  (void)b;
+  if (v->conn)
+    lace_connection_cancel(v->conn);
+}
+
+void lace_query_view_set_reload_tables(LaceQueryView *v, gboolean reload) { v->reload_tables = reload; }
+
+const char *lace_query_view_get_status_text(LaceQueryView *v) { return gtk_label_get_text(GTK_LABEL(v->status_label)); }
+
+gboolean lace_query_view_is_locked(LaceQueryView *v) {
+  return v->conn && lace_connection_user_busy(v->conn, NULL, NULL);
+}
+
 LaceQueryView *lace_query_view_new(LaceConnection *conn, const LacePrefs *prefs) {
   LaceQueryView *v = g_object_new(LACE_TYPE_QUERY_VIEW, NULL);
   v->conn = g_object_ref(conn);
@@ -998,7 +1063,16 @@ LaceQueryView *lace_query_view_new(LaceConnection *conn, const LacePrefs *prefs)
 
   v->paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
   gtk_paned_set_wide_handle(GTK_PANED(v->paned), FALSE);
-  gtk_widget_set_parent(v->paned, GTK_WIDGET(v));
+  v->box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_set_parent(v->box, GTK_WIDGET(v));
+  v->lock_banner = adw_banner_new("");
+  adw_banner_set_button_label(ADW_BANNER(v->lock_banner), "Cancel");
+  gtk_widget_add_css_class(v->lock_banner, "lock-banner");
+  g_signal_connect(v->lock_banner, "button-clicked", G_CALLBACK(on_lock_cancel), v);
+  gtk_box_append(GTK_BOX(v->box), v->lock_banner);
+  gtk_widget_set_vexpand(v->paned, TRUE);
+  gtk_box_append(GTK_BOX(v->box), v->paned);
+  g_signal_connect(conn, "busy-changed", G_CALLBACK(on_conn_busy), v);
 
   /* Editor half */
   GtkWidget *top = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

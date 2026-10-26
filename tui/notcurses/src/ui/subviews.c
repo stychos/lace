@@ -307,6 +307,22 @@ static bool list_activate(NcApp *app, View *v) {
   return true;
 }
 
+int subview_cursor_tag(NcApp *app, View *v) {
+  if (!v || v->kind != VIEW_TABLE || v->subview == SV_DATA) return CATALOG_TAG_NONE;
+  CatalogRows t;
+  if (!build_now(app, v, &t)) { catalog_rows_free(&t); return CATALOG_TAG_NONE; }
+  size_t cursor = v->sv_cursor[v->subview];
+  clamp_cursor(&t, &cursor);
+  int tag = cursor < t.nrows && selectable(&t, cursor) ? t.tag[cursor] : CATALOG_TAG_NONE;
+  catalog_rows_free(&t);
+  return tag;
+}
+
+const char *subview_keys_hint(const View *v) {
+  const SvOps *ops = v && v->kind == VIEW_TABLE ? ops_of(v) : NULL;
+  return ops ? ops->keys_hint : NULL;
+}
+
 const char *subview_enter_hint(const View *v) {
   const SvOps *ops = v && v->kind == VIEW_TABLE ? ops_of(v) : NULL;
   return ops ? ops->hint : NULL;
@@ -366,6 +382,11 @@ bool subviews_do_action(NcApp *app, View *v, HotkeyAction a) {
       return true;
     }
   if (v->subview == SV_DATA) return false;
+  if (hotkey_get_category(a) == HOTKEY_CAT_STRUCTURE) {
+    const SvOps *ops = ops_of(v);
+    if (!ops || !ops->action) return false;
+    return ops->action(app, v, a, subview_cursor_tag(app, v));
+  }
   switch (a) {
   case HOTKEY_MOVE_UP: return list_move(app, v, -1, false);
   case HOTKEY_MOVE_DOWN: return list_move(app, v, 1, false);
@@ -388,6 +409,11 @@ bool subview_action_applies(const View *v, HotkeyAction a) {
   if (!v || v->kind != VIEW_TABLE) return false;
   for (int i = 0; i < SV_COUNT; i++)
     if (a == action_of((SubView)i)) return view_has_subview(v, (SubView)i);
+  if (a == HOTKEY_TABLE_MENU) return true; /* the table's actions, from any sub-view */
+  if (hotkey_get_category(a) == HOTKEY_CAT_STRUCTURE) { /* the editors' keys: only in their lists */
+    const SvOps *ops = v->subview == SV_DATA ? NULL : ops_of(v);
+    return ops && ops->action;
+  }
   if (v->subview == SV_DATA) return true; /* the grid's own rules */
   switch (a) {
   case HOTKEY_MOVE_UP: case HOTKEY_MOVE_DOWN: case HOTKEY_PAGE_UP: case HOTKEY_PAGE_DOWN:
@@ -399,4 +425,22 @@ bool subview_action_applies(const View *v, HotkeyAction a) {
     return hotkey_get_category(a) != HOTKEY_CAT_TABLE && hotkey_get_category(a) != HOTKEY_CAT_NAVIGATION &&
            hotkey_get_category(a) != HOTKEY_CAT_FILTERS;
   }
+}
+
+LaceDriver subview_driver(NcApp *app, const View *v) {
+  ConnTab *t = app_view_tab(app, v);
+  return t && t->conn ? nc_connection_driver(t->conn) : LACE_DRIVER_SQLITE;
+}
+
+const LaceColumn *subview_column(const View *v, const char *name) {
+  for (size_t i = 0; name && v->schema && i < v->schema->num_columns; i++)
+    if (v->schema->columns[i].name && !strcmp(v->schema->columns[i].name, name)) return &v->schema->columns[i];
+  return NULL;
+}
+
+size_t subview_column_names(const View *v, const char ***out) {
+  size_t n = v->schema ? v->schema->num_columns : 0;
+  *out = n ? safe_calloc(n, sizeof **out) : NULL;
+  for (size_t i = 0; i < n; i++) (*out)[i] = v->schema->columns[i].name ? v->schema->columns[i].name : "";
+  return n;
 }
