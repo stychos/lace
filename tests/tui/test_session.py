@@ -18,7 +18,7 @@ def test_session_v2_round_trip(home):
                                 "notcurses": {"theme": "dark"}})
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
-        t.keys("Enter")
+        t.keys("Down", "Enter")         # highlight it in the form, open it
         t.wait("Tables")
         t.keys("Enter")
         t.wait_status("Row 1/500")
@@ -71,10 +71,10 @@ def test_session_v2_from_gui(home):
 
 
 
-def test_session_v2_form_skipped(home):
-    """A connection form entry (written by later builds) is skipped quietly:
-    the saved connection after it restores, nothing is reported, and the
-    file is saved again as version 2 with that connection's tab"""
+def test_session_v2_form_kept(home):
+    """A connection form entry restores as a form in its place, the saved
+    connection after it too, nothing is reported, and the file is saved
+    again as version 2 with both"""
     db = make_db(home, rows=5)
     save_connection(home, db)
     home.write("session.json", {"version": 2, "current": 0, "workspaces": [{
@@ -93,7 +93,9 @@ def test_session_v2_form_skipped(home):
         assert t.quit() == 0
     s = home.read("session.json")
     assert s["version"] == 2
-    conn = s["workspaces"][0]["connections"][0]
+    conns = s["workspaces"][0]["connections"]
+    assert conns[0] == {"form": True, "order": 0}, conns
+    conn = conns[1]
     assert conn["saved_id"] == SAVED_ID and [x["type"] for x in conn["tabs"]] == ["query", "table"]
 
 BAD = '{"version": 2, "work'
@@ -105,7 +107,7 @@ def test_session_v2_unparsable_kept(home):
     save_connection(home, db)
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
-        t.keys("Enter")
+        t.keys("Down", "Enter")         # highlight it in the form, open it
         t.wait("Tables")
         t.keys("Enter")
         t.wait_status("Row 1/5")
@@ -137,7 +139,7 @@ def test_session_connection_tab_only(home):
     save_connection(home, db)
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
-        t.keys("Enter")
+        t.keys("Down", "Enter")         # highlight it in the form, open it
         t.wait("Tables")
         assert t.quit() == 0
     conn = home.read("session.json")["workspaces"][0]["connections"][0]
@@ -156,7 +158,6 @@ def test_session_url_connection_kept(home):
     db = make_db(home, rows=7)
     with Tui(home, ["-s"]) as t:  # Nothing to pick: the input has focus
         t.type("sqlite://" + db)
-        t.wait("Connect to")
         t.keys("Enter")
         t.wait("Tables")
         t.keys("Enter")
@@ -195,12 +196,62 @@ def test_session_foreign_kept_without_connections(home):
     home.write("session.json", {"version": 2, "workspaces": [], "current": 0,
                                 "gtk": {"x": 1}})
     with Tui(home, ["-s"]) as t:
-        t.wait("CONNECTIONS")
+        t.wait("URI")
         assert t.quit() == 0
     s = home.read("session.json")
     assert s["gtk"] == {"x": 1} and s["version"] == 2 and s["workspaces"] == []
     home.write("session.json", {"version": 2, "workspaces": [], "current": 0})
     with Tui(home, ["-s"]) as t:
-        t.wait("CONNECTIONS")
+        t.wait("URI")
         assert t.quit() == 0
     assert not os.path.exists(home.cfg_dir + "/session.json")
+
+
+def test_session_restore_form_current(home):
+    """A connection form in session.json comes back in its place, current
+    when it was; quitting writes it again, and nothing more"""
+    db = make_db(home, rows=5)
+    save_connection(home, db)
+    home.write("session.json", {"version": 2, "current": 0, "workspaces": [
+        {"name": "W", "current": 1, "connections": [
+            {"saved_id": SAVED_ID, "current": 0,
+             "tabs": [{"type": "table", "table": "big", "order": 0}]},
+            {"form": True, "order": 1}]}]})
+    with Tui(home, []) as t:
+        t.wait("URI")
+        t.wait("New connection")
+        assert "big" in t.screen()[1]       # the table tab is there too
+        assert t.quit() == 0
+    s = home.read("session.json")
+    conns = s["workspaces"][0]["connections"]
+    forms = [c for c in conns if c.get("form")]
+    assert len(forms) == 1 and set(forms[0]) == {"form", "order"}, conns
+
+
+def test_session_forms_only_workspace(home):
+    """A workspace that held only forms comes back with them"""
+    db = make_db(home, rows=5)
+    save_connection(home, db)
+    home.write("session.json", {"version": 2, "current": 1, "workspaces": [
+        {"name": "A", "current": 0, "connections": [
+            {"saved_id": SAVED_ID, "current": 0, "tabs": [{"type": "table", "table": "big"}]}]},
+        {"name": "Forms", "current": 0, "connections": [
+            {"form": True, "order": 0}, {"form": True, "order": 1}]}]})
+    with Tui(home, []) as t:
+        t.wait("URI")
+        t.wait("W2]")
+        assert t.screen()[1].count("New connection") == 2
+        assert t.quit() == 0
+
+
+def test_session_failed_connection_reported(home):
+    """A session whose connection cannot be opened restores as a form, and
+    says why"""
+    save_connection(home, home.file("gone.sqlite"))
+    home.write("session.json", {"version": 2, "current": 0, "workspaces": [
+        {"name": "W", "current": 0, "connections": [
+            {"saved_id": SAVED_ID, "current": 0, "tabs": [{"type": "table", "table": "big"}]}]}]})
+    with Tui(home, []) as t:
+        t.wait("URI")
+        t.wait_status("could not be restored")
+        assert t.quit() == 0

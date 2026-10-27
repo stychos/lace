@@ -1,0 +1,10 @@
+# args: -s
+# fixture-conns
+# Picking a saved connection names the tab; Open here turns the form into it
+form-pick Local
+expect-title Local
+form-action open
+expect-page connection
+expect-pages 1
+expect-tables
+quit

@@ -1,0 +1,5 @@
+expect-windows 1
+expect-pages 2
+expect-page connection
+expect-tables
+quit

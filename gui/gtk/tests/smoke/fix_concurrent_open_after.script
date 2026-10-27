@@ -1,0 +1,4 @@
+expect-windows 2
+wait 1500
+expect-connections 1
+quit

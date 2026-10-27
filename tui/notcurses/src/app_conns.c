@@ -1,22 +1,12 @@
 /* The open connections and who holds them */
 #include "app.h"
+#include "core/conn_fields.h"
 #include "config/recent.h"
 #include "model/workspace.h"
 #include "util/mem.h"
 #include "util/str.h"
 #include <stdlib.h>
 #include <string.h>
-
-bool nc_conn_key_matches(const char *saved_a, const char *connstr_a, const char *saved_b, const char *connstr_b) {
-  bool sa = saved_a && *saved_a, sb = saved_b && *saved_b;
-  if (sa || sb) return sa && sb && !strcmp(saved_a, saved_b);
-  if (!connstr_a || !connstr_b) return false;
-  char *a = recent_strip_passwords(connstr_a), *b = recent_strip_passwords(connstr_b);
-  bool same = a && b && !strcmp(a, b);
-  str_secure_free(a);
-  str_secure_free(b);
-  return same;
-}
 
 static size_t find(const NcApp *app, const NcConnection *c) {
   for (size_t i = 0; i < app->num_conns; i++)
@@ -32,9 +22,9 @@ NcConnection *app_conn_lookup(NcApp *app, const char *saved_id, const char *conn
     if (saved_id && *saved_id) {
       /* the same entry, still pointing where the open one does (it may have been edited since) */
       if (sid && !strcmp(sid, saved_id) &&
-          (!connstr || nc_conn_key_matches(NULL, connstr, NULL, nc_connection_connstr(c))))
+          (!connstr || conn_key_matches(NULL, connstr, NULL, nc_connection_connstr(c))))
         return c;
-    } else if (nc_conn_key_matches(NULL, connstr, sid, nc_connection_connstr(c))) {
+    } else if (conn_key_matches(NULL, connstr, sid, nc_connection_connstr(c))) {
       return c;
     }
   }

@@ -1,0 +1,6 @@
+python3 - "$HOME_DIR/.config/lace/recent.json" "$HOME_DIR/t.sqlite" <<'PY'
+import json, sys
+recent = json.load(open(sys.argv[1]))["recent"]
+urls = [r["url"] for r in recent]
+assert len(urls) == 1 and urls[0].endswith(sys.argv[2]), urls
+PY

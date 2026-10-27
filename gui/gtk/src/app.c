@@ -7,6 +7,8 @@
  */
 
 #include "app.h"
+#include "conn/conn_registry.h"
+#include "config/recent.h"
 #include "session.h"
 #include "util.h"
 #include "views/prefs_dialog.h"
@@ -25,6 +27,7 @@ struct _LaceApp {
   char *saved_error;
   gboolean no_session;
   gboolean activated;
+  LaceConnRegistry *conns;
 };
 
 enum { SIG_SAVED_CHANGED, N_SIGNALS };
@@ -85,6 +88,7 @@ void lace_app_save_session(LaceApp *app, LaceWindow *except) {
 
 LaceWindow *lace_app_new_window(LaceApp *app, const char *name) {
   LaceWindow *w = lace_window_new(app, name);
+  lace_window_add_form(w, -1); /* a new workspace starts with a connection form */
   gtk_window_present(GTK_WINDOW(w));
   return w;
 }
@@ -264,6 +268,88 @@ void lace_app_test_connection(LaceApp *app, GtkWidget *parent, const char *conns
 }
 
 /* ==========================================================================
+ * Open connections, shared by every window
+ * ========================================================================== */
+
+LaceConnection *lace_app_find_connection(LaceApp *app, const char *saved_id, const char *connstr) {
+  return lace_conn_registry_find(app->conns, saved_id, connstr);
+}
+
+void lace_app_hold_connection(LaceApp *app, LaceConnection *c) { lace_conn_registry_hold(app->conns, c); }
+
+void lace_app_release_connection(LaceApp *app, LaceConnection *c) {
+  if (app->conns)
+    lace_conn_registry_release(app->conns, c);
+}
+
+guint lace_app_connection_holders(LaceApp *app, LaceConnection *c) {
+  return lace_conn_registry_holders(app->conns, c);
+}
+
+guint lace_app_n_connections(LaceApp *app) { return lace_conn_registry_count(app->conns); }
+
+/* A connection string that is not a saved connection: to recent.json */
+static void remember_recent(const char *connstr) {
+  RecentList list = {0};
+  recent_load(&list);
+  if (recent_add(&list, connstr)) {
+    char *err = NULL;
+    if (!recent_save(&list, &err))
+      g_warning("recent.json: %s", err ? err : "cannot save");
+    free(err);
+  }
+  recent_free(&list);
+}
+
+typedef struct {
+  LaceApp *app;
+  char *saved_id;
+  LaceConnectCb cb;
+  gpointer user_data;
+} OpenReq;
+
+static void opened(LaceConnection *conn, const char *error, gpointer data) {
+  OpenReq *o = data;
+  /* Another open of the same database landed first (a session's windows
+   * restore at once): that one is used, this one closed */
+  LaceConnection *first = conn ? lace_conn_registry_find(o->app->conns, o->saved_id,
+                                                         lace_connection_get_connstr(conn))
+                               : NULL;
+  if (first) {
+    lace_connection_close(conn);
+    o->cb(first, NULL, o->user_data);
+    g_free(o->saved_id);
+    g_free(o);
+    return;
+  }
+  if (conn) {
+    lace_conn_registry_add(o->app->conns, conn);
+    if (!o->saved_id)
+      remember_recent(lace_connection_get_connstr(conn));
+  }
+  o->cb(conn, error, o->user_data);
+  g_free(o->saved_id);
+  g_free(o);
+}
+
+void lace_app_open(LaceApp *app, GtkWidget *parent, const char *connstr, const char *saved_id,
+                   const char *name, LaceConnectCb cb, gpointer user_data) {
+  LaceConnection *open = lace_conn_registry_find(app->conns, saved_id, connstr);
+  if (open) {
+    if (!saved_id || !*saved_id)
+      remember_recent(connstr);
+    cb(open, NULL, user_data);
+    return;
+  }
+  OpenReq *o = g_new0(OpenReq, 1);
+  o->app = app;
+  o->saved_id = saved_id && *saved_id ? g_strdup(saved_id) : NULL;
+  o->cb = cb;
+  o->user_data = user_data;
+  lace_app_connect(app, parent, connstr, saved_id, name, opened, o);
+}
+
+/* ==========================================================================
  * Actions and lifecycle
  * ========================================================================== */
 
@@ -326,6 +412,7 @@ static void lace_app_startup(GApplication *gapp) {
   g_object_unref(css);
 
   app->prefs = lace_prefs_load();
+  app->conns = lace_conn_registry_new();
   lace_app_apply_color_scheme(app);
 
   char *err = NULL;
@@ -419,8 +506,10 @@ static int lace_app_command_line(GApplication *gapp, GApplicationCommandLine *cl
     LaceWindow *w = LACE_IS_WINDOW(gtk_application_get_active_window(GTK_APPLICATION(app)))
                         ? LACE_WINDOW(gtk_application_get_active_window(GTK_APPLICATION(app)))
                         : NULL;
-    if (!w || new_window)
-      w = lace_app_new_window(app, NULL);
+    if (!w || new_window) {
+      w = lace_window_new(app, NULL); /* the targets fill it (a failure leaves a form) */
+      gtk_window_present(GTK_WINDOW(w));
+    }
     const char *cwd = g_application_command_line_get_cwd(cl);
     for (guint i = 0; i < targets->len; i++) {
       const char *t = g_ptr_array_index(targets, i);
@@ -459,6 +548,7 @@ static void lace_app_shutdown(GApplication *gapp) {
     lace_client_destroy(app->client);
     app->client = NULL;
   }
+  g_clear_pointer(&app->conns, lace_conn_registry_free);
   g_clear_pointer(&app->saved, connmgr_free);
   g_clear_pointer(&app->prefs, lace_prefs_free);
   g_clear_pointer(&app->saved_error, g_free);

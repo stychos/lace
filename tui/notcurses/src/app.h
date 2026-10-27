@@ -159,7 +159,6 @@ void app_rename_saved_workspace(NcApp *app, size_t index, const char *name);
  * One database connection serves every tab, in any workspace, opened on the
  * same saved connection (by id) or the same URL (password-less string). Each
  * connected tab holds it; the last release closes it. */
-bool nc_conn_key_matches(const char *saved_a, const char *connstr_a, const char *saved_b, const char *connstr_b);
 /* NULL: none open. With a saved id, connstr (when given) must match too: an
  * entry edited since its connection opened is connected anew */
 NcConnection *app_conn_lookup(NcApp *app, const char *saved_id, const char *connstr);
@@ -201,9 +200,6 @@ void app_connect_saved(NcApp *app, const char *saved_id, NcDest dest, ConnectDon
  * model (may be NULL) lets a refused password be asked for. */
 void app_test_connection(NcApp *app, const char *connstr, const LaceSavedConnection *model,
                          ConnectDoneFn done, void *data);
-/* What the user typed as a target: a URL as it is, a SQLite file as a URL;
- * allocated, NULL (with *error) when it is neither */
-char *app_target_to_connstr(const char *text, char **error);
 /* Startup: connect to the command-line targets one after another */
 void app_connect_targets(NcApp *app);
 /* The connection leaves its tab's care: a running statement is cancelled, the

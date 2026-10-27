@@ -438,8 +438,41 @@ void workspace_close(TuiState *state);
 void tui_workspace_switch(TuiState *state, size_t index);
 
 /* Close workspace index; the current one stays current. With none left,
- * nothing more happens (the caller is the Workspaces window). */
+ * on_last_workspace_close decides (quit, or a new workspace with a form). */
 void tui_workspace_close_at(TuiState *state, size_t index);
+
+/* What to ask before closing workspace index when more than "close it?" is
+ * at stake (a transaction rolled back, lace quitting); NULL otherwise.
+ * Caller frees. */
+char *tui_workspace_close_question(TuiState *state, size_t index);
+
+/* ============================================================================
+ * Placing connections (connect_place.c)
+ * ============================================================================
+ */
+
+/* Where an open connection goes: HERE turns the form at (ws_idx, tab_idx)
+ * into its tab; BACKGROUND puts a tab right after that one, which stays
+ * current; NEW_WORKSPACE a new workspace with it as the only tab;
+ * WORKSPACE the end of workspace ws_idx, which becomes current */
+typedef enum { PLACE_HERE, PLACE_BACKGROUND, PLACE_NEW_WORKSPACE, PLACE_WORKSPACE } PlaceKind;
+bool tui_place_connection(TuiState *state, size_t conn_idx, PlaceKind kind, size_t ws_idx,
+                          size_t tab_idx);
+/* An open database joins the app's connections (history and tables
+ * loaded); its index, SIZE_MAX (and db disconnected) on failure */
+size_t tui_add_open_connection(TuiState *state, DbConnection *db, const char *connstr,
+                               const char *saved_id);
+/* A tab was inserted at position at of workspace ws_idx: its UITabState too */
+void tui_tab_ui_insert(TuiState *state, size_t ws_idx, size_t at);
+/* A workspace with a tab: one with a form when there is none, a form in
+ * the current one when it is empty */
+void tui_ensure_tab(TuiState *state);
+/* A new workspace with one form, made current */
+void tui_new_workspace_form(TuiState *state);
+/* A form right after the current tab (new_connection) */
+void tui_new_connection_tab(TuiState *state);
+/* Whether the table sidebar's window exists now (not while a form is current) */
+bool tui_sidebar_shown(TuiState *state);
 
 /* ============================================================================
  * Sidebar functions (sidebar.c)

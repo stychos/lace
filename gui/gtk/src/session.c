@@ -1,18 +1,21 @@
 /*
  * Lace GTK frontend
- * Session persistence (gtk-session.json)
+ * Session persistence: the shared session.json (version 2, its JSON layer
+ * in session_json.c); gtk-session.json is read once when there is none
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
 #include "session.h"
+#include "config/session_json.h"
 #include "platform/platform.h"
 #include <lace.h>
 #include "util.h"
 #include "views/query_view.h"
 #include "views/table_view.h"
 #include "window.h"
+#include "views/form_page.h"
 #include <config/saved_connection.h>
 #include <util/json_helpers.h>
 #include <util/str.h>
@@ -21,12 +24,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define SESSION_FILE "gtk-session.json"
+#define SESSION_FILE "session.json"
+#define LEGACY_FILE "gtk-session.json"
 
-char *lace_session_path(void) {
+static char *config_file(const char *name) {
   const char *dir = platform_get_config_dir();
-  return dir ? str_printf("%s%s%s", dir, LACE_PATH_SEP_STR, SESSION_FILE) : NULL;
+  return dir ? str_printf("%s%s%s", dir, LACE_PATH_SEP_STR, name) : NULL;
 }
+
+char *lace_session_path(void) { return config_file(SESSION_FILE); }
+
+/* gtk-session.json was read at startup: renamed after the first save */
+static gboolean g_legacy_read;
 
 /* ==========================================================================
  * Save
@@ -109,16 +118,27 @@ static cJSON *window_json(LaceWindow *w) {
   cJSON_AddStringToObject(j, "name", lace_window_get_name(w));
   int width, height;
   gtk_window_get_default_size(GTK_WINDOW(w), &width, &height);
-  cJSON_AddNumberToObject(j, "width", width);
-  cJSON_AddNumberToObject(j, "height", height);
-  cJSON_AddBoolToObject(j, "maximized", gtk_window_is_maximized(GTK_WINDOW(w)));
+  cJSON *gtk = cJSON_AddObjectToObject(j, "gtk");
+  cJSON_AddNumberToObject(gtk, "width", width);
+  cJSON_AddNumberToObject(gtk, "height", height);
+  cJSON_AddBoolToObject(gtk, "maximized", gtk_window_is_maximized(GTK_WINDOW(w)));
   AdwTabView *tv = lace_window_get_tab_view(w);
   cJSON *conns = cJSON_AddArrayToObject(j, "connections");
   int n = adw_tab_view_get_n_pages(tv);
   AdwTabPage *sel = adw_tab_view_get_selected_page(tv);
   for (int i = 0; i < n; i++) {
     AdwTabPage *page = adw_tab_view_get_nth_page(tv, i);
-    cJSON_AddItemToArray(conns, connection_json(LACE_CONNECTION_PAGE(adw_tab_page_get_child(page))));
+    GtkWidget *child = adw_tab_page_get_child(page);
+    cJSON *c;
+    if (LACE_IS_CONNECTION_PAGE(child)) {
+      c = connection_json(LACE_CONNECTION_PAGE(child));
+    } else { /* a connection form: its place, nothing else (a connection
+              * gets no "order": the TUIs would add its placeholder tab there) */
+      c = cJSON_CreateObject();
+      cJSON_AddBoolToObject(c, "form", true);
+      cJSON_AddNumberToObject(c, "order", i);
+    }
+    cJSON_AddItemToArray(conns, c);
     if (page == sel)
       cJSON_AddNumberToObject(j, "current", i);
   }
@@ -129,20 +149,38 @@ void lace_session_save(LaceApp *app, LaceWindow *except) {
   char *path = lace_session_path();
   if (!path)
     return;
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddNumberToObject(root, "version", 1);
-  cJSON *windows = cJSON_AddArrayToObject(root, "windows");
+  cJSON *workspaces = cJSON_CreateArray();
+  int current = 0, i = 0;
+  GtkWindow *active = gtk_application_get_active_window(GTK_APPLICATION(app));
   GList *wins = lace_app_get_lace_windows(app);
   for (GList *l = wins; l; l = l->next) {
     if (l->data == except)
       continue;
-    cJSON_AddItemToArray(windows, window_json(LACE_WINDOW(l->data)));
+    if (l->data == (gpointer)active)
+      current = i;
+    cJSON_AddItemToArray(workspaces, window_json(LACE_WINDOW(l->data)));
+    i++;
   }
   g_list_free(wins);
-  char *text = cJSON_Print(root);
-  cJSON_Delete(root);
-  if (!text || !platform_write_file_private(path, text, strlen(text)))
+  /* The file as it is now: other frontends' members are kept, one that
+   * does not parse is left alone */
+  char *existing = platform_file_exists(path) ? platform_read_file(path, 16 * 1024 * 1024) : NULL;
+  char *err = NULL;
+  char *text = lace_session_json_merge(existing, workspaces, current, &err);
+  str_secure_free(existing);
+  if (!text) {
+    g_warning("session: %s (not written)", err ? err : "unknown error");
+  } else if (!platform_write_file_private(path, text, strlen(text))) {
     g_warning("session: could not write %s: %s", path, strerror(errno));
+  } else if (g_legacy_read) {
+    char *legacy = config_file(LEGACY_FILE);
+    char *to = legacy ? str_printf("%s.migrated", legacy) : NULL;
+    if (legacy && rename(legacy, to) == 0)
+      g_legacy_read = FALSE;
+    free(legacy);
+    free(to);
+  }
+  free(err);
   str_secure_free(text);
   free(path);
 }
@@ -158,6 +196,7 @@ typedef struct {
   cJSON *conns;    /* Array */
   int index;
   int current;
+  AdwTabPage *current_page; /* the page that was current, once it is there */
 } Restore;
 
 static void restore_next(Restore *r);
@@ -251,8 +290,7 @@ static void restore_connected(LaceConnection *conn, const char *error, gpointer 
     LaceConnectionPage *cp = lace_window_add_connection(w, conn);
     restore_tabs(cp, cj);
     if (r->index - 1 == r->current)
-      adw_tab_view_set_selected_page(lace_window_get_tab_view(w),
-                                     adw_tab_view_get_page(lace_window_get_tab_view(w), GTK_WIDGET(cp)));
+      r->current_page = adw_tab_view_get_page(lace_window_get_tab_view(w), GTK_WIDGET(cp));
   } else if (error) {
     lace_toast(GTK_WIDGET(w), "Could not reopen %s: %s", json_get_string(cj, "name", "a connection"), error);
   }
@@ -266,12 +304,25 @@ static void restore_next(Restore *r) {
     restore_free(r);
     return;
   }
+  AdwTabView *tv = lace_window_get_tab_view(w);
   if (r->index >= cJSON_GetArraySize(r->conns)) {
+    if (adw_tab_view_get_n_pages(tv) == 0)
+      lace_window_add_form(w, -1); /* nothing came back: never an empty window */
+    else if (r->current_page)
+      adw_tab_view_set_selected_page(tv, r->current_page);
     g_object_unref(w);
     restore_free(r);
     return;
   }
   cJSON *cj = cJSON_GetArrayItem(r->conns, r->index++);
+  if (json_get_bool(cj, "form", false)) { /* a connection form: back, empty, in its place */
+    LaceFormPage *form = lace_window_add_form(w, adw_tab_view_get_n_pages(tv));
+    if (r->index - 1 == r->current)
+      r->current_page = adw_tab_view_get_page(tv, GTK_WIDGET(form));
+    g_object_unref(w);
+    restore_next(r);
+    return;
+  }
   const char *saved_id = json_get_string(cj, "saved_id", NULL);
   const char *name = json_get_string(cj, "name", NULL);
   char *connstr = NULL;
@@ -294,13 +345,19 @@ static void restore_next(Restore *r) {
     }
     connstr = str_dup(c);
   }
-  lace_app_connect(r->app, GTK_WIDGET(w), connstr, saved_id, name, restore_connected, r);
+  lace_app_open(r->app, GTK_WIDGET(w), connstr, saved_id, name, restore_connected, r);
   str_secure_free(connstr);
   g_object_unref(w);
 }
 
 gboolean lace_session_restore(LaceApp *app) {
   char *path = lace_session_path();
+  gboolean legacy = FALSE;
+  if (path && !platform_file_exists(path)) {
+    free(path);
+    path = config_file(LEGACY_FILE);
+    legacy = TRUE;
+  }
   if (!path || !platform_file_exists(path)) {
     free(path);
     return FALSE;
@@ -309,24 +366,33 @@ gboolean lace_session_restore(LaceApp *app) {
   free(path);
   if (!content)
     return FALSE;
-  cJSON *root = cJSON_Parse(content);
+  char *err = NULL;
+  cJSON *windows = lace_session_json_workspaces(content, legacy, "gtk", &err);
   str_secure_free(content);
-  if (!root)
+  if (!windows) {
+    g_warning("session: %s", err ? err : "unknown error");
+    free(err);
     return FALSE;
-  cJSON *windows = json_get_array(root, "windows");
+  }
+  free(err);
+  g_legacy_read = legacy;
   gboolean any = FALSE;
   cJSON *wj;
   cJSON_ArrayForEach(wj, windows) {
-    LaceWindow *w = lace_app_new_window(app, json_get_string(wj, "name", NULL));
-    int width = json_get_int(wj, "width", 1200), height = json_get_int(wj, "height", 760);
+    LaceWindow *w = lace_window_new(app, json_get_string(wj, "name", NULL));
+    gtk_window_present(GTK_WINDOW(w));
+    cJSON *gtk = json_get_object(wj, "gtk");
+    int width = json_get_int(gtk, "width", 1200), height = json_get_int(gtk, "height", 760);
     if (width > 200 && height > 200)
       gtk_window_set_default_size(GTK_WINDOW(w), width, height);
-    if (json_get_bool(wj, "maximized", false))
+    if (json_get_bool(gtk, "maximized", false))
       gtk_window_maximize(GTK_WINDOW(w));
     any = TRUE;
     cJSON *conns = json_get_array(wj, "connections");
-    if (!conns || cJSON_GetArraySize(conns) == 0)
+    if (!conns || cJSON_GetArraySize(conns) == 0) {
+      lace_window_add_form(w, -1);
       continue;
+    }
     Restore *r = g_new0(Restore, 1);
     r->app = app;
     g_weak_ref_init(&r->window, w);
@@ -335,6 +401,6 @@ gboolean lace_session_restore(LaceApp *app) {
     r->current = json_get_int(wj, "current", 0);
     restore_next(r);
   }
-  cJSON_Delete(root);
+  cJSON_Delete(windows);
   return any;
 }

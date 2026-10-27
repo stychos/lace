@@ -40,5 +40,5 @@ int main(int argc, char **argv) {
   LaceApp *app = lace_app_new();
   int status = g_application_run(G_APPLICATION(app), argc, argv);
   g_object_unref(app);
-  return status;
+  return lace_debug_script_failed() ? 3 : status;
 }

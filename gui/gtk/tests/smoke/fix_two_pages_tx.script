@@ -1,0 +1,17 @@
+# args: -s
+# Two tabs of one connection in one window: both show its transaction, and
+# the one left keeps following it after the other closes
+connect sqlite://$LACE_SMOKE_DB
+expect-tables
+connect sqlite://$LACE_SMOKE_DB
+expect-connections 1
+query BEGIN
+run
+expect-indicator 2
+action win.close-connection
+expect-no-dialog
+expect-indicator 1
+query COMMIT
+run
+expect-indicator 0
+quit

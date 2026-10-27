@@ -37,6 +37,7 @@ typedef enum {
   FIELD_HISTORY_MAX_SIZE,
   FIELD_AUTO_OPEN_TABLE,
   FIELD_KEEP_CONN_TAB,
+  FIELD_LAST_WS_CLOSE,
   FIELD_DAEMON_SPAWN_MODE,
   FIELD_DAEMON_IDLE_TIMEOUT,
   FIELD_RESTORE_SESSION,
@@ -334,6 +335,10 @@ static void draw_general_tab(WINDOW *win, DialogState *ds, int start_y,
   draw_checkbox(win, y++, start_x + 2, "Keep a connection tab when the last tab closes",
                 ds->config->general.keep_connection_tab,
                 ds->selected_field == FIELD_KEEP_CONN_TAB, focused);
+
+  draw_option(win, y++, start_x + 2, "When the last workspace closes",
+              ds->config->general.last_workspace_close == CONFIG_LAST_WS_NEW ? "new workspace" : "quit",
+              ds->selected_field == FIELD_LAST_WS_CLOSE, focused);
 
   draw_option(win, y++, start_x + 2, "Daemon spawn mode",
               spawn_mode_name(ds->config->general.daemon_spawn_mode),
@@ -976,6 +981,10 @@ static bool handle_general_input(DialogState *ds, const UiEvent *event) {
     case FIELD_KEEP_CONN_TAB:
       ds->config->general.keep_connection_tab =
           !ds->config->general.keep_connection_tab;
+      break;
+    case FIELD_LAST_WS_CLOSE:
+      ds->config->general.last_workspace_close =
+          ds->config->general.last_workspace_close == CONFIG_LAST_WS_NEW ? CONFIG_LAST_WS_QUIT : CONFIG_LAST_WS_NEW;
       break;
     case FIELD_DAEMON_SPAWN_MODE:
       /* Cycle through spawn modes: Unix -> Stdio -> TCP -> Detect -> Unix */

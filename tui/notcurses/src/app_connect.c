@@ -1,5 +1,6 @@
 /* Connecting, connection tabs and workspaces */
 #include "app.h"
+#include "core/conn_fields.h"
 #include "conn/connection.h"
 #include "conn/mainq.h"
 #include "core/connstr_display.h"
@@ -325,26 +326,6 @@ void app_test_connection(NcApp *app, const char *connstr, const LaceSavedConnect
   start_request(r);
 }
 
-char *app_target_to_connstr(const char *text, char **error) {
-  while (text && (*text == ' ' || *text == '\t')) text++;
-  if (!text || !*text) {
-    if (error) *error = str_dup("Nothing to connect to");
-    return NULL;
-  }
-  char *t = str_dup(text);
-  size_t n = strlen(t);
-  while (n && (t[n - 1] == ' ' || t[n - 1] == '\t' || t[n - 1] == '\n')) t[--n] = 0;
-  if (strstr(t, "://") || strncmp(t, "sqlite:", 7) == 0) return t;
-  if (connstr_is_sqlite_file(t)) {
-    char *cs = connstr_from_path(t, error);
-    str_secure_free(t);
-    return cs;
-  }
-  if (error) *error = str_dup("Not a connection URL or an existing SQLite file");
-  str_secure_free(t);
-  return NULL;
-}
-
 static void target_done(NcApp *app, ConnTab *tab, const char *error, void *data) {
   (void)tab; (void)error; (void)data;
   app_connect_targets(app);
@@ -353,7 +334,7 @@ static void target_done(NcApp *app, ConnTab *tab, const char *error, void *data)
 void app_connect_targets(NcApp *app) {
   while (app->next_target < app->num_targets) {
     char *err = NULL;
-    char *cs = app_target_to_connstr(app->targets[app->next_target++], &err);
+    char *cs = conn_target_to_connstr(app->targets[app->next_target++], &err);
     if (!cs) {
       app_set_status(app, true, "%s", err ? err : "Not a connection");
       free(err);

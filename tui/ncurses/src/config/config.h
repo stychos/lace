@@ -258,6 +258,7 @@ typedef struct {
   size_t num_touched;
   unsigned frontend; /* CONFIG_FE_* of the frontend running: hotkey conflicts
                         are checked among its actions only */
+  bool hotkeys_foreign; /* A GUI: the TUIs own "hotkeys"; a save keeps the file's */
 } Config;
 
 /* ============================================================================
@@ -277,6 +278,10 @@ bool config_save_file(const Config *config, const char *path, char **error);
 
 /* A frontend's own section in extra (owned object, created on demand) */
 struct cJSON *config_section(Config *config, const char *name);
+/* A boolean in a frontend's own section ("macos": "keychain_passwords"),
+ * dflt when absent; setting one marks the section to be saved from memory */
+bool config_section_get_bool(Config *config, const char *section, const char *key, bool dflt);
+void config_section_set_bool(Config *config, const char *section, const char *key, bool value);
 
 /* Free config structure */
 void config_free(Config *config);

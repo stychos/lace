@@ -34,7 +34,9 @@ gboolean lace_app_save_saved(LaceApp *app, GtkWidget *parent);
 void lace_app_apply_color_scheme(LaceApp *app);
 void lace_app_save_prefs(LaceApp *app, GtkWidget *parent);
 
+/* A new window (workspace) with one connection form, presented */
 LaceWindow *lace_app_new_window(LaceApp *app, const char *name);
+
 GList *lace_app_get_lace_windows(LaceApp *app); /* g_list_free */
 void lace_app_save_session(LaceApp *app, LaceWindow *except);
 
@@ -49,8 +51,23 @@ void lace_app_connect(LaceApp *app, GtkWidget *parent, const char *connstr,
 void lace_app_test_connection(LaceApp *app, GtkWidget *parent, const char *connstr,
                               LaceConnectCb cb, gpointer user_data);
 
+/* The open connections (conn/conn_registry.c): one per saved connection or
+ * password-less string, in any window. lace_app_open uses an open one when
+ * there is one (cb at once), else connects (lace_app_connect) and registers
+ * it; a URL goes to recent.json. Whoever places the connection holds it;
+ * the last release closes it. */
+void lace_app_open(LaceApp *app, GtkWidget *parent, const char *connstr, const char *saved_id,
+                   const char *name, LaceConnectCb cb, gpointer user_data);
+LaceConnection *lace_app_find_connection(LaceApp *app, const char *saved_id, const char *connstr);
+void lace_app_hold_connection(LaceApp *app, LaceConnection *c);
+void lace_app_release_connection(LaceApp *app, LaceConnection *c);
+guint lace_app_connection_holders(LaceApp *app, LaceConnection *c);
+guint lace_app_n_connections(LaceApp *app);
+
 /* debug_script.c: LACE_GTK_SCRIPT driving for headless tests */
 void lace_debug_script_start(LaceApp *app);
+/* An expect-* command failed: main() exits with status 3 */
+gboolean lace_debug_script_failed(void);
 
 G_END_DECLS
 

@@ -487,6 +487,7 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_NEXT_WORKSPACE) ||
            hotkey_matches(cfg, event, HOTKEY_CLOSE_TAB) ||
            hotkey_matches(cfg, event, HOTKEY_CONNECT_DIALOG) ||
+           hotkey_matches(cfg, event, HOTKEY_NEW_CONNECTION) ||
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_HEADER) ||
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
            hotkey_matches(cfg, event, HOTKEY_GOTO_ROW) ||

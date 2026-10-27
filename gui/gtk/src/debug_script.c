@@ -35,7 +35,35 @@
  *   connect URL         open another connection tab
  *   shot NAME           screenshot the X display to $LACE_GTK_SHOTS/NAME.png
  *   heap [LABEL]        log glibc heap use
+ *   form-uri TEXT       type TEXT into the current form's URI row, then leave it
+ *   form-field KEY VAL  set a form field (form_page.h names the keys; VAL may be empty)
+ *   form-pick NAME      highlight a saved connection or Recent entry in the form's list
+ *   form-action ACTION  open, background, new-window, to-window:N, save, save-as-new, test, clear
+ *   form-menu NAME      aim the form list's context menu at a row, as a right-click does
+ *   form-search TEXT    type into the form list's search
+ *   form-tree ACTION    a list action: new-folder, rename, duplicate, delete, forget
+ *   transfer-tab N      move the current window's selected tab to window N (as a drag does)
+ *   window N            make the N-th open window (in creation order) the current one
+ *   close-window        close the current window
  *   quit                close every window
+ *
+ * Expectations (tests/smoke.sh): a failed one prints "script: expectation
+ * failed: ..." and quits; the app then exits with status 3. Those marked
+ * (waits) retry for up to 5 s first.
+ *
+ *   expect-windows N        open windows (waits)
+ *   expect-pages N          the current window's tabs (waits)
+ *   expect-page KIND        its selected tab: connection, form or none (waits)
+ *   expect-title TEXT       its selected tab's title (waits)
+ *   expect-tables           the current connection's tables are loaded (waits)
+ *   expect-connections N    open database connections in the app (waits)
+ *   expect-no-dialog        no dialog over the current window
+ *   expect-indicator N      tabs of the current window showing a transaction mark (waits)
+ *   expect-dialog TEXT      a dialog over the current window whose heading or text has TEXT (waits)
+ *   expect-field KEY [VAL]  a field of the current form holds VAL (empty when left out) (waits)
+ *   expect-uri-masked       the form's URI row shows the mask and no typed password
+ *   expect-message TEXT     the form's message contains TEXT (waits)
+ *   expect-saved NAME       connections.json has a saved connection of that name (waits)
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
@@ -43,6 +71,7 @@
 
 #include "app.h"
 #include "views/connection_page.h"
+#include "views/form_page.h"
 #include "views/filter_bar.h"
 #include "views/query_view.h"
 #include "views/sidebar.h"
@@ -60,9 +89,30 @@ typedef struct {
   LaceApp *app;
   char **commands;
   int index;
+  gint64 waiting_since; /* an expectation being retried, 0 if none */
 } Script;
 
+static gboolean g_failed;
+/* The window "window N" picked, while the set of windows stays the same */
+static GWeakRef g_picked;
+static guint g_picked_count;
+
+gboolean lace_debug_script_failed(void) { return g_failed; }
+
+static guint n_windows(LaceApp *app) {
+  GList *wins = lace_app_get_lace_windows(app);
+  guint n = g_list_length(wins);
+  g_list_free(wins);
+  return n;
+}
+
 static LaceWindow *active_window(LaceApp *app) {
+  LaceWindow *picked = g_weak_ref_get(&g_picked);
+  if (picked) {
+    g_object_unref(picked); /* the app's window list keeps it alive */
+    if (n_windows(app) == g_picked_count)
+      return picked;
+  }
   GtkWindow *w = gtk_application_get_active_window(GTK_APPLICATION(app));
   if (LACE_IS_WINDOW(w))
     return LACE_WINDOW(w);
@@ -93,6 +143,56 @@ static void schedule(Script *s, guint ms) {
   g_timeout_add(ms, step, s);
 }
 
+/* The N-th open window by creation order (1-based) */
+static LaceWindow *window_number(LaceApp *app, int n) {
+  GList *wins = lace_app_get_lace_windows(app);
+  LaceWindow *found = NULL;
+  for (int k = 1; k <= n; k++) {
+    LaceWindow *best = NULL;
+    for (GList *l = wins; l; l = l->next) {
+      LaceWindow *w = l->data;
+      guint num = lace_window_get_number(w);
+      guint prev = found ? lace_window_get_number(found) : 0;
+      if (num > prev && (!best || num < lace_window_get_number(best)))
+        best = w;
+    }
+    found = best;
+  }
+  g_list_free(wins);
+  return found;
+}
+
+static const char *page_kind(LaceWindow *w) {
+  AdwTabPage *page = w ? adw_tab_view_get_selected_page(lace_window_get_tab_view(w)) : NULL;
+  if (!page)
+    return "none";
+  return LACE_IS_CONNECTION_PAGE(adw_tab_page_get_child(page)) ? "connection" : "form";
+}
+
+static guint n_connections(LaceApp *app) { return lace_app_n_connections(app); }
+
+/* An expectation: true to go on; false when it is being retried (the step
+ * is scheduled again) or failed (the app quits) */
+static gboolean expect(Script *s, gboolean ok, gboolean waits, const char *cmd, const char *arg,
+                       const char *seen) {
+  if (ok) {
+    s->waiting_since = 0;
+    return TRUE;
+  }
+  gint64 now = g_get_monotonic_time();
+  if (waits && (!s->waiting_since || now - s->waiting_since < 5 * G_USEC_PER_SEC)) {
+    if (!s->waiting_since)
+      s->waiting_since = now;
+    s->index--; /* this command again */
+    schedule(s, 100);
+    return FALSE;
+  }
+  g_printerr("script: expectation failed: %s %s: saw %s\n", cmd, arg ? arg : "", seen);
+  g_failed = TRUE;
+  g_action_group_activate_action(G_ACTION_GROUP(s->app), "quit", NULL);
+  return FALSE;
+}
+
 static gboolean step(gpointer data) {
   Script *s = data;
   char *cmd = s->commands[s->index];
@@ -102,6 +202,7 @@ static gboolean step(gpointer data) {
     return G_SOURCE_REMOVE;
   }
   s->index++;
+  cmd = g_strdup(cmd); /* parsed in place; the original is run again by a retry */
   g_strstrip(cmd);
   char *arg = strchr(cmd, ' ');
   if (arg) {
@@ -256,7 +357,7 @@ static gboolean step(gpointer data) {
     }
     g_strfreev(parts);
   } else if (g_str_equal(cmd, "connect") && w && arg) {
-    lace_window_connect_to(w, arg, NULL, NULL);
+    lace_window_connect_to(w, arg, NULL, NULL); /* through lace_app_open: an open one is used */
   } else if (g_str_equal(cmd, "shot") && arg) {
     const char *dir = g_getenv("LACE_GTK_SHOTS");
     char *path = g_strdup_printf("%s/%s.png", dir ? dir : ".", arg);
@@ -278,12 +379,146 @@ static gboolean step(gpointer data) {
                 cells, rows, g_list_model_get_n_items(G_LIST_MODEL(lace_data_grid_get_model(grid))));
     }
 #endif
+  } else if (g_str_has_prefix(cmd, "form-")) {
+    LaceFormPage *form = w ? lace_window_current_form(w) : NULL;
+    if (!form) {
+      g_warning("script: unknown or inapplicable command '%s' (no form)", cmd);
+    } else if (g_str_equal(cmd, "form-uri")) {
+      lace_form_page_set_uri(form, arg ? arg : "");
+    } else if (g_str_equal(cmd, "form-field") && arg) {
+      char **kv = g_strsplit(arg, " ", 2);
+      if (!lace_form_page_set_field(form, kv[0], kv[1] ? kv[1] : ""))
+        g_warning("script: unknown or inapplicable command '%s %s'", cmd, kv[0]);
+      g_strfreev(kv);
+    } else if (g_str_equal(cmd, "form-pick") && arg) {
+      if (!lace_form_page_pick(form, arg))
+        g_warning("script: unknown or inapplicable command '%s %s' (not listed)", cmd, arg);
+      delay = 300; /* a question may come up */
+    } else if (g_str_equal(cmd, "form-action") && arg) {
+      lace_form_page_action(form, arg);
+      delay = 300;
+    } else if (g_str_equal(cmd, "form-menu") && arg) {
+      if (!lace_form_page_menu_at(form, arg))
+        g_warning("script: unknown or inapplicable command '%s %s' (not listed)", cmd, arg);
+    } else if (g_str_equal(cmd, "form-search")) {
+      lace_form_page_search(form, arg);
+    } else if (g_str_equal(cmd, "form-tree") && arg) {
+      lace_form_page_tree_action(form, arg);
+      delay = 300;
+    } else {
+      g_warning("script: unknown or inapplicable command '%s'", cmd);
+    }
+  } else if (g_str_has_prefix(cmd, "expect-")) {
+    char seen[256] = "";
+    gboolean ok, waits = TRUE;
+    LaceFormPage *form = w ? lace_window_current_form(w) : NULL;
+    if (g_str_equal(cmd, "expect-windows") && arg) {
+      g_snprintf(seen, sizeof seen, "%u", n_windows(s->app));
+      ok = (int)n_windows(s->app) == atoi(arg);
+    } else if (g_str_equal(cmd, "expect-pages") && arg) {
+      int n = w ? adw_tab_view_get_n_pages(lace_window_get_tab_view(w)) : -1;
+      g_snprintf(seen, sizeof seen, "%d", n);
+      ok = n == atoi(arg);
+    } else if (g_str_equal(cmd, "expect-page") && arg) {
+      g_snprintf(seen, sizeof seen, "%s", page_kind(w));
+      ok = g_str_equal(page_kind(w), arg);
+    } else if (g_str_equal(cmd, "expect-title") && arg) {
+      AdwTabPage *page = w ? adw_tab_view_get_selected_page(lace_window_get_tab_view(w)) : NULL;
+      const char *t = page ? adw_tab_page_get_title(page) : NULL;
+      g_snprintf(seen, sizeof seen, "%s", t ? t : "(no tab)");
+      ok = t && g_str_equal(t, arg);
+    } else if (g_str_equal(cmd, "expect-tables")) {
+      ok = cp && lace_connection_tables_loaded(lace_connection_page_get_connection(cp));
+      g_snprintf(seen, sizeof seen, "%s", cp ? "tables not loaded" : "no connection tab");
+    } else if (g_str_equal(cmd, "expect-connections") && arg) {
+      g_snprintf(seen, sizeof seen, "%u", n_connections(s->app));
+      ok = (int)n_connections(s->app) == atoi(arg);
+    } else if (g_str_equal(cmd, "expect-field") && form) {
+      char **kv = g_strsplit(arg ? arg : "", " ", 2);
+      char *v = kv[0] ? lace_form_page_get_field(form, kv[0]) : NULL;
+      g_snprintf(seen, sizeof seen, "'%s'", v ? v : "(unknown field)");
+      ok = v && g_str_equal(v, kv[1] ? kv[1] : "");
+      g_free(v);
+      g_strfreev(kv);
+    } else if (g_str_equal(cmd, "expect-uri-masked") && form) {
+      const char *u = lace_form_page_get_uri(form);
+      char *pw = lace_form_page_get_field(form, "password");
+      g_snprintf(seen, sizeof seen, "'%s'", u ? u : "");
+      ok = u && strstr(u, "\xe2\x80\xa2") && (!pw || !*pw || !strstr(u, pw));
+      g_free(pw);
+      waits = FALSE;
+    } else if (g_str_equal(cmd, "expect-message") && form && arg) {
+      const char *m = lace_form_page_get_message(form);
+      g_snprintf(seen, sizeof seen, "'%s'", m ? m : "");
+      ok = m && strstr(m, arg);
+    } else if (g_str_equal(cmd, "expect-saved") && arg) {
+      char *err = NULL;
+      ConnectionManager *mgr = connmgr_load(&err);
+      free(err);
+      ok = FALSE;
+      for (size_t i = 0; mgr && !ok && i < connmgr_count_filtered(mgr, arg); i++) {
+        ConnectionItem *it = connmgr_get_filtered_item(mgr, arg, i);
+        ok = it && it->type == CONN_ITEM_CONNECTION && g_strcmp0(it->connection.name, arg) == 0;
+      }
+      g_snprintf(seen, sizeof seen, "no saved connection called %s", arg);
+      if (mgr)
+        connmgr_free(mgr);
+    } else if (g_str_equal(cmd, "expect-dialog") && arg) {
+      AdwDialog *d = w ? adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(w)) : NULL;
+      const char *heading = ADW_IS_ALERT_DIALOG(d) ? adw_alert_dialog_get_heading(ADW_ALERT_DIALOG(d)) : NULL;
+      const char *body = ADW_IS_ALERT_DIALOG(d) ? adw_alert_dialog_get_body(ADW_ALERT_DIALOG(d)) : NULL;
+      g_snprintf(seen, sizeof seen, "%s", d ? (body ? body : "a dialog") : "no dialog");
+      ok = (heading && strstr(heading, arg)) || (body && strstr(body, arg));
+    } else if (g_str_equal(cmd, "expect-indicator") && arg) {
+      int n = 0;
+      AdwTabView *tv = w ? lace_window_get_tab_view(w) : NULL;
+      for (int i = 0; tv && i < adw_tab_view_get_n_pages(tv); i++)
+        n += adw_tab_page_get_indicator_icon(adw_tab_view_get_nth_page(tv, i)) != NULL;
+      g_snprintf(seen, sizeof seen, "%d", n);
+      ok = n == atoi(arg);
+    } else if (g_str_equal(cmd, "expect-no-dialog")) {
+      AdwDialog *d = w ? adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(w)) : NULL;
+      g_snprintf(seen, sizeof seen, "%s", d ? adw_dialog_get_title(d) : "none");
+      ok = d == NULL;
+      waits = FALSE;
+    } else {
+      g_warning("script: unknown or inapplicable command '%s'", cmd);
+      g_free(cmd);
+      schedule(s, delay);
+      return G_SOURCE_REMOVE;
+    }
+    gboolean go_on = expect(s, ok, waits, cmd, arg, seen);
+    g_free(cmd);
+    if (go_on)
+      schedule(s, delay);
+    return G_SOURCE_REMOVE;
+  } else if (g_str_equal(cmd, "window") && arg) {
+    LaceWindow *pick = window_number(s->app, atoi(arg));
+    if (pick) {
+      g_weak_ref_set(&g_picked, pick);
+      g_picked_count = n_windows(s->app);
+      gtk_window_present(GTK_WINDOW(pick));
+    } else {
+      g_warning("script: no window %s", arg);
+    }
+  } else if (g_str_equal(cmd, "transfer-tab") && arg && w) {
+    LaceWindow *to = window_number(s->app, atoi(arg));
+    AdwTabPage *page = adw_tab_view_get_selected_page(lace_window_get_tab_view(w));
+    if (to && page && to != w)
+      adw_tab_view_transfer_page(lace_window_get_tab_view(w), page, lace_window_get_tab_view(to),
+                                 adw_tab_view_get_n_pages(lace_window_get_tab_view(to)));
+    else
+      g_warning("script: unknown or inapplicable command '%s %s'", cmd, arg);
+  } else if (g_str_equal(cmd, "close-window") && w) {
+    gtk_window_close(GTK_WINDOW(w));
   } else if (g_str_equal(cmd, "quit")) {
+    g_free(cmd);
     g_action_group_activate_action(G_ACTION_GROUP(s->app), "quit", NULL);
     return G_SOURCE_REMOVE;
   } else if (*cmd) {
     g_warning("script: unknown or inapplicable command '%s'", cmd);
   }
+  g_free(cmd);
   schedule(s, delay);
   return G_SOURCE_REMOVE;
 }

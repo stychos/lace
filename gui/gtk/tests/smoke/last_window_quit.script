@@ -1,0 +1,11 @@
+# args: -s
+# fixture-conns
+# expect-exit
+# Closing the last window's last tab quits (on_last_workspace_close "quit");
+# the session still holds the window
+form-pick Local
+form-action background
+expect-pages 2
+action win.close-tab
+expect-pages 1
+action win.close-tab

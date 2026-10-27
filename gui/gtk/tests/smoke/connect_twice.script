@@ -1,0 +1,7 @@
+# The same database opened twice (next to the window's start form) is one connection; a URL goes to Recent once, without a password
+connect sqlite://$LACE_SMOKE_DB
+expect-tables
+connect sqlite://$LACE_SMOKE_DB
+expect-pages 3
+expect-connections 1
+quit

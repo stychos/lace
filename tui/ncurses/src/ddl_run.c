@@ -182,8 +182,7 @@ static bool same_object(const Tab *t, size_t conn_idx, LaceObjectKind kind, cons
   return strcmp(t->table_name, object) == 0;
 }
 
-/* Close tab i of workspace w, which is not the current workspace: the
- * tab_ui entries shift as tab_close does for the current one */
+/* Remove tab i of workspace w: the tab_ui entries shift as tab_close does */
 static void close_elsewhere(TuiState *state, size_t w, size_t i) {
   Workspace *ws = &state->app->workspaces[w];
   size_t old = ws->num_tabs;
@@ -207,12 +206,23 @@ static void after_change(TuiState *state, size_t conn_idx, LaceObjectKind kind, 
       if (!same_object(t, conn_idx, kind, object))
         continue;
       if (after == DDL_AFTER_DROP) {
-        if (w == cur_ws) {
-          tab_switch(state, i);
-          tab_close(state);
+        /* The view goes, never the connection: its last tab in this
+         * workspace becomes the connection's tab (the sidebar of tables) */
+        size_t others = 0;
+        for (size_t k = 0; k < ws->num_tabs; k++)
+          others += k != i && ws->tabs[k].type != TAB_TYPE_FORM && ws->tabs[k].connection_index == conn_idx;
+        if (others == 0) {
+          Connection *c = app_get_connection(app, conn_idx);
+          tab_make_connection(t, conn_idx, c ? c->connstr : NULL);
+          if (w == cur_ws && ws->current_tab == i)
+            state->sidebar_visible = state->sidebar_focused = true;
         } else {
-          close_elsewhere(state, w, i);
+          if (w == cur_ws)
+            tui_cancel_background_load(state);
+          close_elsewhere(state, w, i); /* shifts the tab_ui entries as tab_close does */
         }
+        if (w == cur_ws)
+          tab_restore(state);
         continue;
       }
       if (after == DDL_AFTER_RENAME && arg) {

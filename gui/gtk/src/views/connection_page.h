@@ -44,7 +44,8 @@ LaceQueryView *lace_connection_page_new_query(LaceConnectionPage *p, const char 
 /* The current inner tab's widget: a LaceTableView, a LaceQueryView or NULL */
 GtkWidget *lace_connection_page_current_view(LaceConnectionPage *p);
 gboolean lace_connection_page_close_current(LaceConnectionPage *p);
-/* Close the tab showing that view (a dropped table's); false when it is not here */
+/* Close the tab showing that view (a dropped table's; no "last-tab-closed"
+ * for it: the connection stays); false when it is not here */
 gboolean lace_connection_page_close_view(LaceConnectionPage *p, GtkWidget *view);
 void lace_connection_page_select_tab(LaceConnectionPage *p, int offset);
 AdwTabView *lace_connection_page_get_tab_view(LaceConnectionPage *p);
@@ -57,6 +58,8 @@ gboolean lace_connection_page_sidebar_visible(LaceConnectionPage *p);
 void lace_connection_page_set_sidebar_visible(LaceConnectionPage *p, gboolean visible);
 void lace_connection_page_focus_sidebar(LaceConnectionPage *p);
 void lace_connection_page_focus_content(LaceConnectionPage *p);
+
+/* Signal "last-tab-closed": the user closed its last table or SQL editor */
 
 G_END_DECLS
 

@@ -1,0 +1,11 @@
+# args: -s
+# fixture-conns: pg
+# Saving twice keeps a connection in its folder
+form-pick Beta
+form-field user u2
+form-action save
+expect-saved Beta
+form-field user u3
+form-action save
+wait 300
+quit

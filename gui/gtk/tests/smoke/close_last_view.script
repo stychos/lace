@@ -1,0 +1,13 @@
+# args: -s
+# fixture-conns
+# Closing a connection's last table leaves a form in its place, and the connection closes
+form-pick Local
+form-action open
+expect-tables
+table big
+wait 300
+action win.close-tab
+expect-page form
+expect-pages 1
+expect-connections 0
+quit

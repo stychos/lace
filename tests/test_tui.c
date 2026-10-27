@@ -12,6 +12,8 @@
 #include "views/text_input.h"
 #include "views/form_dialog.h"
 #include "core/connstr_display.h"
+#include "core/conn_fields.h"
+#include "config/session_json.h"
 #include "row_key.h"
 #include "config/connections.h"
 #include "config/recent.h"
@@ -355,12 +357,102 @@ static ConnectionItem *child_named(ConnectionItem *folder, const char *name) {
 /* Items live by value in their folder's array: growing, shifting and moving
  * must leave every parent pointer right */
 /* The connection tab's actions: names, categories, frontends, no clash in their category */
+static void test_conn_fields_shared(void) {
+  ConnFields f;
+  conn_fields_init(&f);
+  CHECK(conn_fields_set_uri(&f, "postgres://app:pw@db1:5432/shop"));
+  char *uri = conn_fields_uri(&f);
+  CHECK(strstr(uri, CF_PASSWORD_MASK) != NULL);
+  CHECK(strstr(uri, "pw@") == NULL);
+  free(uri);
+  CHECK(!conn_fields_set_uri(&f, "::nonsense"));
+  CHECK_STR(f.in[CF_HOST].buf, "db1"); /* left as it was */
+  conn_fields_free(&f);
+  CHECK(conn_key_matches(NULL, "postgres://u:a@h/db", NULL, "postgres://u:b@h/db"));
+  CHECK(!conn_key_matches("id1", NULL, "id2", NULL));
+  char *err = NULL;
+  CHECK(conn_target_to_connstr("not a file", &err) == NULL && err);
+  free(err);
+}
+
+static void test_conn_fields_text(void) {
+  ConnFields f;
+  conn_fields_init(&f);
+  conn_fields_mark_clean(&f);
+  conn_fields_set_text(&f, CF_HOST, "db9");
+  CHECK_STR(conn_fields_text(&f, CF_HOST), "db9");
+  CHECK(conn_fields_dirty(&f));
+  CHECK_STR(conn_fields_text(&f, CF_COUNT), ""); /* out of range: empty, never a crash */
+  conn_fields_free(&f);
+}
+
+static void test_config_section_bool(void) {
+  Config *c = config_get_defaults();
+  CHECK(config_section_get_bool(c, "macos", "keychain_passwords", true));
+  config_section_set_bool(c, "macos", "keychain_passwords", false);
+  CHECK(!config_section_get_bool(c, "macos", "keychain_passwords", true));
+  config_free(c);
+}
+
+static void test_session_json_frontends(void) {
+  const char *legacy = "{\"windows\": [{\"name\": \"G\", \"frame\": \"{{0,0},{9,9}}\","
+                       " \"maximized\": true, \"connections\": []}]}";
+  char *err = NULL;
+  cJSON *ws = lace_session_json_workspaces(legacy, true, "macos", &err);
+  cJSON *w0 = ws ? cJSON_GetArrayItem(ws, 0) : NULL;
+  cJSON *mac = w0 ? cJSON_GetObjectItem(w0, "macos") : NULL;
+  CHECK(mac && cJSON_IsTrue(cJSON_GetObjectItem(mac, "maximized")));
+  CHECK(mac && cJSON_IsString(cJSON_GetObjectItem(mac, "frame")));
+  CHECK(w0 && !cJSON_GetObjectItem(w0, "frame") && !cJSON_GetObjectItem(w0, "gtk"));
+  cJSON_Delete(ws);
+  free(err);
+}
+
+static void test_form_tab_model(void) {
+  AppState app;
+  app_state_init(&app);
+  app_add_connection(&app, NULL, "sqlite:///a.db");
+  app_add_connection(&app, NULL, "sqlite:///b.db");
+  Workspace *ws = app_create_workspace(&app);
+  workspace_create_connection_tab(ws, 1, "sqlite:///b.db");
+  Tab *f = workspace_insert_form_tab(ws, 0);
+  CHECK(f && f->type == TAB_TYPE_FORM && ws->current_tab == 0);
+  CHECK(ws->tabs[0].connection_index == TAB_NO_CONNECTION);
+  CHECK(app_connection_users(&app, 1) == 1);
+  app_close_connection(&app, 0); /* shifts indices above 0 */
+  CHECK(ws->num_tabs == 2);
+  CHECK(ws->tabs[0].type == TAB_TYPE_FORM && ws->tabs[0].connection_index == TAB_NO_CONNECTION);
+  CHECK(ws->tabs[1].connection_index == 0);
+  uint64_t uid = ws->tabs[1].uid;
+  tab_make_form(&ws->tabs[1]);
+  CHECK(ws->tabs[1].type == TAB_TYPE_FORM && ws->tabs[1].uid == uid);
+  CHECK(app_get_tab_connection(&app, &ws->tabs[1]) == NULL);
+  CHECK(app_connection_users(&app, 0) == 0);
+  app_state_cleanup(&app);
+}
+
+static void test_find_open_connection(void) {
+  AppState app;
+  app_state_init(&app);
+  Connection *c = app_add_connection(&app, NULL, "postgres://u:secret@h/db");
+  c->saved_conn_id = str_dup("id-1");
+  app_add_connection(&app, NULL, "sqlite:///x.db");
+  CHECK(app_find_open_connection(&app, "id-1", NULL) == 0);
+  CHECK(app_find_open_connection(&app, "id-1", "postgres://u@other/db") == SIZE_MAX);
+  CHECK(app_find_open_connection(&app, NULL, "postgres://u@h/db") == SIZE_MAX); /* a saved one: by id only */
+  CHECK(app_find_open_connection(&app, NULL, "sqlite:///x.db") == 1);
+  CHECK(app_find_open_connection(&app, NULL, "sqlite:///y.db") == SIZE_MAX);
+  app_state_cleanup(&app);
+}
+
 static void test_hotkeys_connection_tab(void) {
   Config *c = config_get_defaults();
   CHECK(hotkey_action_from_key("new_connection") == HOTKEY_NEW_CONNECTION);
   CHECK_STR(hotkey_action_name(HOTKEY_CONN_OPEN), "Open here");
   CHECK(hotkey_get_category(HOTKEY_CONN_OPEN_BACKGROUND) == HOTKEY_CAT_CONNECT);
-  CHECK(hotkey_action_frontends(HOTKEY_CONN_CLEAR) == CONFIG_FE_NOTCURSES);
+  CHECK(hotkey_action_frontends(HOTKEY_CONN_CLEAR) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_frontends(HOTKEY_CONN_OPEN) == CONFIG_FE_ALL);
+  CHECK(hotkey_action_frontends(HOTKEY_NEW_CONNECTION) == CONFIG_FE_ALL);
   CHECK(hotkey_action_frontends(HOTKEY_CONN_TEST) == CONFIG_FE_ALL);
   CHECK(hotkey_action_frontends(HOTKEY_CONN_EDIT) == CONFIG_FE_NCURSES);
   c->frontend = CONFIG_FE_NOTCURSES;
@@ -369,6 +461,10 @@ static void test_hotkeys_connection_tab(void) {
   static const char *keys[] = {"CTRL+T", "ENTER", "CTRL+B", "CTRL+N", "CTRL+O", "CTRL+Y", "CTRL+L"};
   for (size_t i = 0; i < 7; i++)
     CHECK(hotkey_find_conflict(c, fresh[i], keys[i]) == HOTKEY_COUNT);
+  c->frontend = CONFIG_FE_NCURSES;
+  for (size_t i = 0; i < 7; i++)
+    CHECK(hotkey_find_conflict(c, fresh[i], keys[i]) == HOTKEY_COUNT);
+  c->frontend = CONFIG_FE_NOTCURSES;
   /* The sub-views and following keys are every frontend's; an Alt letter
    * matches regardless of case (the translators report it upper) */
   CHECK(hotkey_action_frontends(HOTKEY_SUBVIEW_INDEXES) == CONFIG_FE_ALL);
@@ -1357,6 +1453,12 @@ int main(void) {
   test_config_file();
   test_config_connection_tab_keys();
   test_hotkeys_connection_tab();
+  test_conn_fields_shared();
+  test_form_tab_model();
+  test_conn_fields_text();
+  test_config_section_bool();
+  test_session_json_frontends();
+  test_find_open_connection();
   test_connection_tree();
   test_connections_file();
   test_argv_scrub();

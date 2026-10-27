@@ -1,0 +1,14 @@
+# args: -s
+# fixture-conns: pg
+# A typed password is an edit: moving to another entry asks; Keep keeps everything
+form-pick Alpha
+form-field password x
+form-pick Beta
+answer cancel
+expect-field name Alpha
+expect-field password x
+form-pick Beta
+answer go
+expect-field name Beta
+expect-field password
+quit

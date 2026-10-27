@@ -1,0 +1,11 @@
+# args: -s
+# fixture-conns
+# config: {"general": {"daemon_spawn_mode": 1, "keep_connection_tab": false}}
+# expect-exit
+# Without keep_connection_tab the tab goes; the window, then lace, close with it
+form-pick Local
+form-action open
+expect-tables
+table big
+wait 300
+action win.close-tab

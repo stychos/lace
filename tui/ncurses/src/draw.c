@@ -16,6 +16,7 @@
 #include "render_helpers.h"
 #include "core/catalog_rows.h"
 #include "tui_internal.h"
+#include "views/form_tab.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -362,6 +363,12 @@ void tui_draw_header(TuiState *state) {
    * password, fitted to the left two thirds of the line */
   Connection *app_conn = TUI_TAB_CONNECTION(state);
   char *where = app_conn ? tui_connstr_display(app_conn->connstr) : NULL;
+  Tab *form = TUI_TAB(state);
+  if (!where && form && form->type == TAB_TYPE_FORM) { /* lace ▸ the form's label */
+    char *label = form_tab_label(form);
+    where = str_printf("lace \xE2\x96\xB8 %s", label);
+    free(label);
+  }
   if (where) {
     int max_x = getmaxx(state->header_win);
     tui_print_clip(state->header_win, 0, 1, max_x * 2 / 3, where);
@@ -371,7 +378,7 @@ void tui_draw_header(TuiState *state) {
   /* Right side: combined connection/workspace indicator */
   if (state->app) {
     Tab *tab = TUI_TAB(state);
-    bool multi_conn = state->app->num_connections > 1;
+    bool multi_conn = state->app->num_connections > 1 && tab && tab->type != TAB_TYPE_FORM;
     bool multi_ws = state->app->num_workspaces > 1;
 
     if (multi_conn || multi_ws) {
@@ -882,6 +889,13 @@ void tui_draw_status(TuiState *state) {
     if (sc != SIZE_MAX) {
       draw_column_info(state, "", &tab->schema->columns[sc]);
     }
+  }
+
+  /* A connection form: its keys, unless there is something to say */
+  if (tab && tab->type == TAB_TYPE_FORM && !state->status_msg) {
+    char hints[320];
+    form_tab_status(state, tab, hints, sizeof hints);
+    tui_print_clip(state->status_win, 0, 1, state->term_cols - 2, hints);
   }
 
   /* Center: status/error message */

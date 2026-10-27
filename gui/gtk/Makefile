@@ -37,12 +37,13 @@ SRCS := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 # Shared with the TUI (see the header comment)
-SHARED_SRCS = $(TUI_SRC)/config/connections.c $(TUI_SRC)/core/history.c \
-              $(TUI_SRC)/platform/posix/platform_posix.c $(TUI_SRC)/core/catalog_rows.c \
-              $(TUI_SRC)/core/utf8.c
-SHARED_OBJS = $(BUILD_DIR)/shared/connections.o $(BUILD_DIR)/shared/history.o \
-              $(BUILD_DIR)/shared/platform_posix.o $(BUILD_DIR)/shared/catalog_rows.o \
-              $(BUILD_DIR)/shared/utf8.o
+# config.json, recent.json, the session converters and the connection
+# form's field model are the TUIs' too, so every frontend reads them alike
+SHARED_NAMES = config/connections core/history platform/posix/platform_posix core/catalog_rows \
+               core/utf8 config/config config/recent config/workspace_json core/ui_event \
+               core/conn_fields views/text_input config/session_json
+SHARED_SRCS = $(addprefix $(TUI_SRC)/,$(addsuffix .c,$(SHARED_NAMES)))
+SHARED_OBJS = $(addprefix $(BUILD_DIR)/shared/,$(addsuffix .o,$(notdir $(SHARED_NAMES))))
 
 GRESOURCE_XML = $(RES_DIR)/lace.gresource.xml
 GRESOURCE_C = $(BUILD_DIR)/resources.c
@@ -72,21 +73,12 @@ $(BUILD_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/shared/connections.o: $(TUI_SRC)/config/connections.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-$(BUILD_DIR)/shared/history.o: $(TUI_SRC)/core/history.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-$(BUILD_DIR)/shared/platform_posix.o: $(TUI_SRC)/platform/posix/platform_posix.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-$(BUILD_DIR)/shared/catalog_rows.o: $(TUI_SRC)/core/catalog_rows.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
-$(BUILD_DIR)/shared/utf8.o: $(TUI_SRC)/core/utf8.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+define SHARED_RULE
+$(BUILD_DIR)/shared/$(notdir $(1)).o: $(TUI_SRC)/$(1).c
+	@mkdir -p $$(dir $$@)
+	$$(CC) $$(CFLAGS) -MMD -MP -c $$< -o $$@
+endef
+$(foreach s,$(SHARED_NAMES),$(eval $(call SHARED_RULE,$(s))))
 
 $(GRESOURCE_C): $(GRESOURCE_XML) $(RES_FILES)
 	@mkdir -p $(BUILD_DIR)
@@ -122,9 +114,25 @@ TEST_DDL = $(BUILD_DIR)/test_ddl
 $(TEST_DDL): tests/test_ddl.c tests/test.h $(BUILD_DIR)/src/views/ddl_helpers.o ../../liblace/build/liblace.a
 	$(CC) $(CFLAGS) -Itests $< $(BUILD_DIR)/src/views/ddl_helpers.o -o $@ $(LDFLAGS) $(LIBS)
 
-test: $(TEST_MODEL) $(TEST_DDL)
+# Preferences over the shared config.json (GLib only)
+TEST_PREFS = $(BUILD_DIR)/test_prefs
+$(TEST_PREFS): tests/test_prefs.c tests/test.h $(BUILD_DIR)/src/prefs.o $(SHARED_OBJS) ../../liblace/build/liblace.a
+	$(CC) $(CFLAGS) -Itests $< $(BUILD_DIR)/src/prefs.o $(SHARED_OBJS) -o $@ $(LDFLAGS) $(LIBS)
+
+# session.json's JSON layer (the shared config/session_json.c)
+TEST_SESSION = $(BUILD_DIR)/test_session
+$(TEST_SESSION): tests/test_session.c tests/test.h $(SHARED_OBJS) ../../liblace/build/liblace.a
+	$(CC) $(CFLAGS) -Itests $< $(SHARED_OBJS) -o $@ $(LDFLAGS) $(LIBS)
+
+test: $(TEST_MODEL) $(TEST_DDL) $(TEST_PREFS) $(TEST_SESSION)
 	./$(TEST_MODEL)
 	./$(TEST_DDL)
+	./$(TEST_PREFS)
+	./$(TEST_SESSION)
+
+# Headless scenarios (Xvfb, dbus-run-session; skipped without them)
+smoke: $(TARGET)
+	sh tests/smoke.sh $(SMOKE)
 
 # Install the binary, the desktop entry and the icon (PREFIX, DESTDIR as
 # the top-level Makefile)
@@ -144,4 +152,4 @@ check-deps:
 	@echo "Arch:          pacman -S gtk4 libadwaita gtksourceview5 cjson"
 	@echo "macOS:         brew install gtk4 libadwaita gtksourceview5 cjson"
 
-.PHONY: all clean debug release run test install check-deps FORCE
+.PHONY: smoke all clean debug release run test install check-deps FORCE

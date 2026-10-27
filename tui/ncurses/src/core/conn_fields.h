@@ -1,8 +1,8 @@
 /* The connection form's fields, without any drawing: what the connection tab
  * edits. Filled from a saved connection or a URI, turned back into a saved
  * connection, a connection string or the (masked) URI line. */
-#ifndef LACE_NC_CONN_FORM_H
-#define LACE_NC_CONN_FORM_H
+#ifndef LACE_CONN_FIELDS_H
+#define LACE_CONN_FIELDS_H
 #include "views/text_input.h"
 #include <config/saved_connection.h>
 #include <stdbool.h>
@@ -40,6 +40,10 @@ int conn_fields_next(const ConnFields *f, int from, int dir); /* the next visibl
 bool conn_fields_dirty(const ConnFields *f);
 void conn_fields_mark_clean(ConnFields *f);
 void conn_fields_set_message(ConnFields *f, bool error, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+/* A text field's text ("" for a field out of range or with none) and setting
+ * it (for callers that cannot reach the array, Swift) */
+const char *conn_fields_text(const ConnFields *f, int field);
+void conn_fields_set_text(ConnFields *f, int field, const char *text);
 /* The saved connection the fields describe; NULL (message set) when they do
  * not validate. with_secrets keeps typed passwords whatever the save boxes say. */
 LaceSavedConnection *conn_fields_collect(ConnFields *f, bool with_secrets);
@@ -56,4 +60,12 @@ bool conn_fields_set_uri(ConnFields *f, const char *text);
 /* Validation: an error message or NULL. port: empty or 1..65535; host: no "/ ? # @" or whitespace */
 char *connect_check_port(const char *text, const char *what);
 char *connect_check_host(const char *text, const char *what);
+
+/* What was typed or given on the command line as a connection string: a URL
+ * as it is, an existing SQLite file (a leading ~/ is $HOME) made a URL;
+ * NULL and *error otherwise */
+char *conn_target_to_connstr(const char *text, char **error);
+/* Whether two connections are the same database: by saved id when either
+ * has one, else by the connection string without passwords */
+bool conn_key_matches(const char *saved_a, const char *connstr_a, const char *saved_b, const char *connstr_b);
 #endif

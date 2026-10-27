@@ -1,0 +1,29 @@
+# A connection used by two windows: closing it in one asks nothing and
+# leaves it open; the other window keeps using it, transaction included
+connect sqlite://$LACE_SMOKE_DB
+expect-tables
+action app.new-window
+expect-windows 2
+window 2
+connect sqlite://$LACE_SMOKE_DB
+expect-tables
+expect-connections 1
+query BEGIN
+run
+wait 500
+window 1
+action win.close-connection
+wait 300
+expect-no-dialog
+expect-connections 1
+window 2
+query SELECT 1
+run
+wait 300
+expect-tables
+action win.close-connection
+expect-dialog A transaction is open
+answer cancel
+wait 200
+expect-connections 1
+quit

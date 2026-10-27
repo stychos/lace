@@ -12,24 +12,17 @@
 #include "../db_compat.h"
 #include "../tui.h"
 
-/* Connection open mode */
+/* How the Workspaces window closed */
 typedef enum {
-  CONNECT_MODE_CANCELLED,     /* User cancelled */
-  CONNECT_MODE_NEW_TAB,       /* Open in new tab of current workspace */
-  CONNECT_MODE_NEW_WORKSPACE, /* Open in new workspace */
-  CONNECT_MODE_QUIT           /* User wants to quit the app */
+  CONNECT_MODE_CANCELLED, /* Closed (anything it did is done) */
+  CONNECT_MODE_QUIT       /* The user wants to quit the app */
 } ConnectMode;
 
-/* Connection dialog result */
 typedef struct {
-  char *connstr;       /* Connection string (caller must str_secure_free) */
-  char *saved_conn_id; /* Saved connection ID (caller must free, may be NULL) */
-  ConnectMode mode;    /* How to open the connection */
-  DbConnection *conn;  /* Already open (the dialog connected): the caller
-                          adds it, never connects a second time */
+  ConnectMode mode;
 } ConnectResult;
 
-/* Show connection dialog and return connection result */
+/* Show the Workspaces window (the workspaces manager) */
 ConnectResult connect_view_show(TuiState *state);
 
 #endif /* LACE_CONNECT_VIEW_H */

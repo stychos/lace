@@ -1,0 +1,14 @@
+# fixture-conns
+# Two windows on one saved connection come back from the session sharing
+# one connection (their restores run at the same time)
+# then: fix_concurrent_open_after.script
+form-pick Local
+form-action open
+expect-tables
+action app.new-window
+window 2
+form-pick Local
+form-action open
+expect-tables
+expect-connections 1
+quit

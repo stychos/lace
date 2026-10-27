@@ -1,6 +1,7 @@
 /*
  * Lace GTK frontend
- * Session: windows, their connection tabs and inner tabs (gtk-session.json)
+ * Session: windows, their connection tabs and inner tabs (the shared
+ * session.json, version 2)
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace

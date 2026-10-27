@@ -14,7 +14,7 @@
 #include "undo.h"
 #include "ui/textbuf.h"
 #include "ui/sqlhl.h"
-#include "ui/conn_form.h"
+#include "core/conn_fields.h"
 #include "ui/form_tab.h"
 #include "ui/header.h"
 #include "ui/input.h"
@@ -473,11 +473,11 @@ static void test_detach_cancels_running(void) {
 /* Which open connection a new request may share: a saved id by id, a typed
  * URL by its password-less string */
 static void test_conn_key_matches(void) {
-  CHECK(nc_conn_key_matches("id1", "sqlite:///a", "id1", "sqlite:///b"));
-  CHECK(!nc_conn_key_matches("id1", "sqlite:///a", "id2", "sqlite:///a"));
-  CHECK(nc_conn_key_matches(NULL, "postgres://u:pw@h/db", "", "postgres://u@h/db"));
-  CHECK(!nc_conn_key_matches("id1", "postgres://u@h/db", NULL, "postgres://u@h/db"));
-  CHECK(!nc_conn_key_matches(NULL, "postgres://u@h/db", NULL, "postgres://u@h/other"));
+  CHECK(conn_key_matches("id1", "sqlite:///a", "id1", "sqlite:///b"));
+  CHECK(!conn_key_matches("id1", "sqlite:///a", "id2", "sqlite:///a"));
+  CHECK(conn_key_matches(NULL, "postgres://u:pw@h/db", "", "postgres://u@h/db"));
+  CHECK(!conn_key_matches("id1", "postgres://u@h/db", NULL, "postgres://u@h/db"));
+  CHECK(!conn_key_matches(NULL, "postgres://u@h/db", NULL, "postgres://u@h/other"));
 }
 
 /* Holders of a shared connection: the last release closes it */
@@ -1419,12 +1419,12 @@ static void test_connect_helpers(void) {
   CHECK(has_error(connect_check_host("h?x", "Host")));
   CHECK(has_error(connect_check_host("h#x", "Host")));
   /* targets: URLs as they are, a missing file is an error, not a SQLite URL */
-  CHECK_STR_FREE(app_target_to_connstr("  postgres://u@h/d ", &err), "postgres://u@h/d");
-  CHECK_STR_FREE(app_target_to_connstr("sqlite:///x.db", &err), "sqlite:///x.db");
-  CHECK(app_target_to_connstr("", &err) == NULL);
+  CHECK_STR_FREE(conn_target_to_connstr("  postgres://u@h/d ", &err), "postgres://u@h/d");
+  CHECK_STR_FREE(conn_target_to_connstr("sqlite:///x.db", &err), "sqlite:///x.db");
+  CHECK(conn_target_to_connstr("", &err) == NULL);
   free(err);
   err = NULL;
-  CHECK(app_target_to_connstr("/nonexistent/lace-test.db", &err) == NULL && err != NULL);
+  CHECK(conn_target_to_connstr("/nonexistent/lace-test.db", &err) == NULL && err != NULL);
   free(err);
 }
 

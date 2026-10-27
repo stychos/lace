@@ -1,12 +1,12 @@
 /* The connection form tab. Left: the saved connections tree and Recent
- * (ui/conn_picker.c); right: the URI line over the fields (ui/conn_form.c),
+ * (ui/conn_picker.c); right: the URI line over the fields (core/conn_fields.c, shared with the ncurses TUI),
  * the open and manage buttons, a message line. Highlighting a saved
  * connection or a recent URL fills the fields, asking first when they hold
  * edits not saved. */
 #include "ui/form_tab.h"
 #include "config/connections.h"
 #include "model/workspace.h"
-#include "ui/conn_form.h"
+#include "core/conn_fields.h"
 #include "ui/conn_picker.h"
 #include "ui/dialogs/confirm.h"
 #include "ui/dialogs/pick.h"

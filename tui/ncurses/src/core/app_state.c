@@ -13,6 +13,7 @@
 #include "../../liblace/include/util/str.h"
 #include "../../liblace/include/util/connstr.h"
 #include "history.h"
+#include "conn_fields.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -175,9 +176,14 @@ void query_count_stop(Tab *tab) {
   tab->query_count_op = NULL;
 }
 
+void (*tab_form_free_hook)(struct FormTab *form);
+
 void tab_free_data(Tab *tab) {
   if (!tab)
     return;
+  if (tab->form && tab_form_free_hook)
+    tab_form_free_hook(tab->form);
+  tab->form = NULL;
   undo_stack_clear(&tab->undo);
 
   /* Cancel any pending background operation first to prevent use-after-free */
@@ -314,24 +320,20 @@ Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index) {
   return tab;
 }
 
-Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
-                                     const char *connstr) {
-  if (!ws)
-    return NULL;
-
-  if (!workspace_ensure_tab_capacity(ws))
-    return NULL;
-
-  size_t new_idx = ws->num_tabs;
-  Tab *tab = &ws->tabs[new_idx];
+void tab_make_connection(Tab *tab, size_t connection_index, const char *connstr) {
+  if (!tab)
+    return;
+  uint64_t uid = tab->uid;
+  tab_free_data(tab);
   tab_init(tab);
-
+  if (uid)
+    tab->uid = uid;
   tab->type = TAB_TYPE_CONNECTION;
   tab->connection_index = connection_index;
+  tab->active = true;
 
   /* A short display name: the database (a file's base name), else the
    * host. Parsed, never cut from the raw string, which holds passwords. */
-  tab->table_name = NULL;
   ConnString *cs = connstr ? connstr_parse(connstr, NULL) : NULL;
   if (cs) {
     const char *name = NULL;
@@ -347,12 +349,52 @@ Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
   }
   if (!tab->table_name)
     tab->table_name = str_dup("Connection");
+}
 
-  tab->active = true;
+Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
+                                     const char *connstr) {
+  if (!ws)
+    return NULL;
+
+  if (!workspace_ensure_tab_capacity(ws))
+    return NULL;
+
+  size_t new_idx = ws->num_tabs;
+  Tab *tab = &ws->tabs[new_idx];
+  memset(tab, 0, sizeof(Tab));
+  tab_make_connection(tab, connection_index, connstr);
   ws->num_tabs++;
   ws->current_tab = new_idx;
 
   return tab;
+}
+
+Tab *workspace_insert_form_tab(Workspace *ws, size_t at) {
+  if (!ws || !workspace_ensure_tab_capacity(ws))
+    return NULL;
+  if (at > ws->num_tabs)
+    at = ws->num_tabs;
+  memmove(&ws->tabs[at + 1], &ws->tabs[at], (ws->num_tabs - at) * sizeof(Tab));
+  Tab *tab = &ws->tabs[at];
+  tab_init(tab);
+  tab->type = TAB_TYPE_FORM;
+  tab->connection_index = TAB_NO_CONNECTION;
+  tab->active = true;
+  ws->num_tabs++;
+  ws->current_tab = at;
+  return tab;
+}
+
+void tab_make_form(Tab *tab) {
+  if (!tab)
+    return;
+  uint64_t uid = tab->uid;
+  tab_free_data(tab);
+  tab_init(tab);
+  tab->uid = uid;
+  tab->type = TAB_TYPE_FORM;
+  tab->connection_index = TAB_NO_CONNECTION;
+  tab->active = true;
 }
 
 bool workspace_close_tab(Workspace *ws, size_t index) {
@@ -653,7 +695,7 @@ bool app_close_connection(AppState *app, size_t index) {
     Workspace *ws = &app->workspaces[w];
     for (size_t t = 0; t < ws->num_tabs; t++) {
       Tab *tab = &ws->tabs[t];
-      if (tab->connection_index > index) {
+      if (tab->connection_index > index && tab->connection_index != TAB_NO_CONNECTION) {
         tab->connection_index--;
       }
     }
@@ -744,6 +786,29 @@ Tab *app_current_tab(AppState *app) {
   if (!ws)
     return NULL;
   return workspace_current_tab(ws);
+}
+
+size_t app_connection_users(const AppState *app, size_t conn_idx) {
+  size_t n = 0;
+  for (size_t w = 0; app && conn_idx != TAB_NO_CONNECTION && w < app->num_workspaces; w++)
+    for (size_t t = 0; t < app->workspaces[w].num_tabs; t++)
+      n += app->workspaces[w].tabs[t].type != TAB_TYPE_FORM &&
+           app->workspaces[w].tabs[t].connection_index == conn_idx;
+  return n;
+}
+
+size_t app_find_open_connection(AppState *app, const char *saved_id, const char *connstr) {
+  bool by_id = saved_id && *saved_id;
+  for (size_t i = 0; app && i < app->num_connections; i++) {
+    const Connection *c = &app->connections[i];
+    if (!c->active)
+      continue;
+    if (by_id ? c->saved_conn_id && !strcmp(c->saved_conn_id, saved_id) &&
+                    (!connstr || conn_key_matches(NULL, connstr, NULL, c->connstr))
+              : conn_key_matches(NULL, connstr, c->saved_conn_id, c->connstr))
+      return i;
+  }
+  return SIZE_MAX;
 }
 
 Connection *app_get_tab_connection(AppState *app, Tab *tab) {

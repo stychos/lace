@@ -119,8 +119,14 @@ typedef struct {
 typedef enum {
   TAB_TYPE_TABLE,     /* Table data view */
   TAB_TYPE_QUERY,     /* SQL query editor */
-  TAB_TYPE_CONNECTION /* Connection placeholder (no table loaded) */
+  TAB_TYPE_CONNECTION, /* Connected, no table loaded: the sidebar to pick one */
+  TAB_TYPE_FORM        /* A connection form: not connected (views/form_tab.c) */
 } TabType;
+
+/* A form's connection_index: it has none */
+#define TAB_NO_CONNECTION SIZE_MAX
+
+struct FormTab; /* the form's UI state (views/form_tab.c) */
 
 /* The sub-views of a table tab (core/catalog_rows.c builds their rows): a
  * table has all five; a database view Data, Definition (the Structure slot)
@@ -153,7 +159,11 @@ typedef struct {
   char *definition_error;
 
   /* Connection reference - which connection this tab uses */
-  size_t connection_index; /* Index into app->connections[] */
+  size_t connection_index; /* Index into app->connections[]; TAB_NO_CONNECTION for a form */
+
+  /* A form tab's state, made by the UI when first drawn; freed through
+   * tab_form_free_hook, so it moves with the tab when tabs[] shifts */
+  struct FormTab *form;
 
   /* Table identification */
   char *table_name;   /* Table name (for display) */
@@ -325,6 +335,13 @@ Connection *app_add_connection(AppState *app, DbConnection *db_conn,
 Connection *app_get_connection(AppState *app, size_t index);
 bool app_close_connection(AppState *app, size_t index);
 size_t app_find_connection_index(AppState *app, DbConnection *conn);
+/* The tabs, in every workspace, that use the connection (forms never) */
+size_t app_connection_users(const AppState *app, size_t conn_idx);
+/* An open connection to the same database: with a saved id the one opened
+ * from it (and, when connstr is given, still pointing where it does: a saved
+ * connection edited since is connected anew); else one with the same
+ * password-less string and no saved id. SIZE_MAX when none. */
+size_t app_find_open_connection(AppState *app, const char *saved_id, const char *connstr);
 
 /* Add a statement to the query history of the connection that ran it
  * (type is a HistoryEntryType). Main thread only. */
@@ -357,6 +374,15 @@ Tab *workspace_create_query_tab(Workspace *ws, size_t connection_index);
 Tab *workspace_create_connection_tab(Workspace *ws, size_t connection_index,
                                      const char *connstr);
 bool workspace_close_tab(Workspace *ws, size_t index);
+/* A connection form at position at (clamped), made current; NULL on failure */
+Tab *workspace_insert_form_tab(Workspace *ws, size_t at);
+/* The tab's data freed and the tab its connection's tab with no table open,
+ * named after the database (uid kept) */
+void tab_make_connection(Tab *tab, size_t connection_index, const char *connstr);
+/* The tab's data freed and the tab a form in its place (uid kept) */
+void tab_make_form(Tab *tab);
+/* Frees a tab's form state (installed by the UI) */
+extern void (*tab_form_free_hook)(struct FormTab *form);
 Tab *workspace_switch_tab(Workspace *ws, size_t index);
 
 /* ============================================================================

@@ -1,16 +1,12 @@
 /*
  * Lace
- * Workspaces window: the home screen. One list of everything that can be
- * switched to or opened (open workspaces, saved workspaces, saved
- * connections, recent connections), one input on top that filters it or
- * takes a URL or file to connect to, a details pane for the selection, and
- * a footer with the keys that apply to it.
+ * Workspaces window: the workspaces manager. One list of the open
+ * workspaces and the saved layouts, an input on top that searches it, a
+ * details pane for the selection, and a footer with the keys that apply to
+ * it. Connecting happens in connection tabs (form_tab.c), not here.
  *
  * It fills the terminal and follows its resizes. Every change to saved
- * connections, saved workspaces and the recent list is written at once.
- * Connecting happens here, once, on a worker behind the cancellable
- * progress dialog, asking for a database or SSH password when the server
- * refuses one; the open connection goes back to the caller.
+ * workspaces is written at once.
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
@@ -18,7 +14,6 @@
 
 #include "connect_internal.h"
 #include "text_input_draw.h"
-#include "../async/async.h"
 #include "../config/session.h"
 #include "util/json_helpers.h"
 #include <stdint.h>
@@ -82,27 +77,7 @@ const char *connect_key_hint(const Config *config, HotkeyAction action,
   return buf[0] ? buf : fallback;
 }
 
-/* Write saved connections at once: a crash or a kill must not lose them */
-static void persist(DialogState *ds) {
-  if (!ds->mgr->modified || ds->mgr->read_only)
-    return;
-  char *err = NULL;
-  if (!connmgr_save(ds->mgr, &err)) {
-    if (!ds->error_msg)
-      set_error(ds, err ? err : str_dup("Could not save connections.json"));
-    else
-      free(err);
-    ds->mgr->modified = false; /* Reported once, not on every key */
-  }
-}
 
-static void save_recent(DialogState *ds) {
-  char *err = NULL;
-  if (!recent_save(&ds->recent, &err) && !ds->error_msg)
-    set_error(ds, err);
-  else
-    free(err);
-}
 
 static bool save_layouts(DialogState *ds) {
   char *err = NULL;
@@ -110,6 +85,10 @@ static bool save_layouts(DialogState *ds) {
     return true;
   set_error(ds, err);
   return false;
+}
+
+static const char *connect_filter(DialogState *ds) {
+  return ds->input.len > 0 ? ds->input.buf : NULL;
 }
 
 static AppState *app_of(DialogState *ds) { return ds->state ? ds->state->app : NULL; }
@@ -242,44 +221,12 @@ static bool ws_matches(DialogState *ds, size_t i, const char *filter) {
   return hit;
 }
 
-/* "1, 3": the workspaces with a tab on saved connection id ("" if none) */
-static char *open_in(DialogState *ds, const char *id) {
-  AppState *app = app_of(ds);
-  StringBuilder *sb = sb_new(16);
-  for (size_t w = 0; app && id && w < app->num_workspaces; w++) {
-    Workspace *ws = &app->workspaces[w];
-    for (size_t t = 0; t < ws->num_tabs; t++) {
-      Connection *c = app_get_connection(app, ws->tabs[t].connection_index);
-      if (c && c->saved_conn_id && str_eq(c->saved_conn_id, id)) {
-        sb_printf(sb, "%s%zu", sb->len ? ", " : "", w + 1);
-        break;
-      }
-    }
-  }
-  return sb_finish(sb);
-}
 
 static size_t saved_ws_tabs(const SavedWorkspace *s) {
   cJSON *tabs = json_get_array(s->workspace, "tabs");
   return tabs ? (size_t)json_array_size(tabs) : 0;
 }
 
-/* What the input holds: a URL or a database file to connect to (else it is
- * only a filter) */
-static bool input_is_target(DialogState *ds) {
-  const char *t = ds->input.buf;
-  if (ds->input.len == 0 || !t)
-    return false;
-  if (strstr(t, "://") || t[0] == '/' || t[0] == '.' || t[0] == '~' || strchr(t, '/'))
-    return true;
-  static const char *const ext[] = {".db", ".sqlite", ".sqlite3", ".db3", NULL};
-  for (int i = 0; ext[i]; i++) {
-    size_t n = strlen(ext[i]);
-    if (ds->input.len > n && strcasecmp(t + ds->input.len - n, ext[i]) == 0)
-      return true;
-  }
-  return false;
-}
 
 /* ============================================================================
  * The list
@@ -311,8 +258,6 @@ static void remember_selection(DialogState *ds) {
     return;
   ds->sel_kind = r->kind;
   ds->sel_index = r->index;
-  if (r->kind == ROW_TREE)
-    ds->tree_highlight = r->index;
 }
 
 /* A section's title, after an empty line unless it is the first */
@@ -325,14 +270,6 @@ static void add_header(DialogState *ds, const char *title) {
 static void build_rows(DialogState *ds) {
   ds->num_rows = 0;
   const char *filter = connect_filter(ds);
-  if (ds->move.active) {
-    connect_add_row(ds, ROW_HEADER, 0, NULL, 0, "CONNECTIONS");
-    connect_tree_rows(ds);
-    return;
-  }
-  if (input_is_target(ds))
-    connect_add_row(ds, ROW_URL, 0, NULL, 0, NULL);
-
   size_t before = ds->num_rows;
   for (size_t i = 0; i < num_workspaces(ds); i++) {
     if (!filter || ws_matches(ds, i, filter)) {
@@ -349,26 +286,6 @@ static void build_rows(DialogState *ds) {
       connect_add_row(ds, ROW_SAVED_WS, i, NULL, 0, NULL);
     }
   }
-  if (connect_tree_count(ds) > 0) {
-    add_header(ds, "CONNECTIONS");
-    connect_tree_rows(ds);
-  } else if (!filter) {
-    add_header(ds, "CONNECTIONS");
-    connect_add_row(ds, ROW_NOTE, 0, NULL, 0,
-                    ds->mgr->read_only ? "(connections.json unreadable)"
-                                       : "(none yet: n adds one)");
-  }
-  before = ds->num_rows;
-  for (size_t i = 0; i < ds->recent.count; i++) {
-    char *d = tui_connstr_display(ds->recent.items[i].url);
-    bool hit = !filter || matches(d, filter) || matches(ds->recent.items[i].url, filter);
-    free(d);
-    if (hit) {
-      if (ds->num_rows == before)
-        add_header(ds, "RECENT");
-      connect_add_row(ds, ROW_RECENT, i, NULL, 0, NULL);
-    }
-  }
   if (ds->num_rows == 0)
     connect_add_row(ds, ROW_NOTE, 0, NULL, 0, "(nothing matches)");
 }
@@ -382,10 +299,7 @@ static void rebuild(DialogState *ds) {
     ListRow *r = &ds->rows[i];
     if (!selectable(r))
       continue;
-    if (ds->move.active ? r->kind == ROW_MOVING
-                        : (r->kind == ds->sel_kind &&
-                           r->index == (ds->sel_kind == ROW_TREE ? ds->tree_highlight
-                                                                 : ds->sel_index)))
+    if (r->kind == ds->sel_kind && r->index == ds->sel_index)
       found = i;
   }
   if (found == SIZE_MAX && ds->num_rows > 0) {
@@ -407,15 +321,8 @@ static void select_first(DialogState *ds) {
   ds->sel = 0;
   ds->scroll = 0;
   ds->sel_kind = ROW_NOTE; /* Matches nothing: the nearest selectable row */
-  /* A typed filter goes to the first item whose own name matches, not the
-   * folders listed above it */
-  const char *f = connect_filter(ds);
-  for (size_t i = 0; f && i < ds->num_rows; i++) {
-    ListRow *r = &ds->rows[i];
-    if (r->kind == ROW_TREE && connmgr_is_folder(r->item) &&
-        !matches(connmgr_item_name(r->item), f))
-      continue;
-    if (selectable(r)) {
+  for (size_t i = 0; i < ds->num_rows; i++) {
+    if (selectable(&ds->rows[i])) {
       ds->sel = i;
       break;
     }
@@ -531,8 +438,6 @@ static void draw_row(DialogState *ds, const ListRow *r, int y, bool sel) {
   attr_t base = A_NORMAL;
   if (sel)
     base = ds->input_focused ? A_REVERSE : (attr_t)(COLOR_PAIR(COLOR_SELECTED) | A_BOLD);
-  if (r->kind == ROW_MOVING)
-    base = COLOR_PAIR(COLOR_SELECTED) | A_BOLD;
   char *left = NULL, *right = NULL;
   attr_t right_attr = sel ? A_NORMAL : A_DIM;
 
@@ -543,21 +448,6 @@ static void draw_row(DialogState *ds, const ListRow *r, int y, bool sel) {
   case ROW_NOTE:
     WITH_ATTR(win, A_DIM, tui_print_clip(win, y, x + 2, w - 2, r->text));
     return;
-  case ROW_URL: {
-    bool url = strstr(ds->input.buf, "://") != NULL;
-    char *masked = url ? connstr_mask_password(ds->input.buf) : str_dup(ds->input.buf);
-    const char *shown = masked ? masked : "";
-    /* A long path or URL: its end (the file, the database) matters most */
-    int room = w - 14;
-    int sw = utf8_width(shown, strlen(shown));
-    while (room > 4 && sw > room - 1 && *shown) {
-      shown += utf8_next(shown, strlen(shown), 0);
-      sw = utf8_width(shown, strlen(shown));
-    }
-    left = str_printf("\xE2\x86\x92 Connect to %s%s", shown == masked || !masked ? "" : "\xE2\x80\xA6", shown);
-    str_secure_free(masked);
-    break;
-  }
   case ROW_WORKSPACE: {
     AppState *app = app_of(ds);
     char *title = ws_title(ds, r->index);
@@ -579,39 +469,8 @@ static void draw_row(DialogState *ds, const ListRow *r, int y, bool sel) {
     right = str_printf("%zu tab%s", n, n == 1 ? "" : "s");
     break;
   }
-  case ROW_TREE:
-  case ROW_MOVING: {
-    ConnectionItem *item = r->item;
-    int indent = r->depth * 2;
-    if (indent > w / 2)
-      indent = w / 2;
-    const char *name = connmgr_item_name(item);
-    if (connmgr_is_folder(item)) {
-      bool open = item->folder.expanded || connect_filter(ds);
-      left = open ? str_printf("%*s\xE2\x96\xBE %s", indent, "", name ? name : "")
-                  : str_printf("%*s\xE2\x96\xB8 %s (%zu)", indent, "", name ? name : "",
-                               item->folder.num_children);
-    } else {
-      left = str_printf("%*s%s %s", indent, "", r->kind == ROW_MOVING ? "\xC2\xBB" : " ",
-                        name ? name : "");
-      char *in = open_in(ds, item->connection.id);
-      if (in && in[0] && r->kind == ROW_TREE) {
-        right = str_printf("\xE2\x97\x8F open in %s", in);
-        if (!sel)
-          right_attr = COLOR_PAIR(COLOR_NUMBER);
-      }
-      free(in);
-    }
+  default:
     break;
-  }
-  case ROW_RECENT: {
-    RecentEntry *e = &ds->recent.items[r->index];
-    char *d = short_name(e->url);
-    left = str_printf("  %s", d ? d : e->url);
-    free(d);
-    right = when(e->used);
-    break;
-  }
   }
   wattron(win, base);
   mvwhline(win, y, ds->list_x, ' ', ds->list_w);
@@ -702,14 +561,6 @@ static void pane_wrap(Pane *p, attr_t attr, const char *text) {
   pane_wrap_at(p, attr, text, 0);
 }
 
-static void pane_field(Pane *p, const char *label, const char *value) {
-  if (!value || !value[0])
-    return;
-  char *line = str_printf("%-10s %s", label, value);
-  pane_wrap_at(p, A_NORMAL, line, 11);
-  free(line);
-}
-
 static void pane_title(Pane *p, const char *title, const char *sub) {
   pane_line(p, A_BOLD, title);
   if (sub && sub[0])
@@ -717,38 +568,6 @@ static void pane_title(Pane *p, const char *title, const char *sub) {
   p->y++;
 }
 
-/* The fields of a connection (saved, or parsed from a URL) */
-static void pane_connection(Pane *p, const SavedConnection *c) {
-  bool sqlite = c->driver && str_eq(c->driver, "sqlite");
-  pane_field(p, "Driver:", c->driver);
-  if (sqlite) {
-    pane_field(p, "File:", c->database);
-    return;
-  }
-  const char *host = c->host && c->host[0] ? c->host : "localhost";
-  char *hp = c->port > 0 ? str_printf("%s:%d", host, c->port) : str_dup(host);
-  pane_field(p, "Host:", hp);
-  free(hp);
-  pane_field(p, "Database:", c->database);
-  pane_field(p, "User:", c->user);
-  pane_field(p, "Password:",
-             c->save_password && c->password && c->password[0] ? "saved"
-             : c->password && c->password[0]                    ? "this session only"
-                                                                : "asked when needed");
-  if (c->ssh) {
-    char *via = str_printf("%s%s%s", c->ssh_user && c->ssh_user[0] ? c->ssh_user : "",
-                           c->ssh_user && c->ssh_user[0] ? "@" : "",
-                           c->ssh_host ? c->ssh_host : "");
-    if (c->ssh_port > 0) {
-      char *v = str_printf("%s:%d", via, c->ssh_port);
-      free(via);
-      via = v;
-    }
-    pane_field(p, "SSH via:", via);
-    free(via);
-    pane_field(p, "SSH key:", c->ssh_key);
-  }
-}
 
 /* "Query: <first line>" */
 static char *query_line(const char *q) {
@@ -862,59 +681,14 @@ static void pane_saved_ws(DialogState *ds, Pane *p, size_t i) {
                       "used as they are)");
 }
 
-static void pane_tree(DialogState *ds, Pane *p, ConnectionItem *item) {
-  if (connmgr_is_folder(item)) {
-    pane_title(p, connmgr_item_name(item), "Folder");
-    char *n = str_printf("%zu item%s", item->folder.num_children,
-                         item->folder.num_children == 1 ? "" : "s");
-    pane_line(p, A_NORMAL, n);
-    free(n);
-    return;
-  }
-  SavedConnection *c = &item->connection;
-  char *in = open_in(ds, c->id);
-  char *sub = in && in[0] ? str_printf("Saved connection, open in workspace %s", in)
-                          : str_dup("Saved connection");
-  pane_title(p, c->name, sub);
-  free(in);
-  free(sub);
-  pane_connection(p, c);
-  p->y++;
-  char *url = connmgr_build_connstr(c);
-  char *masked = url ? connstr_mask_password(url) : NULL;
-  str_secure_free(url);
-  pane_line(p, A_DIM, "URL:");
-  pane_wrap(p, A_DIM, masked ? masked : "(cannot be built from these fields)");
-  str_secure_free(masked);
-}
 
-/* A URL (typed, or recent) as what it connects to */
-static void pane_url(Pane *p, const char *url, const char *title, const char *sub) {
-  pane_title(p, title, sub);
-  if (!strstr(url, "://")) {
-    pane_field(p, "File:", url);
-    return;
-  }
-  char *err = NULL;
-  SavedConnection *c = connmgr_parse_connstr(url, &err);
-  if (!c) {
-    pane_wrap(p, COLOR_PAIR(COLOR_ERROR), err ? err : "Not a connection URL");
-    free(err);
-    return;
-  }
-  pane_connection(p, c);
-  connmgr_free_connection(c);
-  free(c);
-}
 
 static void pane_examples(Pane *p) {
   static const char *const lines[] = {
-      "Type a URL or a database file in the input to connect:",
+      "Every open workspace and the saved layouts.",
       "",
-      "  /path/to/file.sqlite",
-      "  postgres://user@host/db",
-      "  mysql://user@host:3306/db",
-      "  postgres+ssh://sshuser@sshhost/user@dbhost/db",
+      "Connections open in a connection tab: Ctrl+T in any",
+      "workspace, or n here for a new workspace with one.",
       NULL};
   for (int i = 0; lines[i]; i++)
     pane_line(p, i == 0 ? A_NORMAL : A_DIM, lines[i]);
@@ -923,45 +697,12 @@ static void pane_examples(Pane *p) {
 static void draw_pane(DialogState *ds) {
   Pane p = {ds->win, ds->pane_y, ds->pane_x, ds->pane_w, ds->pane_y + ds->pane_h};
   ListRow *r = selected(ds);
-  if (ds->move.active) {
-    ConnectionItem *t = ds->move.target_folder;
-    char *to = str_printf("Moving \"%s\" to %s", connmgr_item_name(ds->move.source),
-                          !t || t == &ds->mgr->root ? "the top level" : connmgr_item_name(t));
-    pane_title(&p, to, NULL);
-    free(to);
-    pane_wrap(&p, A_DIM, "Up/Down choose the place, Space or Enter drops it, Esc cancels");
-    return;
-  }
-  if (!r) {
-    pane_examples(&p);
-    return;
-  }
-  switch (r->kind) {
-  case ROW_WORKSPACE:
+  if (r && r->kind == ROW_WORKSPACE)
     pane_workspace(ds, &p, r->index);
-    break;
-  case ROW_SAVED_WS:
+  else if (r && r->kind == ROW_SAVED_WS)
     pane_saved_ws(ds, &p, r->index);
-    break;
-  case ROW_TREE:
-    pane_tree(ds, &p, r->item);
-    break;
-  case ROW_RECENT: {
-    char *w = when(ds->recent.items[r->index].used);
-    char *name = short_name(ds->recent.items[r->index].url);
-    char *sub = str_printf("Recent connection, last used %s. Not saved: s saves it", w);
-    pane_url(&p, ds->recent.items[r->index].url, name ? name : "Recent", sub);
-    free(name);
-    free(sub);
-    free(w);
-    break;
-  }
-  case ROW_URL:
-    pane_url(&p, ds->input.buf, "Connect to", "Enter connects, as a new workspace");
-    break;
-  default:
+  else
     pane_examples(&p);
-  }
 }
 
 /* ============================================================================
@@ -969,58 +710,21 @@ static void draw_pane(DialogState *ds) {
  * ============================================================================
  */
 
-static bool has_tab_target(DialogState *ds) {
-  AppState *app = app_of(ds);
-  Workspace *ws = app ? workspace_at(ds, app->current_workspace) : NULL;
-  return ws && ws->num_tabs > 0;
-}
+
 
 /* The actions that apply to the selected row, Enter's first */
 static int row_actions(DialogState *ds, ActionId *out) {
   int n = 0;
   ListRow *r = selected(ds);
-  if (ds->move.active)
-    return 0;
-  if (r) {
-    bool conn = r->kind == ROW_TREE && connmgr_is_connection(r->item);
-    switch (r->kind) {
-    case ROW_WORKSPACE:
-      out[n++] = ACT_ENTER;
-      out[n++] = ACT_RENAME;
-      out[n++] = ACT_SAVE;
-      out[n++] = ACT_DELETE;
-      break;
-    case ROW_SAVED_WS:
-      out[n++] = ACT_ENTER;
-      out[n++] = ACT_RENAME;
-      out[n++] = ACT_DELETE;
-      break;
-    case ROW_TREE:
-      out[n++] = ACT_ENTER;
-      if (conn && has_tab_target(ds))
-        out[n++] = ACT_TAB_HERE;
-      if (conn) {
-        out[n++] = ACT_EDIT;
-        out[n++] = ACT_TEST;
-        out[n++] = ACT_DUPLICATE;
-      }
-      out[n++] = ACT_RENAME;
-      out[n++] = ACT_MOVE;
-      out[n++] = ACT_DELETE;
-      break;
-    case ROW_RECENT:
-    case ROW_URL:
-      out[n++] = ACT_ENTER;
-      if (has_tab_target(ds))
-        out[n++] = ACT_TAB_HERE;
-      out[n++] = ACT_SAVE;
-      out[n++] = ACT_TEST;
-      if (r->kind == ROW_RECENT)
-        out[n++] = ACT_DELETE;
-      break;
-    default:
-      break;
-    }
+  if (r && r->kind == ROW_WORKSPACE) {
+    out[n++] = ACT_ENTER;
+    out[n++] = ACT_RENAME;
+    out[n++] = ACT_SAVE;
+    out[n++] = ACT_DELETE;
+  } else if (r && r->kind == ROW_SAVED_WS) {
+    out[n++] = ACT_ENTER;
+    out[n++] = ACT_RENAME;
+    out[n++] = ACT_DELETE;
   }
   /* Narrow: the details right after Enter, where they are seen */
   if (!ds->wide) {
@@ -1030,7 +734,6 @@ static int row_actions(DialogState *ds, ActionId *out) {
     n++;
   }
   out[n++] = ACT_NEW;
-  out[n++] = ACT_NEW_FOLDER;
   out[n++] = ACT_SEARCH;
   out[n++] = ACT_HELP;
   return n;
@@ -1049,17 +752,10 @@ static const char *action_key(DialogState *ds, ActionId act) {
   const Config *c = ds->config;
   switch (act) {
   case ACT_ENTER: return "Enter";
-  case ACT_TAB_HERE: return "t";
-  case ACT_EDIT: return connect_key_hint(c, HOTKEY_CONN_EDIT, "e");
-  case ACT_TEST: return connect_key_hint(c, HOTKEY_CONN_TEST, "Ctrl+T");
-  case ACT_SAVE:
-    return ds->input_focused ? connect_key_hint(c, HOTKEY_CONN_SAVE, "Ctrl+S") : "s";
+  case ACT_SAVE: return "s";
   case ACT_RENAME: return connect_key_hint(c, HOTKEY_CONN_RENAME, "r");
   case ACT_DELETE: return connect_key_hint(c, HOTKEY_CONN_DELETE, "x");
-  case ACT_DUPLICATE: return connect_key_hint(c, HOTKEY_CONN_DUPLICATE, "d");
-  case ACT_MOVE: return connect_key_hint(c, HOTKEY_CONN_MOVE, "Space");
   case ACT_NEW: return connect_key_hint(c, HOTKEY_CONN_NEW, "n");
-  case ACT_NEW_FOLDER: return connect_key_hint(c, HOTKEY_CONN_NEW_FOLDER, "N");
   case ACT_SEARCH: return connect_key_hint(c, HOTKEY_CONN_FILTER, "/");
   case ACT_DETAILS: return "i";
   case ACT_HELP: return "?";
@@ -1071,24 +767,12 @@ static const char *action_key(DialogState *ds, ActionId act) {
 static const char *action_label(DialogState *ds, ActionId act) {
   ListRow *r = selected(ds);
   RowKind k = r ? r->kind : ROW_NOTE;
-  bool folder = k == ROW_TREE && connmgr_is_folder(r->item);
   switch (act) {
-  case ACT_ENTER:
-    return k == ROW_WORKSPACE  ? "switch"
-           : k == ROW_SAVED_WS ? "open"
-           : folder            ? (r->item->folder.expanded ? "close" : "open")
-           : k == ROW_TREE     ? "open"
-                               : "connect";
-  case ACT_TAB_HERE: return "tab here";
-  case ACT_EDIT: return "edit";
-  case ACT_TEST: return "test";
-  case ACT_SAVE: return k == ROW_WORKSPACE ? "save layout" : "save";
+  case ACT_ENTER: return k == ROW_WORKSPACE ? "switch" : "open";
+  case ACT_SAVE: return "save layout";
   case ACT_RENAME: return "rename";
-  case ACT_DELETE: return k == ROW_WORKSPACE ? "close" : k == ROW_RECENT ? "forget" : "delete";
-  case ACT_DUPLICATE: return "duplicate";
-  case ACT_MOVE: return "move";
-  case ACT_NEW: return "new";
-  case ACT_NEW_FOLDER: return "folder";
+  case ACT_DELETE: return k == ROW_WORKSPACE ? "close" : "delete";
+  case ACT_NEW: return "new workspace";
   case ACT_SEARCH: return "search";
   case ACT_DETAILS: return ds->show_details ? "list" : "details";
   case ACT_HELP: return "keys";
@@ -1097,60 +781,13 @@ static const char *action_label(DialogState *ds, ActionId act) {
   }
 }
 
-/* One line about the selection, for narrow terminals (no details pane) */
-static char *row_summary(DialogState *ds) {
-  ListRow *r = selected(ds);
-  if (!r)
-    return NULL;
-  switch (r->kind) {
-  case ROW_WORKSPACE: {
-    Workspace *ws = workspace_at(ds, r->index);
-    if (!ws || ws->num_tabs == 0)
-      return NULL;
-    size_t t = ws->current_tab < ws->num_tabs ? ws->current_tab : 0;
-    Connection *c = app_get_connection(app_of(ds), ws->tabs[t].connection_index);
-    return c ? tui_connstr_display(c->connstr) : NULL;
-  }
-  case ROW_TREE: {
-    if (connmgr_is_folder(r->item))
-      return str_printf("Folder, %zu item%s", r->item->folder.num_children,
-                        r->item->folder.num_children == 1 ? "" : "s");
-    char *url = connmgr_build_connstr(&r->item->connection);
-    char *d = url ? tui_connstr_display(url) : NULL;
-    str_secure_free(url);
-    return d;
-  }
-  case ROW_RECENT:
-    return tui_connstr_display(ds->recent.items[r->index].url);
-  case ROW_SAVED_WS:
-  {
-    size_t n = saved_ws_tabs(&ds->saved_ws.items[r->index]);
-    return str_printf("Saved workspace, %zu tab%s", n, n == 1 ? "" : "s");
-  }
-  default:
-    return NULL;
-  }
-}
 
 static void draw_message(DialogState *ds, int y) {
   WINDOW *win = ds->win;
   const char *msg = ds->error_msg ? ds->error_msg : ds->success_msg;
-  char *own = NULL;
   attr_t attr = msg ? COLOR_PAIR(ds->error_msg ? COLOR_ERROR : COLOR_NUMBER) : A_DIM;
-  if (!msg && ds->mgr->read_only && ds->load_error) {
-    msg = own = str_printf("Not saved: %s", ds->load_error);
-    attr = COLOR_PAIR(COLOR_ERROR);
-  } else if (!msg && ds->move.active) {
-    ConnectionItem *t = ds->move.target_folder;
-    msg = own = str_printf("Moving to %s: Up/Down choose the place, Space or Enter "
-                           "drops it, Esc cancels",
-                           !t || t == &ds->mgr->root ? "the top level" : connmgr_item_name(t));
-  } else if (!msg && ds->input_focused) {
-    msg = "Type to search, or a URL or file to connect. Up/Down select, Enter opens, "
-          "Tab or Esc: the list";
-  } else if (!msg && !ds->wide) {
-    msg = own = row_summary(ds);
-  }
+  if (!msg && ds->input_focused)
+    msg = "Type to search. Up/Down select, Enter opens, Tab or Esc: the list";
   if (!msg)
     return;
   char *flat = connect_flatten_message(msg);
@@ -1158,7 +795,6 @@ static void draw_message(DialogState *ds, int y) {
   tui_print_clip(win, y, 2, ds->term_w - 4, flat);
   wattroff(win, attr);
   free(flat);
-  str_secure_free(own);
 }
 
 /* The keys for the selection ("Enter switch  r rename ..."), as many as
@@ -1227,7 +863,7 @@ static void draw_input(DialogState *ds, int *cy, int *cx) {
   WITH_ATTR(win, COLOR_PAIR(COLOR_TITLE) | A_BOLD, mvwaddch(win, 1, 2, '>'));
   *cy = *cx = -1;
   if (ds->input.len == 0 && !ds->input_focused) {
-    char *ph = str_printf("%s search, or type a URL or file to connect",
+    char *ph = str_printf("%s search workspaces",
                           connect_key_hint(ds->config, HOTKEY_CONN_FILTER, "/"));
     WITH_ATTR(win, A_DIM, tui_print_clip(win, 1, 4, w, ph));
     free(ph);
@@ -1398,338 +1034,12 @@ int connect_button_at(const int *x, const int *width, int count, int cx) {
   return -1;
 }
 
-/* Every key, in a box (any key closes it) */
-static void show_help(DialogState *ds) {
-  const Config *c = ds->config;
-  /* connect_key_hint returns a static buffer: one call per line */
-  char *lines[] = {
-      str_printf("%-11s open, switch to, or connect to the selection", "Enter"),
-      str_printf("%-11s open a connection as a tab in the current workspace", "t"),
-      str_printf("%-11s search everything, or type a URL or file", connect_key_hint(c, HOTKEY_CONN_FILTER, "/")),
-      str_printf("%-11s from the input back to the list", "Tab, Esc"),
-      str_printf("%-11s save a workspace's layout, or a URL as a connection", "s"),
-      str_printf("%-11s new connection", connect_key_hint(c, HOTKEY_CONN_NEW, "n")),
-      str_printf("%-11s new folder", connect_key_hint(c, HOTKEY_CONN_NEW_FOLDER, "N")),
-      str_printf("%-11s edit a connection", connect_key_hint(c, HOTKEY_CONN_EDIT, "e")),
-      str_printf("%-11s test a connection", connect_key_hint(c, HOTKEY_CONN_TEST, "Ctrl+T")),
-      str_printf("%-11s rename", connect_key_hint(c, HOTKEY_CONN_RENAME, "r")),
-      str_printf("%-11s duplicate a connection", connect_key_hint(c, HOTKEY_CONN_DUPLICATE, "d")),
-      str_printf("%-11s move a connection or folder", connect_key_hint(c, HOTKEY_CONN_MOVE, "Space")),
-      str_printf("%-11s close a workspace, delete, forget a recent one",
-                 connect_key_hint(c, HOTKEY_CONN_DELETE, "x")),
-      str_printf("%-11s open or close a folder", "Left/Right"),
-      str_printf("%-11s details in place of the list (narrow terminals)", "i"),
-      str_printf("%-11s close this window", "Esc"),
-      str_printf("%-11s quit lace", "q"),
-  };
-  int n = (int)(sizeof(lines) / sizeof(lines[0]));
-  int term_h, term_w;
-  getmaxyx(stdscr, term_h, term_w);
-  int w = 0;
-  for (int i = 0; i < n; i++) {
-    int lw = utf8_width(lines[i], strlen(lines[i]));
-    if (lw > w)
-      w = lw;
-  }
-  w += 4;
-  if (w > term_w)
-    w = term_w;
-  int h = n + 2 < term_h ? n + 2 : term_h;
-  WINDOW *dlg = dialog_create(h, w, term_h, term_w);
-  if (dlg) {
-    werase(dlg);
-    DRAW_BOX(dlg, COLOR_BORDER);
-    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, 2, w - 4, " Keys "));
-    for (int i = 0; i < n && i + 1 < h - 1; i++)
-      tui_print_clip(dlg, i + 1, 2, w - 4, lines[i]);
-    curs_set(0);
-    wrefresh(dlg);
-    wgetch(dlg);
-    delwin(dlg);
-  }
-  for (int i = 0; i < n; i++)
-    free(lines[i]);
-  connect_redraw(ds);
-}
-
-/* ============================================================================
- * Connecting
- * ============================================================================
- */
-
-/* "Connection failed: <why>", unless why already says it failed */
-static char *failure_message(const char *why) {
-  if (!why)
-    return str_dup("Connection failed");
-  if (strstr(why, "failed") && strstr(why, "failed") - why < 32)
-    return str_dup(why);
-  return str_printf("Connection failed: %s", why);
-}
-
-typedef enum { AUTH_NONE, AUTH_DB, AUTH_SSH } AuthNeed;
-
-/* Did the server turn us away for want of a (right) password? */
-static AuthNeed auth_need(const char *err) {
-  if (!err)
-    return AUTH_NONE;
-  if (strstr(err, "SSH connection failed") &&
-      (strstr(err, "Permission denied") || strstr(err, "authentication")))
-    return AUTH_SSH;
-  static const char *const db[] = {"password authentication failed",
-                                   "authentication failed",
-                                   "no password supplied",
-                                   "FATAL:  password",
-                                   "Access denied",
-                                   NULL};
-  for (int i = 0; db[i]; i++)
-    if (strstr(err, db[i]))
-      return AUTH_DB;
-  return AUTH_NONE;
-}
-
-/* One attempt, on a worker behind the progress dialog (Esc cancels) */
-static DbConnection *connect_once(DialogState *ds, const char *connstr,
-                                  char **err, bool *cancelled) {
-  *err = NULL;
-  *cancelled = false;
-  if (!ds->state)
-    return db_connect(ds->client, connstr, err);
-  AsyncOperation op;
-  async_init(&op);
-  op.op_type = ASYNC_OP_CONNECT;
-  op.client = ds->client;
-  op.connstr = str_dup(connstr);
-  if (!async_start(&op)) {
-    str_secure_free(op.connstr);
-    op.connstr = NULL;
-    *err = str_dup("Could not start connecting");
-    return NULL;
-  }
-  bool done = tui_show_processing_dialog_ex(ds->state, &op, "Connecting...", 0);
-  DbConnection *conn = NULL;
-  if (done && op.state == ASYNC_STATE_COMPLETED) {
-    conn = (DbConnection *)op.result;
-    op.result = NULL;
-  } else if (op.state == ASYNC_STATE_CANCELLED || !done) {
-    *cancelled = true;
-  } else {
-    *err = str_dup(op.error ? op.error : "Connection failed");
-  }
-  str_secure_free(op.connstr); /* Holds passwords */
-  op.connstr = NULL;
-  async_free(&op);
-  connect_redraw(ds); /* The progress dialog drew over us */
-  return conn;
-}
-
-/* Connect to model (a saved connection, or one parsed from a URL), first
- * with first_connstr; ask for a database or SSH password when the server
- * wants one and try again. On success *final_connstr is the string that
- * worked (with any password given here). */
-static DbConnection *open_connection(DialogState *ds, const SavedConnection *model,
-                                     const char *first_connstr,
-                                     char **final_connstr, char **err_out,
-                                     bool *cancelled) {
-  *final_connstr = NULL;
-  *err_out = NULL;
-  char *connstr = str_dup(first_connstr);
-  char *db_pw = NULL, *ssh_pw = NULL;
-  bool sqlite = model && model->driver && str_eq(model->driver, "sqlite");
-  DbConnection *conn = NULL;
-  for (int attempt = 0; attempt < 4 && connstr; attempt++) {
-    char *err = NULL;
-    conn = connect_once(ds, connstr, &err, cancelled);
-    if (conn || *cancelled) {
-      free(err);
-      break;
-    }
-    AuthNeed need = sqlite || !model ? AUTH_NONE : auth_need(err);
-    if (need == AUTH_NONE || attempt == 3) {
-      *err_out = err;
-      break;
-    }
-    /* Ask for the password the server refused */
-    const char *who_user = need == AUTH_SSH ? model->ssh_user : model->user;
-    const char *who_host = need == AUTH_SSH ? model->ssh_host : model->host;
-    char *label = str_printf("%s password%s%s%s%s:",
-                             need == AUTH_SSH ? "SSH" : "Database",
-                             (who_user && who_user[0]) || (who_host && who_host[0]) ? " for " : "",
-                             who_user && who_user[0] ? who_user : "",
-                             who_user && who_user[0] && who_host && who_host[0] ? "@" : "",
-                             who_host && who_host[0] ? who_host : "");
-    PromptOptions opts = {attempt ? "Wrong password? Try again" : "Password required",
-                          label, NULL, NULL, true, true};
-    char *pw = tui_prompt(&opts);
-    free(label);
-    connect_redraw(ds);
-    if (!pw) {
-      *err_out = err;
-      break;
-    }
-    free(err);
-    if (need == AUTH_SSH) {
-      str_secure_free(ssh_pw);
-      ssh_pw = pw;
-    } else {
-      str_secure_free(db_pw);
-      db_pw = pw;
-    }
-    str_secure_free(connstr);
-    /* The saved-connection builder keeps an SSH tunnel and URL-encodes */
-    connstr = lace_saved_conn_build_connstr(model, db_pw, ssh_pw);
-  }
-  str_secure_free(db_pw);
-  str_secure_free(ssh_pw);
-  if (conn)
-    *final_connstr = connstr;
-  else
-    str_secure_free(connstr);
-  return conn;
-}
-
-/* The first attempt's string for a saved connection: passwords typed this
- * session count even when they are not saved */
-static char *saved_connstr(const SavedConnection *c) {
-  return lace_saved_conn_build_connstr(
-      c, c->password && c->password[0] ? c->password : NULL,
-      c->ssh_password && c->ssh_password[0] ? c->ssh_password : NULL);
-}
-
-bool connect_test_saved(DialogState *ds, const SavedConnection *conn, char **msg) {
-  char *connstr = saved_connstr(conn);
-  if (!connstr) {
-    *msg = str_dup("These fields do not make a valid connection");
-    return false;
-  }
-  char *final = NULL, *err = NULL;
-  bool cancelled = false;
-  DbConnection *db = open_connection(ds, conn, connstr, &final, &err, &cancelled);
-  str_secure_free(connstr);
-  str_secure_free(final);
-  if (db) {
-    db_disconnect(db);
-    *msg = str_dup("Connection works");
-    return true;
-  }
-  *msg = cancelled ? str_dup("Test cancelled") : failure_message(err);
-  free(err);
-  return false;
-}
-
-/* The input as a connection string (a file path made a URL) */
-static char *input_connstr(DialogState *ds) {
-  const char *t = ds->input.buf;
-  if (strstr(t, "://"))
-    return str_dup(t);
-  char *path = NULL;
-  const char *home = getenv("HOME");
-  if (t[0] == '~' && t[1] == '/' && home)
-    path = str_printf("%s%s", home, t + 1);
-  char *err = NULL;
-  char *c = connstr_from_path(path ? path : t, &err);
-  free(path);
-  if (!c)
-    set_error(ds, err ? err : str_dup("Not a database file"));
-  else
-    free(err);
-  return c;
-}
-
-/* The connection string of a URL or recent row */
-static char *row_url(DialogState *ds, const ListRow *r) {
-  if (r->kind == ROW_RECENT)
-    return str_dup(ds->recent.items[r->index].url);
-  return input_connstr(ds);
-}
-
-/* Connect (or test) a saved connection, a recent one or the typed URL. On
- * success the open connection and its string go into result (unless only
- * testing), and a URL goes to the recent list. */
-static bool do_connect(DialogState *ds, const ListRow *r, bool test_only,
-                       ConnectResult *result) {
-  SavedConnection *model = NULL;
-  bool own_model = false;
-  char *connstr = NULL;
-  const char *saved_id = NULL;
-  if (r->kind == ROW_TREE) {
-    model = &r->item->connection;
-    saved_id = model->id;
-    connstr = saved_connstr(model);
-    if (!connstr) {
-      set_error(ds, str_dup("This saved connection has fields that do not make a "
-                            "valid URL: edit it (e)"));
-      return false;
-    }
-  } else {
-    connstr = row_url(ds, r);
-    if (!connstr)
-      return false;
-    /* For password retries; the first attempt uses the URL as typed */
-    model = connmgr_parse_connstr(connstr, NULL);
-    own_model = model != NULL;
-  }
-
-  char *final = NULL, *err = NULL;
-  bool cancelled = false;
-  DbConnection *db = open_connection(ds, model, connstr, &final, &err, &cancelled);
-  str_secure_free(connstr);
-  bool ok = db != NULL;
-  if (!db) {
-    if (cancelled)
-      set_success(ds, str_dup(test_only ? "Test cancelled" : "Connecting cancelled"));
-    else
-      set_error(ds, failure_message(err));
-  } else if (test_only) {
-    db_disconnect(db);
-    str_secure_free(final);
-    set_success(ds, str_dup("Connection works"));
-  } else {
-    if (r->kind != ROW_TREE && recent_add(&ds->recent, final))
-      save_recent(ds);
-    result->conn = db;
-    result->connstr = final;
-    result->saved_conn_id = saved_id ? str_dup(saved_id) : NULL;
-  }
-  free(err);
-  if (own_model) {
-    connmgr_free_connection(model);
-    free(model);
-  }
-  return ok;
-}
 
 /* ============================================================================
  * Actions
  * ============================================================================
  */
 
-static void save_url(DialogState *ds, const ListRow *r) {
-  char *url = row_url(ds, r);
-  if (!url)
-    return;
-  char *err = NULL;
-  if (connect_save_dialog(ds, url, &err)) {
-    set_success(ds, str_dup("Connection saved"));
-    /* Saved: no longer a recent one */
-    char *clean = recent_strip_passwords(url);
-    for (size_t i = 0; clean && i < ds->recent.count; i++) {
-      if (str_eq(ds->recent.items[i].url, clean)) {
-        recent_remove(&ds->recent, i);
-        save_recent(ds);
-        break;
-      }
-    }
-    free(clean);
-    if (r->kind == ROW_URL) {
-      text_input_set(&ds->input, "");
-      ds->input_focused = false;
-    }
-  } else if (err) {
-    set_error(ds, err);
-  }
-  str_secure_free(url);
-  connect_redraw(ds);
-}
 
 static void save_layout(DialogState *ds, size_t i) {
   Workspace *ws = workspace_at(ds, i);
@@ -1804,8 +1114,10 @@ static void close_workspace(DialogState *ds, size_t i) {
   if (!ws || !ds->state)
     return;
   char *title = ws_title(ds, i);
-  char *q = str_printf("Close workspace %zu \"%s\" (%zu tab%s)?", i + 1, title, ws->num_tabs,
-                       ws->num_tabs == 1 ? "" : "s");
+  char *q = tui_workspace_close_question(ds->state, i);
+  if (!q)
+    q = str_printf("Close workspace %zu \"%s\" (%zu tab%s)?", i + 1, title, ws->num_tabs,
+                   ws->num_tabs == 1 ? "" : "s");
   bool yes = connect_confirm(ds->win, "Close Workspace", q);
   free(q);
   if (yes) {
@@ -1843,6 +1155,52 @@ static bool open_saved_ws(DialogState *ds, size_t i) {
   return ok;
 }
 
+/* Every key, in a box (any key closes it) */
+static void show_help(DialogState *ds) {
+  const Config *c = ds->config;
+  /* connect_key_hint returns a static buffer: one call per line */
+  char *lines[] = {
+      str_printf("%-11s switch to a workspace, or open a saved one", "Enter"),
+      str_printf("%-11s search", connect_key_hint(c, HOTKEY_CONN_FILTER, "/")),
+      str_printf("%-11s from the input back to the list", "Tab, Esc"),
+      str_printf("%-11s save a workspace's layout", "s"),
+      str_printf("%-11s rename", connect_key_hint(c, HOTKEY_CONN_RENAME, "r")),
+      str_printf("%-11s close a workspace, delete a saved one", connect_key_hint(c, HOTKEY_CONN_DELETE, "x")),
+      str_printf("%-11s new workspace (with a connection tab)", connect_key_hint(c, HOTKEY_CONN_NEW, "n")),
+      str_printf("%-11s details in place of the list (narrow terminals)", "i"),
+      str_printf("%-11s close this window", "Esc"),
+      str_printf("%-11s quit lace", "q"),
+  };
+  int n = (int)(sizeof(lines) / sizeof(lines[0]));
+  int term_h, term_w;
+  getmaxyx(stdscr, term_h, term_w);
+  int w = 0;
+  for (int i = 0; i < n; i++) {
+    int lw = utf8_width(lines[i], strlen(lines[i]));
+    if (lw > w)
+      w = lw;
+  }
+  w += 4;
+  if (w > term_w)
+    w = term_w;
+  int h = n + 2 < term_h ? n + 2 : term_h;
+  WINDOW *dlg = dialog_create(h, w, term_h, term_w);
+  if (dlg) {
+    werase(dlg);
+    DRAW_BOX(dlg, COLOR_BORDER);
+    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, 2, w - 4, " Keys "));
+    for (int i = 0; i < n && i + 1 < h - 1; i++)
+      tui_print_clip(dlg, i + 1, 2, w - 4, lines[i]);
+    curs_set(0);
+    wrefresh(dlg);
+    wgetch(dlg);
+    delwin(dlg);
+  }
+  for (int i = 0; i < n; i++)
+    free(lines[i]);
+  connect_redraw(ds);
+}
+
 /* Run act on the selected row; *running goes false when the window should
  * close */
 static void run_action(DialogState *ds, ActionId act, bool *running,
@@ -1856,10 +1214,6 @@ static void run_action(DialogState *ds, ActionId act, bool *running,
   }
   ListRow *sel = selected(ds);
   ListRow r = sel ? *sel : (ListRow){ROW_NOTE, 0, NULL, 0, NULL};
-  if (r.kind == ROW_TREE)
-    ds->tree_highlight = r.index;
-  bool conn_row = (r.kind == ROW_TREE && connmgr_is_connection(r.item)) ||
-                  r.kind == ROW_RECENT || r.kind == ROW_URL;
 
   switch (act) {
   case ACT_ENTER:
@@ -1869,63 +1223,32 @@ static void run_action(DialogState *ds, ActionId act, bool *running,
     } else if (r.kind == ROW_SAVED_WS) {
       if (open_saved_ws(ds, r.index))
         *running = false;
-    } else if (r.kind == ROW_TREE && connmgr_is_folder(r.item)) {
-      connmgr_toggle_folder(r.item);
-      ds->mgr->modified = true;
-    } else if (conn_row && do_connect(ds, &r, false, result)) {
-      result->mode = CONNECT_MODE_NEW_WORKSPACE;
-      *running = false;
     }
-    break;
-  case ACT_TAB_HERE:
-    if (do_connect(ds, &r, false, result)) {
-      result->mode = CONNECT_MODE_NEW_TAB;
-      *running = false;
-    }
-    break;
-  case ACT_TEST:
-    do_connect(ds, &r, true, result);
-    break;
-  case ACT_EDIT:
-    connect_tree_edit(ds);
     break;
   case ACT_SAVE:
-    if (r.kind == ROW_WORKSPACE)
-      save_layout(ds, r.index);
-    else
-      save_url(ds, &r);
+    save_layout(ds, r.index);
     break;
   case ACT_RENAME:
     if (r.kind == ROW_WORKSPACE)
       rename_workspace(ds, r.index);
-    else if (r.kind == ROW_SAVED_WS)
-      rename_saved_ws(ds, r.index);
     else
-      connect_tree_rename(ds);
+      rename_saved_ws(ds, r.index);
     break;
   case ACT_DELETE:
     if (r.kind == ROW_WORKSPACE) {
       close_workspace(ds, r.index);
-    } else if (r.kind == ROW_SAVED_WS) {
-      delete_saved_ws(ds, r.index);
-    } else if (r.kind == ROW_RECENT) {
-      recent_remove(&ds->recent, r.index);
-      save_recent(ds);
+      /* The last one closed: lace quits, or a new workspace shows */
+      if (!ds->state->running || !ds->state->app->running) {
+        result->mode = CONNECT_MODE_QUIT;
+        *running = false;
+      }
     } else {
-      connect_tree_delete(ds);
+      delete_saved_ws(ds, r.index);
     }
     break;
-  case ACT_DUPLICATE:
-    connect_tree_duplicate(ds);
-    break;
-  case ACT_MOVE:
-    connect_tree_move(ds);
-    break;
   case ACT_NEW:
-    connect_tree_new_connection(ds, r.kind == ROW_TREE ? r.item : NULL);
-    break;
-  case ACT_NEW_FOLDER:
-    connect_tree_new_folder(ds, r.kind == ROW_TREE ? r.item : NULL);
+    tui_new_workspace_form(ds->state);
+    *running = false;
     break;
   case ACT_SEARCH:
     ds->input_focused = true;
@@ -1944,9 +1267,6 @@ static void run_action(DialogState *ds, ActionId act, bool *running,
   default:
     break;
   }
-  /* A tree action may move the highlight within the tree */
-  if (r.kind == ROW_TREE && ds->sel_kind == ROW_TREE)
-    ds->sel_index = ds->tree_highlight;
 }
 
 /* What a key asks for (letters only from the list; in the input they are
@@ -1955,19 +1275,11 @@ static ActionId key_action(DialogState *ds, const UiEvent *ev) {
   const Config *c = ds->config;
   if (render_event_is_special(ev, UI_KEY_ENTER))
     return ACT_ENTER;
-  if (c && hotkey_matches(c, ev, HOTKEY_CONN_TEST))
-    return ACT_TEST;
-  if (c && hotkey_matches(c, ev, HOTKEY_CONN_SAVE))
-    return ACT_SAVE;
   if (ds->input_focused)
     return ACT_NONE;
   int ch = render_event_get_char(ev);
-  if (ch == 't')
-    return ACT_TAB_HERE;
   if (ch == 's')
     return ACT_SAVE;
-  if (ch == 'T')
-    return ACT_TEST;
   if (ch == '?')
     return ACT_HELP;
   if (ch == 'q')
@@ -1979,10 +1291,8 @@ static ActionId key_action(DialogState *ds, const UiEvent *ev) {
   static const struct {
     HotkeyAction hk;
     ActionId act;
-  } map[] = {{HOTKEY_CONN_EDIT, ACT_EDIT},         {HOTKEY_CONN_RENAME, ACT_RENAME},
-             {HOTKEY_CONN_DELETE, ACT_DELETE},     {HOTKEY_CONN_DUPLICATE, ACT_DUPLICATE},
-             {HOTKEY_CONN_MOVE, ACT_MOVE},         {HOTKEY_CONN_NEW_FOLDER, ACT_NEW_FOLDER},
-             {HOTKEY_CONN_NEW, ACT_NEW},           {HOTKEY_CONN_FILTER, ACT_SEARCH}};
+  } map[] = {{HOTKEY_CONN_RENAME, ACT_RENAME}, {HOTKEY_CONN_DELETE, ACT_DELETE},
+             {HOTKEY_CONN_NEW, ACT_NEW},       {HOTKEY_CONN_FILTER, ACT_SEARCH}};
   for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
     if (hotkey_matches(c, ev, map[i].hk))
       return map[i].act;
@@ -1995,11 +1305,10 @@ static ActionId key_action(DialogState *ds, const UiEvent *ev) {
  */
 
 /* Clicks: the input focuses it, a row selects (a double click opens), a
- * footer hint runs; the wheel moves the selection. Ignored during a
- * move. */
+ * footer hint runs; the wheel moves the selection. */
 static void handle_mouse(DialogState *ds, const UiEvent *event, bool *running,
                          ConnectResult *result) {
-  if (ds->move.active || !ds->win)
+  if (!ds->win)
     return;
   int y = event->mouse.y, x = event->mouse.x;
   if (event->mouse.button == UI_MOUSE_SCROLL_UP ||
@@ -2043,39 +1352,23 @@ static void handle_mouse(DialogState *ds, const UiEvent *event, bool *running,
  */
 
 ConnectResult connect_view_show(TuiState *state) {
-  ConnectResult result = {NULL, NULL, CONNECT_MODE_CANCELLED, NULL};
+  ConnectResult result = {CONNECT_MODE_CANCELLED};
 
   DialogState ds = {0};
   ds.state = state;
-  char *load_err = NULL;
-  ds.mgr = connmgr_load(&load_err);
-  if (!ds.mgr) {
-    /* Not loaded: show an empty list, and never overwrite the file */
+  ds.mgr = connmgr_load(NULL); /* Names of saved connections, read only */
+  if (!ds.mgr)
     ds.mgr = connmgr_new();
-    ds.mgr->read_only = true;
-    ds.load_error = load_err ? load_err : str_dup("connections.json could not be read");
-    load_err = NULL;
-  }
-  free(load_err);
+  ds.mgr->read_only = true;
   ds.config = state && state->app ? state->app->config : NULL;
-  ds.client = state && state->app ? state->app->client : NULL;
-  recent_load(&ds.recent);
   saved_workspaces_load(&ds.saved_ws);
   text_input_init(&ds.input, NULL, false);
-  if (ds.load_error)
-    ds.error_msg = str_printf("connections.json: %s (changes will not be saved)",
-                              ds.load_error);
-  else if (ds.saved_ws.load_error)
+  if (ds.saved_ws.load_error)
     ds.error_msg = str_printf("%s (saved workspaces will not be changed)",
                               ds.saved_ws.load_error);
-  persist(&ds); /* Ids repaired while loading */
 
-  /* Start on the current workspace; with nothing to pick, in the input */
+  /* Start on the current workspace */
   build_rows(&ds);
-  bool any = false;
-  for (size_t i = 0; i < ds.num_rows; i++)
-    any = any || selectable(&ds.rows[i]);
-  ds.input_focused = !any;
   ds.sel_kind = num_workspaces(&ds) > 0 ? ROW_WORKSPACE : ROW_NOTE;
   ds.sel_index = state && state->app ? state->app->current_workspace : 0;
 
@@ -2104,17 +1397,6 @@ ConnectResult connect_view_show(TuiState *state) {
     }
     if (event.type == UI_EVENT_MOUSE) {
       handle_mouse(&ds, &event, &running, &result);
-      persist(&ds);
-      continue;
-    }
-    /* A move owns the keyboard until it is dropped or cancelled */
-    if (ds.move.active) {
-      connect_tree_move_key(&ds, &event);
-      if (!ds.move.active) {
-        ds.sel_kind = ROW_TREE;
-        ds.sel_index = ds.tree_highlight;
-      }
-      persist(&ds);
       continue;
     }
 
@@ -2148,9 +1430,8 @@ ConnectResult connect_view_show(TuiState *state) {
         text_input_handle_key(&ds.input, &event);
         if (!str_eq(old, ds.input.buf ? ds.input.buf : ""))
           select_first(&ds);
-        str_secure_free(old);
+        free(old);
       }
-      persist(&ds);
       continue;
     }
 
@@ -2176,30 +1457,20 @@ ConnectResult connect_view_show(TuiState *state) {
     } else if (render_event_is_special(&event, UI_KEY_HOME) ||
                render_event_is_special(&event, UI_KEY_END)) {
       select_edge(&ds, render_event_is_special(&event, UI_KEY_END));
-    } else if ((render_event_is_special(&event, UI_KEY_LEFT) ||
-                render_event_is_special(&event, UI_KEY_RIGHT)) &&
-               selected(&ds) && selected(&ds)->kind == ROW_TREE) {
-      ds.tree_highlight = selected(&ds)->index;
-      connect_tree_left_right(&ds, render_event_is_special(&event, UI_KEY_RIGHT));
-      ds.sel_index = ds.tree_highlight;
     } else {
       run_action(&ds, key_action(&ds, &event), &running, &result);
     }
-    persist(&ds);
   }
 
-  persist(&ds);
   curs_set(0);
   if (ds.win)
     delwin(ds.win);
   connmgr_free(ds.mgr);
-  recent_free(&ds.recent);
   saved_workspaces_free(&ds.saved_ws);
   free(ds.rows);
   free(ds.error_msg);
   free(ds.success_msg);
-  free(ds.load_error);
-  text_input_free(&ds.input); /* Wiped: it may hold a password */
+  text_input_free(&ds.input);
 
   /* The window covered everything: the screen is drawn again in full */
   if (state) {

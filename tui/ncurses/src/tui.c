@@ -10,6 +10,7 @@
 #include "core/actions.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
+#include "views/form_tab.h"
 #include "ddl_edit.h"
 #include "views/config_view.h"
 #include <ctype.h>
@@ -135,6 +136,12 @@ void tui_refresh(TuiState *state) {
   tui_note_tab_switch(state);
 
   Tab *tab = TUI_TAB(state);
+  /* The table sidebar has no window while a form is current: arriving at or
+   * leaving a form by any route lays the screen out again */
+  if (tab && tab->type == TAB_TYPE_FORM)
+    state->sidebar_focused = false;
+  if (state->main_win && (state->sidebar_win != NULL) != tui_sidebar_shown(state))
+    tui_recreate_windows(state);
 
   tui_draw_header(state);
   tui_draw_tabs(state);
@@ -146,6 +153,8 @@ void tui_refresh(TuiState *state) {
       tui_draw_query(state);
     } else if (tab->type == TAB_TYPE_CONNECTION) {
       tui_draw_connection_tab(state);
+    } else if (tab->type == TAB_TYPE_FORM) {
+      form_tab_draw(state, tab);
     } else {
       tui_draw_table(state);
     }
@@ -262,6 +271,7 @@ typedef struct {
 static const DialogHotkeyEntry dialog_hotkey_table[] = {
     {HOTKEY_GOTO_ROW, tui_show_goto_dialog},
     {HOTKEY_CONNECT_DIALOG, tui_show_connect_dialog},
+    {HOTKEY_NEW_CONNECTION, tui_new_connection_tab},
     {HOTKEY_TOGGLE_HISTORY, tui_show_history_dialog},
     {HOTKEY_CONFIG, tui_show_config},
 };
@@ -792,6 +802,16 @@ void tui_run(TuiState *state) {
       tui_calculate_column_widths(state);
       tui_refresh(state);
       continue;
+    }
+
+    /* A connection form takes its keys first (its own Tab ring too); the
+     * keys it leaves go to the global hotkeys below */
+    Tab *form_tab = TUI_TAB(state);
+    if (form_tab && form_tab->type == TAB_TYPE_FORM) {
+      if (form_tab_handle_key(state, form_tab, &event)) {
+        tui_refresh(state);
+        continue;
+      }
     }
 
     /* Handle edit mode input */

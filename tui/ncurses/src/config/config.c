@@ -409,13 +409,13 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
     [HOTKEY_SUBVIEW_INFORMATION] = {"subview_information", "Information", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_information), CONFIG_FE_ALL},
     [HOTKEY_FOLLOW_FK] = {"follow_fk", "Follow foreign key", HOTKEY_CAT_TABLE, DEF_KEYS(def_follow_fk), CONFIG_FE_ALL},
     [HOTKEY_REFERENCED_BY] = {"referenced_by", "Referenced by\xe2\x80\xa6", HOTKEY_CAT_TABLE, DEF_KEYS(def_referenced_by), CONFIG_FE_ALL},
-    [HOTKEY_NEW_CONNECTION] = {"new_connection", "New connection", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_connection), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_OPEN] = {"conn_open", "Open here", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_OPEN_BACKGROUND] = {"conn_open_background", "Open in background tab", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_background), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_OPEN_NEW_WORKSPACE] = {"conn_open_new_workspace", "Open in new workspace", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_new_workspace), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_OPEN_TO_WORKSPACE] = {"conn_open_to_workspace", "Open in workspace\xe2\x80\xa6", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_to_workspace), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_SAVE_AS_NEW] = {"conn_save_as_new", "Save as new", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_save_as_new), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_CLEAR] = {"conn_clear", "Clear form", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_clear), CONFIG_FE_NOTCURSES},
+    [HOTKEY_NEW_CONNECTION] = {"new_connection", "New connection", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_connection), CONFIG_FE_ALL},
+    [HOTKEY_CONN_OPEN] = {"conn_open", "Open here", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open), CONFIG_FE_ALL},
+    [HOTKEY_CONN_OPEN_BACKGROUND] = {"conn_open_background", "Open in background tab", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_background), CONFIG_FE_ALL},
+    [HOTKEY_CONN_OPEN_NEW_WORKSPACE] = {"conn_open_new_workspace", "Open in new workspace", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_new_workspace), CONFIG_FE_ALL},
+    [HOTKEY_CONN_OPEN_TO_WORKSPACE] = {"conn_open_to_workspace", "Open in workspace\xe2\x80\xa6", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_open_to_workspace), CONFIG_FE_ALL},
+    [HOTKEY_CONN_SAVE_AS_NEW] = {"conn_save_as_new", "Save as new", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_save_as_new), CONFIG_FE_ALL},
+    [HOTKEY_CONN_CLEAR] = {"conn_clear", "Clear form", HOTKEY_CAT_CONNECT, DEF_KEYS(def_conn_clear), CONFIG_FE_ALL},
     [HOTKEY_TABLE_MENU] = {"table_menu", "Table actions\xe2\x80\xa6", HOTKEY_CAT_TABLE, DEF_KEYS(def_table_menu), CONFIG_FE_ALL},
     [HOTKEY_STRUCT_ADD] = {"struct_add", "Add\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_add), CONFIG_FE_ALL},
     [HOTKEY_STRUCT_EDIT] = {"struct_edit", "Edit\xe2\x80\xa6", HOTKEY_CAT_STRUCTURE, DEF_KEYS(def_struct_edit), CONFIG_FE_ALL},
@@ -769,6 +769,7 @@ Config *config_copy(const Config *config) {
 
   copy->general = config->general;
   copy->frontend = config->frontend;
+  copy->hotkeys_foreign = config->hotkeys_foreign;
   copy->extra = config->extra ? cJSON_Duplicate(config->extra, true)
                               : cJSON_CreateObject();
   if (config->num_touched) {
@@ -1090,7 +1091,8 @@ bool config_save_file(const Config *config, const char *path_in, char **error) {
     }
   }
   cJSON_DeleteItemFromObject(json, "general");
-  cJSON_DeleteItemFromObject(json, "hotkeys");
+  if (!config->hotkeys_foreign)
+    cJSON_DeleteItemFromObject(json, "hotkeys");
 
   /* General settings */
   cJSON *general = cJSON_CreateObject();
@@ -1116,8 +1118,8 @@ bool config_save_file(const Config *config, const char *path_in, char **error) {
   JSON_ADD_INT(general, "color_scheme", config->general.color_scheme);
   cJSON_AddItemToObject(json, "general", general);
 
-  /* Hotkeys */
-  cJSON *hotkeys = serialize_hotkeys(config);
+  /* Hotkeys (a GUI leaves the TUIs' as they are in the file) */
+  cJSON *hotkeys = config->hotkeys_foreign ? NULL : serialize_hotkeys(config);
   if (hotkeys) {
     cJSON_AddItemToObject(json, "hotkeys", hotkeys);
   }
@@ -1536,3 +1538,17 @@ const char *hotkey_category_name(HotkeyCategory category) {
   return category_names[category];
 }
 
+
+bool config_section_get_bool(Config *config, const char *section, const char *key, bool dflt) {
+  cJSON *sec = config && config->extra ? cJSON_GetObjectItem(config->extra, section) : NULL;
+  cJSON *v = sec ? cJSON_GetObjectItem(sec, key) : NULL;
+  return cJSON_IsBool(v) ? cJSON_IsTrue(v) : dflt;
+}
+
+void config_section_set_bool(Config *config, const char *section, const char *key, bool value) {
+  cJSON *sec = config_section(config, section);
+  if (!sec)
+    return;
+  cJSON_DeleteItemFromObject(sec, key);
+  cJSON_AddBoolToObject(sec, key, value);
+}

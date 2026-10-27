@@ -10,6 +10,7 @@
 #include "core/actions.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
+#include "views/form_tab.h"
 #include "views/config_view.h"
 #include <ctype.h>
 #include <locale.h>
@@ -143,6 +144,7 @@ bool tui_init(TuiState *state, AppState *app) {
 
   memset(state, 0, sizeof(TuiState));
   state->app = app;
+  tab_form_free_hook = form_tab_free; /* a form tab's state goes with the tab */
 
   /* vm_table is created on-demand when tabs are accessed */
 
@@ -300,6 +302,9 @@ void tui_cleanup(TuiState *state) {
   /* Free internal clipboard buffer */
   free(state->clipboard_buffer);
 
+  /* The saved connections and Recent the connection forms used */
+  tui_connmgr_free(state);
+
   /* Delete windows */
   if (state->main_win)
     delwin(state->main_win);
@@ -320,6 +325,11 @@ void tui_cleanup(TuiState *state) {
   if (state->app) {
     app_state_cleanup(state->app);
   }
+}
+
+bool tui_sidebar_shown(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  return state->sidebar_visible && !(tab && tab->type == TAB_TYPE_FORM);
 }
 
 /* Recreate windows after resize or sidebar toggle */
@@ -376,7 +386,7 @@ void tui_recreate_windows(TuiState *state) {
 
   state->content_rows = main_height - 3;
 
-  if (state->sidebar_visible) {
+  if (tui_sidebar_shown(state)) {
     /* Create sidebar window (starts after tab bar) */
     state->sidebar_win = newwin(main_height, SIDEBAR_WIDTH, main_start_y, 0);
     if (state->sidebar_win) {

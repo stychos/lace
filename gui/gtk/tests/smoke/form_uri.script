@@ -1,0 +1,12 @@
+# args: -s
+# A typed URI fills the fields; the URI line masks the password; text that
+# does not parse opens nothing
+form-uri postgres://app:hunter2@db1:5432/shop
+expect-field host db1
+expect-field password hunter2
+expect-uri-masked
+form-uri ::nonsense
+form-action open
+expect-message Not a connection URL
+expect-page form
+quit

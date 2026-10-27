@@ -39,6 +39,10 @@ bool tab_create_query(TuiState *state) {
   if (current_tab) {
     connection_index = current_tab->connection_index;
   }
+  if (!app_get_connection(state->app, connection_index)) { /* a connection form has none */
+    tui_set_error(state, "No connection here: open one first");
+    return false;
+  }
 
   /* Find next query number by scanning existing tabs */
   int max_query_num = 0;

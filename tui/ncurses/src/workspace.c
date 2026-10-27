@@ -11,6 +11,8 @@
 
 #include "core/workspace.h"
 #include "tui_internal.h"
+#include "views/form_tab.h"
+#include "util/mem.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -175,9 +177,17 @@ bool tab_create_object(TuiState *state, LaceObjectKind kind, const char *name, c
 /* Longest tab label shown, in columns (longer names are clipped) */
 #define TAB_LABEL_MAX_COLS 30
 
+/* What a tab is called: its table, or a form's label; caller frees */
+static char *tab_label(const Tab *tab) {
+  if (tab->type == TAB_TYPE_FORM)
+    return form_tab_label(tab);
+  return str_dup(tab->table_name ? tab->table_name : "?");
+}
+
 int tui_tab_width(const Tab *tab) {
-  const char *name = tab->table_name ? tab->table_name : "?";
+  char *name = tab_label(tab);
   int cols = utf8_width(name, strlen(name));
+  free(name);
   if (cols > TAB_LABEL_MAX_COLS)
     cols = TAB_LABEL_MAX_COLS;
   return cols + 4; /* " name " plus the separator column */
@@ -204,20 +214,26 @@ void tui_draw_tabs(TuiState *state) {
     if (!tab->active)
       continue;
 
-    const char *name = tab->table_name ? tab->table_name : "?";
+    char *name = tab_label(tab);
     int tab_width = tui_tab_width(tab); /* Same widths as the mouse hit test */
 
-    if (x + tab_width > state->term_cols)
+    if (x + tab_width > state->term_cols) {
+      free(name);
       break;
+    }
 
-    /* " name " in display columns, clipped to the label width */
+    /* " name " in display columns, clipped to the label width; a form's
+     * label in italics */
     attr_t attr = i == ws->current_tab ? COLOR_PAIR(COLOR_SELECTED) | A_BOLD
                                        : A_NORMAL;
+    if (tab->type == TAB_TYPE_FORM)
+      attr |= A_ITALIC;
     wattron(state->tab_win, attr);
     mvwaddch(state->tab_win, 0, x, ' ');
     tui_print_fit(state->tab_win, 0, x + 1, tab_width - 3, name);
     waddch(state->tab_win, ' ');
     wattroff(state->tab_win, attr);
+    free(name);
 
     x += tab_width;
 
@@ -243,181 +259,109 @@ void tui_draw_tabs(TuiState *state) {
   wrefresh(state->tab_win);
 }
 
-/* Close current tab */
+/* Shift the UITabState entries of workspace ws_idx down over tab_idx */
+static void tab_ui_remove(TuiState *state, size_t ws_idx, size_t tab_idx, size_t old_num_tabs) {
+  if (old_num_tabs > 0 && state->tab_ui && ws_idx < state->tab_ui_ws_capacity &&
+      state->tab_ui[ws_idx] && old_num_tabs <= state->tab_ui_capacity[ws_idx]) {
+    for (size_t i = tab_idx; i < old_num_tabs - 1; i++)
+      state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
+    memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
+  }
+}
+
+/* What a connection is called in a question */
+static char *conn_label(Connection *c) {
+  char *d = c ? tui_connstr_display(c->connstr) : NULL;
+  return d ? d : str_dup("the connection");
+}
+
+static bool conn_in_transaction(const Connection *c) {
+  return c && c->conn && (c->conn->in_transaction || c->conn->transaction_failed);
+}
+
+/* Closing the last workspace ends lace (on_last_workspace_close "quit") */
+static bool last_close_quits(TuiState *state) {
+  return state->app->num_workspaces == 1 &&
+         state->app->config->general.last_workspace_close == CONFIG_LAST_WS_QUIT;
+}
+
+/* Close current tab. A form goes. The last tab of its connection in this
+ * workspace lets the connection go and, with keep_connection_tab, becomes a
+ * form in its place; the connection closes when no tab anywhere uses it. A
+ * workspace left without tabs closes (workspace_close_current). */
 void tab_close(TuiState *state) {
   Workspace *ws = TUI_WORKSPACE(state);
   if (!ws || ws->num_tabs == 0)
     return;
-
-  /* Cancel any pending background load */
-  tui_cancel_background_load(state);
-
-  /* Get indices and tab info before close */
-  size_t ws_idx = state->app->current_workspace;
+  AppState *app = state->app;
+  size_t ws_idx = app->current_workspace;
   size_t tab_idx = ws->current_tab;
   size_t old_num_tabs = ws->num_tabs;
   Tab *tab = &ws->tabs[tab_idx];
-  TabType closing_type = tab->type;
+  bool form = tab->type == TAB_TYPE_FORM;
   size_t conn_idx = tab->connection_index;
 
-  /* Free UITabState resources for the closing tab */
-  UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
-  if (ui) {
-    /* Free resources */
-    free(ui->query_result_edit_buf);
-    ui->query_result_edit_buf = NULL;
+  size_t same = 0; /* other tabs of this connection here */
+  for (size_t i = 0; !form && i < ws->num_tabs; i++)
+    same += i != tab_idx && ws->tabs[i].type != TAB_TYPE_FORM && ws->tabs[i].connection_index == conn_idx;
+  bool last_here = !form && same == 0;
+  bool keep = last_here && app->config->general.keep_connection_tab;
+  bool conn_ends = last_here && app_connection_users(app, conn_idx) <= 1;
+  bool quits = !keep && ws->num_tabs == 1 && last_close_quits(state);
+
+  /* One question, before anything closes */
+  Connection *c = app_get_connection(app, conn_idx);
+  char *msg = NULL;
+  if (conn_ends && conn_in_transaction(c)) {
+    char *name = conn_label(c);
+    msg = str_printf("A transaction is open on %s. Close, roll back%s?", name, quits ? " and quit" : "");
+    free(name);
+  } else if (quits && app->config->general.quit_confirmation) {
+    msg = str_dup("Quit lace?");
   }
-
-  /* If closing a CONNECTION tab, check if other tabs use this connection */
-  if (closing_type == TAB_TYPE_CONNECTION) {
-    /* Close the tab first */
-    workspace_close_tab(ws, tab_idx);
-
-    /* Count the tabs still using this connection in every workspace:
-     * app_close_connection closes all of them, including tabs (and their
-     * query text) in workspaces the user is not looking at. */
-    size_t other_tabs_same_conn = 0;
-    for (size_t w = 0; w < state->app->num_workspaces; w++) {
-      Workspace *other = &state->app->workspaces[w];
-      for (size_t i = 0; i < other->num_tabs; i++) {
-        if (other->tabs[i].connection_index == conn_idx) {
-          other_tabs_same_conn++;
-        }
-      }
-    }
-
-    /* Shift UITabState entries (with bounds checking) */
-    if (old_num_tabs > 0 && state->tab_ui &&
-        ws_idx < state->tab_ui_ws_capacity && state->tab_ui[ws_idx] &&
-        old_num_tabs <= state->tab_ui_capacity[ws_idx]) {
-      for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
-        state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
-      }
-      memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
-    }
-
-    if (other_tabs_same_conn > 0) {
-      /* Other tabs still use this connection - just restore the next tab */
-      if (ws->num_tabs > 0) {
-        tab_restore(state);
-      } else {
-        workspace_close(state);
-      }
+  if (msg) {
+    bool yes = tui_show_confirm_dialog(state, msg);
+    free(msg);
+    if (!yes) {
+      tui_refresh(state);
       return;
     }
-
-    /* No other tabs use this connection - close it */
-    state->sidebar_tables_key = NULL;
-
-    /* Close the connection in app state - this frees everything */
-    app_close_connection(state->app, conn_idx);
-
-    /* Tab data fields are managed per-tab, cleared by workspace_close_tab */
-    /* Hide sidebar since there's no connection */
-    state->sidebar_visible = false;
-    state->sidebar_focused = false;
-    tui_recreate_windows(state);
-
-    /* If there are other tabs, restore them */
-    if (ws->num_tabs > 0) {
-      tab_restore(state);
-    } else {
-      /* No tabs left - close the workspace */
-      workspace_close(state);
-    }
-    return;
   }
 
-  /* Closing a TABLE or QUERY tab */
-  /* Count remaining content tabs FOR THIS CONNECTION (excluding the one being
-   * closed) */
-  size_t remaining_conn_content_tabs = 0;
-  bool has_conn_connection_tab = false;
-  for (size_t i = 0; i < ws->num_tabs; i++) {
-    if (i == tab_idx)
-      continue;
-    if (ws->tabs[i].connection_index != conn_idx)
-      continue; /* Different connection, skip */
-    if (ws->tabs[i].type == TAB_TYPE_CONNECTION) {
-      has_conn_connection_tab = true;
-    } else {
-      remaining_conn_content_tabs++;
-    }
+  /* Cancel any pending background load */
+  tui_cancel_background_load(state);
+  UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
+  if (ui) {
+    free(ui->query_result_edit_buf);
+    memset(ui, 0, sizeof *ui);
   }
 
-  /* Close the tab */
-  workspace_close_tab(ws, tab_idx);
-
-  /* Shift UITabState entries to match (with bounds checking) */
-  if (old_num_tabs > 0 && state->tab_ui && ws_idx < state->tab_ui_ws_capacity &&
-      state->tab_ui[ws_idx] && old_num_tabs <= state->tab_ui_capacity[ws_idx]) {
-    for (size_t i = tab_idx; i < old_num_tabs - 1; i++) {
-      state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
-    }
-    memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
-  }
-
-  /* If this was the last content tab for this connection, create a connection
-   * tab (unless keep_connection_tab is off, in which case close the
-   * connection) */
-  if (remaining_conn_content_tabs == 0 && !has_conn_connection_tab) {
-    /* Check if we should close connection instead of creating connection tab */
-    bool close_conn = state->app->config &&
-                      !state->app->config->general.keep_connection_tab;
-
-    if (!close_conn) {
-      /* Get connection string for display */
-      Connection *conn = app_get_connection(state->app, conn_idx);
-      const char *connstr = conn ? conn->connstr : NULL;
-
-      /* Create connection tab */
-      Tab *conn_tab = workspace_create_connection_tab(ws, conn_idx, connstr);
-      if (conn_tab) {
-        /* Switch to the new connection tab */
-        ws->current_tab = ws->num_tabs - 1;
-
-        /* Connection tab has no table data - Tab fields are clean */
-
-        /* Focus sidebar to select a new table */
-        state->sidebar_visible = true;
-        state->sidebar_focused = true;
-        state->sidebar_highlight = 0;
-        state->sidebar_scroll = 0;
-        state->sidebar_filter[0] = '\0';
-        state->sidebar_filter_len = 0;
-        state->sidebar_filter_active = false;
-        tui_recreate_windows(state);
-
-        /* Reset filters state */
-        tui_set_filters_visible(state, false);
-        tui_set_filters_focused(state, false);
-        state->filters_was_focused = false;
-        state->filters_editing = false;
-        state->filters_cursor_row = 0;
-        state->filters_cursor_col = 0;
-        state->filters_scroll = 0;
-        return;
-      }
-    }
-    /* If close_conn is true, fall through to close workspace/connection */
-  }
-
-  /* If no tabs remain, close the workspace */
-  if (ws->num_tabs == 0) {
-    workspace_close(state);
+  if (keep) {
+    tab_make_form(tab); /* in its place */
   } else {
-    /* Restore the now-current tab */
-    tab_restore(state);
+    workspace_close_tab(ws, tab_idx);
+    tab_ui_remove(state, ws_idx, tab_idx, old_num_tabs);
   }
+  if (conn_ends && c) {
+    state->sidebar_tables_key = NULL;
+    app_close_connection(app, conn_idx);
+  }
+  state->sidebar_focused = false;
+
+  if (ws->num_tabs == 0)
+    workspace_close(state);
+  else
+    tab_restore(state);
 }
 
-/* Close the current workspace; with none left, show the Workspaces window
- * when show_window is set */
-static void workspace_close_current(TuiState *state, bool show_window) {
+/* Close the current workspace: the connections only it used close too;
+ * with none left, on_last_workspace_close says whether lace quits or a
+ * fresh workspace with a form appears */
+static void workspace_close_current(TuiState *state) {
   if (!state || !state->app)
     return;
-
-  size_t ws_idx = state->app->current_workspace;
+  AppState *app = state->app;
+  size_t ws_idx = app->current_workspace;
 
   /* Cancel any pending background load */
   tui_cancel_background_load(state);
@@ -425,7 +369,6 @@ static void workspace_close_current(TuiState *state, bool show_window) {
   /* Free UITabState resources for all tabs in this workspace */
   if (ws_idx < state->tab_ui_ws_capacity && state->tab_ui[ws_idx]) {
     for (size_t i = 0; i < state->tab_ui_capacity[ws_idx]; i++) {
-      /* Free resources */
       free(state->tab_ui[ws_idx][i].query_result_edit_buf);
       state->tab_ui[ws_idx][i].query_result_edit_buf = NULL;
     }
@@ -444,13 +387,22 @@ static void workspace_close_current(TuiState *state, bool show_window) {
     }
   }
 
-  /* Close workspace in app state (frees tabs and data) */
-  app_close_workspace(state->app, ws_idx);
+  /* The connections its tabs use, to close the ones nobody else uses */
+  Workspace *ws = &app->workspaces[ws_idx];
+  bool *used = safe_calloc(app->num_connections + 1, sizeof(bool));
+  for (size_t t = 0; t < ws->num_tabs; t++)
+    if (ws->tabs[t].type != TAB_TYPE_FORM && ws->tabs[t].connection_index < app->num_connections)
+      used[ws->tabs[t].connection_index] = true;
 
-  /* Tab data fields are freed by app_close_workspace */
+  /* Close workspace in app state (frees tabs and data) */
+  app_close_workspace(app, ws_idx);
+  for (size_t i = app->num_connections; i-- > 0;)
+    if (used[i] && app_connection_users(app, i) == 0)
+      app_close_connection(app, i);
+  free(used);
+  state->sidebar_tables_key = NULL;
 
   /* Reset UI state */
-  state->sidebar_visible = false;
   state->sidebar_focused = false;
   state->sidebar_highlight = 0;
   state->sidebar_scroll = 0;
@@ -465,28 +417,20 @@ static void workspace_close_current(TuiState *state, bool show_window) {
   state->filters_cursor_col = 0;
   state->filters_scroll = 0;
 
-  /* Check if there are other workspaces */
-  if (state->app->num_workspaces > 0) {
+  if (app->num_workspaces > 0) {
     /* Switch to the new current workspace (adjusted by app_close_workspace) */
+    tui_sync_from_app(state);
     tui_recreate_windows(state);
     tab_restore(state);
+  } else if (app->config->general.last_workspace_close == CONFIG_LAST_WS_NEW) {
+    tui_new_workspace_form(state);
   } else {
-    /* No workspaces left - show connect dialog */
-    tui_recreate_windows(state);
-    if (state->sidebar_win) {
-      werase(state->sidebar_win);
-      wrefresh(state->sidebar_win);
-    }
-    werase(state->main_win);
-    wrefresh(state->main_win);
-    if (show_window) {
-      tui_refresh(state);
-      tui_show_connect_dialog(state);
-    }
+    state->running = false;
+    app->running = false;
   }
 }
 
-void workspace_close(TuiState *state) { workspace_close_current(state, true); }
+void workspace_close(TuiState *state) { workspace_close_current(state); }
 
 void tui_workspace_switch(TuiState *state, size_t index) {
   if (!state || !state->app || index >= state->app->num_workspaces)
@@ -501,12 +445,37 @@ void tui_workspace_switch(TuiState *state, size_t index) {
     tab_restore(state);
 }
 
+char *tui_workspace_close_question(TuiState *state, size_t index) {
+  AppState *app = state->app;
+  if (index >= app->num_workspaces)
+    return NULL;
+  Workspace *ws = &app->workspaces[index];
+  bool quits = last_close_quits(state);
+  for (size_t t = 0; t < ws->num_tabs; t++) {
+    size_t ci = ws->tabs[t].connection_index;
+    Connection *c = ws->tabs[t].type == TAB_TYPE_FORM ? NULL : app_get_connection(app, ci);
+    if (!conn_in_transaction(c))
+      continue;
+    size_t here = 0;
+    for (size_t j = 0; j < ws->num_tabs; j++)
+      here += ws->tabs[j].type != TAB_TYPE_FORM && ws->tabs[j].connection_index == ci;
+    if (here < app_connection_users(app, ci))
+      continue; /* another workspace keeps it open */
+    char *name = conn_label(c);
+    char *q = str_printf("A transaction is open on %s. Close the workspace, roll back%s?", name,
+                         quits ? " and quit" : "");
+    free(name);
+    return q;
+  }
+  return quits ? str_dup("Close the last workspace and quit lace?") : NULL;
+}
+
 void tui_workspace_close_at(TuiState *state, size_t index) {
   if (!state || !state->app || index >= state->app->num_workspaces)
     return;
   size_t back = state->app->current_workspace;
   tui_workspace_switch(state, index);
-  workspace_close_current(state, false);
+  workspace_close_current(state);
   /* Back to the workspace that was current, where it moved to */
   if (back != index && state->app->num_workspaces > 0)
     tui_workspace_switch(state, back > index ? back - 1 : back);

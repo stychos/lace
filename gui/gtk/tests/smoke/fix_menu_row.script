@@ -1,0 +1,16 @@
+# args: -s
+# fixture-conns
+# The list's context menu never points at a row the list has since freed:
+# a right-click, a search (the rows are rebuilt), then the New folder button
+form-menu Local
+form-search zz
+form-tree new-folder
+wait 300
+answer cancel
+form-search
+form-menu Local
+form-search Lo
+form-tree delete
+wait 300
+answer cancel
+quit

@@ -1,0 +1,8 @@
+# The session goes to the shared session.json (version 2, geometry under
+# "gtk", no password) and comes back from it
+# then: session_restore_after.script
+connect sqlite://$LACE_SMOKE_DB
+expect-tables
+table big
+wait 500
+quit

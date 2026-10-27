@@ -26,6 +26,8 @@ static void on_switch(GObject *row, GParamSpec *p, PrefsCtx *c) {
   if (g_str_equal(key, "confirm_delete")) pr->confirm_delete = on;
   else if (g_str_equal(key, "restore_session")) pr->restore_session = on;
   else if (g_str_equal(key, "approximate_counts")) pr->approximate_counts = on;
+  else if (g_str_equal(key, "keep_connection_tab")) pr->keep_connection_tab = on;
+  else if (g_str_equal(key, "auto_open_first_table")) pr->auto_open_first_table = on;
   save(c);
 }
 
@@ -43,6 +45,8 @@ static void on_combo(GObject *row, GParamSpec *p, PrefsCtx *c) {
     pr->daemon_spawn_mode = sel;
   } else if (g_str_equal(key, "row_numbers")) {
     pr->row_numbers = sel;
+  } else if (g_str_equal(key, "last_workspace_close")) {
+    pr->last_workspace_close = sel ? CONFIG_LAST_WS_NEW : CONFIG_LAST_WS_QUIT;
   }
   save(c);
 }
@@ -133,6 +137,16 @@ void lace_prefs_dialog_show(LaceApp *app, GtkWidget *parent) {
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(g),
       switch_row(c, "Approximate row counts", "Use catalogue estimates for large PostgreSQL and MySQL tables (shown with ≈)",
                  "approximate_counts", pr->approximate_counts));
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(g),
+      switch_row(c, "Open the first table on connect", "A new connection shows its first table, not only its list",
+                 "auto_open_first_table", pr->auto_open_first_table));
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(g),
+      switch_row(c, "Keep a connection tab", "Closing a connection's last table or editor leaves a connection form",
+                 "keep_connection_tab", pr->keep_connection_tab));
+  static const char *const last_ws[] = {"Quit", "Open a new window", NULL};
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(g),
+      combo_row(c, "When the last window closes", NULL, "last_workspace_close", last_ws,
+                pr->last_workspace_close == CONFIG_LAST_WS_NEW ? 1 : 0));
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(g),
       spin_row(c, "Rows per page", "Rows fetched per page as you scroll (new tabs)", "page_size",
                100, 100000, 100, pr->page_size));

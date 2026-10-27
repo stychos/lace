@@ -1,0 +1,16 @@
+# args: -s
+# fixture-conns: pg
+# "Drop the changes?" answered after the list was rebuilt (a search) neither
+# keeps nor selects a freed row
+form-pick Alpha
+form-field password x
+form-pick Local
+form-search a
+answer go
+wait 200
+form-field password y
+form-pick Alpha
+answer cancel
+wait 200
+expect-field password y
+quit

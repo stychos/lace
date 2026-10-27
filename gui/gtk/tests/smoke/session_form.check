@@ -1,0 +1,8 @@
+python3 - "$HOME_DIR/.config/lace/session.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+conns = json.loads(text)["workspaces"][0]["connections"]
+forms = [c for c in conns if c.get("form")]
+assert forms == [{"form": True, "order": 1}], conns
+assert conns[0].get("saved_id") == "11111111-0000-4000-8000-000000000001", conns
+PY

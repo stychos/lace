@@ -1,0 +1,12 @@
+python3 - "$HOME_DIR/.config/lace/session.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+s = json.loads(text)
+assert s["version"] == 2, s
+ws = s["workspaces"][0]
+assert ws["gtk"]["width"] > 0 and "width" not in ws, ws
+conn = [c for c in ws["connections"] if not c.get("form")][0]  # after the window's start form
+assert conn["tabs"][0]["table"] == "big", ws
+assert "password" not in text
+assert "windows" not in s
+PY

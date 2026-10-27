@@ -1,33 +1,40 @@
 /*
  * Lace
- * Workspaces window: the saved connections tree (its rows, its actions and
- * moving items)
+ * The saved connections tree of the connection form tab: its rows, its
+ * actions and moving items
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
  */
 
-#include "connect_internal.h"
+#include "conn_tree.h"
+#include "prompt.h"
+#include "../tui_internal.h"
+#include "../../liblace/include/util/mem.h"
+#include "../../liblace/include/util/str.h"
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
 
 /* ============================================================================
  * The tree as listed
  * ============================================================================
  */
 
-const char *connect_filter(DialogState *ds) {
-  return ds->input.len > 0 ? ds->input.buf : NULL;
+const char *conn_tree_filter(const ConnTree *t) {
+  return t->filter.len > 0 ? t->filter.buf : NULL;
 }
 
-size_t connect_tree_count(DialogState *ds) {
-  return connmgr_count_filtered(ds->mgr, connect_filter(ds));
+size_t connect_tree_count(ConnTree *t) {
+  return connmgr_count_filtered(t->mgr, conn_tree_filter(t));
 }
 
-ConnectionItem *connect_tree_item(DialogState *ds, size_t index) {
-  return connmgr_get_filtered_item(ds->mgr, connect_filter(ds), index);
+ConnectionItem *connect_tree_item(ConnTree *t, size_t index) {
+  return connmgr_get_filtered_item(t->mgr, conn_tree_filter(t), index);
 }
 
-static ConnectionItem *highlighted(DialogState *ds) {
-  return connect_tree_item(ds, ds->tree_highlight);
+static ConnectionItem *highlighted(ConnTree *ds) {
+  return connect_tree_item(ds, ds->highlight);
 }
 
 /* ============================================================================
@@ -85,7 +92,7 @@ static size_t find_index_in_parent(ConnectionItem *item,
 }
 
 /* The item to insert after for the current position (NULL: at the start) */
-static ConnectionItem *get_insert_after_for_pos(DialogState *ds) {
+static ConnectionItem *get_insert_after_for_pos(ConnTree *ds) {
   if (!ds->move.active || !ds->move.target_folder || ds->move.insert_pos == 0)
     return NULL;
   return get_child_excluding_source(ds->move.target_folder,
@@ -93,7 +100,7 @@ static ConnectionItem *get_insert_after_for_pos(DialogState *ds) {
 }
 
 /* The depth the item would have where it is now */
-static int get_move_target_depth(DialogState *ds) {
+static int get_move_target_depth(ConnTree *ds) {
   if (!ds->move.active || !ds->move.target_folder ||
       ds->move.target_folder == &ds->mgr->root)
     return 0;
@@ -113,7 +120,7 @@ static bool is_descendant_of(ConnectionItem *item, ConnectionItem *ancestor) {
 }
 
 /* Where, among the listed items without the source, the source goes */
-static ssize_t compute_source_visual_position(DialogState *ds) {
+static ssize_t compute_source_visual_position(ConnTree *ds) {
   if (!ds->move.active || !ds->move.target_folder)
     return -1;
 
@@ -159,13 +166,13 @@ static ssize_t compute_source_visual_position(DialogState *ds) {
   return last >= 0 ? last + 1 : -1;
 }
 
-void connect_tree_rows(DialogState *ds) {
+void connect_tree_rows(ConnTree *ds, ConnTreeRowFn add, void *ctx) {
   size_t n = connect_tree_count(ds);
   if (!ds->move.active) {
     for (size_t i = 0; i < n; i++) {
       ConnectionItem *item = connect_tree_item(ds, i);
       if (item)
-        connect_add_row(ds, ROW_TREE, i, item, connmgr_get_item_depth(item), NULL);
+        add(ctx, false, i, item, connmgr_get_item_depth(item));
     }
     return;
   }
@@ -179,14 +186,14 @@ void connect_tree_rows(DialogState *ds) {
     if (!item || item == ds->move.source)
       continue;
     if (!placed && (ssize_t)shown == at) {
-      connect_add_row(ds, ROW_MOVING, 0, ds->move.source, depth, NULL);
+      add(ctx, true, 0, ds->move.source, depth);
       placed = true;
     }
-    connect_add_row(ds, ROW_TREE, i, item, connmgr_get_item_depth(item), NULL);
+    add(ctx, false, i, item, connmgr_get_item_depth(item));
     shown++;
   }
   if (!placed)
-    connect_add_row(ds, ROW_MOVING, 0, ds->move.source, depth, NULL);
+    add(ctx, true, 0, ds->move.source, depth);
 }
 
 /* ============================================================================
@@ -199,7 +206,7 @@ static void set_msg(char **slot, const char *msg) {
   *slot = str_dup(msg);
 }
 
-static void drop_item(DialogState *ds) {
+static void drop_item(ConnTree *ds) {
   ConnectionItem *target = ds->move.target_folder;
   ConnectionItem *insert_after = get_insert_after_for_pos(ds);
   ConnectionItem *source = ds->move.source;
@@ -238,26 +245,26 @@ static void drop_item(DialogState *ds) {
       ConnectionItem *item = connect_tree_item(ds, i);
       const char *name = item ? connmgr_item_name(item) : NULL;
       if (name && connmgr_is_folder(item) == is_folder && strcmp(name, source_name) == 0) {
-        ds->tree_highlight = i;
+        ds->highlight = i;
         break;
       }
     }
   }
   free(source_name);
-  if (ds->tree_highlight >= visible && visible > 0)
-    ds->tree_highlight = visible - 1;
+  if (ds->highlight >= visible && visible > 0)
+    ds->highlight = visible - 1;
 }
 
-void connect_tree_move(DialogState *ds) {
+void connect_tree_move(ConnTree *ds) {
   if (ds->move.active) {
     drop_item(ds);
     return;
   }
   ConnectionItem *current = highlighted(ds);
-  if (current && connect_filter(ds)) {
+  if (current && conn_tree_filter(ds)) {
     /* Moving works on the whole tree: drop the filter, open the folders
      * above the item and keep the highlight on it */
-    text_input_set(&ds->input, "");
+    text_input_set(&ds->filter, "");
     for (ConnectionItem *p = current->parent; p && p->parent; p = p->parent) {
       if (!p->folder.expanded) {
         p->folder.expanded = true;
@@ -267,7 +274,7 @@ void connect_tree_move(DialogState *ds) {
     size_t n = connect_tree_count(ds);
     for (size_t i = 0; i < n; i++) {
       if (connect_tree_item(ds, i) == current) {
-        ds->tree_highlight = i;
+        ds->highlight = i;
         break;
       }
     }
@@ -286,10 +293,9 @@ void connect_tree_move(DialogState *ds) {
       break;
     }
   }
-  ds->input_focused = false;
 }
 
-bool connect_tree_move_key(DialogState *ds, const UiEvent *event) {
+bool connect_tree_move_key(ConnTree *ds, const UiEvent *event) {
   if (!ds->move.active)
     return false;
   ConnectionItem *target = ds->move.target_folder;
@@ -344,7 +350,7 @@ bool connect_tree_move_key(DialogState *ds, const UiEvent *event) {
  * ============================================================================
  */
 
-void connect_tree_left_right(DialogState *ds, bool right) {
+void connect_tree_left_right(ConnTree *ds, bool right) {
   ConnectionItem *item = highlighted(ds);
   if (!item)
     return;
@@ -356,7 +362,7 @@ void connect_tree_left_right(DialogState *ds, bool right) {
     size_t n = connect_tree_count(ds);
     for (size_t i = 0; i < n; i++) {
       if (connect_tree_item(ds, i) == item->parent) {
-        ds->tree_highlight = i;
+        ds->highlight = i;
         break;
       }
     }
@@ -365,7 +371,7 @@ void connect_tree_left_right(DialogState *ds, bool right) {
 
 /* Where something new goes: into the given folder, else next to the given
  * item, else at the top */
-static ConnectionItem *new_parent(DialogState *ds, ConnectionItem *at) {
+static ConnectionItem *new_parent(ConnTree *ds, ConnectionItem *at) {
   if (at && connmgr_is_folder(at)) {
     at->folder.expanded = true;
     return at;
@@ -375,9 +381,10 @@ static ConnectionItem *new_parent(DialogState *ds, ConnectionItem *at) {
   return &ds->mgr->root;
 }
 
-void connect_tree_new_folder(DialogState *ds, ConnectionItem *at) {
-  char *name = connect_prompt_text(ds->win, "New Folder", "Name:", "");
-  connect_redraw(ds);
+void connect_tree_new_folder(ConnTree *ds, ConnectionItem *at) {
+  PromptOptions opts = {"New Folder", "Name:", "", NULL, false, false};
+  char *name = tui_prompt(&opts);
+  tui_refresh(ds->state);
   if (!name)
     return;
   ConnectionFolder *folder = connmgr_new_folder(name);
@@ -394,42 +401,14 @@ void connect_tree_new_folder(DialogState *ds, ConnectionItem *at) {
   }
 }
 
-void connect_tree_new_connection(DialogState *ds, ConnectionItem *at) {
-  char *err = NULL;
-  if (connect_connection_form(ds, NULL, new_parent(ds, at), &err)) {
-    set_msg(&ds->success_msg, "Connection created");
-  } else if (err) {
-    free(ds->error_msg);
-    ds->error_msg = err;
-  }
-  connect_redraw(ds);
-}
-
-void connect_tree_edit(DialogState *ds) {
+void connect_tree_rename(ConnTree *ds) {
   ConnectionItem *item = highlighted(ds);
   if (!item)
     return;
-  if (connmgr_is_folder(item)) {
-    connect_tree_rename(ds);
-    return;
-  }
-  char *err = NULL;
-  if (connect_connection_form(ds, item, NULL, &err)) {
-    set_msg(&ds->success_msg, "Connection updated");
-  } else if (err) {
-    free(ds->error_msg);
-    ds->error_msg = err;
-  }
-  connect_redraw(ds);
-}
-
-void connect_tree_rename(DialogState *ds) {
-  ConnectionItem *item = highlighted(ds);
-  if (!item)
-    return;
-  char *name = connect_prompt_text(ds->win, connmgr_is_folder(item) ? "Rename Folder" : "Rename",
-                                   "Name:", connmgr_item_name(item));
-  connect_redraw(ds);
+  PromptOptions opts = {connmgr_is_folder(item) ? "Rename Folder" : "Rename", "Name:",
+                        connmgr_item_name(item), NULL, false, false};
+  char *name = tui_prompt(&opts);
+  tui_refresh(ds->state);
   if (!name)
     return;
   if (connmgr_is_folder(item)) {
@@ -442,7 +421,7 @@ void connect_tree_rename(DialogState *ds) {
   ds->mgr->modified = true;
 }
 
-void connect_tree_duplicate(DialogState *ds) {
+void connect_tree_duplicate(ConnTree *ds) {
   ConnectionItem *item = highlighted(ds);
   if (!item || !connmgr_is_connection(item) || !item->parent) {
     set_msg(&ds->error_msg, "Select a connection to duplicate");
@@ -457,14 +436,14 @@ void connect_tree_duplicate(DialogState *ds) {
   copy->name = str_printf("%s (copy)", item->connection.name ? item->connection.name : "");
   if (connmgr_add_connection(item->parent, copy)) { /* Takes copy */
     ds->mgr->modified = true;
-    set_msg(&ds->success_msg, "Duplicated: edit it with e");
+    set_msg(&ds->success_msg, "Duplicated");
   } else {
     connmgr_free_connection(copy);
     free(copy);
   }
 }
 
-void connect_tree_delete(DialogState *ds) {
+void connect_tree_delete(ConnTree *ds) {
   ConnectionItem *item = highlighted(ds);
   if (!item || !item->parent)
     return;
@@ -475,16 +454,16 @@ void connect_tree_delete(DialogState *ds) {
                      item->folder.num_children == 1 ? "" : "s");
   else
     msg = str_printf("Delete \"%s\"?", connmgr_item_name(item));
-  bool yes = connect_confirm(ds->win, "Confirm Delete", msg);
+  bool yes = tui_show_confirm_dialog(ds->state, msg);
   free(msg);
-  connect_redraw(ds);
+  tui_refresh(ds->state);
   if (!yes)
     return;
   connmgr_remove_item(ds->mgr, item);
   ds->mgr->modified = true;
   /* Stay on the same row (now the next item), or the last one */
   size_t visible = connect_tree_count(ds);
-  if (ds->tree_highlight >= visible)
-    ds->tree_highlight = visible > 0 ? visible - 1 : 0;
+  if (ds->highlight >= visible)
+    ds->highlight = visible > 0 ? visible - 1 : 0;
   set_msg(&ds->success_msg, "Deleted");
 }

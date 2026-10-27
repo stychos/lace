@@ -1,5 +1,6 @@
-#include "ui/conn_form.h"
-#include "app.h"
+#include "conn_fields.h"
+#include "config/recent.h"
+#include "util/connstr.h"
 #include "util/mem.h"
 #include "util/str.h"
 #include <ctype.h>
@@ -292,7 +293,7 @@ char *conn_fields_uri(const ConnFields *f) {
 
 bool conn_fields_set_uri(ConnFields *f, const char *text) {
   char *err = NULL;
-  char *cs = app_target_to_connstr(text, &err);
+  char *cs = conn_target_to_connstr(text, &err);
   LaceSavedConnection *m = cs ? lace_saved_conn_from_connstr(cs, &err) : NULL;
   str_secure_free(cs);
   if (!m) {
@@ -314,4 +315,52 @@ bool conn_fields_set_uri(ConnFields *f, const char *text) {
   free(f->message);
   f->message = NULL;
   return true;
+}
+
+char *conn_target_to_connstr(const char *text, char **error) {
+  while (text && (*text == ' ' || *text == '\t')) text++;
+  if (!text || !*text) {
+    if (error) *error = str_dup("Nothing to connect to");
+    return NULL;
+  }
+  char *t = str_dup(text);
+  size_t n = strlen(t);
+  while (n && (t[n - 1] == ' ' || t[n - 1] == '\t' || t[n - 1] == '\n')) t[--n] = 0;
+  if (strstr(t, "://") || strncmp(t, "sqlite:", 7) == 0) return t;
+  const char *home = getenv("HOME");
+  if (t[0] == '~' && t[1] == '/' && home) { /* a shell would have expanded it */
+    char *p = str_printf("%s%s", home, t + 1);
+    str_secure_free(t);
+    t = p;
+  }
+  if (connstr_is_sqlite_file(t)) {
+    char *cs = connstr_from_path(t, error);
+    str_secure_free(t);
+    return cs;
+  }
+  if (error) *error = str_dup("Not a connection URL or an existing SQLite file");
+  str_secure_free(t);
+  return NULL;
+}
+
+bool conn_key_matches(const char *saved_a, const char *connstr_a, const char *saved_b, const char *connstr_b) {
+  bool sa = saved_a && *saved_a, sb = saved_b && *saved_b;
+  if (sa || sb) return sa && sb && !strcmp(saved_a, saved_b);
+  if (!connstr_a || !connstr_b) return false;
+  char *a = recent_strip_passwords(connstr_a), *b = recent_strip_passwords(connstr_b);
+  bool same = a && b && !strcmp(a, b);
+  str_secure_free(a);
+  str_secure_free(b);
+  return same;
+}
+
+const char *conn_fields_text(const ConnFields *f, int field) {
+  if (!f || field < 0 || field >= CF_COUNT || !f->in[field].buf)
+    return "";
+  return f->in[field].buf;
+}
+
+void conn_fields_set_text(ConnFields *f, int field, const char *text) {
+  if (f && field >= 0 && field < CF_COUNT)
+    text_input_set(&f->in[field], text ? text : "");
 }

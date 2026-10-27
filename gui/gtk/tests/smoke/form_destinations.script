@@ -1,0 +1,15 @@
+# args: -s
+# fixture-conns
+# Background tab, new window, to another window: one connection throughout
+form-pick Local
+form-action background
+expect-pages 2
+expect-page form
+form-action new-window
+expect-windows 2
+window 1
+form-action to-window:2
+window 2
+expect-pages 2
+expect-connections 1
+quit

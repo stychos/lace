@@ -1,0 +1,9 @@
+# fixture-conns
+# A form is saved in its place and comes back as a form
+# then: session_form_after.script
+form-pick Local
+form-action open
+expect-tables
+action win.connect
+expect-page form
+quit

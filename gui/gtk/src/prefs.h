@@ -1,6 +1,7 @@
 /*
  * Lace GTK frontend
- * Preferences (gtk.json in the shared config directory)
+ * Preferences: the shared config.json's "general" (config/config.c), with
+ * gtk.json migrated into it once
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
@@ -9,6 +10,7 @@
 #ifndef LACE_GTK_PREFS_H
 #define LACE_GTK_PREFS_H
 
+#include "config/config.h"
 #include <lace.h>
 #include <stdbool.h>
 
@@ -35,17 +37,27 @@ typedef struct {
   int color_scheme;        /* LaceColorScheme */
   int page_size;           /* rows per page */
   int row_numbers;         /* LaceRowNumbers */
+  bool keep_connection_tab;   /* the last inner tab's close leaves a form */
+  int last_workspace_close;   /* CONFIG_LAST_WS_*: the last window closing */
+  bool auto_open_first_table; /* a new connection opens its first table */
+  Config *config;             /* the shared file's contents (owned) */
 } LacePrefs;
 
 /* Whether a grid of this table shows row numbers under the preference */
 bool lace_prefs_row_numbers_for(const LacePrefs *p, const LaceSchema *schema);
 
-/* Defaults, then whatever gtk.json holds */
+/* config.json's "general" (defaults for what it lacks; a file that does not
+ * parse gives defaults and is never overwritten); gtk.json's values are
+ * taken once for the keys "general" lacks, then it is renamed
+ * gtk.json.migrated */
 LacePrefs *lace_prefs_load(void);
-bool lace_prefs_save(const LacePrefs *p, char **error);
+/* The fields into "general", then config_save(): the file's other members
+ * (other frontends' sections, the TUIs' hotkeys) are kept */
+bool lace_prefs_save(LacePrefs *p, char **error);
 void lace_prefs_free(LacePrefs *p);
 
-/* Path of gtk.json (allocated) */
-char *lace_prefs_path(void);
+/* The same with explicit paths (tests) */
+LacePrefs *lace_prefs_load_from(const char *config_path, const char *legacy_path);
+bool lace_prefs_save_to(LacePrefs *p, const char *config_path, char **error);
 
 #endif /* LACE_GTK_PREFS_H */

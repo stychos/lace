@@ -40,8 +40,8 @@ def test_session_restore(home):
     db = make_db(home, rows=500)
     save_connection(home, db)
     with Tui(home, []) as t:
-        t.wait("testdb")  # No session yet: the connection manager
-        t.keys("Enter")
+        t.wait("testdb")  # No session yet: a connection form lists it
+        t.keys("Down", "Enter")
         t.wait("Tables")
         t.keys("Enter")
         t.wait_status(re.compile(r"Row 1/500"))
@@ -68,7 +68,7 @@ def test_dialogs_open_and_close(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
         # "?" is the hotkey list of the configuration dialog
-        for key, marker in [("w", "search, or type a URL"), (",", "Configuration"),
+        for key, marker in [("w", "search workspaces"), (",", "Configuration"),
                             ("?", "Previous tab"), ("i", "History")]:
             t.keys(key)
             t.wait(marker)

@@ -22,7 +22,12 @@ struct _LaceConnectionPage {
   guint query_counter;
   guint style_idle;
   AdwTabPage *menu_page; /* the page the tab context menu opened on */
+  gboolean closing_view; /* a view closes for a reason not the user's (a dropped table) */
+  guint last_tab_idle;
 };
+
+enum { SIG_LAST_TAB_CLOSED, N_SIGNALS };
+static guint signals[N_SIGNALS];
 
 G_DEFINE_TYPE(LaceConnectionPage, lace_connection_page, GTK_TYPE_WIDGET)
 
@@ -51,9 +56,21 @@ static void on_page_reordered(AdwTabView *v, AdwTabPage *page, int pos, LaceConn
   schedule_style_sync(p);
 }
 
+static gboolean emit_last_tab_closed(gpointer data) {
+  LaceConnectionPage *p = data;
+  p->last_tab_idle = 0;
+  if (adw_tab_view_get_n_pages(ADW_TAB_VIEW(p->tab_view)) == 0)
+    g_signal_emit(p, signals[SIG_LAST_TAB_CLOSED], 0);
+  return G_SOURCE_REMOVE;
+}
+
 static gboolean on_close_page(AdwTabView *view, AdwTabPage *page, LaceConnectionPage *p) {
-  (void)p;
+  gboolean last = adw_tab_view_get_n_pages(view) == 1 && !p->closing_view;
   adw_tab_view_close_page_finish(view, page, TRUE);
+  /* The user closed the last table or editor: the window decides what the
+   * tab becomes (keep_connection_tab), once this signal is over */
+  if (last && !p->last_tab_idle)
+    p->last_tab_idle = g_idle_add_full(G_PRIORITY_DEFAULT, emit_last_tab_closed, g_object_ref(p), g_object_unref);
   return GDK_EVENT_STOP;
 }
 
@@ -304,7 +321,9 @@ gboolean lace_connection_page_close_view(LaceConnectionPage *p, GtkWidget *view)
   AdwTabPage *page = page_of_view(p, view);
   if (!page)
     return FALSE;
+  p->closing_view = TRUE; /* a dropped table: the connection stays */
   adw_tab_view_close_page(ADW_TAB_VIEW(p->tab_view), page);
+  p->closing_view = FALSE;
   return TRUE;
 }
 
@@ -436,6 +455,10 @@ static void lace_connection_page_dispose(GObject *obj) {
     g_source_remove(p->style_idle);
     p->style_idle = 0;
   }
+  if (p->last_tab_idle) {
+    g_source_remove(p->last_tab_idle);
+    p->last_tab_idle = 0;
+  }
   g_clear_pointer(&p->split, gtk_widget_unparent);
   p->sidebar = NULL;
   g_clear_object(&p->conn);
@@ -445,6 +468,9 @@ static void lace_connection_page_dispose(GObject *obj) {
 static void lace_connection_page_class_init(LaceConnectionPageClass *klass) {
   G_OBJECT_CLASS(klass)->dispose = lace_connection_page_dispose;
   gtk_widget_class_set_layout_manager_type(GTK_WIDGET_CLASS(klass), GTK_TYPE_BIN_LAYOUT);
+  /* The user closed its last table or SQL editor */
+  signals[SIG_LAST_TAB_CLOSED] = g_signal_new("last-tab-closed", LACE_TYPE_CONNECTION_PAGE, G_SIGNAL_RUN_LAST,
+                                              0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static void lace_connection_page_init(LaceConnectionPage *p) { (void)p; }

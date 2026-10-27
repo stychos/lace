@@ -283,6 +283,13 @@ static cJSON *serialize_tab(TuiState *state, size_t ws_idx, size_t tab_idx,
   if (!json)
     return NULL;
 
+  /* A connection form: its place and nothing else (never what was typed) */
+  if (tab->type == TAB_TYPE_FORM) {
+    JSON_ADD_STR(json, "type", "FORM");
+    JSON_ADD_STR(json, "connection_id", "");
+    return json;
+  }
+
   /* Tab type */
   const char *type_str = "CONNECTION";
   if (tab->type == TAB_TYPE_TABLE)
@@ -630,6 +637,11 @@ static bool parse_tab(cJSON *json, SessionTab *tab) {
   memset(tab, 0, sizeof(SessionTab));
 
   const char *type_str = json_get_string(json, "type", "");
+  if (str_eq(type_str, "FORM")) { /* a connection form: only its place */
+    tab->type = TAB_TYPE_FORM;
+    tab->connection_id = str_dup("");
+    return true;
+  }
   if (str_eq(type_str, "TABLE"))
     tab->type = TAB_TYPE_TABLE;
   else if (str_eq(type_str, "QUERY"))
@@ -724,16 +736,7 @@ static bool parse_workspace(cJSON *json, SessionWorkspace *ws) {
     if (count > 0) {
       ws->tabs = safe_calloc(count, sizeof(SessionTab));
       cJSON *t;
-      size_t index = 0, current = ws->current_tab;
       cJSON_ArrayForEach(t, tabs) {
-        /* A connection form (later builds) is not a tab here yet: skipped,
-         * and the current tab index moves down past it */
-        if (str_eq(json_get_string(t, "type", ""), "FORM")) {
-          if (index++ < current && ws->current_tab > 0)
-            ws->current_tab--;
-          continue;
-        }
-        index++;
         if (parse_tab(t, &ws->tabs[ws->num_tabs])) {
           ws->num_tabs++;
         }
@@ -1348,8 +1351,12 @@ static bool restore_tab(TuiState *state, SessionTab *stab, size_t conn_idx,
 /* Restore session's workspaces after the ones open now; the last one
  * restored at or before session->current_workspace becomes current. The
  * number of workspaces restored. */
+/* *failed counts the tabs whose connection could not be opened, *why
+ * (allocated, may be NULL) says why the first one failed */
 static size_t restore_workspaces(TuiState *state, Session *session,
-                                 ConnectionManager *connmgr) {
+                                 ConnectionManager *connmgr, size_t *failed, char **why) {
+  *failed = 0;
+  *why = NULL;
   size_t restored_workspaces = 0;
   size_t current_workspace = state->app->current_workspace;
   for (size_t ws_i = 0; ws_i < session->num_workspaces; ws_i++) {
@@ -1381,6 +1388,16 @@ static size_t restore_workspaces(TuiState *state, Session *session,
     for (size_t tab_i = 0; tab_i < sws->num_tabs; tab_i++) {
       SessionTab *stab = &sws->tabs[tab_i];
 
+      /* A connection form comes back empty, in its place */
+      if (stab->type == TAB_TYPE_FORM) {
+        if (workspace_insert_form_tab(ws, ws->num_tabs)) {
+          restored_tabs++;
+          if (tab_i <= sws->current_tab)
+            current_tab = ws->num_tabs - 1;
+        }
+        continue;
+      }
+
       /* Get or create connection */
       char *conn_err = NULL;
       size_t conn_idx =
@@ -1388,8 +1405,12 @@ static size_t restore_workspaces(TuiState *state, Session *session,
                              &conn_err);
 
       if (conn_idx == (size_t)-1) {
-        /* Connection failed - skip this tab */
-        free(conn_err);
+        /* Connection failed - skip this tab, and say so afterwards */
+        (*failed)++;
+        if (!*why)
+          *why = conn_err;
+        else
+          free(conn_err);
         continue;
       }
 
@@ -1403,15 +1424,14 @@ static size_t restore_workspaces(TuiState *state, Session *session,
       free(tab_err);
     }
 
-    if (restored_tabs > 0) {
-      ws->current_tab = current_tab;
-      if (ws_i <= session->current_workspace || restored_workspaces == 0)
-        current_workspace = ws_idx;
-      restored_workspaces++;
-    } else {
-      /* No tabs restored - remove the empty workspace */
-      app_close_workspace(state->app, ws_idx);
-    }
+    /* Nothing came back (its connections failed): the workspace stays,
+     * with a form, so a workspace is never left empty */
+    if (restored_tabs == 0 && workspace_insert_form_tab(ws, 0))
+      current_tab = 0;
+    ws->current_tab = current_tab;
+    if (ws_i <= session->current_workspace || restored_workspaces == 0)
+      current_workspace = ws_idx;
+    restored_workspaces++;
   }
   if (restored_workspaces > 0)
     state->app->current_workspace = current_workspace;
@@ -1466,10 +1486,13 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
   state->status_visible = session->status_visible;
   state->sidebar_visible = session->sidebar_visible;
 
-  size_t restored = restore_workspaces(state, session, connmgr);
+  size_t failed = 0;
+  char *why = NULL;
+  size_t restored = restore_workspaces(state, session, connmgr, &failed, &why);
   connmgr_free(connmgr);
 
   if (restored == 0) {
+    free(why);
     if (session->warning)
       err_setf(error, "No workspaces could be restored (%s)", session->warning);
     else
@@ -1477,8 +1500,12 @@ bool session_restore(struct TuiState *state, Session *session, char **error) {
     return false;
   }
   restore_finish(state);
-  if (session->warning)
+  if (failed)
+    tui_set_error(state, "Session: %zu tab%s could not be restored%s%s%s", failed, failed == 1 ? "" : "s",
+                  why ? " (" : "", why ? why : "", why ? ")" : "");
+  else if (session->warning)
     tui_set_error(state, "Session: %s", session->warning);
+  free(why);
   return true;
 }
 
@@ -1564,13 +1591,20 @@ bool session_open_workspace_json(struct TuiState *state, cJSON *json,
   session.workspaces = &sws;
   session.num_workspaces = 1;
   session.current_workspace = 0;
-  size_t restored = restore_workspaces(state, &session, connmgr);
+  size_t failed = 0;
+  char *why = NULL;
+  size_t restored = restore_workspaces(state, &session, connmgr, &failed, &why);
   connmgr_free(connmgr);
   session_workspace_free(&sws);
   if (restored == 0) {
+    free(why);
     err_setf(error, "None of its connections could be opened");
     return false;
   }
   restore_finish(state);
+  if (failed)
+    tui_set_error(state, "%zu tab%s could not be restored%s%s%s", failed, failed == 1 ? "" : "s",
+                  why ? " (" : "", why ? why : "", why ? ")" : "");
+  free(why);
   return true;
 }

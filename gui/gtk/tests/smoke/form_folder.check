@@ -1,0 +1,7 @@
+python3 - "$HOME_DIR/.config/lace/connections.json" <<'PY'
+import json, sys
+root = json.load(open(sys.argv[1]))["root"]["children"]
+work = [c for c in root if c.get("name") == "Work"][0]
+assert [c["name"] for c in work["children"]] == ["Beta"], root
+assert work["children"][0]["user"] == "u3", work
+PY

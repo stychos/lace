@@ -9,7 +9,7 @@
 #include "window.h"
 #include "session.h"
 #include "util.h"
-#include "views/connect_dialog.h"
+#include "views/form_page.h"
 #include "views/history_dialog.h"
 #include <config/saved_connection.h>
 #include <util/connstr.h>
@@ -25,9 +25,6 @@ struct _LaceWindow {
   GtkWidget *title_widget;
   GtkWidget *tab_bar;
   GtkWidget *tab_view;
-  GtkWidget *stack;
-  GtkWidget *welcome_list;
-  GtkWidget *welcome_group;
   GtkWidget *sidebar_toggle;
   guint window_counter;
 };
@@ -39,7 +36,7 @@ static guint g_window_counter;
 static void update_title(LaceWindow *w) {
   adw_window_title_set_title(ADW_WINDOW_TITLE(w->title_widget), w->name);
   AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(w->tab_view));
-  if (page) {
+  if (page && LACE_IS_CONNECTION_PAGE(adw_tab_page_get_child(page))) {
     LaceConnectionPage *cp = LACE_CONNECTION_PAGE(adw_tab_page_get_child(page));
     char *d = lace_connection_get_display(lace_connection_page_get_connection(cp));
     adw_window_title_set_subtitle(ADW_WINDOW_TITLE(w->title_widget), d);
@@ -54,6 +51,8 @@ static void update_title(LaceWindow *w) {
 
 const char *lace_window_get_name(LaceWindow *w) { return w->name; }
 
+guint lace_window_get_number(LaceWindow *w) { return w->window_counter; }
+
 void lace_window_set_name(LaceWindow *w, const char *name) {
   g_free(w->name);
   w->name = g_strdup(name && *name ? name : "Workspace");
@@ -62,69 +61,21 @@ void lace_window_set_name(LaceWindow *w, const char *name) {
 
 LaceConnectionPage *lace_window_current_page(LaceWindow *w) {
   AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(w->tab_view));
-  return page ? LACE_CONNECTION_PAGE(adw_tab_page_get_child(page)) : NULL;
+  GtkWidget *child = page ? adw_tab_page_get_child(page) : NULL;
+  return LACE_IS_CONNECTION_PAGE(child) ? LACE_CONNECTION_PAGE(child) : NULL;
+}
+
+LaceFormPage *lace_window_current_form(LaceWindow *w) {
+  AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(w->tab_view));
+  GtkWidget *child = page ? adw_tab_page_get_child(page) : NULL;
+  return LACE_IS_FORM_PAGE(child) ? LACE_FORM_PAGE(child) : NULL;
 }
 
 AdwTabView *lace_window_get_tab_view(LaceWindow *w) { return ADW_TAB_VIEW(w->tab_view); }
 
 /* ==========================================================================
- * Welcome page
+ * Opening a SQLite file: into the current form, or a new one
  * ========================================================================== */
-
-static void on_welcome_row_activated(GtkListBox *lb, GtkListBoxRow *row, LaceWindow *w) {
-  (void)lb;
-  const char *id = g_object_get_data(G_OBJECT(row), "id");
-  ConnectionItem *item = id ? connmgr_find_by_id(lace_app_get_saved(w->app), id) : NULL;
-  if (!item || item->type != CONN_ITEM_CONNECTION)
-    return;
-  char *connstr = lace_saved_conn_to_connstr(&item->connection);
-  lace_window_connect_to(w, connstr, item->connection.id, item->connection.name);
-  str_secure_free(connstr);
-}
-
-static char *saved_subtitle(const LaceSavedConnection *c) {
-  if (g_strcmp0(c->driver, "sqlite") == 0)
-    return g_strdup_printf("SQLite · %s", c->database ? c->database : "");
-  return g_strdup_printf("%s · %s%s%s/%s%s%s", lace_driver_normalize(c->driver),
-                         c->user && *c->user ? c->user : "", c->user && *c->user ? "@" : "",
-                         c->host ? c->host : "", c->database ? c->database : "",
-                         c->ssh ? " via " : "", c->ssh && c->ssh_host ? c->ssh_host : "");
-}
-
-static void collect_saved(ConnectionItem *folder, GtkListBox *list, int *count) {
-  for (size_t i = 0; folder && i < folder->folder.num_children; i++) {
-    ConnectionItem *it = &folder->folder.children[i];
-    if (it->type == CONN_ITEM_FOLDER) {
-      collect_saved(it, list, count);
-      continue;
-    }
-    if (*count >= 12)
-      return;
-    GtkWidget *row = adw_action_row_new();
-    adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(row), FALSE);
-    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row), it->connection.name ? it->connection.name : "Connection");
-    char *sub = saved_subtitle(&it->connection);
-    adw_action_row_set_subtitle(ADW_ACTION_ROW(row), sub);
-    g_free(sub);
-    const char *icon = g_strcmp0(it->connection.driver, "sqlite") == 0 ? "lace-sqlite-symbolic"
-                     : g_strcmp0(it->connection.driver, "postgres") == 0 ? "lace-postgres-symbolic"
-                                                                          : "lace-mysql-symbolic";
-    adw_action_row_add_prefix(ADW_ACTION_ROW(row), gtk_image_new_from_icon_name(icon));
-    adw_action_row_add_suffix(ADW_ACTION_ROW(row), gtk_image_new_from_icon_name("go-next-symbolic"));
-    adw_action_row_set_activatable_widget(ADW_ACTION_ROW(row), NULL);
-    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
-    g_object_set_data_full(G_OBJECT(row), "id", g_strdup(it->connection.id), g_free);
-    gtk_list_box_append(list, row);
-    (*count)++;
-  }
-}
-
-static void rebuild_welcome(LaceWindow *w) {
-  gtk_list_box_remove_all(GTK_LIST_BOX(w->welcome_list));
-  int count = 0;
-  collect_saved(&lace_app_get_saved(w->app)->root, GTK_LIST_BOX(w->welcome_list), &count);
-  gtk_widget_set_visible(w->welcome_group, count > 0);
-}
 
 static void on_open_file_done(GObject *src, GAsyncResult *res, gpointer data) {
   LaceWindow *w = data;
@@ -138,7 +89,10 @@ static void on_open_file_done(GObject *src, GAsyncResult *res, gpointer data) {
   char *enc = connstr_encode_path(path);
   char *connstr = g_strdup_printf("sqlite://%s", enc ? enc : path);
   free(enc);
-  lace_window_connect_to(w, connstr, NULL, NULL);
+  LaceFormPage *form = lace_window_current_form(w);
+  if (!form)
+    form = lace_window_add_form(w, -1);
+  lace_form_page_set_uri(form, connstr);
   g_free(connstr);
   g_free(path);
 }
@@ -168,78 +122,12 @@ static void act_open_file(GSimpleAction *a, GVariant *p, gpointer data) {
   g_object_unref(d);
 }
 
-static GtkWidget *build_welcome(LaceWindow *w) {
-  GtkWidget *scrolled = gtk_scrolled_window_new();
-  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-  GtkWidget *clamp = adw_clamp_new();
-  adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 560);
-  GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-  gtk_widget_set_valign(box, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_top(box, 36);
-  gtk_widget_set_margin_bottom(box, 36);
-
-  GtkWidget *icon = gtk_image_new_from_icon_name("dev.hexed.lace");
-  gtk_widget_add_css_class(icon, "welcome-icon");
-  gtk_image_set_pixel_size(GTK_IMAGE(icon), 96);
-  gtk_box_append(GTK_BOX(box), icon);
-  GtkWidget *title = gtk_label_new("Lace");
-  gtk_widget_add_css_class(title, "welcome-title");
-  gtk_box_append(GTK_BOX(box), title);
-  GtkWidget *desc = gtk_label_new("Each window is a workspace. Each tab is a database connection.");
-  gtk_widget_add_css_class(desc, "dim-label");
-  gtk_label_set_wrap(GTK_LABEL(desc), TRUE);
-  gtk_label_set_justify(GTK_LABEL(desc), GTK_JUSTIFY_CENTER);
-  gtk_box_append(GTK_BOX(box), desc);
-
-  GtkWidget *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-  gtk_widget_set_halign(buttons, GTK_ALIGN_CENTER);
-  gtk_widget_set_margin_top(buttons, 12);
-  GtkWidget *connect = gtk_button_new_with_label("Connect…");
-  gtk_widget_add_css_class(connect, "suggested-action");
-  gtk_widget_add_css_class(connect, "pill");
-  gtk_actionable_set_action_name(GTK_ACTIONABLE(connect), "win.connect");
-  GtkWidget *open = gtk_button_new_with_label("Open SQLite file…");
-  gtk_widget_add_css_class(open, "pill");
-  gtk_actionable_set_action_name(GTK_ACTIONABLE(open), "win.open-file");
-  gtk_box_append(GTK_BOX(buttons), connect);
-  gtk_box_append(GTK_BOX(buttons), open);
-  gtk_box_append(GTK_BOX(box), buttons);
-
-  GtkWidget *group = adw_preferences_group_new();
-  w->welcome_group = group;
-  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group), "Saved connections");
-  gtk_widget_set_margin_top(group, 24);
-  w->welcome_list = gtk_list_box_new();
-  gtk_widget_add_css_class(w->welcome_list, "boxed-list");
-  gtk_list_box_set_selection_mode(GTK_LIST_BOX(w->welcome_list), GTK_SELECTION_NONE);
-  g_signal_connect(w->welcome_list, "row-activated", G_CALLBACK(on_welcome_row_activated), w);
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), w->welcome_list);
-  gtk_box_append(GTK_BOX(box), group);
-  GtkWidget *hint = gtk_label_new("Ctrl+T connects · Ctrl+N opens a new workspace · Ctrl+? lists every shortcut");
-  gtk_widget_add_css_class(hint, "dim-label");
-  gtk_widget_add_css_class(hint, "caption");
-  gtk_widget_set_margin_top(hint, 12);
-  gtk_box_append(GTK_BOX(box), hint);
-
-  adw_clamp_set_child(ADW_CLAMP(clamp), box);
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), clamp);
-  return scrolled;
-}
-
 /* ==========================================================================
  * Connection tabs
  * ========================================================================== */
 
 static void update_stack(LaceWindow *w) {
-  int n = adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view));
-  if (n == 0) {
-    rebuild_welcome(w);
-    gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "welcome");
-  } else {
-    gtk_stack_set_visible_child_name(GTK_STACK(w->stack), "tabs");
-  }
-  gtk_widget_set_visible(w->tab_bar, n > 0);
-  gtk_widget_set_visible(w->sidebar_toggle, n > 0);
+  gtk_widget_set_visible(w->sidebar_toggle, lace_window_current_page(w) != NULL);
   update_title(w);
 }
 
@@ -247,17 +135,21 @@ static AdwTabPage *page_of_connection(LaceWindow *w, LaceConnection *conn) {
   int n = adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view));
   for (int i = 0; i < n; i++) {
     AdwTabPage *page = adw_tab_view_get_nth_page(ADW_TAB_VIEW(w->tab_view), i);
-    LaceConnectionPage *cp = LACE_CONNECTION_PAGE(adw_tab_page_get_child(page));
-    if (lace_connection_page_get_connection(cp) == conn)
+    GtkWidget *child = adw_tab_page_get_child(page);
+    if (LACE_IS_CONNECTION_PAGE(child) && lace_connection_page_get_connection(LACE_CONNECTION_PAGE(child)) == conn)
       return page;
   }
   return NULL;
 }
 
-static void refresh_page_state(LaceWindow *w, LaceConnection *conn) {
-  AdwTabPage *page = page_of_connection(w, conn);
-  if (!page)
-    return;
+/* The window a tab is in now (tabs can be moved between windows) */
+static LaceWindow *window_of_page(GtkWidget *child) {
+  GtkRoot *root = gtk_widget_get_root(child);
+  return LACE_IS_WINDOW(root) ? LACE_WINDOW(root) : NULL;
+}
+
+/* One tab's busy spinner, transaction mark and title, from its connection */
+static void refresh_tab(AdwTabPage *page, LaceConnection *conn) {
   adw_tab_page_set_loading(page, lace_connection_is_busy(conn));
   LaceTxState tx = lace_connection_get_tx_state(conn);
   if (tx == LACE_TX_NONE) {
@@ -274,38 +166,165 @@ static void refresh_page_state(LaceWindow *w, LaceConnection *conn) {
   adw_tab_page_set_title(page, lace_connection_get_name(conn));
 }
 
-static void on_conn_state(LaceConnection *conn, LaceWindow *w) {
-  refresh_page_state(w, conn);
+/* The connection's signals reach each of its tabs (data: the page's
+ * widget), in whichever window the tab is now */
+static void on_conn_state(LaceConnection *conn, LaceConnectionPage *cp) {
+  LaceWindow *w = window_of_page(GTK_WIDGET(cp));
+  AdwTabPage *page = w ? adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), GTK_WIDGET(cp)) : NULL;
+  if (page)
+    refresh_tab(page, conn);
 }
 
-static void on_conn_notice(LaceConnection *conn, const char *msg, LaceWindow *w) {
-  (void)conn;
-  lace_toast(GTK_WIDGET(w->toast_overlay), "%s", msg);
+static void on_conn_notice(LaceConnection *conn, const char *msg, LaceConnectionPage *cp) {
+  LaceWindow *w = window_of_page(GTK_WIDGET(cp));
+  /* Once per window: from the connection's first tab there */
+  if (w && page_of_connection(w, conn) == adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), GTK_WIDGET(cp)))
+    lace_toast(GTK_WIDGET(w->toast_overlay), "%s", msg);
+}
+
+/* The page stops listening to its connection */
+static void unwire(LaceConnectionPage *cp) {
+  g_signal_handlers_disconnect_by_data(lace_connection_page_get_connection(cp), cp);
+}
+
+typedef struct {
+  LaceWindow *w;
+  AdwTabPage *page;
+} ClosePage;
+
+static void close_confirmed(gboolean yes, gpointer data) {
+  ClosePage *c = data;
+  if (yes) {
+    LaceConnectionPage *cp = LACE_CONNECTION_PAGE(adw_tab_page_get_child(c->page));
+    unwire(cp);
+    lace_app_release_connection(c->w->app, lace_connection_page_get_connection(cp));
+    adw_tab_view_close_page_finish(ADW_TAB_VIEW(c->w->tab_view), c->page, TRUE);
+  } else {
+    adw_tab_view_close_page_finish(ADW_TAB_VIEW(c->w->tab_view), c->page, FALSE);
+  }
+  g_object_unref(c->page);
+  g_object_unref(c->w);
+  g_free(c);
 }
 
 static gboolean on_close_page(AdwTabView *view, AdwTabPage *page, LaceWindow *w) {
+  if (!LACE_IS_CONNECTION_PAGE(adw_tab_page_get_child(page))) { /* a form */
+    adw_tab_view_close_page_finish(view, page, TRUE);
+    return GDK_EVENT_STOP;
+  }
   LaceConnectionPage *cp = LACE_CONNECTION_PAGE(adw_tab_page_get_child(page));
   LaceConnection *conn = lace_connection_page_get_connection(cp);
-  g_signal_handlers_disconnect_by_func(conn, on_conn_state, w);
-  g_signal_handlers_disconnect_by_func(conn, on_conn_notice, w);
-  lace_connection_close(conn);
+  /* The last page using the connection closes it: ask first when a
+   * transaction would be rolled back */
+  if (lace_app_connection_holders(w->app, conn) <= 1 && lace_connection_get_tx_state(conn) != LACE_TX_NONE &&
+      !g_object_get_data(G_OBJECT(page), "asked")) {
+    ClosePage *c = g_new0(ClosePage, 1);
+    c->w = g_object_ref(w);
+    c->page = g_object_ref(page);
+    char *body = g_strdup_printf("A transaction is open on %s. Close and roll back?", lace_connection_get_name(conn));
+    lace_confirm(GTK_WIDGET(w), "Close connection", body, "_Close", TRUE, close_confirmed, c);
+    g_free(body);
+    return GDK_EVENT_STOP;
+  }
+  unwire(cp);
+  lace_app_release_connection(w->app, conn);
   adw_tab_view_close_page_finish(view, page, TRUE);
   return GDK_EVENT_STOP;
+}
+
+static gboolean close_if_empty(gpointer data) {
+  LaceWindow *w = data;
+  if (!gtk_widget_in_destruction(GTK_WIDGET(w)) && adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view)) == 0)
+    gtk_window_close(GTK_WINDOW(w)); /* a workspace left without tabs closes */
+  return G_SOURCE_REMOVE;
 }
 
 static void on_pages_changed(GObject *o, GParamSpec *p, LaceWindow *w) {
   (void)o; (void)p;
   update_stack(w);
+  if (adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view)) == 0 && !gtk_widget_in_destruction(GTK_WIDGET(w)))
+    g_idle_add_full(G_PRIORITY_DEFAULT, close_if_empty, g_object_ref(w), g_object_unref);
 }
 
 static void on_selected_page(GObject *o, GParamSpec *p, LaceWindow *w) {
   (void)o; (void)p;
-  update_title(w);
+  update_stack(w);
 }
 
-LaceConnectionPage *lace_window_add_connection(LaceWindow *w, LaceConnection *conn) {
+/* The first table, once the list is there (auto_open_first_table) */
+static void open_first_table(LaceConnectionPage *cp) {
+  GListModel *tables = lace_connection_get_tables(lace_connection_page_get_connection(cp));
+  if (!tables || g_list_model_get_n_items(tables) == 0 || lace_connection_page_current_view(cp))
+    return;
+  GtkStringObject *first = g_list_model_get_item(tables, 0);
+  lace_connection_page_open_table(cp, gtk_string_object_get_string(first));
+  g_object_unref(first);
+}
+
+static void on_tables_for_auto_open(LaceConnection *conn, LaceConnectionPage *cp) {
+  g_signal_handlers_disconnect_by_func(conn, on_tables_for_auto_open, cp);
+  open_first_table(cp);
+}
+
+/* The page lets its connection go and a form takes its place */
+static void into_form(LaceWindow *w, AdwTabPage *page) {
+  int at = adw_tab_view_get_page_position(ADW_TAB_VIEW(w->tab_view), page);
+  g_object_set_data(G_OBJECT(page), "asked", GINT_TO_POINTER(1));
+  lace_window_add_form(w, at);
+  adw_tab_view_close_page(ADW_TAB_VIEW(w->tab_view), page);
+}
+
+typedef struct {
+  LaceWindow *w;
+  AdwTabPage *page;
+} IntoForm;
+
+static void into_form_answered(gboolean yes, gpointer data) {
+  IntoForm *f = data;
+  if (yes && adw_tab_view_get_page_position(ADW_TAB_VIEW(f->w->tab_view), f->page) >= 0)
+    into_form(f->w, f->page);
+  g_object_unref(f->page);
+  g_object_unref(f->w);
+  g_free(f);
+}
+
+/* The user closed a connection tab's last table or editor: with
+ * keep_connection_tab the tab becomes a form in its place, else it closes
+ * (either way its hold on the connection goes; the last one asks about an
+ * open transaction) */
+static void on_last_tab_closed(LaceConnectionPage *cp, gpointer data) {
+  (void)data;
+  LaceWindow *w = window_of_page(GTK_WIDGET(cp));
+  if (!w)
+    return;
+  AdwTabPage *page = adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), GTK_WIDGET(cp));
+  if (!page)
+    return;
+  if (!lace_app_get_prefs(w->app)->keep_connection_tab) {
+    adw_tab_view_close_page(ADW_TAB_VIEW(w->tab_view), page);
+    return;
+  }
+  LaceConnection *conn = lace_connection_page_get_connection(cp);
+  if (lace_app_connection_holders(w->app, conn) <= 1 && lace_connection_get_tx_state(conn) != LACE_TX_NONE) {
+    IntoForm *f = g_new0(IntoForm, 1);
+    f->w = g_object_ref(w);
+    f->page = g_object_ref(page);
+    char *body = g_strdup_printf("A transaction is open on %s. Close and roll back?", lace_connection_get_name(conn));
+    lace_confirm(GTK_WIDGET(w), "Close connection", body, "_Close", TRUE, into_form_answered, f);
+    g_free(body);
+    return;
+  }
+  into_form(w, page);
+}
+
+/* A tab for conn at position (-1: the end), selected or not */
+static LaceConnectionPage *insert_connection(LaceWindow *w, LaceConnection *conn, int position, gboolean select,
+                                             gboolean auto_open) {
   LaceConnectionPage *cp = lace_connection_page_new(conn, lace_app_get_prefs(w->app));
-  AdwTabPage *page = adw_tab_view_append(ADW_TAB_VIEW(w->tab_view), GTK_WIDGET(cp));
+  AdwTabView *tv = ADW_TAB_VIEW(w->tab_view);
+  AdwTabPage *page = position < 0 || position >= adw_tab_view_get_n_pages(tv)
+                         ? adw_tab_view_append(tv, GTK_WIDGET(cp))
+                         : adw_tab_view_insert(tv, GTK_WIDGET(cp), position);
   adw_tab_page_set_title(page, lace_connection_get_name(conn));
   char *d = lace_connection_get_display(conn);
   adw_tab_page_set_tooltip(page, d);
@@ -313,34 +332,96 @@ LaceConnectionPage *lace_window_add_connection(LaceWindow *w, LaceConnection *co
   GIcon *icon = g_icon_new_for_string(lace_connection_get_icon_name(conn), NULL);
   adw_tab_page_set_icon(page, icon);
   g_object_unref(icon);
-  adw_tab_view_set_selected_page(ADW_TAB_VIEW(w->tab_view), page);
-  g_signal_connect(conn, "tx-changed", G_CALLBACK(on_conn_state), w);
-  g_signal_connect(conn, "busy-changed", G_CALLBACK(on_conn_state), w);
-  g_signal_connect(conn, "notice", G_CALLBACK(on_conn_notice), w);
-  refresh_page_state(w, conn);
+  if (select)
+    adw_tab_view_set_selected_page(tv, page);
+  lace_app_hold_connection(w->app, conn);
+  g_signal_connect_object(conn, "tx-changed", G_CALLBACK(on_conn_state), cp, 0);
+  g_signal_connect_object(conn, "busy-changed", G_CALLBACK(on_conn_state), cp, 0);
+  g_signal_connect_object(conn, "notice", G_CALLBACK(on_conn_notice), cp, 0);
+  g_signal_connect(cp, "last-tab-closed", G_CALLBACK(on_last_tab_closed), NULL);
+  refresh_tab(page, conn);
   update_stack(w);
-  lace_connection_page_focus_sidebar(cp);
+  if (auto_open && lace_app_get_prefs(w->app)->auto_open_first_table) {
+    if (lace_connection_tables_loaded(conn))
+      open_first_table(cp);
+    else
+      g_signal_connect_object(conn, "tables-changed", G_CALLBACK(on_tables_for_auto_open), cp, 0);
+  }
+  if (select)
+    lace_connection_page_focus_sidebar(cp);
   return cp;
+}
+
+LaceConnectionPage *lace_window_add_connection(LaceWindow *w, LaceConnection *conn) {
+  return insert_connection(w, conn, -1, TRUE, TRUE);
+}
+
+static int position_of(LaceWindow *w, GtkWidget *child) {
+  AdwTabPage *page = adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), child);
+  return page ? adw_tab_view_get_page_position(ADW_TAB_VIEW(w->tab_view), page) : -1;
+}
+
+LaceConnectionPage *lace_window_place_here(LaceWindow *w, GtkWidget *form, LaceConnection *conn) {
+  int at = position_of(w, form);
+  LaceConnectionPage *cp = insert_connection(w, conn, at, TRUE, TRUE);
+  AdwTabPage *fp = at >= 0 ? adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), form) : NULL;
+  if (fp)
+    adw_tab_view_close_page(ADW_TAB_VIEW(w->tab_view), fp);
+  return cp;
+}
+
+LaceConnectionPage *lace_window_place_after(LaceWindow *w, GtkWidget *form, LaceConnection *conn) {
+  int at = position_of(w, form);
+  return insert_connection(w, conn, at < 0 ? -1 : at + 1, FALSE, FALSE);
+}
+
+static void on_form_label(LaceFormPage *form, gpointer data) {
+  (void)data;
+  LaceWindow *w = window_of_page(GTK_WIDGET(form)); /* where the tab is now */
+  if (!w)
+    return;
+  AdwTabPage *page = adw_tab_view_get_page(ADW_TAB_VIEW(w->tab_view), GTK_WIDGET(form));
+  if (page)
+    adw_tab_page_set_title(page, lace_form_page_get_label(form));
+}
+
+LaceFormPage *lace_window_add_form(LaceWindow *w, int position) {
+  LaceFormPage *form = lace_form_page_new(w);
+  AdwTabView *tv = ADW_TAB_VIEW(w->tab_view);
+  AdwTabPage *sel = adw_tab_view_get_selected_page(tv);
+  if (position < 0)
+    position = sel ? adw_tab_view_get_page_position(tv, sel) + 1 : adw_tab_view_get_n_pages(tv);
+  AdwTabPage *page = position >= adw_tab_view_get_n_pages(tv) ? adw_tab_view_append(tv, GTK_WIDGET(form))
+                                                              : adw_tab_view_insert(tv, GTK_WIDGET(form), position);
+  adw_tab_page_set_title(page, lace_form_page_get_label(form));
+  GIcon *icon = g_icon_new_for_string("network-server-symbolic", NULL);
+  adw_tab_page_set_icon(page, icon);
+  g_object_unref(icon);
+  g_signal_connect(form, "label-changed", G_CALLBACK(on_form_label), NULL);
+  adw_tab_view_set_selected_page(tv, page);
+  update_stack(w);
+  return form;
 }
 
 static void connected_cb(LaceConnection *conn, const char *error, gpointer data) {
   LaceWindow *w = data;
   if (conn) {
     lace_window_add_connection(w, conn);
-  } else if (error) {
-    lace_error_dialog(GTK_WIDGET(w), "Could not connect", error);
+  } else {
+    if (adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view)) == 0)
+      lace_window_add_form(w, -1); /* never an empty window */
+    if (error)
+      lace_error_dialog(GTK_WIDGET(w), "Could not connect", error);
   }
   g_object_unref(w);
 }
 
 void lace_window_connect_to(LaceWindow *w, const char *connstr, const char *saved_id,
                             const char *name) {
-  lace_app_connect(w->app, GTK_WIDGET(w), connstr, saved_id, name, connected_cb, g_object_ref(w));
+  lace_app_open(w->app, GTK_WIDGET(w), connstr, saved_id, name, connected_cb, g_object_ref(w));
 }
 
-void lace_window_show_connect_dialog(LaceWindow *w) {
-  lace_connect_dialog_show(w, NULL);
-}
+
 
 /* ==========================================================================
  * Actions
@@ -353,7 +434,7 @@ static GtkWidget *current_view(LaceWindow *w) {
 
 static void act_connect(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
-  lace_window_show_connect_dialog(LACE_WINDOW(data));
+  lace_window_add_form(LACE_WINDOW(data), -1); /* right after the current tab */
 }
 
 static void act_new_query(GSimpleAction *a, GVariant *p, gpointer data) {
@@ -363,15 +444,19 @@ static void act_new_query(GSimpleAction *a, GVariant *p, gpointer data) {
   if (cp)
     lace_connection_page_new_query(cp, NULL);
   else
-    lace_toast(GTK_WIDGET(w->toast_overlay), "Connect to a database first (Ctrl+T)");
+    lace_toast(GTK_WIDGET(w->toast_overlay), "Open a connection first");
 }
 
 static void act_close_tab(GSimpleAction *a, GVariant *p, gpointer data) {
   (void)a; (void)p;
   LaceWindow *w = data;
   LaceConnectionPage *cp = lace_window_current_page(w);
-  if (!cp)
+  if (!cp) { /* a form: the tab itself */
+    AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(w->tab_view));
+    if (page)
+      adw_tab_view_close_page(ADW_TAB_VIEW(w->tab_view), page);
     return;
+  }
   if (!lace_connection_page_close_current(cp)) {
     AdwTabPage *page = adw_tab_view_get_selected_page(ADW_TAB_VIEW(w->tab_view));
     adw_tab_view_close_page(ADW_TAB_VIEW(w->tab_view), page);
@@ -488,7 +573,7 @@ static void act_shortcuts(GSimpleAction *a, GVariant *p, gpointer data) {
       {"Workspaces", "Rename workspace", "<Control><Shift>r"},
       {"Workspaces", "Preferences", "<Control>comma"},
       {"Workspaces", "Quit", "<Control>q"},
-      {"Connections", "Connect (new tab)", "<Control>t"},
+      {"Connections", "New connection tab", "<Control>t"},
       {"Connections", "Close connection", "<Control><Shift>w"},
       {"Connections", "Next / previous connection", "<Control>Page_Down <Control>Page_Up"},
       {"Connections", "Toggle the tables sidebar", "F9"},
@@ -540,28 +625,25 @@ static gboolean on_close_request(GtkWindow *win, gpointer data) {
   g_list_free(wins);
   /* The last window closing is the end of the session: remember it */
   lace_session_save(w->app, last ? NULL : w);
+  /* on_last_workspace_close "new": a fresh window with a form ("quit": the
+   * application ends with its last window) */
+  if (last && lace_app_get_prefs(w->app)->last_workspace_close == CONFIG_LAST_WS_NEW)
+    lace_app_new_window(w->app, NULL);
   int n = adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view));
   for (int i = 0; i < n; i++) {
     AdwTabPage *page = adw_tab_view_get_nth_page(ADW_TAB_VIEW(w->tab_view), i);
-    LaceConnectionPage *cp = LACE_CONNECTION_PAGE(adw_tab_page_get_child(page));
-    LaceConnection *conn = lace_connection_page_get_connection(cp);
-    g_signal_handlers_disconnect_by_func(conn, on_conn_state, w);
-    g_signal_handlers_disconnect_by_func(conn, on_conn_notice, w);
-    lace_connection_close(conn);
+    GtkWidget *child = adw_tab_page_get_child(page);
+    if (!LACE_IS_CONNECTION_PAGE(child))
+      continue;
+    LaceConnection *conn = lace_connection_page_get_connection(LACE_CONNECTION_PAGE(child));
+    unwire(LACE_CONNECTION_PAGE(child));
+    lace_app_release_connection(w->app, conn);
   }
   return GDK_EVENT_PROPAGATE;
 }
 
-static void on_saved_changed(LaceApp *app, LaceWindow *w) {
-  (void)app;
-  if (adw_tab_view_get_n_pages(ADW_TAB_VIEW(w->tab_view)) == 0)
-    rebuild_welcome(w);
-}
-
 static void lace_window_dispose(GObject *obj) {
   LaceWindow *w = LACE_WINDOW(obj);
-  if (w->app)
-    g_signal_handlers_disconnect_by_func(w->app, on_saved_changed, w);
   g_clear_pointer(&w->name, g_free);
   G_OBJECT_CLASS(lace_window_parent_class)->dispose(obj);
 }
@@ -576,6 +658,7 @@ LaceWindow *lace_window_new(LaceApp *app, const char *name) {
   LaceWindow *w = g_object_new(LACE_TYPE_WINDOW, "application", app, NULL);
   w->app = app;
   g_window_counter++;
+  w->window_counter = g_window_counter;
   w->name = name && *name ? g_strdup(name)
             : g_window_counter == 1 ? g_strdup("Workspace")
                                     : g_strdup_printf("Workspace %u", g_window_counter);
@@ -595,7 +678,7 @@ LaceWindow *lace_window_new(LaceApp *app, const char *name) {
   adw_button_content_set_icon_name(ADW_BUTTON_CONTENT(content), "list-add-symbolic");
   adw_button_content_set_label(ADW_BUTTON_CONTENT(content), "Connect");
   gtk_button_set_child(GTK_BUTTON(connect), content);
-  gtk_widget_set_tooltip_text(connect, "Open a connection in a new tab (Ctrl+T)");
+  gtk_widget_set_tooltip_text(connect, "A new connection tab (Ctrl+T)");
   gtk_actionable_set_action_name(GTK_ACTIONABLE(connect), "win.connect");
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), connect);
 
@@ -637,11 +720,7 @@ LaceWindow *lace_window_new(LaceApp *app, const char *name) {
   adw_tab_bar_set_autohide(ADW_TAB_BAR(w->tab_bar), FALSE);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tv), w->tab_bar);
 
-  w->stack = gtk_stack_new();
-  gtk_stack_set_transition_type(GTK_STACK(w->stack), GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-  gtk_stack_add_named(GTK_STACK(w->stack), build_welcome(w), "welcome");
-  gtk_stack_add_named(GTK_STACK(w->stack), w->tab_view, "tabs");
-  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), w->stack);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tv), w->tab_view);
   adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(w->toast_overlay), tv);
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(w), w->toast_overlay);
 
@@ -674,7 +753,6 @@ LaceWindow *lace_window_new(LaceApp *app, const char *name) {
   g_signal_connect(w->tab_view, "notify::n-pages", G_CALLBACK(on_pages_changed), w);
   g_signal_connect(w->tab_view, "notify::selected-page", G_CALLBACK(on_selected_page), w);
   g_signal_connect(w, "close-request", G_CALLBACK(on_close_request), NULL);
-  g_signal_connect(app, "saved-changed", G_CALLBACK(on_saved_changed), w);
   update_stack(w);
   return w;
 }

@@ -1,0 +1,18 @@
+# args: -s
+# fixture-conns
+# Save writes over the picked entry, Save as new adds one; a bad port is refused
+form-pick Local
+form-field name L2
+form-action save
+expect-saved L2
+form-field name L3
+form-action save-as-new
+expect-saved L3
+expect-saved L2
+form-action clear
+form-field driver postgres
+form-field host h
+form-field port 99999
+form-action save
+expect-message 1 to 65535
+quit

@@ -1,0 +1,24 @@
+# args: -s
+# fixture-conns
+# A tab moved to another window belongs to it: closing the first window,
+# then the tab's last table, leaves a form in the second
+form-pick Local
+form-action open
+expect-tables
+table big
+wait 300
+action app.new-window
+expect-windows 2
+window 1
+transfer-tab 2
+wait 300
+close-window
+expect-windows 1
+window 1
+expect-pages 2
+expect-page connection
+action win.close-tab
+wait 300
+expect-page form
+expect-connections 0
+quit

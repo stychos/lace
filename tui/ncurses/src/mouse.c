@@ -10,6 +10,7 @@
 #include "core/app_state.h"
 #include "render_helpers.h"
 #include "tui_internal.h"
+#include "views/form_tab.h"
 #include "query_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -444,11 +445,20 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   /* Determine click location. Rows come from the windows themselves: the
    * tab bar is on row 0 or 1 and the content starts below it, depending on
    * whether the header is shown. */
-  int sidebar_width = state->sidebar_visible ? SIDEBAR_WIDTH : 0;
+  int sidebar_width = state->sidebar_win ? SIDEBAR_WIDTH : 0;
   int tab_y = state->tab_win ? getbegy(state->tab_win) : 1;
   int main_y = state->main_win ? getbegy(state->main_win) : tab_y + 1;
   MouseClick m = {mouse_x, mouse_y,      is_double,     is_scroll_up,
                   is_scroll_down, sidebar_width, tab_y, main_y};
+
+  /* A connection form takes the clicks and the wheel below the tab bar */
+  Tab *form_click_tab = TUI_TAB(state);
+  if (form_click_tab && form_click_tab->type == TAB_TYPE_FORM && mouse_y >= main_y) {
+    int wheel = is_scroll_up ? -1 : is_scroll_down ? 1 : 0;
+    if (!wheel && !is_click && !is_double)
+      return false;
+    return form_tab_handle_mouse(state, form_click_tab, mouse_y - main_y, mouse_x, is_double, wheel);
+  }
 
   /* Handle scroll wheel - scroll relative to cursor */
   if (is_scroll_up || is_scroll_down) {
@@ -464,7 +474,7 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   }
 
   /* Check if click is in sidebar */
-  if (state->sidebar_visible && mouse_x < sidebar_width) {
+  if (state->sidebar_win && mouse_x < sidebar_width) {
     return mouse_click_sidebar(state, &m);
   }
 

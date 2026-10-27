@@ -27,105 +27,20 @@ bool tui_connect(TuiState *state, const char *connstr) {
 
   /* Use async connection with progress dialog */
   DbConnection *conn = tui_connect_with_progress(state, connstr);
-
-  if (!conn) {
-    /* Error already set by tui_connect_with_progress */
+  if (!conn)
+    return false; /* Error already set by tui_connect_with_progress */
+  size_t idx = tui_add_open_connection(state, conn, connstr, NULL);
+  if (idx == SIZE_MAX)
     return false;
+  /* Into a form of the current workspace (one is made when it has none) */
+  tui_ensure_tab(state);
+  Workspace *ws = TUI_WORKSPACE(state);
+  Tab *tab = TUI_TAB(state);
+  if (!tab || tab->type != TAB_TYPE_FORM) {
+    tui_new_connection_tab(state);
+    tab = TUI_TAB(state);
   }
-
-  /* Create a new connection in the app state hierarchy */
-  Connection *app_conn = app_add_connection(state->app, conn, connstr);
-  if (!app_conn) {
-    db_disconnect(conn);
-    tui_set_error(state, "Failed to create connection");
-    return false;
-  }
-
-  /* Load tables first */
-  if (!tui_load_tables(state, app_conn)) {
-    return false;
-  }
-
-  /* Create a workspace if none exists */
-  Workspace *ws = app_current_workspace(state->app);
-  if (!ws) {
-    ws = app_create_workspace(state->app);
-    if (!ws) {
-      tui_set_error(state, "Failed to create workspace");
-      return false;
-    }
-  }
-
-  /* Find connection index */
-  size_t conn_index = app_find_connection_index(state->app, conn);
-
-  /* Check if we should auto-open the first table */
-  bool auto_open = state->app->config &&
-                   state->app->config->general.auto_open_first_table &&
-                   app_conn->num_tables > 0;
-
-  if (auto_open) {
-    /* Create a table tab with the first table */
-    size_t table_idx = 0;
-    Tab *tab = workspace_create_table_tab(ws, conn_index, app_conn->tables[table_idx]);
-    if (tab) {
-
-      /* Ensure UITabState capacity before accessing */
-      size_t ws_idx = state->app->current_workspace;
-      size_t tab_idx_ui = ws->current_tab;
-      tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx_ui);
-
-      /* Load table data (updates Tab directly) */
-      tui_load_table_data(state, app_conn->tables[table_idx]);
-
-      /* Initialize sidebar state (global, not per-tab) */
-      state->sidebar_visible = true;
-      state->sidebar_focused = false;
-
-      tui_recreate_windows(state);
-      tui_set_status(state, "Connected to %s - %s", conn->database,
-                     app_conn->tables[table_idx]);
-      return true;
-    }
-  } else {
-    /* Create a connection tab (don't auto-load any table) */
-    Tab *tab = workspace_create_connection_tab(ws, conn_index, connstr);
-    if (tab) {
-      /* Ensure UITabState capacity before accessing */
-      size_t ws_idx = state->app->current_workspace;
-      size_t tab_idx = ws->current_tab;
-      tui_ensure_tab_ui_capacity(state, ws_idx, tab_idx);
-
-      /* Initialize per-tab UI state */
-      UITabState *ui = TUI_TAB_UI(state);
-      if (ui) {
-        ui->filters_visible = false;
-        ui->filters_focused = false;
-      }
-
-      /* Initialize sidebar state (global) - focus sidebar to select a table */
-      state->sidebar_visible = true;
-      state->sidebar_focused = true;
-      state->sidebar_highlight = 0;
-      state->sidebar_scroll = 0;
-
-      /* Connection tab has no table data - Tab fields stay NULL */
-
-      tui_recreate_windows(state);
-
-      if (app_conn->num_tables == 0) {
-        tui_set_status(state, "Connected to %s - No tables found",
-                       conn->database);
-      } else {
-        tui_set_status(state, "Connected to %s - Select a table from sidebar",
-                       conn->database);
-      }
-      return true;
-    }
-  }
-
-  tui_set_error(state, "Failed to create tab");
-  return false;
+  return tui_place_connection(state, idx, PLACE_HERE, state->app->current_workspace, ws->current_tab);
 }
 
 void tui_disconnect(TuiState *state) {

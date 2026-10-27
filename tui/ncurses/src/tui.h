@@ -10,6 +10,8 @@
 #define LACE_TUI_H
 
 #include "async/async.h"
+#include "config/connections.h"
+#include "config/recent.h"
 #include "core/app_state.h"
 #include "core/constants.h"
 #include "db_compat.h"
@@ -172,6 +174,12 @@ struct TuiState {
    * Dynamic 2D array: tab_ui[workspace_index][tab_index]
    * =========================================================================
    */
+  /* The saved connections and Recent, as the connection forms list and
+   * change them: loaded once (tui_connmgr, tui_recent), freed at cleanup */
+  ConnectionManager *connmgr;
+  char *connmgr_error; /* connections.json did not load: read only, why */
+  RecentList *recent;
+
   UITabState **tab_ui;       /* Array of per-workspace UITabState arrays */
   size_t *tab_ui_capacity;   /* Capacity per workspace */
   size_t tab_ui_ws_capacity; /* Capacity for workspace dimension */

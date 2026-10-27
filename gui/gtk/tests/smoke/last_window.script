@@ -1,0 +1,8 @@
+# args: -s
+# config: {"general": {"daemon_spawn_mode": 1, "on_last_workspace_close": "new"}}
+# Closing the last window's last tab: a fresh window with a form
+action win.close-tab
+wait 500
+expect-windows 1
+expect-page form
+quit

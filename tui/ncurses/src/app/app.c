@@ -13,6 +13,7 @@
 #include "util/connstr.h"
 #include "../db_compat.h"
 #include "../tui.h"
+#include "../tui_internal.h"
 #include "../../liblace/include/util/str.h"
 #include <getopt.h>
 #include <stdio.h>
@@ -386,10 +387,9 @@ static int run_tui_mode(AppConfig *config) {
   session_set_password_callback(tui_password_callback, &state);
 
   if (config->connstr) {
-    /* Explicit connection string provided - use it */
-    if (!tui_connect(&state, config->connstr)) {
-      /* Error message already shown in TUI */
-    }
+    /* Explicit connection string provided - use it (a failure leaves a
+     * form, below, and the error on the status line) */
+    tui_connect(&state, config->connstr);
   } else if (!config->skip_session && app.config &&
              app.config->general.restore_session) {
     /* No connection string - try to restore previous session */
@@ -415,11 +415,9 @@ static int run_tui_mode(AppConfig *config) {
     free(session_err);
   }
 
-  if (!config->connstr && !session_restored) {
-    /* No connection and no session - show connect dialog */
-    tui_refresh(&state);
-    tui_show_connect_dialog(&state);
-  }
+  /* Nothing connected and no session: a connection form */
+  if (!session_restored)
+    tui_ensure_tab(&state);
 
   /* An older config.json may carry defaults that are now other actions' keys */
   char *conflicts = config_hotkey_conflicts_text(app.config);
