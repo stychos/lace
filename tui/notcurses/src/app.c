@@ -734,6 +734,7 @@ static void trace_input(const struct ncinput *ni, uint32_t id, bool ok, const Ui
     if (path && *path) f = fopen(path, "a");
   }
   if (!f) return;
+#ifdef NCINPUT_MAX_EFF_TEXT_CODEPOINTS /* an older notcurses has no eff_text (ui/input.c) */
   char eff[NCINPUT_MAX_EFF_TEXT_CODEPOINTS * 4 + 1] = "";
   size_t n = 0;
   while (n < NCINPUT_MAX_EFF_TEXT_CODEPOINTS && ni->eff_text[n]) n++;
@@ -741,6 +742,9 @@ static void trace_input(const struct ncinput *ni, uint32_t id, bool ok, const Ui
     int len = notcurses_ucs32_to_utf8(ni->eff_text, n, (unsigned char *)eff, sizeof eff - 1);
     eff[len > 0 ? len : 0] = 0;
   }
+#else
+  const char *eff = "";
+#endif
   fprintf(f, "%lld id=%u evtype=%d mods=0x%x eff=\"%s\" -> ", (long long)app_now_ms(), (unsigned)id,
           (int)ni->evtype, ni->modifiers, eff);
   if (!ok) fputs("dropped\n", f);

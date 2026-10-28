@@ -102,7 +102,10 @@ bool input_translate(const struct ncinput *ni, uint32_t id, UiEvent *out) {
   /* Under the kitty keyboard protocol the id is the key's base character
    * ('1' for Shift+1, '[' for '{') and the text the press produces, with
    * Shift and the layout applied, is only in eff_text: that is what was
-   * typed, and what a character hotkey like '{' or '?' is bound to */
+   * typed, and what a character hotkey like '{' or '?' is bound to. An
+   * older notcurses (3.0.7, Ubuntu 24.04) has no eff_text: there the id
+   * is all there is */
+#ifdef NCINPUT_MAX_EFF_TEXT_CODEPOINTS
   if (ni->eff_text[0] && !(mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER))) {
     unsigned n = 0;
     while (n < NCINPUT_MAX_EFF_TEXT_CODEPOINTS && ni->eff_text[n]) n++;
@@ -118,6 +121,7 @@ bool input_translate(const struct ncinput *ni, uint32_t id, UiEvent *out) {
       return true;
     }
   }
+#endif
   if (id > 0x7f) { /* text: first byte for the ncurses-style byte path, text for the rest */
     out->key.key = (unsigned char)ni->utf8[0];
     out->key.mods = (UiKeyMod)mods;

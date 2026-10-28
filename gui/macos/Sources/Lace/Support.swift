@@ -1,13 +1,32 @@
 //
 // Lace macOS frontend
 // Small shared pieces: number and time formatting, alerts as async calls,
-// a few plain views (text cells, the error banner, the notice bubble)
+// a few plain views (text cells, the error banner, the notice bubble), and
+// the async Result(catching:) older Swift lacks
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
 
 import AppKit
 import LaceKit
+
+#if !compiler(>=6.4)
+/// `await Result { try await ... }`: Swift 6.4's _Concurrency has this
+/// initializer (back-deployed); Swift 6.3 (Xcode 26) has only the
+/// synchronous one, so it is given here, with the same isolation: the body
+/// runs on the caller's actor
+extension Result {
+  nonisolated(nonsending) init(
+    catching body: nonisolated(nonsending) () async throws(Failure) -> Success
+  ) async {
+    do throws(Failure) {
+      self = .success(try await body())
+    } catch {
+      self = .failure(error)
+    }
+  }
+}
+#endif
 
 @MainActor
 enum Format {

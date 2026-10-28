@@ -50,8 +50,10 @@ jobs:
   # The GTK4/libadwaita frontend (gui/gtk): built with warnings as errors,
   # then its unit tests (the row model). It shares liblace's SQL builders
   # with the other frontends, so a liblace API change shows up here.
+  # Ubuntu 26.04: the frontend needs libadwaita 1.8 (AdwShortcutsDialog),
+  # and 24.04 has 1.5.
   gtk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -126,9 +128,13 @@ jobs:
           if-no-files-found: ignore
 
   # Real databases in containers (tests/integration/run.py). Linux only:
-  # hosted macOS runners have no container engine.
+  # hosted macOS runners have no container engine. The runner has podman
+  # too, which run.py would pick, but its compose provider is docker-compose
+  # and podman's user socket is not running: use docker's engine.
   integration:
     runs-on: ubuntu-latest
+    env:
+      LACE_TEST_DOCKER: docker
     steps:
       - uses: actions/checkout@v4
 

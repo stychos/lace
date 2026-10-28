@@ -86,7 +86,9 @@ static void test_input_translate(void) {
   ni = key('x', NCKEY_MOD_SHIFT);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == 'X' && e.key.mods == UI_MOD_NONE);
   /* The kitty protocol reports Shift+1 as '1' + SHIFT with the typed '!'
-   * only in eff_text; Shift+[ likewise, so a '{' hotkey still matches */
+   * only in eff_text; Shift+[ likewise, so a '{' hotkey still matches
+   * (an older notcurses has no eff_text) */
+#ifdef NCINPUT_MAX_EFF_TEXT_CODEPOINTS
   ni = key('1', NCKEY_MOD_SHIFT);
   ni.eff_text[0] = '!';
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == '!' && e.key.mods == UI_MOD_NONE && !e.key.text[0]);
@@ -99,6 +101,7 @@ static void test_input_translate(void) {
   ni = key('1', NCKEY_MOD_ALT); /* a modifier keeps the base key: Alt+1 is a binding */
   ni.eff_text[0] = '!';
   CHECK(input_translate(&ni, ni.id, &e) && e.key.key == '1' && e.key.mods == UI_MOD_ALT);
+#endif
   ni = key(NCKEY_ESC, 0);
   CHECK(input_translate(&ni, ni.id, &e) && e.key.is_special && e.key.key == UI_KEY_ESCAPE);
   ni = key(NCKEY_TAB, NCKEY_MOD_SHIFT);
