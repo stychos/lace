@@ -183,8 +183,7 @@ def _cache_dir(home):
 def _start_laced(home, *args):
     """A daemon in the given HOME (its default socket and token file live
     there), logging to its own file"""
-    env = dict(os.environ, HOME=home.path, XDG_RUNTIME_DIR="",
-               LACED_LOG=home.file("shared-laced.log"))
+    env = dict(os.environ, **home.env(), LACED_LOG=home.file("shared-laced.log"))
     return subprocess.Popen([os.path.join(LACED_DIR, "laced"), *args], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

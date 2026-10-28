@@ -68,6 +68,17 @@ class Home:
     def file(self, name):
         return os.path.join(self.path, name)
 
+    def env(self):
+        """HOME and the XDG directories Linux builds read before it, all in
+        this HOME: an inherited XDG_CONFIG_HOME (GitHub's runners set one)
+        or XDG_RUNTIME_DIR would give every test one config directory and
+        one default daemon socket. An empty XDG_RUNTIME_DIR puts the socket
+        under HOME/.cache; macOS reads none of them"""
+        return {"HOME": self.path,
+                "XDG_CONFIG_HOME": os.path.join(self.path, ".config"),
+                "XDG_DATA_HOME": os.path.join(self.path, ".local", "share"),
+                "XDG_RUNTIME_DIR": ""}
+
     def close_tuis(self):
         """Kill the tmux server of every Tui started here that is still
         running: a test that fails before its own close() must not leave
@@ -117,9 +128,9 @@ class Tui:
         # A UTF-8 locale that exists: macOS has no C.UTF-8, minimal Linux
         # systems often only C.UTF-8
         utf8 = "en_US.UTF-8" if os.uname().sysname == "Darwin" else "C.UTF-8"
-        e = {"HOME": home.path, "LANG": utf8, "LC_ALL": utf8, "ESCDELAY": "25",
-             "PATH": LACED_DIR + os.pathsep + os.environ.get("PATH", ""),
-             "LACED_LOG": home.file("laced.log")}
+        e = dict(home.env(), LANG=utf8, LC_ALL=utf8, ESCDELAY="25",
+                 PATH=LACED_DIR + os.pathsep + os.environ.get("PATH", ""),
+                 LACED_LOG=home.file("laced.log"))
         e.update(env or {})
         exports = " ".join(f"{k}={shquote(v)}" for k, v in e.items())
         argv = " ".join(shquote(a) for a in [binary or LACE, *args])
@@ -201,10 +212,13 @@ class Tui:
     # -- input --------------------------------------------------------------
 
     def keys(self, *keys, delay=0.05):
-        """tmux key names: Enter, Escape, Up, PPage, C-r, BSpace, Tab, BTab, ..."""
+        """tmux key names: Enter, Escape, Up, PPage, C-r, BSpace, Tab, BTab, ...
+        A bare Escape gets a longer pause: a key the TUI finds already
+        waiting after one (ESCDELAY, 25 ms) is read as Alt+key, and on a
+        slow runner Escape then q became Alt+Q, so quit() did not quit"""
         for k in keys:
             self.tmux("send-keys", "-t", "t", k)
-            time.sleep(delay)
+            time.sleep(max(delay, 0.25) if k == "Escape" else delay)
 
     def type(self, text):
         self.tmux("send-keys", "-t", "t", "-l", text)
@@ -446,7 +460,7 @@ class Db:
         return pg if self.pg else mysql if self.mysql else sqlite
 
     def _run(self, sql):
-        env = dict(os.environ, HOME=self.home.path,
+        env = dict(os.environ, **self.home.env(),
                    PATH=LACED_DIR + os.pathsep + os.environ.get("PATH", ""))
         r = subprocess.run([LACE, "-q", sql, "-f", "tsv", self.url], capture_output=True,
                            text=True, timeout=120, env=env)
