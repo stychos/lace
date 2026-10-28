@@ -1,3 +1,4 @@
+#include "core/chrome.h"
 #include "conn/connection.h"
 #include "conn/jobs_internal.h"
 #include "config/recent.h"
@@ -603,21 +604,7 @@ void nc_connection_set_name(NcConnection *c, const char *name) {
 const char *nc_connection_connstr(const NcConnection *c) { return c->connstr; }
 const char *nc_connection_saved_id(const NcConnection *c) { return c->saved_id; }
 
-char *nc_connection_short_name(const NcConnection *c) {
-  ConnString *cs = connstr_parse(c->connstr, NULL);
-  if (!cs) return str_dup("database");
-  char *out;
-  if (str_eq(cs->driver, "sqlite")) {
-    const char *db = cs->database ? cs->database : "";
-    const char *slash = strrchr(db, '/');
-    out = str_dup(slash && slash[1] ? slash + 1 : db);
-  } else {
-    out = str_printf("%s on %s", cs->database ? cs->database : "db",
-                     cs->host && *cs->host ? cs->host : "localhost");
-  }
-  connstr_free(cs);
-  return out;
-}
+char *nc_connection_short_name(const NcConnection *c) { return chrome_connstr_short_name(c->connstr); }
 
 char *nc_connection_display(const NcConnection *c) {
   char *out = connstr_display(c->connstr);

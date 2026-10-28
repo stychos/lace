@@ -1,0 +1,11 @@
+python3 - "$CONFIG_DIR/session.json" <<'PY'
+import json, sys
+text = open(sys.argv[1]).read()
+assert "hunter2" not in text and "db1" not in text, "typed form text reached session.json"
+s = json.loads(text)
+conns = s["workspaces"][0]["connections"]
+forms = [c for c in conns if c.get("form")]
+assert forms == [{"form": True, "order": 1}], conns
+assert conns[0].get("saved_id") and "order" not in conns[0], conns
+assert s["workspaces"][0]["current"] == 1, s
+PY

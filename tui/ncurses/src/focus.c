@@ -147,3 +147,25 @@ bool tui_focus_cycle(TuiState *state, int dir) {
   }
   return true;
 }
+
+unsigned tui_focus_context(TuiState *state) {
+  Tab *tab = TUI_TAB(state);
+  UITabState *ui = TUI_TAB_UI(state);
+  if (!tab)
+    return 0;
+  if (tab->type == TAB_TYPE_FORM)
+    return HOTKEY_CTX_CONNECT;
+  if (state->sidebar_focused || tab->type == TAB_TYPE_CONNECTION)
+    return HOTKEY_CTX_SIDEBAR;
+  if (tab->type == TAB_TYPE_TABLE) {
+    if (tui_filters_visible(state) && tui_filters_focused(state))
+      return HOTKEY_CTX_FILTERS;
+    return tab->subview != SUBVIEW_DATA ? HOTKEY_CTX_LIST : HOTKEY_CTX_GRID;
+  }
+  if (tab->type == TAB_TYPE_QUERY && ui) {
+    if (ui->query_unfocused)
+      return HOTKEY_CTX_UNFOCUSED;
+    return ui->query_focus_results && tab->query_results ? HOTKEY_CTX_RESULTS : HOTKEY_CTX_EDITOR;
+  }
+  return 0;
+}

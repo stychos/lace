@@ -18,7 +18,7 @@
 #include <string.h>
 
 static int pick(TuiState *state, const char *title, const char *const *items, size_t n) {
-  int x = state->sidebar_visible ? SIDEBAR_WIDTH + 2 : 2;
+  int x = state->sidebar_visible ? tui_sidebar_width(state) + 2 : 2;
   return tui_pick_from_list(state->app->config, title, items, n, 0, 3, x, 30, state->term_cols - 4,
                             state->term_rows - 6);
 }

@@ -14,6 +14,7 @@
 #include "../../liblace/include/util/connstr.h"
 #include "history.h"
 #include "conn_fields.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -179,6 +180,11 @@ void query_count_stop(Tab *tab) {
 void (*tab_form_free_hook)(struct FormTab *form);
 
 void tab_free_data(Tab *tab) {
+  if (tab) {
+    free(tab->user_widths);
+    tab->user_widths = NULL;
+    tab->num_user_widths = 0;
+  }
   if (!tab)
     return;
   if (tab->form && tab_form_free_hook)
@@ -485,6 +491,11 @@ Workspace *app_create_workspace(AppState *app) {
   size_t new_idx = app->num_workspaces;
   Workspace *ws = &app->workspaces[new_idx];
   workspace_init(ws);
+  /* named after its place, as the notcurses TUI names them */
+  if (new_idx)
+    snprintf(ws->name, sizeof ws->name, "Workspace %zu", new_idx + 1);
+  else
+    snprintf(ws->name, sizeof ws->name, "Workspace");
 
   ws->active = true;
 
@@ -564,6 +575,7 @@ void connection_free_data(Connection *conn) {
   /* Free connection string and saved connection ID */
   FREE_NULL(conn->connstr);
   FREE_NULL(conn->saved_conn_id);
+  FREE_NULL(conn->database);
 
   /* Free query history */
   history_free(conn->history);
@@ -919,4 +931,54 @@ void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
       }
     }
   }
+}
+
+bool tab_cycle_sort(Tab *tab, size_t col) {
+  if (!tab)
+    return false;
+  tab->preview = false; /* a sorted view is kept */
+  for (size_t i = 0; i < tab->num_sort_entries; i++) {
+    if (tab->sort_entries[i].column != col)
+      continue;
+    if (tab->sort_entries[i].direction == SORT_ASC) {
+      tab->sort_entries[i].direction = SORT_DESC;
+    } else {
+      memmove(&tab->sort_entries[i], &tab->sort_entries[i + 1],
+              (tab->num_sort_entries - i - 1) * sizeof tab->sort_entries[0]);
+      tab->num_sort_entries--;
+    }
+    return true;
+  }
+  if (tab->num_sort_entries >= MAX_SORT_COLUMNS)
+    return false;
+  tab->sort_entries[tab->num_sort_entries].column = col;
+  tab->sort_entries[tab->num_sort_entries].direction = SORT_ASC;
+  tab->num_sort_entries++;
+  return true;
+}
+
+void tab_set_user_width(Tab *tab, size_t col, int width) {
+  if (!tab)
+    return;
+  if (col >= tab->num_user_widths) {
+    tab->user_widths = safe_realloc(tab->user_widths, (col + 1) * sizeof *tab->user_widths);
+    for (size_t i = tab->num_user_widths; i <= col; i++)
+      tab->user_widths[i] = 0;
+    tab->num_user_widths = col + 1;
+  }
+  tab->user_widths[col] = width;
+}
+
+void tab_clear_user_widths(Tab *tab) {
+  if (!tab)
+    return;
+  free(tab->user_widths);
+  tab->user_widths = NULL;
+  tab->num_user_widths = 0;
+}
+
+void tab_apply_user_widths(const Tab *tab, int *widths, size_t n) {
+  for (size_t i = 0; tab && widths && i < n && i < tab->num_user_widths; i++)
+    if (tab->user_widths[i] > 0)
+      widths[i] = tab->user_widths[i];
 }

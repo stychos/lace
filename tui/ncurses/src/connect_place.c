@@ -78,7 +78,7 @@ static void show_connected(TuiState *state, Connection *conn, bool table_open) {
   else if (conn->num_tables == 0)
     tui_set_status(state, "Connected to %s - No tables found", db);
   else
-    tui_set_status(state, "Connected to %s - Select a table from the sidebar", db);
+    tui_set_status(state, "Connected to %s", db);
 }
 
 /* The current tab, now a CONNECTION tab of conn_idx: with

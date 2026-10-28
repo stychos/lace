@@ -1,0 +1,10 @@
+# expect-exit
+# Closing the last window's only entry (⇧⌘W) closes the window and quits
+# (on_last_workspace_close "quit", the default); the session still holds
+# the window
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action open
+expect-entries 1
+expect-entry connection
+close-connection

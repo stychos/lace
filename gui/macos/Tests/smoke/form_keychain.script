@@ -1,0 +1,16 @@
+# keychain
+# config: {"general": {"daemon_spawn_mode": 1, "delete_confirmation": false, "approximate_counts": false, "page_size": 100}, "macos": {"keychain_passwords": true}}
+# A saved connection whose password is in the Keychain: highlighted, the
+# form shows it and Open would connect with it; Save keeps it out of
+# connections.json
+saved-add-password Secret postgres://app:sekret@127.0.0.1:9/shop
+expect-saved 1
+form-pick Secret
+expect-field password sekret
+expect-field save-password true
+expect-open-uses sekret
+form-field user app2
+form-action save
+expect-form-message Saved Secret
+expect-open-uses sekret
+quit

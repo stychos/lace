@@ -9,6 +9,46 @@
 #include "render_helpers.h"
 #include <ncurses.h>
 #include <string.h>
+#include <term.h>
+
+/* The chords a terminal sends as one extended key (xterm's modifier
+ * forms): Ctrl+Up/Down, Ctrl+PgUp/PgDn, Alt+arrows; ncurses gives each a
+ * key code of its own, found from the terminfo capability */
+typedef struct {
+  const char *cap;
+  int key;
+  int mods;
+  int code;
+} ExtKey;
+
+static ExtKey g_ext[] = {
+    {"kUP5", UI_KEY_UP, UI_MOD_CTRL, 0},          {"kDN5", UI_KEY_DOWN, UI_MOD_CTRL, 0},
+    {"kNXT5", UI_KEY_PAGEDOWN, UI_MOD_CTRL, 0},   {"kPRV5", UI_KEY_PAGEUP, UI_MOD_CTRL, 0},
+    {"kLFT3", UI_KEY_LEFT, UI_MOD_ALT, 0},        {"kRIT3", UI_KEY_RIGHT, UI_MOD_ALT, 0},
+    {"kUP3", UI_KEY_UP, UI_MOD_ALT, 0},           {"kDN3", UI_KEY_DOWN, UI_MOD_ALT, 0},
+    {"kLFT5", UI_KEY_LEFT, UI_MOD_CTRL, 0},       {"kRIT5", UI_KEY_RIGHT, UI_MOD_CTRL, 0},
+};
+
+static bool ext_key(int code, UiEvent *event) {
+  static bool ready;
+  if (!ready) {
+    ready = true;
+    for (size_t i = 0; i < sizeof g_ext / sizeof g_ext[0]; i++) {
+      char *s = tigetstr((char *)g_ext[i].cap);
+      g_ext[i].code = s && s != (char *)-1 ? key_defined(s) : 0;
+    }
+  }
+  for (size_t i = 0; i < sizeof g_ext / sizeof g_ext[0]; i++) {
+    if (g_ext[i].code > 0 && g_ext[i].code == code) {
+      event->type = UI_EVENT_KEY;
+      event->key.key = g_ext[i].key;
+      event->key.mods = g_ext[i].mods;
+      event->key.is_special = true;
+      return true;
+    }
+  }
+  return false;
+}
 
 /* ============================================================================
  * Input Translation
@@ -53,6 +93,9 @@ bool render_translate_key(int ncurses_key, UiEvent *event) {
       } else if (mevent.bstate & BUTTON5_PRESSED) {
         event->mouse.button = UI_MOUSE_SCROLL_DOWN;
         event->mouse.action = UI_MOUSE_PRESS;
+      } else if (mevent.bstate & BUTTON2_CLICKED) {
+        event->mouse.button = UI_MOUSE_MIDDLE;
+        event->mouse.action = UI_MOUSE_CLICK;
       } else if (mevent.bstate & BUTTON3_CLICKED) {
         event->mouse.button = UI_MOUSE_RIGHT;
         event->mouse.action = UI_MOUSE_CLICK;
@@ -66,6 +109,10 @@ bool render_translate_key(int ncurses_key, UiEvent *event) {
   event->type = UI_EVENT_KEY;
   event->key.mods = UI_MOD_NONE;
   event->key.is_special = false;
+  if (ncurses_key > KEY_MAX) { /* an extended key: a chord */
+    if (ext_key(ncurses_key, event))
+      return true;
+  }
 
   /* Handle special keys */
   switch (ncurses_key) {

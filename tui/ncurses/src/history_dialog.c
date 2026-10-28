@@ -9,6 +9,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "views/theme.h"
+#include "views/overlay.h"
 #include "config/config.h"
 #include "core/history.h"
 #include "render_helpers.h"
@@ -184,9 +186,7 @@ void tui_show_history_dialog(TuiState *state) {
     werase(dialog);
 
     /* Draw border and title */
-    DRAW_BOX(dialog, COLOR_BORDER);
-    WITH_ATTR(dialog, A_BOLD,
-              mvwprintw(dialog, 0, (width - 16) / 2, " Query History "));
+    tui_frame_window(dialog, "History", "Enter copy  x remove  c clear  Esc close");
 
     /* Entry count */
     char count_str[32];

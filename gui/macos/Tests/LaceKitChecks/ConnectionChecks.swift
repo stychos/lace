@@ -31,6 +31,34 @@ func checkConnection(laced: String, tmp: URL) async {
   } catch {
     Checks.fail("cancel: unexpected error \(error)")
   }
+  do {
+    try await subscribers(client: client, url: url)
+  } catch {
+    Checks.fail("subscribers: unexpected error \(error)")
+  }
+}
+
+/// A connection shown in two windows: each consumer has its own stream with
+/// every event in order, both end at the close; a late one ends at once
+private func subscribers(client: LaceClient, url: String) async throws {
+  let conn = try await Connection.open(client: client, connectionString: url)
+  let a = conn.subscribe()
+  let b = conn.subscribe()
+  _ = try await conn.exec("BEGIN")
+  _ = try await conn.exec("ROLLBACK")
+  try await conn.close()
+  func collect(_ s: AsyncStream<Connection.Event>) async -> [Connection.Event] {
+    var out: [Connection.Event] = []
+    for await e in s {
+      if case .userBusyChanged = e { continue }
+      out.append(e)
+    }
+    return out
+  }
+  let want: [Connection.Event] = [.transactionChanged(.open), .transactionChanged(.none), .closed]
+  Checks.equal(await collect(a), want, "first subscriber")
+  Checks.equal(await collect(b), want, "second subscriber")
+  Checks.equal(await collect(conn.subscribe()), [.closed], "a subscriber after the close")
 }
 
 private func roundTrip(client: LaceClient, url: String) async throws {

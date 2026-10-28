@@ -220,8 +220,9 @@ public final class SavedConnectionStore {
   public private(set) var folders: [Folder] = []
   /// Every connection in tree order
   public private(set) var entries: [Entry] = []
-  /// After every change (the welcome page and the connect sheet redraw)
+  /// After every change (also posted as didChange, for every connection form)
   public var onChanged: (() -> Void)?
+  public static let didChange = Notification.Name("LaceSavedConnectionsDidChange")
 
   /// connections.json in the config directory (the TUI's path rules)
   public init() {
@@ -360,6 +361,7 @@ public final class SavedConnectionStore {
     defer {
       snapshot()
       onChanged?()
+      NotificationCenter.default.post(name: SavedConnectionStore.didChange, object: self)
     }
     var err: UnsafeMutablePointer<CChar>? = nil
     if !connmgr_save(mgr, &err) {

@@ -1,0 +1,6 @@
+python3 - "$CONFIG_DIR/connections.json" <<'PY'
+import json, sys
+root = json.load(open(sys.argv[1]))["root"]
+names = sorted(c["name"] for c in root["children"])
+assert names == ["Copy", "Renamed"], names
+PY

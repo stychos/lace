@@ -24,7 +24,7 @@ def tui(home, db):
 
 def query_tab(t, sql):
     t.keys("p")
-    t.wait("SQL Query")
+    t.wait("runs the statement at the cursor")
     t.type(sql)
     t.keys("C-r")
 
@@ -43,9 +43,9 @@ def test_browse_and_edit(home, db):
     items(db, "tt_browse")
     with tui(home, db) as t:
         t.open_table("tt_browse")
-        t.wait_status(f"Row 1/{ROWS}")
+        t.wait_header(f"1 of {ROWS:,}")
         t.keys("G")
-        t.wait_status(f"Row {ROWS}/{ROWS}")
+        t.wait_header(f"{ROWS:,} of {ROWS:,}")
         assert cursor_id(t) == ROWS
         t.keys("Right", "Enter", "End", *["BSpace"] * 12)
         t.type("edited in tui")
@@ -62,10 +62,11 @@ def test_sorted_paging(home, db):
     with tui(home, db) as t:
         t.open_table("tt_sorted")
         t.keys("Right", "Right", "o", "o")  # price DESC (then the key)
-        t.wait("▼")
+        t.wait("\u2193")              # a descending sort
         for _ in range(80):
             t.keys("NPage", delay=0.01)
         t.wait(lambda s: (t.row_number() or 0) > 1200)
+        t.wait_stable()                     # every page-down handled
         row = t.row_number()
         want = db.scalar(f"SELECT id FROM tt_sorted ORDER BY price DESC, id ASC "
                          f"LIMIT 1 OFFSET {row - 1}")
@@ -98,11 +99,11 @@ def test_lost_connection_in_transaction(home, db):
     with tui(home, db) as t:
         t.open_table("tt_lost")
         query_tab(t, db.sql("", "SELECT pg_backend_pid() AS pid", "SELECT CONNECTION_ID() AS pid"))
-        t.wait_status(re.compile(r"Row 1/1"))
-        m = re.search(r"│\s*(\d+)\s*│", "\n".join(l for l in t.screen() if "│" in l and "pid" not in l))
-        if not m:
+        t.wait_header(re.compile(r"1 of 1"))
+        cells = t.cursor_cells()
+        if not cells or not cells[0].isdigit():
             raise TuiError("no backend id on screen\n" + t.text())
-        pid = m.group(1)
+        pid = cells[0]
         run_sql(t, "BEGIN")
         t.wait_status("[TX]")
         run_sql(t, "INSERT INTO tt_lost (id, name, price) VALUES (200, 'lost', 1)")
@@ -113,7 +114,7 @@ def test_lost_connection_in_transaction(home, db):
         run_sql(t, "ROLLBACK")
         t.wait(lambda s: "[TX" not in t.status())
         run_sql(t, "SELECT COUNT(*) AS n FROM tt_lost")
-        t.wait_status(re.compile(r"Row 1/1"))
+        t.wait_header(re.compile(r"1 of 1"))
     assert db.scalar("SELECT COUNT(*) FROM tt_lost WHERE id >= 200") == "0"
 
 
@@ -129,12 +130,12 @@ def test_pg_reads_inside_transaction(home, db):
         # Appending LIMIT after FOR UPDATE is a syntax error: the paged form
         # fails, the statement then runs as written, the transaction lives
         run_sql(t, "SELECT * FROM tt_reads WHERE id <= 3 FOR UPDATE")
-        t.wait_status(re.compile(r"Row 1/3"))
+        t.wait_header(re.compile(r"1 of 3"))
         assert "[TX FAILED]" not in t.status()
         t.keys("Escape", "Escape", "[")  # Back to the table tab: page through it
-        t.wait_status(f"/{ROWS}")
+        t.wait_header(f"of {ROWS:,}")
         t.keys("G")
-        t.wait_status(f"Row {ROWS}/{ROWS}")
+        t.wait_header(f"{ROWS:,} of {ROWS:,}")
         assert "[TX FAILED]" not in t.status() and "[TX]" in t.status()
         t.keys("]")
         run_sql(t, "COMMIT")
@@ -149,7 +150,7 @@ def test_pg_schema_qualified_table(home, db):
     db.series('"TtSales".orders', 30)
     with tui(home, db) as t:
         t.open_table("TtSales.orders")
-        t.wait_status("Row 1/30")
+        t.wait_header("1 of 30")
         t.keys("Right", "Enter", "End", *["BSpace"] * 10)
         t.type("qualified")
         t.keys("Enter")
@@ -205,7 +206,7 @@ def test_pg_writing_cte_runs_once(home, db):
         t.open_table("tt_cte")
         query_tab(t, "WITH u AS (UPDATE tt_cte SET price = price + 100 RETURNING id) "
                      "SELECT * FROM u")
-        t.wait(re.compile(r"│ 3\s+│"))
+        t.wait("\u2500 3 rows \u2500")           # the divider: the result came back
         t.keys("Down", "G")  # Last row: would count, or load a page if paged
         time.sleep(1)  # A background count, had one started
     # Raised by 100 exactly once (series() gives price = id % 97)
@@ -230,3 +231,32 @@ def test_ctrl_t_refused_inside_transaction(home, db):
         run_sql(t, "ROLLBACK")
         t.wait(lambda s: "[TX" not in t.status())
     assert db.scalar("SELECT COUNT(*) FROM tt_ctrlt WHERE id = 50") == "0"
+
+
+@each_db("postgres", "mysql")
+def test_switch_database(home, db):
+    """D lists the server's databases, the current one marked; picking
+    another connects the tab there, and the header names it"""
+    items(db, "tt_sw", rows=3)
+    current = db.scalar(db.sql("", "SELECT current_database()", "SELECT DATABASE()"))
+    with tui(home, db) as t:
+        t.open_table("tt_sw")
+        t.wait_header(f"▸ {current} ▸ tt_sw")
+        t.keys("D")
+        t.wait("Switch database")
+        t.wait(f"{current}  (current)")
+        t.keys("Home")
+        time.sleep(0.2)
+        lines = t.screen()
+        top = next(i for i, l in enumerate(lines) if "Switch database" in l)
+        if "(current)" in lines[top + 1]:
+            t.keys("Down")                          # the first other database
+            pick = lines[top + 2]
+        else:
+            pick = lines[top + 1]
+        name = pick.split("│")[-2].strip() if "│" in pick else pick.strip()
+        t.keys("Enter")
+        t.wait_status("Switched to")
+        t.wait_header(f"▸ {name}")
+        assert f"▸ {current} ▸" not in t.header()
+        assert t.quit() == 0

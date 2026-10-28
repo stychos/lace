@@ -16,11 +16,8 @@ def make_db(home, rows=3000):
 def cursor_id(tui):
     """The id (first column) of the highlighted row"""
     cells = tui.cursor_cells()
-    for c in cells or []:
-        if c.isdigit():
-            return int(c)
-        if c:
-            break  # The first non-empty cell is the id
+    if cells and cells[0].isdigit():
+        return int(cells[0])
     raise TuiError(f"no cursor row in\n{tui.text()}")
 
 
@@ -28,7 +25,7 @@ def test_open_and_count(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
-        t.wait_status("Row 1/3000")
+        t.wait_header("1 of 3,000")
         assert cursor_id(t) == 1
 
 
@@ -39,14 +36,14 @@ def test_last_row_and_page_back(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
         t.keys("G")
-        t.wait_status("Row 3000/3000")
+        t.wait_header("3,000 of 3,000")
         assert cursor_id(t) == 3000
         for _ in range(60):
             t.keys("PPage", delay=0.02)
         t.wait(lambda s: t.row_number() is not None and t.row_number() < 2000)
         assert cursor_id(t) == t.row_number()
         t.keys("g")
-        t.wait_status("Row 1/3000")
+        t.wait_header("1 of 3,000")
         for _ in range(60):
             t.keys("NPage", delay=0.02)
         t.wait(lambda s: (t.row_number() or 0) > 1000)
@@ -60,7 +57,7 @@ def test_goto_row(home):
         t.keys("C-g")
         t.type("2500")
         t.keys("Enter")
-        t.wait_status("Row 2500/3000")
+        t.wait_header("2,500 of 3,000")
         assert cursor_id(t) == 2500
 
 
@@ -191,10 +188,10 @@ def test_sort_cycle(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
         t.keys("Right", "o")
-        t.wait("▲")
+        t.wait("\u2191v")                   # the header: v ascending
         assert cursor_id(t) == 1
         t.keys("o")
-        t.wait("▼")
+        t.wait("\u2193v")
         t.wait(lambda s: cursor_id(t) == 50)
 
 

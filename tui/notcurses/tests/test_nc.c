@@ -13,7 +13,7 @@
 #include "edit_ops.h"
 #include "undo.h"
 #include "ui/textbuf.h"
-#include "ui/sqlhl.h"
+#include "core/sqlhl.h"
 #include "core/conn_fields.h"
 #include "ui/form_tab.h"
 #include "ui/header.h"
@@ -1511,7 +1511,10 @@ static void test_conn_form_uri(void) {
   }
   CHECK(conn_fields_set_uri(&f, path));
   CHECK(f.driver == 0);
-  CHECK_STR(f.in[CF_FILE].buf, path);
+  /* the path comes back resolved (macOS: /tmp is /private/tmp) */
+  char *real = realpath(path, NULL);
+  CHECK_STR(f.in[CF_FILE].buf, real ? real : path);
+  free(real);
   unlink(path);
   conn_fields_free(&f);
 }

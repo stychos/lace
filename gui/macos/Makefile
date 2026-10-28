@@ -6,12 +6,14 @@
 # inside it, next to the executable, where liblace looks for the daemon.
 # Needs the Command Line Tools (swift) and cJSON (brew install cjson); no
 # Xcode. liblace.a is linked by path from Package.swift, never with -llace.
-# Saved connections, recent connections, query history and the private
-# file writer are the TUI's own sources, compiled here into
-# build/shared/liblaceshared.a (as the GTK Makefile does), so all three
-# frontends read and write the same connections.json, recent.json and
-# history/<id>.json. Resources/Lace.icns comes from the GTK icon
-# (scripts/make-icon.sh) and is committed.
+# Saved connections, recent connections, query history, config.json, the
+# session converters, the connection form's field model and the private
+# file writer are the TUI's own sources (SHARED_NAMES), compiled here into
+# build/shared/liblaceshared.a with csrc/macos_shared.c, the bridge for
+# what Swift cannot call as it is (as the GTK Makefile does), so every
+# frontend reads and writes the same connections.json, recent.json,
+# config.json, session.json and history/<id>.json. Resources/Lace.icns
+# comes from the GTK icon (scripts/make-icon.sh) and is committed.
 
 SWIFT = swift
 # debug | release (swift build -c)
@@ -47,29 +49,24 @@ MACOS_MIN = 14.0
 TUI_SRC = ../../tui/ncurses/src
 SHARED_DIR = $(BUILD_DIR)/shared
 SHARED_LIB = $(SHARED_DIR)/liblaceshared.a
-SHARED_OBJS = $(SHARED_DIR)/connections.o $(SHARED_DIR)/recent.o $(SHARED_DIR)/history.o \
-  $(SHARED_DIR)/platform_posix.o $(SHARED_DIR)/catalog_rows.o $(SHARED_DIR)/utf8.o
+SHARED_NAMES = config/connections config/recent core/history platform/posix/platform_posix \
+  core/catalog_rows core/utf8 config/config config/workspace_json config/session_json core/ui_event \
+  core/conn_fields views/text_input
+SHARED_OBJS = $(addprefix $(SHARED_DIR)/,$(addsuffix .o,$(notdir $(SHARED_NAMES)))) $(SHARED_DIR)/macos_shared.o
 SHARED_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -mmacosx-version-min=$(MACOS_MIN) \
   -I../../liblace/include -I$(TUI_SRC) $(shell pkg-config --cflags libcjson 2>/dev/null) $(EXTRA_CFLAGS)
 
 all: $(APP)
 
-$(SHARED_DIR)/connections.o: $(TUI_SRC)/config/connections.c
+define SHARED_RULE
+$(SHARED_DIR)/$(notdir $(1)).o: $(TUI_SRC)/$(1).c
 	@mkdir -p $(SHARED_DIR)
-	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
-$(SHARED_DIR)/recent.o: $(TUI_SRC)/config/recent.c
-	@mkdir -p $(SHARED_DIR)
-	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
-$(SHARED_DIR)/history.o: $(TUI_SRC)/core/history.c
-	@mkdir -p $(SHARED_DIR)
-	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
-$(SHARED_DIR)/platform_posix.o: $(TUI_SRC)/platform/posix/platform_posix.c
-	@mkdir -p $(SHARED_DIR)
-	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
-$(SHARED_DIR)/catalog_rows.o: $(TUI_SRC)/core/catalog_rows.c
-	@mkdir -p $(SHARED_DIR)
-	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
-$(SHARED_DIR)/utf8.o: $(TUI_SRC)/core/utf8.c
+	$$(CC) $$(SHARED_CFLAGS) -MMD -MP -c $$< -o $$@
+endef
+$(foreach s,$(SHARED_NAMES),$(eval $(call SHARED_RULE,$(s))))
+
+# The bridge for what Swift cannot call as it is (csrc/macos_shared.h)
+$(SHARED_DIR)/macos_shared.o: csrc/macos_shared.c
 	@mkdir -p $(SHARED_DIR)
 	$(CC) $(SHARED_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -114,8 +111,10 @@ test: $(LIBLACE) $(LACED) $(SHARED_LIB)
 	$(SWIFT) build $(SWIFT_FLAGS) --product LaceKitChecks
 	LACE_TEST_LACED=$(abspath $(LACED)) $(SWIFT_OUT)/LaceKitChecks
 
-# The real app driven by LACE_MACOS_SCRIPT (Tests/smoke.sh): a private HOME
-# and stdio daemon, a temporary SQLite file; a window shows briefly
+# The real app driven by LACE_MACOS_SCRIPT (Tests/smoke.sh): its long run,
+# then every Tests/smoke/NAME.script, each in a private HOME with a stdio
+# daemon and a temporary SQLite file (SMOKE=filter picks them); a window
+# shows briefly
 smoke: swift
 	sh Tests/smoke.sh $(SWIFT_OUT)/Lace $(abspath $(LACED))
 

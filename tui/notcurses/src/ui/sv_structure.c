@@ -4,6 +4,7 @@
  * editors: a column form (add, Enter/e edit), x drop, R rename, P the
  * primary key editor, Space move (MySQL); every change goes through
  * app_ddl_confirm. */
+#include "core/chrome.h"
 #include "ui/subviews.h"
 #include "app_ddl.h"
 #include "model/workspace.h"
@@ -449,8 +450,8 @@ static void structure_activate(NcApp *app, View *v, int tag) {
   if (c) open_column_editor(app, v, c);
 }
 
-const SvOps sv_structure_ops = {structure_build, structure_activate, "Enter edit", structure_action,
-                                "+ add  x drop  R rename  P key  Space move"};
+const SvOps sv_structure_ops = {structure_build, structure_activate, CHROME_SV_STRUCTURE_ENTER, structure_action,
+                                CHROME_SV_STRUCTURE_KEYS};
 
 /* ==========================================================================
  * Definition (a database view, routine or trigger)
@@ -491,5 +492,5 @@ static bool definition_action(NcApp *app, View *v, HotkeyAction a, int tag) {
   return true;
 }
 
-const SvOps sv_definition_ops = {definition_build, definition_activate, "Enter edit in a query view",
+const SvOps sv_definition_ops = {definition_build, definition_activate, CHROME_SV_DEFINITION_ENTER,
                                  definition_action, NULL};

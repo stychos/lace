@@ -1,4 +1,4 @@
-#include "ui/sqlhl.h"
+#include "sqlhl.h"
 #include <ctype.h>
 #include <string.h>
 

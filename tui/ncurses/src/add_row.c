@@ -37,10 +37,10 @@ static void add_row_ensure_col_visible(TuiState *state) {
   /* Find visible range */
   size_t first_visible = scroll_col;
   size_t last_visible = scroll_col;
-  int x = 1;
+  int x = 0;
   for (size_t col = scroll_col; col < num_cols; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > layout.win_cols)
+    if (x + width + 1 > layout.win_cols)
       break;
     x += width + 1;
     last_visible = col;
@@ -51,10 +51,10 @@ static void add_row_ensure_col_visible(TuiState *state) {
   } else if (cursor_col > last_visible) {
     /* Scroll right to show cursor */
     tab->scroll_col = cursor_col;
-    x = 1;
+    x = 0;
     while (tab->scroll_col > 0) {
       int width = tui_get_column_width(state, tab->scroll_col);
-      if (x + width + 3 > layout.win_cols)
+      if (x + width + 1 > layout.win_cols)
         break;
       x += width + 1;
       if (tab->scroll_col == cursor_col)
@@ -172,6 +172,8 @@ void tui_cancel_add_row(TuiState *state) {
 
 /* Persist the new row to the database */
 bool tui_confirm_add_row(TuiState *state) {
+  if (TUI_TAB(state))
+    TUI_TAB(state)->preview = false;
   if (!state || !state->adding_row)
     return false;
 
@@ -423,15 +425,9 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Up/Down arrows - save and exit add-row mode */
-  if (render_event_is_special(event, UI_KEY_UP) ||
-      render_event_is_special(event, UI_KEY_DOWN)) {
-    tui_confirm_add_row(state);
-    return true;
-  }
-
-  /* Left arrow - move to previous column */
-  if (render_event_is_special(event, UI_KEY_LEFT)) {
+  /* Left / Up arrow - the previous field (the form lists them top down) */
+  if (render_event_is_special(event, UI_KEY_LEFT) || render_event_is_special(event, UI_KEY_UP) ||
+      render_event_is_special(event, UI_KEY_BTAB)) {
     if (state->new_row_cursor_col > 0) {
       state->new_row_cursor_col--;
       add_row_ensure_col_visible(state);
@@ -439,8 +435,8 @@ bool tui_handle_add_row_input(TuiState *state, const UiEvent *event) {
     return true;
   }
 
-  /* Right arrow - move to next column */
-  if (render_event_is_special(event, UI_KEY_RIGHT)) {
+  /* Right / Down arrow - the next field */
+  if (render_event_is_special(event, UI_KEY_RIGHT) || render_event_is_special(event, UI_KEY_DOWN)) {
     if (state->new_row_cursor_col < num_cols - 1) {
       state->new_row_cursor_col++;
       add_row_ensure_col_visible(state);

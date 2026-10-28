@@ -1,0 +1,6 @@
+restore-session
+expect-entries 2
+expect-entry form
+expect-field host
+expect-connections 1
+quit

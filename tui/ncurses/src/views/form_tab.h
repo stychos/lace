@@ -26,6 +26,9 @@ bool form_tab_do_action(TuiState *state, Tab *tab, HotkeyAction a);
 char *form_tab_label(const Tab *tab);
 /* The keys to show on the status line */
 void form_tab_status(TuiState *state, Tab *tab, char *buf, size_t n);
+/* The saved connections panel has the keys (not its filter): the status
+ * line shows the panel's hints */
+bool form_tab_list_focused(TuiState *state, Tab *tab);
 /* Fill the form from a connection string (NULL or "": empty), nothing
  * highlighted */
 void form_tab_set_connstr(TuiState *state, Tab *tab, const char *connstr);

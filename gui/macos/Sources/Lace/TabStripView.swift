@@ -1,12 +1,20 @@
 //
 // Lace macOS frontend
 // TabStripView: a row of closable tabs (connections in a workspace, table
-// and query views in a connection)
+// and query views in a connection). A tab is dragged to reorder it, or
+// dropped on another strip of the same drag group (another window's
+// connection tabs): the owner moves its entry (onMove, onAccept). The
+// drop's place is the gap nearest the pointer, marked while dragging.
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
 
 import AppKit
+
+extension NSPasteboard.PasteboardType {
+  /// A tab being dragged within the app (the item is the tab's id)
+  static let laceTab = NSPasteboard.PasteboardType("dev.hexed.lace.tab")
+}
 
 final class TabStripView: NSView {
   struct Item: Equatable {
@@ -33,10 +41,19 @@ final class TabStripView: NSView {
   var onCloseAll: (() -> Void)?
   /// More items for a tab's context menu (the table's actions)
   var menuItemsProvider: ((UUID) -> [NSMenuItem])?
+  /// Strips of one group take each other's tabs (every window's connection
+  /// tabs); nil: tabs reorder within this strip only
+  var dragGroup: String?
+  /// A tab of this strip was dropped at a new index (its final position)
+  var onMove: ((UUID, Int) -> Void)?
+  /// A tab of another strip of the group was dropped here, before index
+  var onAccept: ((UUID, TabStripView, Int) -> Void)?
 
   private let scroll = NSScrollView()
   private let stack = NSStackView()
   private var buttons: [UUID: TabButton] = [:]
+  /// Where a drop would land, while one is over the strip
+  private let marker = NSView()
 
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -66,6 +83,12 @@ final class TabStripView: NSView {
       stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
       stack.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
     ])
+    marker.wantsLayer = true
+    marker.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+    marker.layer?.cornerRadius = 1
+    marker.isHidden = true
+    addSubview(marker)
+    registerForDraggedTypes([.laceTab])
   }
 
   required init?(coder: NSCoder) { fatalError("not used") }
@@ -83,6 +106,7 @@ final class TabStripView: NSView {
     var kept: [UUID: TabButton] = [:]
     for item in items {
       let button = buttons[item.id] ?? TabButton(id: item.id)
+      button.strip = self
       button.configure(item)
       button.onSelect = { [weak self] in self?.onSelect?(item.id) }
       button.onClose = { [weak self] in self?.onClose?(item.id) }
@@ -96,6 +120,112 @@ final class TabStripView: NSView {
     updateSelection()
   }
 
+  // MARK: Dragging (the source is a TabButton, see beginDrag)
+
+  /// The tabs' ids in strip order
+  var itemIDs: [UUID] { items.map(\.id) }
+
+  /// The gap a drop at point (in this view) lands in: 0 before the first
+  /// tab ... items.count after the last
+  func insertionIndex(at point: NSPoint) -> Int {
+    stack.layoutSubtreeIfNeeded()
+    let x = convert(point, to: stack).x
+    for (i, item) in items.enumerated() {
+      guard let b = buttons[item.id] else { continue }
+      if x < b.frame.midX {
+        return i
+      }
+    }
+    return items.count
+  }
+
+  /// A point in this view over the gap before tab index (the script driver
+  /// drops there, as the pointer would)
+  func point(forGap index: Int) -> NSPoint {
+    stack.layoutSubtreeIfNeeded()
+    let frames = items.compactMap { buttons[$0.id]?.frame }
+    let x: CGFloat
+    if frames.isEmpty {
+      x = 6
+    } else if index <= 0 {
+      x = frames[0].minX + 1
+    } else if index >= frames.count {
+      x = frames[frames.count - 1].maxX + 1
+    } else {
+      x = (frames[index - 1].maxX + frames[index].minX) / 2
+    }
+    return convert(NSPoint(x: x, y: bounds.midY), from: stack)
+  }
+
+  /// Whether a tab dragged from source may land here
+  func accepts(from source: TabStripView) -> Bool {
+    source === self || (dragGroup != nil && source.dragGroup == dragGroup)
+  }
+
+  /// A tab of source dropped at point: a move within this strip, or a tab
+  /// taken from another strip of the group. False when nothing changes.
+  @discardableResult
+  func drop(_ id: UUID, from source: TabStripView, at point: NSPoint) -> Bool {
+    guard accepts(from: source) else { return false }
+    let gap = insertionIndex(at: point)
+    if source === self {
+      guard let from = itemIDs.firstIndex(of: id) else { return false }
+      let to = gap > from ? gap - 1 : gap
+      guard to != from else { return false }
+      onMove?(id, to)
+      return true
+    }
+    guard source.itemIDs.contains(id) else { return false }
+    onAccept?(id, source, gap)
+    return true
+  }
+
+  private func source(of info: NSDraggingInfo) -> (UUID, TabStripView)? {
+    guard let button = info.draggingSource as? TabButton, let strip = button.strip, accepts(from: strip) else {
+      return nil
+    }
+    return (button.id, strip)
+  }
+
+  private func showMarker(at location: NSPoint) {
+    let gap = insertionIndex(at: location)
+    let p = point(forGap: gap)
+    marker.frame = NSRect(x: p.x - 1, y: 4, width: 2, height: bounds.height - 8)
+    marker.isHidden = false
+  }
+
+  override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    draggingUpdated(sender)
+  }
+
+  override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+    guard source(of: sender) != nil else {
+      marker.isHidden = true
+      return []
+    }
+    showMarker(at: convert(sender.draggingLocation, from: nil))
+    return .move
+  }
+
+  override func draggingExited(_ sender: NSDraggingInfo?) {
+    marker.isHidden = true
+  }
+
+  override func draggingEnded(_ sender: NSDraggingInfo) {
+    marker.isHidden = true
+  }
+
+  override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    marker.isHidden = true
+    guard let (id, strip) = source(of: sender) else { return false }
+    // After the drag session is over: the drop may close the source's window
+    let point = convert(sender.draggingLocation, from: nil)
+    DispatchQueue.main.async { [weak self] in
+      self?.drop(id, from: strip, at: point)
+    }
+    return true
+  }
+
   private func updateSelection() {
     for (id, button) in buttons {
       button.isSelected = id == selectedID
@@ -107,9 +237,11 @@ final class TabStripView: NSView {
   }
 }
 
-/// One tab: icon, title, badge, close button
-final class TabButton: NSView {
+/// One tab: icon, title, badge, close button; dragging it moves it
+final class TabButton: NSView, NSDraggingSource {
   let id: UUID
+  /// The strip showing it (a drop finds the drag's source strip through it)
+  weak var strip: TabStripView?
   var onSelect: (() -> Void)?
   var onClose: (() -> Void)?
   var onCloseOthers: (() -> Void)?
@@ -131,6 +263,8 @@ final class TabButton: NSView {
   private var dimmed = false
   private var hovering = false
   private var tracking: NSTrackingArea?
+  /// Where the press started (a drag begins once the pointer moves away)
+  private var pressPoint: NSPoint?
 
   init(id: UUID) {
     self.id = id
@@ -236,7 +370,38 @@ final class TabButton: NSView {
   }
 
   override func mouseDown(with event: NSEvent) {
+    pressPoint = event.locationInWindow
     onSelect?()
+  }
+
+  override func mouseUp(with event: NSEvent) {
+    pressPoint = nil
+  }
+
+  override func mouseDragged(with event: NSEvent) {
+    guard let start = pressPoint else { return }
+    let p = event.locationInWindow
+    guard hypot(p.x - start.x, p.y - start.y) > 4 else { return }
+    pressPoint = nil
+    let item = NSPasteboardItem()
+    item.setString(id.uuidString, forType: .laceTab)
+    let dragging = NSDraggingItem(pasteboardWriter: item)
+    dragging.setDraggingFrame(bounds, contents: snapshot())
+    beginDraggingSession(with: [dragging], event: event, source: self)
+  }
+
+  /// The tab as it looks, for the drag image
+  private func snapshot() -> NSImage {
+    let image = NSImage(size: bounds.size)
+    if let rep = bitmapImageRepForCachingDisplay(in: bounds) {
+      cacheDisplay(in: bounds, to: rep)
+      image.addRepresentation(rep)
+    }
+    return image
+  }
+
+  func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+    context == .withinApplication ? .move : []
   }
 
   override func otherMouseDown(with event: NSEvent) {

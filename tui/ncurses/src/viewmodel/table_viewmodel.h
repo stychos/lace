@@ -259,4 +259,9 @@ DbConnection *table_vm_connection(const TableViewModel *vm);
  */
 typedef TableViewModel VmTable;
 
+/* A grid column's width as the notcurses TUI measures it: its name (plus
+ * room for a key's ⚷ and a foreign key's ⇒ in keys' schema) or its widest
+ * value in rows [from, to), at most DEFAULT_COL_WIDTH */
+int grid_measure_column(const ResultSet *data, size_t col, const TableSchema *keys, size_t from, size_t to);
+
 #endif /* LACE_TABLE_VIEWMODEL_H */

@@ -10,6 +10,8 @@
 #include "core/actions.h"
 #include "../../liblace/include/util/mem.h"
 #include "tui_internal.h"
+#include "views/theme.h"
+#include "core/list_model.h"
 #include "views/form_tab.h"
 #include "views/config_view.h"
 #include <ctype.h>
@@ -151,8 +153,17 @@ bool tui_init(TuiState *state, AppState *app) {
   /* Set locale for UTF-8 support */
   setlocale(LC_ALL, "");
 
+  /* The terminal's background decides "system" (asked before initscr, which
+   * would read the reply as keys) */
+  int scheme = app->config ? app->config->general.color_scheme : 0;
+  char typeahead[256];
+  size_t typed = 0;
+  bool terminal_dark = scheme == 0 ? tui_terminal_dark(typeahead, sizeof typeahead, &typed) : true;
+
   /* Initialize ncurses */
   initscr();
+  while (typed > 0) /* keys typed while the terminal was asked: read first, in order */
+    ungetch((unsigned char)typeahead[--typed]);
   /* ncurses waits ESCDELAY (default 1000 ms) after Esc for an escape
    * sequence, which made every Esc lag a second. Respect a user setting. */
   if (!getenv("ESCDELAY")) {
@@ -181,7 +192,7 @@ bool tui_init(TuiState *state, AppState *app) {
   define_key("\033[8^", KEY_F(62));   /* Ctrl+End - rxvt */
 
   /* Enable mouse support (including scroll wheel) */
-  mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON4_PRESSED |
+  mousemask(BUTTON1_CLICKED | BUTTON1_DOUBLE_CLICKED | BUTTON2_CLICKED | BUTTON4_PRESSED |
                 BUTTON5_PRESSED,
             NULL);
   mouseinterval(300); /* Double-click interval in ms */
@@ -191,7 +202,8 @@ bool tui_init(TuiState *state, AppState *app) {
     start_color();
     use_default_colors();
 
-    /* Define color pairs */
+    /* Define color pairs (the ANSI ones: the theme replaces them below on
+     * a 256-colour terminal) */
     init_pair(COLOR_HEADER, COLOR_BLACK, COLOR_CYAN);
     init_pair(COLOR_SELECTED, COLOR_BLACK, COLOR_CYAN);
     init_pair(COLOR_STATUS, COLOR_BLACK, COLOR_CYAN);
@@ -203,7 +215,11 @@ bool tui_init(TuiState *state, AppState *app) {
     init_pair(COLOR_EDIT, COLOR_BLACK, COLOR_YELLOW);
     init_pair(COLOR_ERROR_TEXT, COLOR_RED, -1);
     init_pair(COLOR_PK, COLOR_YELLOW, -1);
+    tui_theme_init(scheme, terminal_dark);
+    state->terminal_dark = terminal_dark;
   }
+
+  list_use_hotkeys(app->config); /* j, k, g, G in the palette's and other lists */
 
   /* Get terminal dimensions */
   getmaxyx(stdscr, state->term_rows, state->term_cols);
@@ -255,6 +271,12 @@ bool tui_init(TuiState *state, AppState *app) {
 void tui_cleanup(TuiState *state) {
   if (!state)
     return;
+
+  for (size_t i = 0; i < state->num_log; i++)
+    str_secure_free(state->log[i].line); /* lines may quote SQL */
+  free(state->log);
+  state->log = NULL;
+  state->num_log = state->log_cap = 0;
 
   /* Save session before cleanup (only if restore_session is enabled) */
   if (state->app && state->app->config &&
@@ -386,15 +408,15 @@ void tui_recreate_windows(TuiState *state) {
 
   state->content_rows = main_height - 3;
 
-  if (tui_sidebar_shown(state)) {
+  if (tui_sidebar_shown(state) && tui_sidebar_width(state) > 0) {
     /* Create sidebar window (starts after tab bar) */
-    state->sidebar_win = newwin(main_height, SIDEBAR_WIDTH, main_start_y, 0);
+    state->sidebar_win = newwin(main_height, tui_sidebar_width(state), main_start_y, 0);
     if (state->sidebar_win) {
       keypad(state->sidebar_win, TRUE);
       wtimeout(state->sidebar_win, 80); /* For scroll animation */
     }
-    main_start_x = SIDEBAR_WIDTH;
-    main_width = state->term_cols - SIDEBAR_WIDTH;
+    main_start_x = tui_sidebar_width(state);
+    main_width = state->term_cols - main_start_x;
   } else {
     state->sidebar_win = NULL;
   }

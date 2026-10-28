@@ -1,0 +1,19 @@
+# Closing a window whose connection another window also holds neither asks
+# nor disconnects: the transaction stays open in the other window
+connect $LACE_SMOKE_DB
+new-window
+window 2
+connect $LACE_SMOKE_DB
+query BEGIN
+run
+expect-badge 1
+window 1
+close-window
+expect-windows 1
+expect-open-connections 1
+window 2
+expect-badge 1
+query SELECT 1
+run
+expect-badge 1
+quit

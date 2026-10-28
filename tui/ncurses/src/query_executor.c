@@ -527,7 +527,6 @@ static void query_execute_impl(TuiState *state, const char *sql) {
       tab->query_paginated = false;
       free(tab->query_base_sql);
       tab->query_base_sql = NULL;
-      tui_set_status(state, "%lld rows affected", (long long)tab->query_affected);
     }
 
     if (err) {
@@ -545,26 +544,22 @@ static void query_execute_impl(TuiState *state, const char *sql) {
         tab->query_source_schema = db_get_table_schema(
             TUI_CONN(state), tab->query_source_table, &schema_err);
         free(schema_err); /* Ignore schema errors */
+        if (tab->query_source_schema) /* room for the key marks */
+          query_calculate_result_widths(tab);
       }
+      /* the divider shows the count; a truncated result says so */
       if (tab->query_paginated) {
         if (!tab->query_total_known) {
           query_count_start(state, tab);
         }
-        query_status_loaded(state, tab);
-      } else {
-        tui_set_status(state, tab->query_results->truncated
-                                  ? "%zu rows returned (truncated: result too large)"
-                                  : "%zu rows returned",
-                       tab->query_results->num_rows);
+      } else if (tab->query_results->truncated) {
+        tui_set_status(state, "%zu rows returned (truncated: result too large)", tab->query_results->num_rows);
       }
       /* History is recorded automatically by database layer */
     }
   }
 
-  /* Focus results pane after execution (only if there are results) */
-  if (!tab->query_error && tab->query_results &&
-      tab->query_results->num_rows > 0) {
-    ui->query_focus_results = true;
-    ui->query_unfocused = false;
-  }
+  /* The editor keeps the focus, as in the notcurses TUI (Esc leaves it,
+   * Down goes to the results) */
+  (void)ui;
 }

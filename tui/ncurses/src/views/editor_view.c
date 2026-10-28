@@ -6,6 +6,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "theme.h"
+#include "overlay.h"
 #include "editor_view.h"
 #include "../config/config.h"
 #include "../../liblace/include/util/mem.h"
@@ -333,22 +335,13 @@ static void editor_backspace(EditorState *state) {
 
 static void draw_editor(WINDOW *win, EditorState *state, const char *title,
                         int height, int width, const Config *config) {
-  werase(win);
-  DRAW_BOX(win, COLOR_BORDER);
-
-  /* Title */
-  int title_len = (int)strlen(title);
-  if (title_len > width - 4)
-    title_len = width - 4;
-  WITH_ATTR(win, A_BOLD, {
-    mvwaddnstr(win, 0, (width - title_len - 2) / 2, " ", 1);
-    waddnstr(win, title, title_len);
-    waddnstr(win, " ", 1);
-  });
+  tui_frame_window(win, title, NULL);
 
   /* Modified indicator */
   if (state->modified) {
+    tui_style(win, TC_ACCENT, TC_OVERLAY_BG, 0);
     mvwaddstr(win, 0, width - 12, " [modified] ");
+    tui_style(win, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
   }
 
   /* Calculate line number width based on total lines */
@@ -373,9 +366,9 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
 
     /* Draw line number */
     if (line_idx < state->num_lines) {
-      wattron(win, A_DIM);
+      tui_style(win, TC_DIM, TC_OVERLAY_BG, 0);
       mvwprintw(win, content_y + row, 1, "%*zu", lnum_width, line_idx + 1);
-      wattroff(win, A_DIM);
+      tui_style(win, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
     } else {
       /* Clear line number area for empty lines */
       mvwhline(win, content_y + row, 1, ' ', lnum_width);
@@ -401,18 +394,18 @@ static void draw_editor(WINDOW *win, EditorState *state, const char *title,
     wclrtoeol(win);
   }
 
-  /* Redraw right border */
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  for (int row = 1; row < height - 1; row++) {
-    mvwaddch(win, row, width - 1, ACS_VLINE);
-  }
+  /* Redraw right border (the lines were cleared to their end) */
+  tui_style(win, TC_OVERLAY_BORDER, TC_OVERLAY_BG, 0);
+  for (int row = 1; row < height - 1; row++)
+    mvwaddstr(win, row, width - 1, "\xe2\x94\x82");
 
-  /* Status bar separator with T-junctions */
+  /* The status row's separator */
   int status_y = height - 2;
-  mvwaddch(win, status_y - 1, 0, ACS_LTEE);
-  mvwhline(win, status_y - 1, 1, ACS_HLINE, width - 2);
-  mvwaddch(win, status_y - 1, width - 1, ACS_RTEE);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
+  mvwaddstr(win, status_y - 1, 0, "\xe2\x94\x9c");
+  for (int x = 1; x < width - 1; x++)
+    mvwaddstr(win, status_y - 1, x, "\xe2\x94\x80");
+  mvwaddstr(win, status_y - 1, width - 1, "\xe2\x94\xa4");
+  tui_style(win, TC_DIM, TC_OVERLAY_BG, 0);
 
   /* Status text */
   if (state->readonly) {

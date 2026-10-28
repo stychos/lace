@@ -189,14 +189,14 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
       getmaxyx(state->main_win, right_rows, right_cols);
       (void)right_rows;
       int avail_width = right_cols;
-      int x = 1;
+      int x = 0;
       size_t last_visible = tab->query_result_scroll_col;
       for (size_t col = tab->query_result_scroll_col;
            col < tab->query_results->num_columns; col++) {
         int w = tab->query_result_col_widths
                     ? tab->query_result_col_widths[col]
                     : 15;
-        if (x + w + 3 > avail_width)
+        if (x + w + 1 > avail_width)
           break;
         x += w + 1;
         last_visible = col;
@@ -204,13 +204,13 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
       if (tab->query_result_col > last_visible) {
         tab->query_result_scroll_col = tab->query_result_col;
         /* Adjust to show as many columns as possible */
-        x = 1;
+        x = 0;
         while (tab->query_result_scroll_col > 0) {
           int w =
               tab->query_result_col_widths
                   ? tab->query_result_col_widths[tab->query_result_scroll_col]
                   : 15;
-          if (x + w + 3 > avail_width)
+          if (x + w + 1 > avail_width)
             break;
           x += w + 1;
           if (tab->query_result_scroll_col == tab->query_result_col)
@@ -241,13 +241,13 @@ static bool query_results_handle_key(TuiState *state, Tab *tab, UITabState *ui,
       int avail_width = end_cols;
       tab->query_result_scroll_col = tab->query_result_col;
       /* Adjust to show as many columns as possible */
-      int x = 1;
+      int x = 0;
       while (tab->query_result_scroll_col > 0) {
         int w =
             tab->query_result_col_widths
                 ? tab->query_result_col_widths[tab->query_result_scroll_col]
                 : 15;
-        if (x + w + 3 > avail_width)
+        if (x + w + 1 > avail_width)
           break;
         x += w + 1;
         if (tab->query_result_scroll_col == tab->query_result_col)

@@ -1,0 +1,19 @@
+# A typed password is an edit: moving to another entry asks; Keep keeps
+# the highlight and the fields, Drop takes the other entry
+saved-add Alpha postgres://app@h1:5432/shop
+saved-add Beta postgres://app@h2:5432/shop
+form-pick Alpha
+form-field password x
+form-pick Beta
+expect-alert Drop the changes
+answer-alert cancel
+expect-field name Alpha
+expect-field password x
+expect-title Alpha
+form-pick Beta
+expect-alert Drop the changes
+answer-alert go
+expect-field name Beta
+expect-field password
+expect-title Beta
+quit

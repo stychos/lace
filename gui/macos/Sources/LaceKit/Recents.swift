@@ -22,6 +22,8 @@ public final class RecentConnections {
   /// Why the last write failed
   public private(set) var lastError: String?
   public var onChanged: (() -> Void)?
+  /// Posted after every change (every connection form's list)
+  public static let didChange = Notification.Name("LaceRecentConnectionsDidChange")
 
   public init() {
     reload()
@@ -79,5 +81,6 @@ public final class RecentConnections {
     }
     reload()
     onChanged?()
+    NotificationCenter.default.post(name: RecentConnections.didChange, object: self)
   }
 }

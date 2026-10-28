@@ -6,6 +6,7 @@
  * (Analyze, Vacuum, Optimize), each through app_ddl_confirm. A database
  * view, routine or trigger shows what the catalog listed and "Edit in a
  * query view". */
+#include "core/chrome.h"
 #include "ui/subviews.h"
 #include "app_ddl.h"
 #include "model/workspace.h"
@@ -294,4 +295,4 @@ static bool info_action(NcApp *app, View *v, HotkeyAction a, int tag) {
   return true;
 }
 
-const SvOps sv_info_ops = {info_build, info_activate, "Enter count/open/act", info_action, NULL};
+const SvOps sv_info_ops = {info_build, info_activate, CHROME_SV_INFO_ENTER, info_action, NULL};

@@ -15,6 +15,11 @@ void sidebar_show_search(ConnTab *t);
 /* Keys while the sidebar has the focus (and the list keys while no view is
  * open); false: not ours, the hotkeys may have it */
 bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev);
+/* Spatial navigation (as the ncurses TUI): Left at a panel's left edge
+ * enters the sidebar, false when it is hidden; from_panel: the filter
+ * panel's, where Right goes back. sidebar_leave: Right, to where it came from. */
+bool sidebar_enter(NcApp *app, ConnTab *t, bool from_panel);
+void sidebar_leave(NcApp *app, ConnTab *t);
 /* The object under the sidebar's cursor: its name (freed by the caller; NULL
  * when the cursor is on a query view, a section header or nothing), its kind,
  * a trigger's table and a routine's kind (allocated, may be NULL) */

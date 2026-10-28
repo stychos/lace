@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libncurses-dev libnotcurses-dev \
+            libsqlite3-dev libpq-dev libmariadb-dev libcjson-dev
+
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ncurses notcurses sqlite libpq mariadb cjson
+
+      - name: Build (warnings are errors)
+        run: make EXTRA_CFLAGS=-Werror
+
+      - name: Shared library
+        run: make -C liblace both EXTRA_CFLAGS=-Werror
+
+      - name: Unit tests
+        run: make test
+
+      - name: TUI tests (tmux)
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then sudo apt-get install -y tmux; else brew install tmux; fi
+          make test-tui
+
+      - name: Unit tests under ASan/UBSan
+        run: |
+          # Ubuntu 24.04 runners randomize 32 bits of mmap addresses, more
+          # than ASan's shadow layout allows (endless DEADLYSIGNAL)
+          if [ "$RUNNER_OS" = Linux ]; then sudo sysctl -w vm.mmap_rnd_bits=28; fi
+          make clean
+          make SANITIZE=1 test
+
+  # The GTK4/libadwaita frontend (gui/gtk): built with warnings as errors,
+  # then its unit tests (the row model). It shares liblace's SQL builders
+  # with the other frontends, so a liblace API change shows up here.
+  gtk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libsqlite3-dev libpq-dev \
+            libmariadb-dev libcjson-dev libgtk-4-dev libadwaita-1-dev \
+            libgtksourceview-5-dev
+
+      - name: Build (warnings are errors)
+        run: make gtk EXTRA_CFLAGS=-Werror
+
+      - name: Unit tests
+        run: make test-gtk
+
+  # The macOS frontend (gui/macos): the Swift package over liblace, the
+  # LaceKit checks against a private stdio daemon, and the app driven by a
+  # script (LACE_MACOS_SCRIPT) against a temporary SQLite file. The hosted
+  # runner has Xcode, so its swift accepts either build system; the Makefile
+  # passes --build-system native, which the Command Line Tools need.
+  macos-app:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: brew install sqlite libpq mariadb cjson
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version || true
+          swift --version
+
+      - name: Build the app bundle (C warnings are errors)
+        run: make macos EXTRA_CFLAGS=-Werror
+
+      - name: LaceKit checks
+        run: make test-macos
+
+      - name: Scripted smoke test
+        run: make smoke-macos
+
+      # The shippable bundle (release build, laced's Homebrew libraries
+      # bundled, ad-hoc signed: Gatekeeper needs a right-click > Open) and
+      # its DMG, kept for two weeks for testers; the smoke test runs once
+      # more against it, so the bundled daemon and libraries are exercised
+      - name: Distribution build
+        run: |
+          make dist-macos
+          sh gui/macos/Tests/smoke.sh gui/macos/build/dist/Lace.app/Contents/MacOS/Lace
+          ditto -c -k --keepParent gui/macos/build/dist/Lace.app Lace.app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Lace-macOS
+          path: |
+            Lace.app.zip
+            gui/macos/build/Lace-*.dmg
+          retention-days: 14
+
+      # The smoke test keeps its directory when an expectation failed:
+      # script.log, laced.log and the screenshots
+      - name: Keep the smoke test's files
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-smoke
+          path: /tmp/lace-smoke.*
+          if-no-files-found: ignore
+
+  # Real databases in containers (tests/integration/run.py). Linux only:
+  # hosted macOS runners have no container engine.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libncurses-dev libsqlite3-dev \
+            libpq-dev libmariadb-dev libcjson-dev openssh-client tmux
+
+      - name: Integration tests (socket and stdio daemons, slow tests too)
+        run: make test-integration IT_ARGS=--slow
+
+  # liblace for Windows, natively: MinGW-w64 from MSYS2 (the daemon and the
+  # TUI are POSIX-only for now)
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: make mingw-w64-x86_64-gcc mingw-w64-x86_64-cjson
+      - name: Build liblace (static and DLL)
+        run: make -C liblace CC=gcc EXTRA_CFLAGS=-Werror CJSON_CFLAGS=-I/mingw64/include/cjson both
+      - name: Unit tests
+        run: make -C liblace CC=gcc CJSON_CFLAGS=-I/mingw64/include/cjson test
+
+  # A Windows build of liblace talking to a real daemon over TCP, under Wine
+  windows-wine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows build under Wine (unit tests, TCP smoke test)
+        run: make test-windows
+
+  # A minute of libFuzzer per parser target (ASan + UBSan)
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fuzz
+        run: |
+          # The container's ASan shares the runner's kernel (see build job)
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          make fuzz FUZZ_SECONDS=60
+      - name: Keep crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: tests/fuzz/build/crashes
+
+  # liblace from many threads while daemons are killed and replaced, under
+  # ThreadSanitizer (tests/stress/run.sh)
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libsqlite3-dev libpq-dev \
+            libmariadb-dev libcjson-dev
+      - name: Stress (ThreadSanitizer)
+        run: |
+          # Ubuntu 24.04 randomizes more address bits than TSan supports
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          make stress STRESS_SECONDS=30

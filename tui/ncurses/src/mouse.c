@@ -38,7 +38,7 @@ static bool mouse_scroll(TuiState *state, const MouseClick *m) {
         scroll_tab->query_results->num_rows > 0) {
       /* Calculate results area position */
       int results_start_y =
-          m->main_y + query_editor_height(getmaxy(state->main_win)) + 1;
+          m->main_y + query_editor_height(scroll_tab, getmaxy(state->main_win)) + 1;
 
       if (m->y >= results_start_y) {
         /* Scroll query results using helper that handles pagination */
@@ -101,67 +101,6 @@ static bool mouse_scroll(TuiState *state, const MouseClick *m) {
   return true;
 }
 
-/* Tab bar: switch tabs (double click closes) */
-static bool mouse_click_tab_bar(TuiState *state, const MouseClick *m) {
-  /* If currently editing, save the edit first */
-  if (state->editing) {
-    tui_confirm_edit(state);
-  }
-
-  /* Calculate which tab was clicked based on x position */
-  Workspace *click_ws = TUI_WORKSPACE(state);
-  if (!click_ws)
-    return true;
-
-  int x = 0;
-  for (size_t i = 0; i < click_ws->num_tabs; i++) {
-    Tab *click_tab = &click_ws->tabs[i];
-    if (!click_tab->active)
-      continue;
-
-    int tab_width = tui_tab_width(click_tab); /* As tui_draw_tabs lays out */
-
-    if (m->x >= x && m->x < x + tab_width) {
-      if (m->is_double) {
-        /* Double-click: close the tab */
-        Tab *target_tab = &click_ws->tabs[i];
-
-        /* Check if query tab has content */
-        if (target_tab->type == TAB_TYPE_QUERY &&
-            ((target_tab->query_text && target_tab->query_len > 0) ||
-             target_tab->query_results)) {
-          /* Ask for confirmation */
-          if (!tui_show_confirm_dialog(
-                  state, "Close query tab with unsaved content?")) {
-            return true; /* User cancelled */
-          }
-        }
-
-        /* Switch to tab first if not current, then close */
-        if (i != click_ws->current_tab) {
-          tab_switch(state, i);
-        }
-        tab_close(state);
-        tui_set_sidebar_focused(state, false);
-        tui_set_filters_focused(state, false);
-      } else {
-        /* Single click: switch to tab */
-        if (i != click_ws->current_tab) {
-          tab_switch(state, i);
-          tui_set_sidebar_focused(state, false);
-          tui_set_filters_focused(state, false);
-        }
-      }
-      return true;
-    }
-
-    x += tab_width;
-    if (x > state->term_cols)
-      break;
-  }
-  return true; /* Clicked on tab bar but not on a specific tab */
-}
-
 /* Sidebar: open a table (double click: in a new tab) */
 static bool mouse_click_sidebar(TuiState *state, const MouseClick *m) {
   /* If currently editing, save the edit first */
@@ -169,18 +108,14 @@ static bool mouse_click_sidebar(TuiState *state, const MouseClick *m) {
     tui_confirm_edit(state);
   }
 
-  /* Sidebar layout (inside sidebar_win, which starts at screen row m->main_y):
-     row 0 = border+title, row 1 = filter, row 2 = separator, row 3+ = table
-     list */
+  /* Sidebar layout (inside sidebar_win, which starts at screen row
+     m->main_y): the search field while it is used, TABLES, then the list
+     from its scroll position (a note first when no table shows) */
   int sidebar_row = m->y - m->main_y; /* Convert to sidebar_win coordinates */
-
-  /* Validate sidebar_row is non-negative before use */
-  if (sidebar_row < 0) {
+  if (sidebar_row < 0)
     return true;
-  }
-
-  /* Click on filter field (row 1 in sidebar_win = screen row 2) */
-  if (sidebar_row == 1) {
+  bool search = state->sidebar_filter_active || state->sidebar_filter_len > 0;
+  if (search && sidebar_row == 0) { /* the search field */
     tui_set_sidebar_focused(state, true);
     state->sidebar_filter_active = true;
     tui_set_filters_focused(state, false);
@@ -191,12 +126,14 @@ static bool mouse_click_sidebar(TuiState *state, const MouseClick *m) {
   state->sidebar_filter_active = false;
   tui_set_filters_focused(state, false);
 
-  /* Click on table list */
-  int list_start_y = 3; /* First table entry row in sidebar window */
-  int clicked_row = sidebar_row - list_start_y;
+  /* the list's line under the click; a note is its first line */
+  int list_row = sidebar_row - tui_sidebar_list_top(state);
+  long line = list_row >= 0 ? (long)tui_sidebar_scroll(state) + list_row : -1;
+  if (tui_sidebar_has_note(state))
+    line--;
 
-  if (clicked_row >= 0) {
-    size_t target_idx = tui_sidebar_scroll(state) + (size_t)clicked_row;
+  if (line >= 0) {
+    size_t target_idx = (size_t)line;
     SidebarEntry e;
     if (tui_sidebar_entry_at(state, target_idx, &e)) {
       /* Update sidebar highlight */
@@ -205,12 +142,12 @@ static bool mouse_click_sidebar(TuiState *state, const MouseClick *m) {
       if (e.kind == SB_HEADER) { /* a click folds and unfolds the section */
         sidebar_open_entry(state, &e, false);
       } else if (m->is_double) {
-        /* Double-click: always open in new tab */
-        sidebar_open_entry(state, &e, true);
+        /* A double click opens for keeps (the preview, if it is one, kept) */
+        sidebar_open_entry(state, &e, false);
         tui_set_sidebar_focused(state, false);
       } else {
-        /* Single click: the same as Enter in the sidebar */
-        sidebar_open_entry(state, &e, false);
+        /* A single click: the preview tab */
+        sidebar_preview_entry(state, &e);
         state->sidebar_last_position = target_idx;
         tui_set_sidebar_focused(state, false);
       }
@@ -239,17 +176,38 @@ static bool mouse_click_query(TuiState *state, const MouseClick *m,
 
   /* Calculate query view layout */
   int win_rows = main_win_rows;
-  int editor_height = query_editor_height(win_rows);
-  /* Grid starts at results_start = editor_height + 1 (window coords)
-   * In screen coords: m->main_y + editor_height + 1
-   * Grid layout: column headers (1 row) + separator (1 row) + data */
+  int editor_height = query_editor_height(query_click_tab, win_rows);
+  /* The results start under the divider (window row editor_height + 1):
+   * the grid's header row, then the data */
   int results_start_y = m->main_y + editor_height + 1; /* screen coords */
-  int results_data_y =
-      results_start_y + 2; /* After col headers + separator */
+  int results_data_y = results_start_y + 1; /* after the grid's header row */
 
-  if (m->y < results_start_y) {
-    /* Clicked in editor area */
+  if (m->y < results_start_y - 1) {
+    /* A click in the editor puts the cursor there (as the notcurses TUI):
+     * the line under it, the display column after the line numbers */
     query_click_ui->query_focus_results = false;
+    query_click_ui->query_unfocused = false;
+    QueryLineInfo *lines = NULL;
+    size_t nlines = 0;
+    query_rebuild_line_cache(query_click_tab, &lines, &nlines);
+    if (nlines > 0) {
+      size_t d = nlines, gw = 1;
+      while (d >= 10) {
+        d /= 10;
+        gw++;
+      }
+      gw++; /* the gap after the numbers */
+      size_t line = query_click_tab->query_scroll_line + (size_t)(m->y - m->main_y);
+      if (line >= nlines)
+        line = nlines - 1;
+      int dx = m->x - m->sidebar_width - (int)gw;
+      query_click_tab->query_cursor =
+          query_line_col_to_cursor(query_click_tab, line, (size_t)(dx > 0 ? dx : 0), lines, nlines);
+    }
+    free(lines);
+  } else if (m->y == results_start_y - 1) {
+    /* the divider: the results */
+    query_click_ui->query_focus_results = query_click_tab->query_results != NULL;
     query_click_ui->query_unfocused = false;
   } else if (query_click_tab->query_results &&
              query_click_tab->query_results->num_rows > 0 &&
@@ -266,7 +224,7 @@ static bool mouse_click_query(TuiState *state, const MouseClick *m,
     if (target_row < query_click_tab->query_results->num_rows) {
       /* Calculate which column was clicked */
       int rel_x = m->x - m->sidebar_width;
-      int x_pos = 1;
+      int x_pos = 0;
       size_t target_col = query_click_tab->query_result_scroll_col;
 
       for (size_t col = query_click_tab->query_result_scroll_col;
@@ -358,23 +316,9 @@ static bool mouse_click_table(TuiState *state, const MouseClick *m) {
   int rel_x = m->x - m->sidebar_width;
   int rel_y = m->y - m->main_y;
 
-  /* Calculate data start row accounting for all header elements */
-  int filters_height = 0;
-  Tab *click_tab = TUI_TAB(state);
-  if (tui_filters_visible(state) && click_tab &&
-      click_tab->type == TAB_TYPE_TABLE) {
-    filters_height = tui_get_filters_panel_height(state);
-  }
-
-  /* Data rows start after: the sub-view strip + filters panel + header line
-   * + column names + sort indicator row (if sorting) + separator */
-  int data_start_y =
-      tui_subview_strip_rows(state) + filters_height + 3; /* +3 = header line + col names + separator */
-
-  /* Add extra row if sorting is active (sort indicator row) */
-  if (click_tab && click_tab->num_sort_entries > 0) {
-    data_start_y += 1;
-  }
+  /* Data rows start under the sub-view strip, the filters panel and the
+   * grid's header row */
+  int data_start_y = tui_get_layout_info(state).data_start_y;
 
   int clicked_data_row = rel_y - data_start_y;
 
@@ -388,7 +332,7 @@ static bool mouse_click_table(TuiState *state, const MouseClick *m) {
 
     if (target_row < loaded_rows) {
       /* Calculate which column was clicked */
-      int x_pos = 1; /* Data starts at x=1 */
+      int x_pos = 0; /* the grid starts at the window's edge */
       size_t target_col = scroll_col;
 
       /* Use widget col_widths if available (same as drawing code) */
@@ -445,11 +389,15 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
   /* Determine click location. Rows come from the windows themselves: the
    * tab bar is on row 0 or 1 and the content starts below it, depending on
    * whether the header is shown. */
-  int sidebar_width = state->sidebar_win ? SIDEBAR_WIDTH : 0;
+  int sidebar_width = state->sidebar_win ? tui_sidebar_width(state) : 0;
   int tab_y = state->tab_win ? getbegy(state->tab_win) : 1;
   int main_y = state->main_win ? getbegy(state->main_win) : tab_y + 1;
   MouseClick m = {mouse_x, mouse_y,      is_double,     is_scroll_up,
                   is_scroll_down, sidebar_width, tab_y, main_y};
+
+  /* The header, the tabs strip and the status line (chrome.c) */
+  if (tui_chrome_mouse(state, event))
+    return true;
 
   /* A connection form takes the clicks and the wheel below the tab bar */
   Tab *form_click_tab = TUI_TAB(state);
@@ -467,11 +415,6 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event) {
 
   if (!is_click && !is_double)
     return false;
-
-  /* Check if click is on tab bar */
-  if (mouse_y == tab_y && TUI_NUM_WORKSPACES(state) > 0) {
-    return mouse_click_tab_bar(state, &m);
-  }
 
   /* Check if click is in sidebar */
   if (state->sidebar_win && mouse_x < sidebar_width) {

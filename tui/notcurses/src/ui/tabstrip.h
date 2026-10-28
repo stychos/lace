@@ -7,7 +7,8 @@
 #include "app.h"
 #include <stddef.h>
 
-#define TABSTRIP_LABEL_MAX 24 /* display columns of a label before it is cut */
+#include "core/chrome.h"
+#define TABSTRIP_LABEL_MAX CHROME_TAB_LABEL_MAX /* display columns of a label before it is cut */
 
 /* One cell of the strip: view `view` of connection tab `tab`, or the tab
  * itself (view SIZE_MAX) when it has no views, so every connection tab has a

@@ -1,0 +1,8 @@
+python3 - "$CONFIG_DIR/connections.json" <<'PY'
+import json, sys
+kids = json.load(open(sys.argv[1]))["root"]["children"]
+folders = {k["name"]: k for k in kids if k["type"] == "folder"}
+assert [c["name"] for c in folders["B"]["children"]] == ["Local"], kids
+assert all(k["type"] == "folder" for k in kids), kids
+assert [k["name"] for k in folders["A"]["children"]] == ["A1"], kids
+PY

@@ -196,8 +196,10 @@ int query_get_col_width(Tab *tab, size_t col);
 /* Rows of the SQL editor in a main window win_rows high (30%, at least 3);
  * the separator is the next row and the results start below it. Result
  * rows begin 3 lines into the results area (title, header, rule). */
-int query_editor_height(int win_rows);
-#define QUERY_RESULTS_HEADER_ROWS 3
+/* The editor's rows in a main window win_rows high: the tab's own split
+ * (split_up/down), else a third, at least 3 and leaving 3 */
+int query_editor_height(const Tab *tab, int win_rows);
+#define QUERY_RESULTS_HEADER_ROWS 1 /* the grid's header row */
 
 /* Result rows that fit below the editor in the current main window (>= 1) */
 int query_visible_result_rows(TuiState *state);

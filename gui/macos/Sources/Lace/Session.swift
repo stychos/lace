@@ -1,11 +1,18 @@
 //
 // Lace macOS frontend
-// Session: macos-session.json next to the TUI's files, with the GTK session
-// file's shape: windows → connections (by saved id, else a password-less
-// connection string) → tabs (a table with its filters, search and sorts by
-// column name, or a query's text). Saved when the app quits and when a
-// window closes (without that window); restored at launch unless the
-// preference is off or -s / --no-session was given.
+// Session: the session.json every frontend shares (version 2; its JSON
+// layer is the shared C code, LaceKit's SessionFile): workspaces (windows,
+// geometry under "macos") → connections (by saved id, else a password-less
+// connection string; a connection form is {"form": true, "order": N} at its
+// place, nothing else, so no typed text or password is ever written) → tabs
+// (a table with its filters, search and sorts by column name, or a query's
+// text). A save reads the file again and keeps
+// what other frontends keep there; a file that does not parse is never
+// written. The old macos-session.json is read when there is no
+// session.json and renamed macos-session.json.migrated after the first
+// save. Saved when the app quits and when a window closes (without that
+// window); restored at launch unless the preference is off or -s /
+// --no-session was given.
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -15,8 +22,15 @@ import LaceKit
 
 @MainActor
 enum Session {
-  static let fileName = "macos-session.json"
+  static let fileName = "session.json"
+  static let legacyFileName = "macos-session.json"
   static var path: URL { Prefs.configDirectory.appendingPathComponent(fileName) }
+  static var legacyPath: URL { Prefs.configDirectory.appendingPathComponent(legacyFileName) }
+  /// macos-session.json was read: renamed after the first save
+  private static var legacyRead = false
+  /// A restore is running: saves leave the file alone (a window closed or
+  /// the app quit half way would write a half-restored session over it)
+  private static var restoring = false
 
   /// -s / --no-session on the command line
   static var disabledByArguments: Bool {
@@ -26,30 +40,55 @@ enum Session {
   // MARK: Save
 
   static func save(except: WorkspaceWindowController? = nil) {
-    let windows = LaceApp.shared.workspaces.filter { $0 !== except }.map(windowJSON)
-    let root: [String: Any] = ["version": 1, "windows": windows]
+    if restoring {
+      if ScriptDriver.isRequested {
+        FileHandle.standardError.write(Data("script: session not saved (a restore is running)\n".utf8))
+      }
+      return
+    }
+    let windows = LaceApp.shared.workspaces.filter { $0 !== except }
+    let front = LaceApp.shared.frontWorkspace
+    let current = windows.firstIndex { $0 === front } ?? 0
+    let workspaces = windows.map(windowJSON)
     if ScriptDriver.isRequested {
       FileHandle.standardError.write(
-        Data("script: session saved, \(windows.count) windows\(except == nil ? "" : " (a window closing)")\n".utf8))
+        Data("script: session saved, \(workspaces.count) windows\(except == nil ? "" : " (a window closing)")\n".utf8))
     }
     do {
       try FileManager.default.createDirectory(
         at: Prefs.configDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-      let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-      try Prefs.writePrivate(data, to: path)
+      // The file as it is now: other frontends' members are kept, one that
+      // does not parse is left alone (merge throws)
+      var existing: String?
+      if FileManager.default.fileExists(atPath: path.path) {
+        existing = try String(contentsOf: path, encoding: .utf8)
+      }
+      let text = try SessionFile.merge(existing: existing, workspaces: workspaces, current: current)
+      try Prefs.writePrivate(Data(text.utf8), to: path)
+      if legacyRead, rename(legacyPath.path, legacyPath.path + ".migrated") == 0 {
+        legacyRead = false
+      }
     } catch {
       NSLog("session: not saved: \(error)")
+      if ScriptDriver.isRequested {
+        FileHandle.standardError.write(Data("script: session not saved: \(error)\n".utf8))
+      }
     }
   }
 
   private static func windowJSON(_ wc: WorkspaceWindowController) -> [String: Any] {
     var j: [String: Any] = ["name": wc.name]
     if let window = wc.window {
-      j["frame"] = NSStringFromRect(window.frame)
-      j["maximized"] = window.isZoomed
+      j["macos"] = ["frame": NSStringFromRect(window.frame), "maximized": window.isZoomed] as [String: Any]
     }
-    let connections = wc.workspace.connectionControllers
-    j["connections"] = connections.map(connectionJSON)
+    j["connections"] = wc.workspace.entryControllers.enumerated().map { i, entry -> [String: Any] in
+      if let vc = entry as? ConnectionViewController {
+        return connectionJSON(vc)
+      }
+      // A form: its place and nothing else (a connection gets no "order":
+      // the TUIs would add a placeholder tab where one is)
+      return ["form": true, "order": i]
+    }
     j["current"] = wc.workspace.currentIndex ?? 0
     return j
   }
@@ -95,46 +134,95 @@ enum Session {
 
   // MARK: Restore
 
-  /// Reopen the saved windows; the first one reuses `first` when it is
-  /// empty. False when there was nothing to restore.
+  /// The saved workspaces: session.json, else the old macos-session.json;
+  /// nil when there is none or it does not parse
+  static func savedWorkspaces() -> [[String: Any]]? {
+    var file = path
+    var legacy = false
+    if !FileManager.default.fileExists(atPath: file.path) {
+      file = legacyPath
+      legacy = true
+    }
+    guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+    do {
+      let workspaces = try SessionFile.workspaces(text: text, legacy: legacy)
+      if legacy {
+        legacyRead = true
+      }
+      return workspaces
+    } catch {
+      NSLog("session: \(error)")
+      return nil
+    }
+  }
+
+  /// Reopen the saved windows; the first one reuses `first` while it holds
+  /// only the untouched form a window starts with (which then goes). Forms
+  /// come back empty in their places; a window that gets nothing back keeps
+  /// one form. False when there was nothing to restore.
   @discardableResult
   static func restore(into first: WorkspaceWindowController?) async -> Bool {
-    guard let data = try? Data(contentsOf: path),
-      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let windows = root["windows"] as? [[String: Any]], !windows.isEmpty
-    else { return false }
-    var reuse = first?.workspace.connectionControllers.isEmpty == true ? first : nil
+    guard let windows = savedWorkspaces(), !windows.isEmpty else { return false }
+    restoring = true
+    defer { restoring = false }
+    var reuse: WorkspaceWindowController?
+    if let first, first.workspace.entryCount == 1, let form = first.workspace.currentForm, form.isPristine {
+      reuse = first
+    }
     var any = false
     for wj in windows {
       let connections = wj["connections"] as? [[String: Any]] ?? []
       let wc: WorkspaceWindowController
+      var startForm: ConnectionFormViewController?
       if let r = reuse {
         wc = r
+        startForm = r.workspace.currentForm
         reuse = nil
       } else {
-        wc = LaceApp.shared.newWorkspace()
+        wc = LaceApp.shared.newWorkspace(withForm: false)
       }
       if let name = wj["name"] as? String, !name.isEmpty {
         wc.rename(name)
       }
-      if let frame = wj["frame"] as? String, let window = wc.window {
+      let geometry = wj["macos"] as? [String: Any]
+      if let frame = geometry?["frame"] as? String, let window = wc.window {
         window.setFrame(NSRectFromString(frame), display: true)
-        if wj["maximized"] as? Bool == true, !window.isZoomed {
+        if geometry?["maximized"] as? Bool == true, !window.isZoomed {
           window.zoom(nil)
         }
       }
       any = true
-      for cj in connections {
-        await restoreConnection(cj, into: wc.workspace)
+      let current = wj["current"] as? Int ?? 0
+      var select: UUID?
+      for (i, cj) in connections.enumerated() {
+        if wc.workspace.isClosed { break }  // closed while it was being restored
+        let entry: (any WorkspaceEntry)?
+        if cj["form"] as? Bool == true {
+          entry = wc.workspace.addForm(at: wc.workspace.entryCount)
+        } else {
+          entry = await restoreConnection(cj, into: wc.workspace)
+        }
+        if i == current, let entry {
+          select = entry.id
+        }
       }
-      if let current = wj["current"] as? Int {
-        wc.workspace.select(index: current)
+      if wc.workspace.isClosed { continue }
+      if let startForm {
+        wc.workspace.dropPristineForm(startForm)
+      }
+      if wc.workspace.entryCount == 0 {
+        wc.workspace.addForm()  // nothing came back: never an empty window
+      } else if let select, let i = wc.workspace.entryControllers.firstIndex(where: { $0.id == select }) {
+        wc.workspace.select(index: i)
       }
     }
     return any
   }
 
-  private static func restoreConnection(_ cj: [String: Any], into workspace: WorkspaceViewController) async {
+  @discardableResult
+  private static func restoreConnection(_ cj: [String: Any], into workspace: WorkspaceViewController) async
+    -> ConnectionViewController?
+  {
     var saved: SavedConnection?
     var connstr: String?
     if let id = cj["saved_id"] as? String, let c = LaceApp.shared.savedConnection(id: id) {
@@ -144,8 +232,8 @@ enum Session {
     if connstr == nil {
       connstr = cj["connstr"] as? String
     }
-    guard let connstr, !connstr.isEmpty else { return }
-    guard let vc = await workspace.open(connectionString: connstr, saved: saved) else { return }
+    guard let connstr, !connstr.isEmpty else { return nil }
+    guard let vc = await workspace.open(connectionString: connstr, saved: saved) else { return nil }
     vc.isSidebarVisible = cj["sidebar"] as? Bool ?? true
     for tj in cj["tabs"] as? [[String: Any]] ?? [] {
       switch tj["type"] as? String {
@@ -180,5 +268,6 @@ enum Session {
     if let current = cj["current"] as? Int {
       vc.content.select(index: current)
     }
+    return vc
   }
 }

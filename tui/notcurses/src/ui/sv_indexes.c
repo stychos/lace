@@ -4,6 +4,7 @@
  * c a check constraint, x drop (the primary key is Structure's key editor's),
  * R or Enter rename (SQLite and MariaDB drop and create, the statement
  * shows it); every change goes through app_ddl_confirm. */
+#include "core/chrome.h"
 #include "ui/subviews.h"
 #include "app_ddl.h"
 #include "model/workspace.h"
@@ -271,5 +272,5 @@ static void indexes_activate(NcApp *app, View *v, int tag) {
   if (ix) rename_index(app, v, ix);
 }
 
-const SvOps sv_indexes_ops = {indexes_build, indexes_activate, "Enter rename", indexes_action,
-                              "+ index  c check  x drop  R rename"};
+const SvOps sv_indexes_ops = {indexes_build, indexes_activate, CHROME_SV_INDEXES_ENTER, indexes_action,
+                              CHROME_SV_INDEXES_KEYS};

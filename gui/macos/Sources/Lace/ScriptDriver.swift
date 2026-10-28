@@ -7,15 +7,28 @@
 // Commands, separated by ';' (a ';' inside SQL is written '\;'):
 //   wait MS                  pause
 //   connect URL              a connection string or SQLite path, as typed
-//   saved-add NAME URL       save URL as a connection named NAME (no Keychain)
+//   saved-add NAME URL       save URL as a connection named NAME (its password not kept)
+//   saved-add-password NAME URL   the same, the URL's password saved (in the
+//                            Keychain when the preference is on)
+//   folder-add NAME [PARENT] a folder of saved connections (in PARENT, by name)
+//   keychain-refuse on|off   the Keychain stand-in hands no password back, as
+//                            when the person denies the prompt
 //   connect-saved NAME       connect through the saved connection named NAME
-//   close-connection         disconnect the current connection tab
-//   close-tab                close the current inner tab
+//   close-connection         close the current strip entry (⇧⌘W)
+//   close-tab                ⌘W: the current inner tab (the last one follows
+//                            keep_connection_tab), else the current entry
+//   new-connection-tab       ⌘T: a connection form after the current entry
+//   drag-entry FROM GAP      drop the window's FROM-th entry (0-based) on its
+//                            strip at gap GAP (0: before the first tab), as a drag does
+//   drag-entry-to N GAP      drop the current entry on window N's strip at GAP
+//   drag-tab FROM GAP        the same for the current connection's inner tabs
+//   expect-entry-titles A|B  the window's strip titles, in order
+//   expect-tab-titles A|B    the current connection's inner tab titles, in order
 //   expect-saved N           N saved connections
 //   expect-recent N [TEXT]   N recent connections, the newest containing TEXT
 //   expect-paging METHOD     the table's last page was read by offset,
 //                            keyset or keyset-backward
-//   save-session | restore-session   write macos-session.json / reopen it
+//   save-session | restore-session   write session.json / reopen it
 //   expect-connections N     N connection tabs in the workspace
 //   expect-tabs N            N inner tabs in the current connection
 //   table NAME               open a table (kept, not a preview) and wait for
@@ -43,7 +56,7 @@
 //   expect-status TEXT       the query toolbar's status contains TEXT
 //   expect-history N [TEXT]  the connection's history holds N entries, the
 //                            last one containing TEXT
-//   sheet add-row|history|connect|preferences   open that sheet or window
+//   sheet add-row|history|preferences   open that sheet or window
 //   dismiss-sheet            close it again
 //   answer TEXT              what the next name prompt (rename, new table, the
 //                            counter, a comment) answers; empty: cancel
@@ -68,7 +81,33 @@
 //   quit                     exit 0, or 1 when an expectation failed
 //   terminate                quit through NSApplication, as ⌘Q does (1 on failures)
 //   close-window             close the workspace window, as the close button does
-//   expect-session-windows N macos-session.json holds N windows
+//   expect-session-windows N session.json holds N workspaces (windows)
+//   expect-entries N         N strip entries in the current window (forms included)
+//   expect-entry KIND        the selected entry is a form, a connection, or none
+//   expect-title TEXT        the selected entry's strip title
+//   expect-windows N         N workspace windows
+//   new-window               a new window, as ⌘N (the script stays on its window)
+//   window N                 the window made N-th (1, 2, ...) becomes the script's
+//                            (when the script's window closes, the newest open one does)
+//   expect-open-connections N   the app's open database connections
+//   expect-badge N           N strip entries of the window show a transaction badge
+//   expect-alert TEXT        an alert over the window contains TEXT (waits)
+//   expect-no-alert          no alert over the window (after a moment)
+//   answer-alert go|cancel   press the alert's action or Cancel button
+//   form-uri TEXT            type into the current form's URI line and apply it
+//   form-field KEY VALUE     set a form field (name, driver, file, host, port,
+//                            database, user, password, save-password, ssh,
+//                            ssh-host, ssh-port, ssh-user, ssh-key,
+//                            ssh-password, save-ssh-password; true/false for boxes)
+//   form-folder NAME         the form's Folder pop-up ("" for the top level)
+//   form-pick NAME           highlight a saved connection (or Recent entry) as a click does
+//   form-action ACTION       open, background, new-window, to-window:N, save,
+//                            save-as-new, test, clear (waits for a connect)
+//   expect-field KEY [VALUE] the form's field holds VALUE (none: empty)
+//   expect-form-message TEXT the form's message line contains TEXT
+//   expect-uri-masked        the URI line shows ••••• and not the typed password
+//   expect-open-uses TEXT    the string Open would connect with contains TEXT
+//                            (a Keychain password; never logged)
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -82,17 +121,24 @@ final class ScriptDriver {
     !(ProcessInfo.processInfo.environment["LACE_MACOS_SCRIPT"] ?? "").isEmpty
   }
 
-  /// Start the driver on the given workspace if $LACE_MACOS_SCRIPT is set
-  static func startIfRequested(in workspace: WorkspaceViewController) {
+  /// Start the driver on the given window if $LACE_MACOS_SCRIPT is set
+  static func startIfRequested(in window: WorkspaceWindowController) {
     guard let script = ProcessInfo.processInfo.environment["LACE_MACOS_SCRIPT"], !script.isEmpty else { return }
-    let driver = ScriptDriver(workspace: workspace, script: script)
+    let driver = ScriptDriver(window: window, script: script)
     Task { await driver.run() }
   }
 
-  private let workspace: WorkspaceViewController
+  /// Expectations that failed so far (the app's exit status when it quits by itself)
+  private(set) static var failureCount = 0
+
+  /// The window the commands act on (`window N` changes it)
+  private var windowController: WorkspaceWindowController
+  private var workspace: WorkspaceViewController { windowController.workspace }
   private let commands: [String]
   private var checks = 0
-  private var failures = 0
+  private var failures = 0 {
+    didSet { Self.failureCount = failures }
+  }
   private let timeout: Double = 30
   /// The answers queued for the name prompts (the `answer` command)
   nonisolated(unsafe) private static var promptAnswers: [String] = []
@@ -102,16 +148,19 @@ final class ScriptDriver {
     promptAnswers.isEmpty ? nil : promptAnswers.removeFirst()
   }
 
-  private init(workspace: WorkspaceViewController, script: String) {
-    self.workspace = workspace
+  private init(window: WorkspaceWindowController, script: String) {
+    windowController = window
     commands = script.replacingOccurrences(of: "\\;", with: "\u{1}")
       .split(separator: ";").map {
         $0.replacingOccurrences(of: "\u{1}", with: ";").trimmingCharacters(in: .whitespacesAndNewlines)
       }.filter { !$0.isEmpty }
     // Scripts never answer dialogs; errors they cause go to the log. The
-    // Keychain would ask too: passwords stay in the private HOME's file.
+    // Keychain would ask too: passwords stay in the private HOME's file,
+    // unless the run named a stand-in file for the Keychain's items
     LaceApp.shared.prefs.confirmDelete = false
-    LaceApp.shared.prefs.keychainPasswords = false
+    if !Keychain.isStandIn {
+      LaceApp.shared.prefs.keychainPasswords = false
+    }
     DdlRunner.autoConfirm = true
     DdlRunner.logger = { line in FileHandle.standardError.write(Data("script: \(line)\n".utf8)) }
     Alerts.logger = { title, message in
@@ -137,12 +186,20 @@ final class ScriptDriver {
   private var grid: GridController? { table?.grid ?? query?.grid }
   private var model: RowModel? { grid?.model }
 
+  /// The newest alert over the script's window containing text
+  private func alert(containing text: String) -> Alerts.Shown? {
+    Alerts.shown.last { $0.window === windowController.window && (text.isEmpty || $0.text.contains(text)) }
+  }
+
   /// Poll a condition on the main actor until it holds or the timeout passes
-  private func waitUntil(_ what: String, _ condition: () -> Bool) async -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
+  /// (quiet: the caller reports the failure itself; a shorter timeout)
+  private func waitUntil(_ what: String, quiet: Bool = false, _ condition: () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(quiet ? 5 : timeout)
     while !condition() {
       if Date() > deadline {
-        check(false, "timed out waiting for \(what)")
+        if !quiet {
+          check(false, "timed out waiting for \(what)")
+        }
         return false
       }
       try? await Task.sleep(for: .milliseconds(25))
@@ -162,6 +219,10 @@ final class ScriptDriver {
   func run() async {
     log("\(commands.count) commands")
     for command in commands {
+      // The script's window closed (its last entry did): on with the newest
+      if !LaceApp.shared.workspaces.contains(where: { $0 === windowController }), let newest = LaceApp.shared.workspaces.last {
+        windowController = newest
+      }
       let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
       let verb = parts[0]
       let arg = parts.count > 1 ? parts[1] : ""
@@ -182,12 +243,13 @@ final class ScriptDriver {
         }
         let vc = await workspace.open(connectionString: cs)
         check(vc != nil, "connect \(arg)")
-      case "saved-add":
+      case "saved-add", "saved-add-password":
         guard words.count >= 2, var c = SavedConnection(connectionString: words[1...].joined(separator: " ")) else {
-          check(false, "saved-add: bad arguments")
+          check(false, "\(verb): bad arguments")
           continue
         }
         c.name = words[0]
+        c.savePassword = verb == "saved-add-password" && c.password != nil
         do {
           try LaceApp.shared.store(c)
         } catch {
@@ -201,8 +263,43 @@ final class ScriptDriver {
         let vc = await workspace.open(connectionString: c.connectionString(), saved: c)
         check(vc != nil, "connect-saved \(arg)")
       case "close-tab":
-        check(connection?.closeCurrentTab() == true, "close-tab: no tab")
+        check(workspace.currentEntry != nil, "close-tab: nothing to close")
+        workspace.closeTab(nil)
+        try? await Task.sleep(for: .milliseconds(100))
         await settle()
+      case "new-connection-tab":
+        workspace.newConnectionTab(nil)
+      case "drag-entry", "drag-tab":
+        guard words.count == 2, let from = Int(words[0]), let gap = Int(words[1]) else {
+          check(false, "\(verb): bad arguments")
+          continue
+        }
+        guard let strip = verb == "drag-entry" ? workspace.stripView : connection?.content.stripView,
+          from >= 0, from < strip.itemIDs.count
+        else {
+          check(false, "\(verb) \(arg): no such tab")
+          continue
+        }
+        strip.drop(strip.itemIDs[from], from: strip, at: strip.point(forGap: gap))
+        try? await Task.sleep(for: .milliseconds(100))
+      case "drag-entry-to":
+        guard words.count == 2, let n = Int(words[0]), let gap = Int(words[1]),
+          let to = LaceApp.shared.workspace(number: n), let id = workspace.currentEntry?.id
+        else {
+          check(false, "drag-entry-to \(arg): no such window or no entry")
+          continue
+        }
+        let strip = to.workspace.stripView
+        check(
+          strip.drop(id, from: workspace.stripView, at: strip.point(forGap: gap)),
+          "drag-entry-to \(arg): the drop was refused")
+        try? await Task.sleep(for: .milliseconds(300))
+      case "expect-entry-titles":
+        let got = workspace.stripView.items.map(\.title).joined(separator: "|")
+        check(got == arg, "expect-entry-titles \(arg): got \(got)")
+      case "expect-tab-titles":
+        let got = connection?.content.stripView.items.map(\.title).joined(separator: "|") ?? "<no connection>"
+        check(got == arg, "expect-tab-titles \(arg): got \(got)")
       case "close-connection":
         guard let connection else {
           check(false, "close-connection: no connection")
@@ -422,8 +519,6 @@ final class ScriptDriver {
             continue
           }
           connection.showHistory(nil)
-        case "connect":
-          workspace.showConnectSheet(editing: nil)
         case "preferences":
           LaceApp.shared.showPreferences()
         default:
@@ -562,9 +657,66 @@ final class ScriptDriver {
         if let data = try? Data(contentsOf: Session.path),
           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         {
-          n = (root["windows"] as? [Any])?.count ?? -1
+          n = (root["workspaces"] as? [Any])?.count ?? -1
         }
         check(n == Int(arg), "expect-session-windows \(arg): got \(n)")
+      case "expect-entries":
+        check(workspace.entryCount == Int(arg), "expect-entries \(arg): got \(workspace.entryCount)")
+      case "expect-entry":
+        check(workspace.currentKind == arg, "expect-entry \(arg): got \(workspace.currentKind)")
+      case "expect-title":
+        check(workspace.currentTitle == arg, "expect-title \(arg): got \(workspace.currentTitle ?? "<none>")")
+      case "expect-windows":
+        let n = LaceApp.shared.workspaces.count
+        check(n == Int(arg), "expect-windows \(arg): got \(n)")
+      case "new-window":
+        LaceApp.shared.newWorkspace()
+        try? await Task.sleep(for: .milliseconds(100))
+      case "window":
+        guard let n = Int(arg), let wc = LaceApp.shared.workspace(number: n) else {
+          check(false, "window \(arg): no such window")
+          continue
+        }
+        windowController = wc
+        wc.window?.makeKeyAndOrderFront(nil)
+      case "expect-open-connections":
+        let n = LaceApp.shared.openConnectionCount
+        check(n == Int(arg), "expect-open-connections \(arg): got \(n)")
+      case "expect-badge":
+        let ok = await waitUntil("\(arg) badges", quiet: true) { workspace.badgeCount == Int(arg) }
+        check(ok, "expect-badge \(arg): got \(workspace.badgeCount)")
+      case "expect-alert":
+        let ok = await waitUntil("an alert with \(arg)", quiet: true) { alert(containing: arg) != nil }
+        check(ok, "expect-alert \(arg): alerts \(Alerts.shown.map(\.text))")
+      case "expect-no-alert":
+        try? await Task.sleep(for: .milliseconds(300))
+        let mine = Alerts.shown.filter { $0.window === windowController.window }
+        check(mine.isEmpty, "expect-no-alert: \(mine.map(\.text))")
+      case "answer-alert":
+        let ok = await waitUntil("an alert to answer", quiet: true) { alert(containing: "") != nil }
+        guard ok, let shown = alert(containing: "") else {
+          check(false, "answer-alert: no alert over the window")
+          continue
+        }
+        Alerts.answer(shown, go: arg == "go")
+        try? await Task.sleep(for: .milliseconds(200))
+      case "form-uri", "form-field", "form-folder", "form-pick", "form-action", "expect-field", "expect-form-message",
+        "expect-uri-masked", "expect-open-uses":
+        guard let form = workspace.currentForm else {
+          check(false, "\(verb): the current entry is not a form")
+          continue
+        }
+        await formCommand(form, verb, arg, words)
+      case "folder-add":
+        let parent = words.count > 1 ? LaceApp.shared.saved.folders.first { $0.name == words[1] }?.path : []
+        do {
+          try LaceApp.shared.saved.addFolder(named: words.first ?? "", inFolder: parent ?? [])
+        } catch {
+          check(false, "folder-add: \(error)")
+        }
+      case "keychain-refuse":
+        check(Keychain.isStandIn, "keychain-refuse: no Keychain stand-in")
+        Keychain.standInRefuses = arg == "on"
       case "quit":
         log("\(checks) checks, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
@@ -572,7 +724,49 @@ final class ScriptDriver {
         check(false, "unknown command \(verb)")
       }
     }
+    if failures > 0 {
+      // Nothing to wait for: the run failed already
+      log("\(checks) checks, \(failures) failed (no quit)")
+      exit(1)
+    }
     log("\(checks) checks, \(failures) failed (no quit: staying open)")
+  }
+
+  private func formCommand(_ form: ConnectionFormViewController, _ verb: String, _ arg: String, _ words: [String]) async {
+    let rest = words.count > 1 ? words[1...].joined(separator: " ") : ""
+    switch verb {
+    case "form-uri":
+      form.setURI(arg)
+    case "form-field":
+      check(!words.isEmpty && form.setField(words[0], rest), "form-field \(words.first ?? ""): no such field")
+    case "form-folder":
+      check(form.setFolder(named: arg), "form-folder \(arg): no such folder")
+    case "form-pick":
+      check(form.pick(name: arg), "form-pick \(arg): no such entry")
+      try? await Task.sleep(for: .milliseconds(100))
+    case "form-action":
+      form.perform(arg)
+      try? await Task.sleep(for: .milliseconds(50))
+      _ = await waitUntil("the form's \(arg)") { !form.isBusy }
+      try? await Task.sleep(for: .milliseconds(100))
+    case "expect-field":
+      let got = form.field(words.first ?? "")
+      check(got == rest, "expect-field \(arg): got \(got ?? "<no such field>")")
+    case "expect-form-message":
+      let got = form.messageText ?? ""
+      check(got.contains(arg), "expect-form-message \(arg): got \(got)")
+    case "expect-uri-masked":
+      let uri = form.uriText
+      let pw = form.field("password") ?? ""
+      check(
+        uri.contains(ConnectionFields.passwordMask) && (pw.isEmpty || !uri.contains(pw)),
+        "expect-uri-masked: got \(uri)")
+    case "expect-open-uses":
+      let cs = form.openTarget()?.connectionString ?? ""
+      check(cs.contains(arg), "expect-open-uses: the string Open would use does not hold it")
+    default:
+      break
+    }
   }
 
   /// A PNG of the window's content (no screen-recording permission needed)

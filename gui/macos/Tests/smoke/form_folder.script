@@ -1,0 +1,12 @@
+# The Folder pop-up keeps its folder when the folder list changes under it
+# (a folder added before it in the list), and Save files the entry there
+saved-add Local sqlite://$LACE_SMOKE_DB
+folder-add A
+folder-add B
+form-pick Local
+form-folder B
+folder-add A1 A
+form-action save
+expect-form-message Saved Local
+form-action save
+quit

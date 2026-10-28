@@ -31,6 +31,7 @@ void filter_panel_add(NcApp *app, View *v);              /* a row for the cursor
 void filter_panel_remove(NcApp *app, View *v);           /* the cursor row */
 /* The field columns of a panel width cols: [x, x + w) per field, del_x the
  * remove mark; value2 is the second half of the value field (BETWEEN) */
-typedef struct { int col_x, col_w, op_x, op_w, val_x, val_w, val2_x, val2_w, del_x; } FpLayout;
+#include "core/chrome.h"
+typedef ChromeFilterLayout FpLayout; /* the shared layout (core/chrome.h) */
 void filter_panel_layout(int cols, bool two_values, FpLayout *L);
 #endif

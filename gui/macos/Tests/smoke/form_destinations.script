@@ -1,0 +1,18 @@
+# Background tab (after the form, the form stays), New window (its only
+# entry), To window (the end of the picked window); one connection for all
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action background
+expect-entries 2
+expect-entry form
+form-action new-window
+expect-windows 2
+window 2
+expect-entries 1
+expect-entry connection
+window 1
+form-action to-window:2
+window 2
+expect-entries 2
+expect-open-connections 1
+quit

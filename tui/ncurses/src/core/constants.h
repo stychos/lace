@@ -27,6 +27,7 @@ typedef enum {
 
 /* Page size for data loading */
 #define TUI_PAGE_SIZE 1000
+#define TUI_LOG_MAX 500 /* status messages the log keeps (as the notcurses TUI) */
 
 /* Number of pages to prefetch */
 #define PREFETCH_PAGES 2

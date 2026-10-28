@@ -35,7 +35,7 @@ def test_last_view_becomes_form(home):
         t.keys("C-w")
         t.wait("New connection")
         t.wait("URI")
-        assert "Tables" not in t.text()
+        assert "TABLES" not in t.text()
         assert t.quit() == 0
 
 
@@ -50,11 +50,11 @@ def test_keep_connection_tab_off(home):
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("C-n")                        # workspace 2 with the connection
-        t.wait("W2]")
+        t.wait_workspace("Workspace 2")
         t.open_table("big")                  # the table takes the connection tab's place
         assert "t.sqlite" not in t.screen()[1]
         t.keys("C-w")                        # its last tab: workspace 2 goes
-        t.wait(lambda s: "W2]" not in s and "URI" in s)
+        t.wait(lambda s: t.workspace() != "Workspace 2" and "URI" in s)
         assert "Local" in t.screen()[1]      # workspace 1's form
         assert t.quit() == 0
 
@@ -63,12 +63,12 @@ def test_form_closes(home):
     """A form among other tabs simply goes"""
     db = make_db(home, rows=3)
     with Tui(home, ["-s", db]) as t:
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("C-t")
         t.wait("URI")
         t.keys("C-w")
         t.wait(lambda s: "URI" not in s)
-        t.wait("Tables")
+        t.wait("TABLES")
         assert t.quit() == 0
 
 
@@ -110,13 +110,13 @@ def test_shared_connection_survives(home):
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("Enter")                      # workspace 1: the connection
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("C-t")
         t.wait("URI")
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("C-n")                        # workspace 2 shares it
-        t.wait("W2]")
+        t.wait_workspace("Workspace 2")
         t.keys("p")
         t.type("BEGIN")
         t.keys("C-r")
@@ -124,11 +124,11 @@ def test_shared_connection_survives(home):
         t.keys("Escape")
         time.sleep(0.2)                      # Esc and a key at once is Alt+key
         t.keys("{")                # workspace 1, its form
-        t.wait(lambda s: "W1]" in s)
+        t.wait_workspace("Workspace")
         t.keys("Escape")                     # the form's panel, which leaves [ to the tab keys
         t.wait_status("folder")
         t.keys("[")                          # the connection tab
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("C-w")                        # no question: workspace 2 holds it
         t.wait("URI")
         assert "transaction" not in t.text()
@@ -137,7 +137,7 @@ def test_shared_connection_survives(home):
         t.keys("C-w")
         t.wait("unsaved content")
         t.keys("y")                          # the connection tab stays
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("C-w")                        # the last tab using the connection
         t.wait("A transaction is open")
         t.keys("n")
@@ -146,11 +146,11 @@ def test_shared_connection_survives(home):
 
 
 def test_config_row(home):
-    """The configuration dialog has the last-workspace setting"""
+    """The preferences have the last-workspace setting"""
     with Tui(home, ["-s"]) as t:
         t.wait("URI")
         t.keys(",")
-        t.wait("When the last workspace closes")
+        t.wait("Last workspace closes")
         assert t.quit() == 0
 
 
@@ -166,6 +166,6 @@ def test_drop_only_open_table_keeps_connection(home):
         t.wait("Drop table big")
         t.keys("y")
         t.wait_status("Drop table: done")
-        t.wait("Tables")
+        t.wait("TABLES")
         assert "URI" not in t.text()
         assert t.quit() == 0

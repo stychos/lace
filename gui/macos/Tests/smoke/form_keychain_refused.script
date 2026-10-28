@@ -1,0 +1,17 @@
+# keychain
+# config: {"general": {"daemon_spawn_mode": 1}, "macos": {"keychain_passwords": true}}
+# A saved password the Keychain does not hand back (the prompt denied):
+# saving the entry's other edits keeps the Keychain item
+saved-add-password Secret postgres://app:sekret@127.0.0.1:9/shop
+keychain-refuse on
+form-pick Secret
+expect-field password
+expect-field save-password true
+form-field user app2
+form-action save
+expect-form-message Saved Secret
+form-action clear
+keychain-refuse off
+form-pick Secret
+expect-field password sekret
+quit

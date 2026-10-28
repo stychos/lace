@@ -69,103 +69,10 @@ char **tui_ddl_names(TuiState *state, const char *what, const char *arg, size_t 
  * The confirmation
  * ========================================================================== */
 
-/* Greedy word wrap by display width into lines (allocated) */
-static size_t wrap_lines(const char *text, int width, char ***out) {
-  *out = NULL;
-  size_t n = 0, cap = 0;
-  const char *p = text;
-  if (width < 4)
-    width = 4;
-  while (*p) {
-    const char *eol = strchr(p, '\n');
-    size_t seg = eol ? (size_t)(eol - p) : strlen(p);
-    size_t pos = 0;
-    do {
-      size_t keep = utf8_fit(p + pos, seg - pos, width, NULL);
-      if (keep < seg - pos) { /* break at the last space when there is one past the first third */
-        size_t sp = keep;
-        while (sp > 0 && p[pos + sp] != ' ')
-          sp--;
-        if (sp > keep / 3)
-          keep = sp;
-      }
-      if (keep == 0)
-        keep = utf8_next(p + pos, seg - pos, 0);
-      if (n == cap) {
-        cap = cap ? cap * 2 : 8;
-        *out = safe_realloc(*out, cap * sizeof **out);
-      }
-      (*out)[n++] = str_ndup(p + pos, keep);
-      pos += keep;
-      while (pos < seg && p[pos] == ' ')
-        pos++;
-    } while (pos < seg);
-    p += seg;
-    if (*p == '\n')
-      p++;
-  }
-  return n;
-}
 
 bool tui_ddl_confirm(TuiState *state, const char *title, const char *message, const char *yes_label,
                      bool destructive) {
-  (void)state;
-  int screen_h, screen_w;
-  getmaxyx(stdscr, screen_h, screen_w);
-  int width = screen_w - 4 < 72 ? screen_w - 4 : 72;
-  if (width < 24 || screen_h < 8)
-    return false;
-  char **lines;
-  size_t n = wrap_lines(message ? message : "", width - 4, &lines);
-  int height = (int)n + 5;
-  if (height > screen_h - 2)
-    height = screen_h - 2;
-  int shown = height - 5;
-  WINDOW *dlg = dialog_create(height, width, screen_h, screen_w);
-  if (!dlg) {
-    for (size_t i = 0; i < n; i++)
-      free(lines[i]);
-    free(lines);
-    return false;
-  }
-  int focus = 0; /* 0 Cancel, 1 yes */
-  bool running = true, yes = false;
-  char *ylabel = str_printf("[ %s ]", yes_label && *yes_label ? yes_label : "Yes");
-  while (running) {
-    werase(dlg);
-    DRAW_BOX(dlg, COLOR_BORDER);
-    char *t = str_printf(" %s ", title ? title : "Confirm");
-    int tw = utf8_width(t, strlen(t));
-    if (tw > width - 4)
-      tw = width - 4;
-    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, (width - tw) / 2, tw, t));
-    free(t);
-    for (int i = 0; i < shown && (size_t)i < n; i++)
-      tui_print_clip(dlg, 2 + i, 2, width - 4, lines[i]);
-    int cw = (int)strlen("[ Cancel ]"), yw = utf8_width(ylabel, strlen(ylabel));
-    int cx = (width - (cw + 2 + yw)) / 2;
-    if (cx < 1)
-      cx = 1;
-    WITH_ATTR(dlg, focus == 0 ? A_REVERSE : A_NORMAL, mvwprintw(dlg, height - 2, cx, "[ Cancel ]"));
-    attr_t ya = focus == 1 ? A_REVERSE | A_BOLD : destructive ? COLOR_PAIR(COLOR_ERROR_TEXT) | A_BOLD : A_NORMAL;
-    WITH_ATTR(dlg, ya, tui_print_clip(dlg, height - 2, cx + cw + 2, yw, ylabel));
-    wrefresh(dlg);
-    int ch = wgetch(dlg);
-    switch (ch) {
-    case KEY_LEFT: case KEY_RIGHT: case '\t': case KEY_BTAB: focus = !focus; break;
-    case 'y': case 'Y': yes = true; running = false; break;
-    case 'n': case 'N': case 27: running = false; break;
-    case '\n': case KEY_ENTER: yes = focus == 1; running = false; break;
-    default: break;
-    }
-  }
-  free(ylabel);
-  for (size_t i = 0; i < n; i++)
-    free(lines[i]);
-  free(lines);
-  delwin(dlg);
-  touchwin(stdscr);
-  return yes;
+  return tui_confirm(state, title, message, yes_label, destructive);
 }
 
 /* ==========================================================================
@@ -183,16 +90,7 @@ static bool same_object(const Tab *t, size_t conn_idx, LaceObjectKind kind, cons
 }
 
 /* Remove tab i of workspace w: the tab_ui entries shift as tab_close does */
-static void close_elsewhere(TuiState *state, size_t w, size_t i) {
-  Workspace *ws = &state->app->workspaces[w];
-  size_t old = ws->num_tabs;
-  workspace_close_tab(ws, i);
-  if (old > 0 && state->tab_ui && w < state->tab_ui_ws_capacity && state->tab_ui[w] && old <= state->tab_ui_capacity[w]) {
-    for (size_t k = i; k < old - 1; k++)
-      state->tab_ui[w][k] = state->tab_ui[w][k + 1];
-    memset(&state->tab_ui[w][old - 1], 0, sizeof(UITabState));
-  }
-}
+static void close_elsewhere(TuiState *state, size_t w, size_t i) { tui_close_tab_at(state, w, i); }
 
 static void after_change(TuiState *state, size_t conn_idx, LaceObjectKind kind, const char *object, DdlAfter after,
                          const char *arg) {

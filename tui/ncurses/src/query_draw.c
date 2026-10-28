@@ -1,6 +1,9 @@
 /*
  * Lace
- * Query tab drawing: the editor / results split and the screen
+ * Query tab drawing, as the notcurses TUI's query view: the editor (line
+ * numbers, SQL highlighting) over a divider that carries the result's
+ * summary ("3 rows", "1,000+ rows", "2 rows affected", the error), the
+ * results grid below it
  *
  * (c) iloveyou, 2025. MIT License.
  * https://github.com/stychos/lace
@@ -8,200 +11,245 @@
 
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
+#include "core/chrome.h"
+#include "core/sqlhl.h"
 #include "query_internal.h"
+#include "views/theme.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
-int query_editor_height(int win_rows) {
-  int h = (win_rows - 1) * 3 / 10; /* 30% for the editor, -1 for separator */
-  return h < 3 ? 3 : h;
+int query_editor_height(const Tab *tab, int win_rows) {
+  int er = tab && tab->query_editor_rows > 0 ? tab->query_editor_rows : win_rows / 3; /* a third, as notcurses */
+  if (er < 3)
+    er = 3;
+  int maxer = win_rows - 3;
+  if (maxer < 1)
+    maxer = 1;
+  if (er > maxer)
+    er = maxer;
+  return er < 1 ? 1 : er;
 }
 
 int query_visible_result_rows(TuiState *state) {
   int rows = getmaxy(state->main_win);
-  int visible =
-      rows - query_editor_height(rows) - 1 - QUERY_RESULTS_HEADER_ROWS;
+  int visible = rows - query_editor_height(TUI_TAB(state), rows) - 1 - QUERY_RESULTS_HEADER_ROWS;
   return visible < 1 ? 1 : visible;
 }
 
-/* Draw the query tab */
+static int digits(size_t n) {
+  int d = 1;
+  while (n >= 10) {
+    n /= 10;
+    d++;
+  }
+  return d;
+}
+
+static void style_for(WINDOW *w, HlClass c) {
+  switch (c) {
+  case HL_KEYWORD: tui_style(w, TC_ACCENT, TC_BG, A_BOLD); break;
+  case HL_STRING: tui_style(w, TC_KEY_FG, TC_BG, 0); break;
+  case HL_COMMENT: tui_style(w, TC_DIM, TC_BG, 0); break;
+  case HL_NUMBER: tui_style(w, TC_NUMBER_FG, TC_BG, 0); break;
+  default: tui_style(w, TC_FG, TC_BG, 0); break;
+  }
+}
+
+static void draw_editor(TuiState *state, Tab *tab, int rows, int cols, bool focused) {
+  WINDOW *w = state->main_win;
+  tui_style(w, TC_FG, TC_BG, 0);
+  for (int y = 0; y < rows; y++)
+    tui_print_fit(w, y, 0, cols, "");
+  QueryLineInfo *lines = NULL;
+  size_t nlines = 0;
+  query_rebuild_line_cache(tab, &lines, &nlines);
+  if (nlines == 0) {
+    free(lines);
+    return;
+  }
+  int gw = digits(nlines) + 1;
+  int tw = cols - gw;
+  size_t cl, cc;
+  query_cursor_to_line_col(tab, &cl, &cc);
+  if (cl < tab->query_scroll_line)
+    tab->query_scroll_line = cl;
+  else if (cl >= tab->query_scroll_line + (size_t)rows)
+    tab->query_scroll_line = cl - (size_t)rows + 1;
+  size_t sl = tab->query_scroll_line;
+  if (tw < 1 || rows < 1) {
+    free(lines);
+    return;
+  }
+
+  tui_style(w, TC_DIM, TC_BG, 0);
+  for (size_t i = 0; i < (size_t)rows && sl + i < nlines; i++) {
+    char num[32];
+    snprintf(num, sizeof num, "%*zu", gw - 1, sl + i + 1);
+    tui_print_fit(w, (int)i, 0, gw - 1, num);
+  }
+
+  /* The text, token by token in its class's colour (tabs 4 wide) */
+  const char *text = tab->query_text ? tab->query_text : "";
+  size_t len = tab->query_text ? tab->query_len : 0;
+  LaceDriver d = TUI_CONN(state) ? TUI_CONN(state)->driver_type : LACE_DRIVER_SQLITE;
+  size_t pos = 0, line = 0, col = 0;
+  while (pos < len && line < sl + (size_t)rows) {
+    HlClass cls;
+    size_t n = sqlhl_next(text, pos, d, &cls);
+    if (n == 0)
+      break;
+    size_t end = pos + n > len ? len : pos + n;
+    for (size_t i = pos; i < end;) {
+      if (text[i] == '\n') {
+        line++;
+        col = 0;
+        i++;
+        continue;
+      }
+      size_t nx = utf8_next(text, len, i);
+      if (nx <= i)
+        nx = i + 1;
+      bool tab_ch = text[i] == '\t';
+      unsigned char c = (unsigned char)text[i];
+      size_t cw = tab_ch ? 4 : (c < 32 || c == 127) ? 0 : (size_t)utf8_width(text + i, nx - i);
+      if (line >= sl && cw > 0 && col + cw <= (size_t)tw) {
+        style_for(w, cls);
+        if (tab_ch)
+          mvwaddstr(w, (int)(line - sl), gw + (int)col, "    ");
+        else
+          mvwaddnstr(w, (int)(line - sl), gw + (int)col, text + i, (int)(nx - i));
+      }
+      col += cw;
+      i = nx;
+    }
+    pos = end;
+  }
+
+  /* The cursor, in reverse video */
+  if (focused && cl >= sl && cl < sl + (size_t)rows && cl < nlines) {
+    const QueryLineInfo *li = &lines[cl];
+    const char *lt = text + li->start;
+    size_t ccol = cc < li->len ? cc : li->len;
+    int cx = gw + (int)query_display_width(lt, ccol);
+    if (cx < cols) {
+      tui_style(w, TC_BG, TC_FG, 0);
+      if (ccol < li->len && (unsigned char)lt[ccol] >= 32 && lt[ccol] != 127)
+        mvwaddnstr(w, (int)(cl - sl), cx, lt + ccol, (int)(utf8_next(lt, li->len, ccol) - ccol));
+      else
+        mvwaddch(w, (int)(cl - sl), cx, ' ');
+    }
+  }
+  tui_style(w, TC_FG, TC_BG, 0);
+  free(lines);
+}
+
+/* "3 rows", "1,000+ rows", "2 rows affected", the error, or "" */
+static char *summary(const Tab *tab, bool *error) {
+  *error = false;
+  if (tab->query_error) {
+    *error = true;
+    char *s = str_dup(tab->query_error);
+    for (char *c = s; *c; c++)
+      if (*c == '\n' || *c == '\r' || *c == '\t')
+        *c = ' ';
+    return s;
+  }
+  if (!tab->query_results && tab->query_exec_success)
+    return str_printf("%lld %s affected", (long long)tab->query_affected, tab->query_affected == 1 ? "row" : "rows");
+  if (tab->query_results && tab->query_results->num_columns > 0) {
+    bool known = true;
+    size_t n = tab->query_results->num_rows;
+    if (tab->query_paginated) {
+      known = tab->query_total_known;
+      n = known ? tab->query_total_rows : tab->query_loaded_offset + tab->query_loaded_count;
+    }
+    char *c = chrome_commas(n);
+    char *out = str_printf("%s%s %s", c, known ? "" : "+", n == 1 && known ? "row" : "rows");
+    free(c);
+    return out;
+  }
+  return str_dup("");
+}
+
+static void draw_divider(TuiState *state, Tab *tab, int y, int cols, bool results_focused) {
+  WINDOW *w = state->main_win;
+  tui_style(w, results_focused ? TC_ACCENT : TC_DIM, TC_BG, 0);
+  for (int i = 0; i < cols; i++)
+    mvwaddstr(w, y, i, "\xe2\x94\x80");
+  bool err;
+  char *s = summary(tab, &err);
+  if (*s && cols > 6) {
+    char *label = str_printf(" %s ", s);
+    int lw = utf8_width(label, strlen(label));
+    if (lw > cols - 4)
+      lw = cols - 4;
+    tui_style(w, err ? TC_ERROR_FG : TC_FG, TC_BG, 0);
+    tui_print_fit(w, y, 2, lw, label);
+    free(label);
+  }
+  free(s);
+  tui_style(w, TC_FG, TC_BG, 0);
+}
+
+/* What the results area says without rows to show */
+static void draw_placeholder(TuiState *state, Tab *tab, int y0, int rows, int cols) {
+  WINDOW *w = state->main_win;
+  if (rows < 1)
+    return;
+  const char *msg = tab->query_error         ? tab->query_error
+                    : tab->query_exec_success ? ""
+                    : tab->query_results      ? "No rows"
+                                              : "^R runs the statement at the cursor";
+  if (!*msg)
+    return;
+  /* wrapped and centred, so a long error is read whole */
+  char *flat = str_dup(msg);
+  for (char *c = flat; *c; c++)
+    if (*c == '\r' || *c == '\t')
+      *c = ' ';
+  char **lines;
+  size_t n = chrome_wrap(flat, cols - 4 > 1 ? cols - 4 : 1, &lines), shown = n;
+  if (shown > (size_t)rows)
+    shown = (size_t)rows;
+  tui_style(w, tab->query_error ? TC_ERROR_FG : TC_DIM, TC_BG, 0);
+  int top = y0 + (rows - (int)shown) / 2;
+  for (size_t i = 0; i < shown; i++) {
+    int mw = utf8_width(lines[i], strlen(lines[i]));
+    tui_print_fit(w, top + (int)i, (cols - mw) / 2 > 0 ? (cols - mw) / 2 : 0, mw, lines[i]);
+  }
+  chrome_wrap_free(lines, n);
+  free(flat);
+  tui_style(w, TC_FG, TC_BG, 0);
+}
+
 void tui_draw_query(TuiState *state) {
   if (!state || !state->main_win)
     return;
-
   Tab *tab = TUI_TAB(state);
   UITabState *ui = TUI_TAB_UI(state);
   if (!tab || tab->type != TAB_TYPE_QUERY || !ui)
     return;
-
-  size_t query_cursor = tab->query_cursor;
-  size_t query_scroll_line = tab->query_scroll_line;
-  bool focus_results = ui->query_focus_results;
-  bool focus_editor = !ui->query_unfocused && !focus_results;
-
-  werase(state->main_win);
-
+  WINDOW *w = state->main_win;
+  wbkgd(w, tui_theme_attr(TC_FG, TC_BG) | ' ');
+  werase(w);
   int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-
-  /* Split view: editor on top, results on bottom */
-  int editor_height = query_editor_height(win_rows);
-  int results_start = editor_height + 1;
-
-  /* Build line cache */
-  QueryLineInfo *lines = NULL;
-  size_t num_lines = 0;
-  query_rebuild_line_cache(tab, &lines, &num_lines);
-
-  /* Get cursor line/col using widget cursor if available */
-  size_t cursor_line, cursor_col;
-  size_t saved_cursor = tab->query_cursor;
-  tab->query_cursor = query_cursor; /* Temporarily set for line calculation */
-  query_cursor_to_line_col(tab, &cursor_line, &cursor_col);
-  tab->query_cursor = saved_cursor;
-
-  /* Adjust scroll to keep cursor visible */
-  if (cursor_line < query_scroll_line) {
-    query_scroll_line = cursor_line;
-  } else if (cursor_line >= query_scroll_line + (size_t)(editor_height - 1)) {
-    query_scroll_line = cursor_line - (size_t)editor_height + 2;
-  }
-  /* Sync scroll back to tab */
-  tab->query_scroll_line = query_scroll_line;
-
-  /* Find current query bounds for highlighting */
-  size_t query_start = 0, query_end = 0;
-  bool has_query_bounds =
-      query_find_bounds_at_cursor(tab->query_text, query_cursor,
-                                  db_conn_driver_name(TUI_CONN(state)),
-                                  &query_start, &query_end);
-
-  /* Draw editor area */
-  if (focus_editor) {
-    wattron(state->main_win, A_BOLD);
-  }
-  mvwprintw(state->main_win, 0, 1, "%s",
-            ui->query_unfocused
-                ? "SQL Query (Enter/Tab: edit, ^R: run, Down: results)"
-                : "SQL Query (^R: run, ^A: all, ^T: transaction, Esc: leave)");
-  if (focus_editor) {
-    wattroff(state->main_win, A_BOLD);
-  }
-
-  /* Draw query text */
-  for (int y = 1; y < editor_height &&
-                  tab->query_scroll_line + (size_t)(y - 1) < num_lines;
-       y++) {
-    size_t line_idx = tab->query_scroll_line + (size_t)(y - 1);
-    QueryLineInfo *li = &lines[line_idx];
-
-    /* Check if this line is within the current query bounds */
-    size_t line_start = li->start;
-    size_t line_end = li->start + li->len;
-    bool line_in_query =
-        has_query_bounds && line_end > query_start && line_start < query_end;
-
-    /* Dim lines outside the current query */
-    bool is_dimmed = has_query_bounds && !line_in_query;
-
-    /* Line number - dim if outside current query, normal otherwise */
-    if (is_dimmed) {
-      wattron(state->main_win, A_DIM);
-    }
-    mvwprintw(state->main_win, y, 0, "%3zu", line_idx + 1);
-    if (is_dimmed) {
-      wattroff(state->main_win, A_DIM);
-    }
-
-    /* Line content - dim if outside current query */
-    if (is_dimmed) {
-      wattron(state->main_win, A_DIM);
-    }
-
-    int x = 4;
-    const char *ltext = tab->query_text + li->start;
-    for (size_t i = 0; i < li->len && x < win_cols - 1;) {
-      size_t next = utf8_next(ltext, li->len, i);
-      unsigned char c = (unsigned char)ltext[i];
-      if (c == '\t') {
-        /* Tab as spaces */
-        for (int t = 0; t < 4 && x < win_cols - 1; t++) {
-          mvwaddch(state->main_win, y, x++, ' ');
-        }
-      } else if (c >= 32 && c != 127) {
-        int w = utf8_width(ltext + i, next - i);
-        if (x + w > win_cols - 1)
-          break;
-        mvwaddnstr(state->main_win, y, x, ltext + i, (int)(next - i));
-        x += w;
-      }
-      i = next;
-    }
-
-    if (is_dimmed) {
-      wattroff(state->main_win, A_DIM);
-    }
-
-    /* Draw cursor if on this line and editor focused */
-    if (focus_editor && line_idx == cursor_line) {
-      /* Tabs are drawn 4 columns wide */
-      const char *ltext = tab->query_text + li->start;
-      size_t ccol = cursor_col < li->len ? cursor_col : li->len;
-      int cursor_x = 4 + (int)query_display_width(ltext, ccol);
-      if (cursor_x < win_cols) {
-        wattron(state->main_win, A_REVERSE);
-        if (ccol < li->len && (unsigned char)ltext[ccol] >= 32 &&
-            ltext[ccol] != 127)
-          mvwaddnstr(state->main_win, y, cursor_x, ltext + ccol,
-                     (int)(utf8_next(ltext, li->len, ccol) - ccol));
-        else
-          mvwaddch(state->main_win, y, cursor_x, ' ');
-        wattroff(state->main_win, A_REVERSE);
-      }
-    }
-  }
-
-  /* Draw scrollbar if content exceeds visible area */
-  int visible_rows = editor_height - 1; /* Minus header line */
-  if (num_lines > (size_t)visible_rows && visible_rows > 0) {
-    int scroll_x = win_cols - 1;
-    int thumb_pos =
-        (int)(tab->query_scroll_line * (size_t)visible_rows / num_lines);
-    int thumb_size = (visible_rows * visible_rows) / (int)num_lines;
-    if (thumb_size < 1)
-      thumb_size = 1;
-
-    wattron(state->main_win, A_DIM);
-    for (int i = 0; i < visible_rows; i++) {
-      mvwaddch(state->main_win, 1 + i, scroll_x,
-               (i >= thumb_pos && i < thumb_pos + thumb_size) ? ACS_CKBOARD
-                                                              : ACS_VLINE);
-    }
-    wattroff(state->main_win, A_DIM);
-  }
-
-  free(lines);
-
-  /* Draw separator */
-  wattron(state->main_win, COLOR_PAIR(COLOR_BORDER));
-  mvwhline(state->main_win, editor_height, 0, ACS_HLINE, win_cols);
-  wattroff(state->main_win, COLOR_PAIR(COLOR_BORDER));
-
-  /* Draw results area */
-  if (tab->query_error) {
-    /* Show error */
-    wattron(state->main_win, COLOR_PAIR(COLOR_ERROR));
-    mvwprintw(state->main_win, results_start, 1, "Error: %s", tab->query_error);
-    wattroff(state->main_win, COLOR_PAIR(COLOR_ERROR));
-  } else if (tab->query_results && tab->query_results->num_columns > 0) {
-    /* Use shared grid drawing function */
-    int results_height = win_rows - results_start;
-    GridDrawParams params = {.win = state->main_win,
-                             .start_y = results_start,
+  getmaxyx(w, win_rows, win_cols);
+  bool focus_results = ui->query_focus_results && !ui->query_unfocused;
+  bool focus_editor = !ui->query_unfocused && !ui->query_focus_results;
+  int er = query_editor_height(tab, win_rows);
+  draw_editor(state, tab, er, win_cols, focus_editor);
+  draw_divider(state, tab, er, win_cols, focus_results);
+  int results_y = er + 1, results_rows = win_rows - results_y;
+  tui_style(w, TC_FG, TC_BG, 0);
+  for (int y = results_y; y < win_rows; y++)
+    tui_print_fit(w, y, 0, win_cols, "");
+  if (tab->query_results && tab->query_results->num_columns > 0 && !tab->query_error) {
+    GridDrawParams params = {.win = w,
+                             .start_y = results_y,
                              .start_x = 0,
-                             .height = results_height,
+                             .height = results_rows,
                              .width = win_cols,
                              .data = tab->query_results,
                              .col_widths = tab->query_result_col_widths,
@@ -211,38 +259,16 @@ void tui_draw_query(TuiState *state) {
                              .scroll_row = tab->query_result_scroll_row,
                              .scroll_col = tab->query_result_scroll_col,
                              .selection_offset = tab->query_loaded_offset,
-                             .is_focused = ui->query_focus_results &&
-                                           !ui->query_unfocused,
+                             .is_focused = focus_results,
                              .is_editing = ui->query_result_editing,
                              .edit_buffer = ui->query_result_edit_buf,
                              .edit_pos = ui->query_result_edit_pos,
                              .show_header_line = false,
                              .sort_entries = NULL,
                              .num_sort_entries = 0};
-
     tui_draw_result_grid(state, &params);
-  } else if (tab->query_exec_success) {
-    /* Show success message for non-SELECT queries */
-    wattron(state->main_win, COLOR_PAIR(COLOR_STATUS));
-    if (tab->query_affected > 0) {
-      mvwprintw(state->main_win, results_start + 1, 1, "%lld rows affected",
-                (long long)tab->query_affected);
-    } else {
-      mvwprintw(state->main_win, results_start + 1, 1,
-                "Statement executed successfully");
-    }
-    wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
   } else {
-    /* No results yet */
-    wattron(state->main_win, A_DIM);
-    char *exec_key =
-        hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
-    mvwprintw(state->main_win, results_start + 1, 1,
-              "Enter SQL and press %s to execute",
-              exec_key ? exec_key : "Ctrl+R");
-    free(exec_key);
-    wattroff(state->main_win, A_DIM);
+    draw_placeholder(state, tab, results_y, results_rows, win_cols);
   }
-
-  wrefresh(state->main_win);
+  wrefresh(w);
 }

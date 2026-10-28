@@ -1,0 +1,5 @@
+python3 - "$CONFIG_DIR/session.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert len(s["workspaces"]) == 1, s
+PY

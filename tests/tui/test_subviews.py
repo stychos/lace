@@ -31,7 +31,7 @@ def test_strip_and_lists(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("orders")
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.wait(lambda s: "Foreign keys" in s.split("\n")[2] and "Information" in s.split("\n")[2])
         t.wait("customer_id ⇒")                 # the grid marks the followable column
         t.keys("s")
@@ -48,7 +48,6 @@ def test_strip_and_lists(home):
         t.keys("n")
         t.wait("Total size")                    # Information: sizes, the count, the triggers
         t.wait("trg_orders")
-        assert "Row 1/3" not in t.text().split("\n")[-1] or True   # the grid is behind the list
         t.keys("End", "Up", "Up", "Up", "Enter")   # above the Actions rows: Enter on the trigger opens its tab
         t.wait("CREATE TRIGGER trg_orders")
         t.wait(lambda s: "Definition" in s.split("\n")[2] and "Indexes" not in s.split("\n")[2])
@@ -58,7 +57,7 @@ def test_strip_and_lists(home):
         assert "Total size" in t.text()
         x, y = t.find("a Data")
         t.click(x + 2, y)                       # the strip's Data cell
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.keys("q")
         assert t.quit() == 0
 
@@ -67,18 +66,18 @@ def test_follow_foreign_keys_both_ways(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("orders")
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.keys("Right")                         # customer_id of row 1
         t.keys("M-Enter")                       # Alt+Enter: the referenced row
         t.wait_status("customers where id = 1")
         t.wait(lambda s: "customers" in s.split("\n")[1])
-        t.wait_status(re.compile(r"Row 1/1"))
+        t.wait_header(re.compile(r"1 of 1"))
         t.keys("M-r")                           # Alt+R: the tables whose keys point at this row
         t.wait("Referenced by")
         t.wait("orders (customer_id)")
         t.keys("Enter")
         t.wait_status("orders where customer_id = 1")
-        t.wait_status(re.compile(r"Row 1/2"))   # the open orders tab was reused and filtered
+        t.wait_header(re.compile(r"1 of 2"))   # the open orders tab was reused and filtered
         t.keys("Home", "Right", "Right")        # total: a column without a key
         t.keys("M-Enter")
         t.wait_status("total is not a foreign key column")
@@ -96,7 +95,7 @@ def test_sidebar_sections_open_views_and_triggers(home):
         t.keys("Enter")                         # and unfolds it
         t.wait("▾ VIEWS")
         t.keys("Down", "Enter")                 # big_orders: a view's rows
-        t.wait_status("Row 1/2")
+        t.wait_header("1 of 2")
         t.wait(lambda s: "Definition" in s.split("\n")[2] and "Indexes" not in s.split("\n")[2])
         t.keys("s")
         t.wait("CREATE VIEW big_orders")
@@ -114,7 +113,7 @@ def test_subview_restored_from_session(home):
     db = make_db(home)
     with Tui(home, ["sqlite://" + db]) as t:
         t.open_table("orders")
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.keys("y")
         t.wait("orders_customer")
         t.keys("q")

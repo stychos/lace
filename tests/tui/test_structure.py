@@ -20,7 +20,7 @@ def test_add_rename_drop_column(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("customers")
-        t.wait_status("Row 1/2")
+        t.wait_header("1 of 2")
         t.keys("s")
         t.wait("auto-increment")
         t.keys("+")                                   # the column form
@@ -68,7 +68,7 @@ def test_index_editor_and_check(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("customers")
-        t.wait_status("Row 1/2")
+        t.wait_header("1 of 2")
         t.keys("y")
         t.wait("PRIMARY")
         t.keys("+")
@@ -103,7 +103,7 @@ def test_information_actions(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("customers")
-        t.wait_status("Row 1/2")
+        t.wait_header("1 of 2")
         t.keys("n")
         t.wait("Set the next auto-increment value")
         t.wait("next 3")
@@ -125,7 +125,7 @@ def test_table_menu_new_rename_drop(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("customers")
-        t.wait_status("Row 1/2")
+        t.wait_header("1 of 2")
         t.keys("m")
         t.wait("Table customers")
         t.wait("Truncate table")
@@ -138,7 +138,7 @@ def test_table_menu_new_rename_drop(home):
         t.wait_status("New table: done")
         t.wait(lambda s: "things" in s.split("\n")[1])        # opened, on Structure
         t.wait("auto-increment")
-        t.wait(lambda s: any(l.startswith("│ things") for l in s.split("\n")))   # the sidebar reloaded
+        t.wait(lambda s: any(l.startswith(" things ") for l in s.split("\n")[2:]))   # the sidebar reloaded
         t.keys("m")                                   # Rename table…
         t.wait("Table things")
         t.keys("Enter")
@@ -160,14 +160,14 @@ def test_table_menu_new_rename_drop(home):
         assert not sqlite_rows(db, "SELECT name FROM sqlite_master WHERE name IN ('things', 'stuff')")
         t.keys("Tab")                                 # the focus ring: back to the sidebar
         t.open_table("orders")                        # orders, which nothing references
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.keys("m")
         t.wait("Table orders")
         t.keys("Down", "Enter")                       # Truncate table…
         t.wait("Delete every row of orders (3 rows)")
         t.keys("y")
         t.wait_status("Truncate table: done")
-        t.wait_status("Row 0/0")
+        t.wait_header("0 of 0")
         assert sqlite_rows(db, "SELECT COUNT(*) FROM orders")[0][0] == 0
         t.keys("q")
         assert t.quit() == 0
@@ -177,7 +177,7 @@ def test_sqlite_refusals(home):
     db = make_db(home)
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("orders")
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         t.keys("f")                                   # Foreign keys: SQLite cannot add or drop one
         t.wait("customers (id)")
         t.keys("+")

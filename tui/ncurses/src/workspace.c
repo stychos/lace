@@ -174,91 +174,6 @@ bool tab_create_object(TuiState *state, LaceObjectKind kind, const char *name, c
   return true;
 }
 
-/* Longest tab label shown, in columns (longer names are clipped) */
-#define TAB_LABEL_MAX_COLS 30
-
-/* What a tab is called: its table, or a form's label; caller frees */
-static char *tab_label(const Tab *tab) {
-  if (tab->type == TAB_TYPE_FORM)
-    return form_tab_label(tab);
-  return str_dup(tab->table_name ? tab->table_name : "?");
-}
-
-int tui_tab_width(const Tab *tab) {
-  char *name = tab_label(tab);
-  int cols = utf8_width(name, strlen(name));
-  free(name);
-  if (cols > TAB_LABEL_MAX_COLS)
-    cols = TAB_LABEL_MAX_COLS;
-  return cols + 4; /* " name " plus the separator column */
-}
-
-/* Draw tab bar */
-void tui_draw_tabs(TuiState *state) {
-  if (!state || !state->tab_win)
-    return;
-
-  werase(state->tab_win);
-  wbkgd(state->tab_win, COLOR_PAIR(COLOR_BORDER));
-
-  Workspace *ws = TUI_WORKSPACE(state);
-  if (!ws) {
-    wrefresh(state->tab_win);
-    return;
-  }
-
-  int x = 0;
-
-  for (size_t i = 0; i < ws->num_tabs; i++) {
-    Tab *tab = &ws->tabs[i];
-    if (!tab->active)
-      continue;
-
-    char *name = tab_label(tab);
-    int tab_width = tui_tab_width(tab); /* Same widths as the mouse hit test */
-
-    if (x + tab_width > state->term_cols) {
-      free(name);
-      break;
-    }
-
-    /* " name " in display columns, clipped to the label width; a form's
-     * label in italics */
-    attr_t attr = i == ws->current_tab ? COLOR_PAIR(COLOR_SELECTED) | A_BOLD
-                                       : A_NORMAL;
-    if (tab->type == TAB_TYPE_FORM)
-      attr |= A_ITALIC;
-    wattron(state->tab_win, attr);
-    mvwaddch(state->tab_win, 0, x, ' ');
-    tui_print_fit(state->tab_win, 0, x + 1, tab_width - 3, name);
-    waddch(state->tab_win, ' ');
-    wattroff(state->tab_win, attr);
-    free(name);
-
-    x += tab_width;
-
-    /* Tab separator */
-    if (i < ws->num_tabs - 1 && x < state->term_cols) {
-      wattron(state->tab_win, COLOR_PAIR(COLOR_BORDER));
-      mvwaddch(state->tab_win, 0, x - 1, ACS_VLINE);
-      wattroff(state->tab_win, COLOR_PAIR(COLOR_BORDER));
-    }
-  }
-
-  /* Show hint for new tab if sidebar visible */
-  if (state->sidebar_focused) {
-    const char *hint = "[+] New tab";
-    int hint_len = (int)strlen(hint);
-    if (state->term_cols - x > hint_len + 2) {
-      wattron(state->tab_win, A_DIM);
-      mvwprintw(state->tab_win, 0, state->term_cols - hint_len - 1, "%s", hint);
-      wattroff(state->tab_win, A_DIM);
-    }
-  }
-
-  wrefresh(state->tab_win);
-}
-
 /* Shift the UITabState entries of workspace ws_idx down over tab_idx */
 static void tab_ui_remove(TuiState *state, size_t ws_idx, size_t tab_idx, size_t old_num_tabs) {
   if (old_num_tabs > 0 && state->tab_ui && ws_idx < state->tab_ui_ws_capacity &&
@@ -267,6 +182,22 @@ static void tab_ui_remove(TuiState *state, size_t ws_idx, size_t tab_idx, size_t
       state->tab_ui[ws_idx][i] = state->tab_ui[ws_idx][i + 1];
     memset(&state->tab_ui[ws_idx][old_num_tabs - 1], 0, sizeof(UITabState));
   }
+}
+
+void tui_close_tab_at(TuiState *state, size_t ws_idx, size_t tab_idx) {
+  if (!state || ws_idx >= state->app->num_workspaces)
+    return;
+  Workspace *ws = &state->app->workspaces[ws_idx];
+  if (tab_idx >= ws->num_tabs)
+    return;
+  size_t old = ws->num_tabs;
+  UITabState *ui = tui_get_tab_ui(state, ws_idx, tab_idx);
+  if (ui) {
+    free(ui->query_result_edit_buf);
+    memset(ui, 0, sizeof *ui);
+  }
+  workspace_close_tab(ws, tab_idx);
+  tab_ui_remove(state, ws_idx, tab_idx, old);
 }
 
 /* What a connection is called in a question */

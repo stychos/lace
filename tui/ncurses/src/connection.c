@@ -170,5 +170,9 @@ bool tui_load_tables(TuiState *state, Connection *conn_obj) {
     async_free(&oop);
   }
 
+  /* The header names the database (a quick read; a failure leaves it out) */
+  free(conn_obj->database);
+  conn_obj->database = NULL;
+  db_current_database(db_conn, &conn_obj->database, NULL);
   return true;
 }

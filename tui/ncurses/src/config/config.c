@@ -382,26 +382,26 @@ static const ActionMeta action_meta[HOTKEY_COUNT] = {
                               DEF_KEYS(def_history_clear), CONFIG_FE_ALL},
     [HOTKEY_HISTORY_CLOSE] = {"history_close", "Close dialog",
                               HOTKEY_CAT_HISTORY, DEF_KEYS(def_history_close), CONFIG_FE_ALL},
-    [HOTKEY_PALETTE] = {"palette", "Command palette", HOTKEY_CAT_GENERAL, DEF_KEYS(def_palette), CONFIG_FE_NOTCURSES},
-    [HOTKEY_NEXT_CONN_TAB] = {"next_conn_tab", "Next tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_next_conn_tab), CONFIG_FE_NOTCURSES},
-    [HOTKEY_PREV_CONN_TAB] = {"prev_conn_tab", "Previous tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_conn_tab), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_1] = {"conn_tab_1", "Tab 1", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_1), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_2] = {"conn_tab_2", "Tab 2", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_2), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_3] = {"conn_tab_3", "Tab 3", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_3), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_4] = {"conn_tab_4", "Tab 4", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_4), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_5] = {"conn_tab_5", "Tab 5", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_5), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_6] = {"conn_tab_6", "Tab 6", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_6), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_7] = {"conn_tab_7", "Tab 7", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_7), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_8] = {"conn_tab_8", "Tab 8", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_8), CONFIG_FE_NOTCURSES},
-    [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_NOTCURSES},
-    [HOTKEY_VIEW_SWITCHER] = {"view_switcher", "Switch view", HOTKEY_CAT_GENERAL, DEF_KEYS(def_view_switcher), CONFIG_FE_NOTCURSES},
-    [HOTKEY_TOGGLE_LOG] = {"toggle_log", "Toggle log", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_log), CONFIG_FE_NOTCURSES},
-    [HOTKEY_SWITCH_DATABASE] = {"switch_database", "Switch database", HOTKEY_CAT_GENERAL, DEF_KEYS(def_switch_database), CONFIG_FE_NOTCURSES},
-    [HOTKEY_NEW_WORKSPACE] = {"new_workspace", "New workspace", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_workspace), CONFIG_FE_NOTCURSES},
-    [HOTKEY_COLUMN_NARROWER] = {"column_narrower", "Narrow column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_narrower), CONFIG_FE_NOTCURSES},
-    [HOTKEY_COLUMN_WIDER] = {"column_wider", "Widen column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_wider), CONFIG_FE_NOTCURSES},
-    [HOTKEY_SPLIT_UP] = {"split_up", "Editor smaller", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_up), CONFIG_FE_NOTCURSES},
-    [HOTKEY_SPLIT_DOWN] = {"split_down", "Editor larger", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_down), CONFIG_FE_NOTCURSES},
+    [HOTKEY_PALETTE] = {"palette", "Command palette", HOTKEY_CAT_GENERAL, DEF_KEYS(def_palette), CONFIG_FE_ALL},
+    [HOTKEY_NEXT_CONN_TAB] = {"next_conn_tab", "Next tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_next_conn_tab), CONFIG_FE_ALL},
+    [HOTKEY_PREV_CONN_TAB] = {"prev_conn_tab", "Previous tab (alternate)", HOTKEY_CAT_GENERAL, DEF_KEYS(def_prev_conn_tab), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_1] = {"conn_tab_1", "Tab 1", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_1), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_2] = {"conn_tab_2", "Tab 2", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_2), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_3] = {"conn_tab_3", "Tab 3", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_3), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_4] = {"conn_tab_4", "Tab 4", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_4), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_5] = {"conn_tab_5", "Tab 5", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_5), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_6] = {"conn_tab_6", "Tab 6", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_6), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_7] = {"conn_tab_7", "Tab 7", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_7), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_8] = {"conn_tab_8", "Tab 8", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_8), CONFIG_FE_ALL},
+    [HOTKEY_CONN_TAB_9] = {"conn_tab_9", "Tab 9", HOTKEY_CAT_GENERAL, DEF_KEYS(def_conn_tab_9), CONFIG_FE_ALL},
+    [HOTKEY_VIEW_SWITCHER] = {"view_switcher", "Switch view", HOTKEY_CAT_GENERAL, DEF_KEYS(def_view_switcher), CONFIG_FE_ALL},
+    [HOTKEY_TOGGLE_LOG] = {"toggle_log", "Toggle log", HOTKEY_CAT_GENERAL, DEF_KEYS(def_toggle_log), CONFIG_FE_ALL},
+    [HOTKEY_SWITCH_DATABASE] = {"switch_database", "Switch database", HOTKEY_CAT_GENERAL, DEF_KEYS(def_switch_database), CONFIG_FE_ALL},
+    [HOTKEY_NEW_WORKSPACE] = {"new_workspace", "New workspace", HOTKEY_CAT_GENERAL, DEF_KEYS(def_new_workspace), CONFIG_FE_ALL},
+    [HOTKEY_COLUMN_NARROWER] = {"column_narrower", "Narrow column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_narrower), CONFIG_FE_ALL},
+    [HOTKEY_COLUMN_WIDER] = {"column_wider", "Widen column", HOTKEY_CAT_TABLE, DEF_KEYS(def_column_wider), CONFIG_FE_ALL},
+    [HOTKEY_SPLIT_UP] = {"split_up", "Editor smaller", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_up), CONFIG_FE_ALL},
+    [HOTKEY_SPLIT_DOWN] = {"split_down", "Editor larger", HOTKEY_CAT_QUERY, DEF_KEYS(def_split_down), CONFIG_FE_ALL},
     [HOTKEY_SUBVIEW_DATA] = {"subview_data", "Data", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_data), CONFIG_FE_ALL},
     [HOTKEY_SUBVIEW_STRUCTURE] = {"subview_structure", "Structure", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_structure), CONFIG_FE_ALL},
     [HOTKEY_SUBVIEW_INDEXES] = {"subview_indexes", "Indexes", HOTKEY_CAT_TABLE, DEF_KEYS(def_subview_indexes), CONFIG_FE_ALL},
@@ -1236,6 +1236,19 @@ HotkeyAction hotkey_action_from_key(const char *key) {
     }
   }
   return HOTKEY_COUNT;
+}
+
+bool hotkey_key_event(const char *key, UiEvent *out) {
+  int code;
+  UiKeyMod mods;
+  if (!out || !parse_key_string(key, &code, &mods))
+    return false;
+  memset(out, 0, sizeof *out);
+  out->type = UI_EVENT_KEY;
+  out->key.key = code;
+  out->key.is_special = code >= UI_KEY_UP; /* as hotkey_matches tells them apart */
+  out->key.mods = mods;
+  return true;
 }
 
 bool hotkey_matches(const Config *config, const UiEvent *event,

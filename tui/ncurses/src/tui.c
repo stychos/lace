@@ -13,6 +13,10 @@
 #include "views/form_tab.h"
 #include "ddl_edit.h"
 #include "views/config_view.h"
+#include "views/palette.h"
+#include "views/prefs_dialog.h"
+#include "views/panels.h"
+#include "query_internal.h"
 #include <ctype.h>
 #include <locale.h>
 #include <stdarg.h>
@@ -181,6 +185,30 @@ void tui_refresh(TuiState *state) {
   }
 }
 
+/* Keep a status message in the log, timestamped, as the notcurses TUI */
+static void log_add(TuiState *state, bool error, const char *text) {
+  if (!text || !*text)
+    return;
+  time_t now = time(NULL);
+  struct tm tm;
+  localtime_r(&now, &tm);
+  char *line = str_printf("%02d:%02d:%02d  %s", tm.tm_hour, tm.tm_min, tm.tm_sec, text);
+  if (!line)
+    return;
+  if (state->num_log == TUI_LOG_MAX) {
+    str_secure_free(state->log[0].line);
+    memmove(state->log, state->log + 1, (TUI_LOG_MAX - 1) * sizeof *state->log);
+    state->num_log--;
+  }
+  if (state->num_log == state->log_cap) {
+    state->log_cap = state->log_cap ? state->log_cap * 2 : 32;
+    state->log = safe_realloc(state->log, state->log_cap * sizeof *state->log);
+  }
+  state->log[state->num_log].line = line;
+  state->log[state->num_log].error = error;
+  state->num_log++;
+}
+
 void tui_set_status(TuiState *state, const char *fmt, ...) {
   if (!state)
     return;
@@ -193,6 +221,7 @@ void tui_set_status(TuiState *state, const char *fmt, ...) {
   va_end(args);
 
   state->status_is_error = false;
+  log_add(state, false, state->status_msg);
 }
 
 void tui_set_error(TuiState *state, const char *fmt, ...) {
@@ -207,6 +236,7 @@ void tui_set_error(TuiState *state, const char *fmt, ...) {
   va_end(args);
 
   state->status_is_error = true;
+  log_add(state, true, state->status_msg);
 }
 
 /* ============================================================================
@@ -241,6 +271,8 @@ static const SimpleHotkeyEntry simple_hotkey_table[] = {
     /* Tabs */
     {HOTKEY_NEXT_TAB, action_tab_next},
     {HOTKEY_PREV_TAB, action_tab_prev},
+    {HOTKEY_NEXT_CONN_TAB, action_tab_next}, /* the same walk (as the notcurses TUI) */
+    {HOTKEY_PREV_CONN_TAB, action_tab_prev},
     {HOTKEY_NEXT_WORKSPACE, action_workspace_next},
     {HOTKEY_PREV_WORKSPACE, action_workspace_prev},
     /* UI Toggles */
@@ -273,8 +305,23 @@ static const DialogHotkeyEntry dialog_hotkey_table[] = {
     {HOTKEY_CONNECT_DIALOG, tui_show_connect_dialog},
     {HOTKEY_NEW_CONNECTION, tui_new_connection_tab},
     {HOTKEY_TOGGLE_HISTORY, tui_show_history_dialog},
-    {HOTKEY_CONFIG, tui_show_config},
+    {HOTKEY_CONFIG, tui_prefs_open},
+    {HOTKEY_PALETTE, tui_palette_open},
+    {HOTKEY_VIEW_SWITCHER, tui_view_switcher_open},
+    {HOTKEY_TOGGLE_LOG, tui_log_open},
+    {HOTKEY_NEW_WORKSPACE, tui_new_workspace_form},
+    {HOTKEY_SWITCH_DATABASE, tui_switch_database},
 };
+
+bool tui_run_dialog_action(TuiState *state, HotkeyAction a) {
+  for (size_t i = 0; i < ARRAY_LEN(dialog_hotkey_table); i++) {
+    if (dialog_hotkey_table[i].hotkey == a) {
+      dialog_hotkey_table[i].handler(state);
+      return true;
+    }
+  }
+  return false;
+}
 
 /* Lookup dialog hotkey handler. Returns true if found and executed. */
 static bool lookup_dialog_hotkey(TuiState *state, const Config *config,
@@ -662,33 +709,10 @@ static bool handle_cycle_sort(TuiState *state, Action *action) {
                                               tab->data->columns[tab->cursor_col].name)
                      : SIZE_MAX;
     if (col < tab->schema->num_columns) {
-      /* Find if column is already in sort list */
-      size_t existing_idx = SIZE_MAX;
-      for (size_t i = 0; i < tab->num_sort_entries; i++) {
-        if (tab->sort_entries[i].column == col) {
-          existing_idx = i;
-          break;
-        }
-      }
-
-      if (existing_idx == SIZE_MAX) {
-        /* Column not in list - add with ASC if room */
-        if (tab->num_sort_entries < MAX_SORT_COLUMNS) {
-          tab->sort_entries[tab->num_sort_entries].column = col;
-          tab->sort_entries[tab->num_sort_entries].direction = SORT_ASC;
-          tab->num_sort_entries++;
-        }
-      } else if (tab->sort_entries[existing_idx].direction == SORT_ASC) {
-        /* Was ascending -> descending */
-        tab->sort_entries[existing_idx].direction = SORT_DESC;
-      } else {
-        /* Was descending -> remove from list */
-        for (size_t i = existing_idx; i < tab->num_sort_entries - 1; i++) {
-          tab->sort_entries[i] = tab->sort_entries[i + 1];
-        }
-        tab->num_sort_entries--;
-      }
-      tui_refresh_table(state);
+      if (tab_cycle_sort(tab, col))
+        tui_refresh_table(state);
+      else
+        tui_set_status(state, "At most %d sort columns", MAX_SORT_COLUMNS);
       return true;
     }
   }
@@ -701,6 +725,246 @@ static bool handle_help(TuiState *state, Action *action) {
   tui_refresh(state);
   (void)action;
   return true;
+}
+
+/* Alt+1..9: the strip's Nth tab; the query split (Ctrl+Up/Down); a grid
+ * column narrower or wider (Alt+Left/Right, < >) */
+static bool handle_extra_keys(TuiState *state, UiEvent *event) {
+  if (event->type != UI_EVENT_KEY || state->editing || state->adding_row)
+    return false;
+  const Config *cfg = state->app->config;
+  Workspace *ws = TUI_WORKSPACE(state);
+  Tab *tab = TUI_TAB(state);
+  UITabState *ui = TUI_TAB_UI(state);
+  for (int k = 0; k < 9; k++) {
+    if (!hotkey_matches(cfg, event, (HotkeyAction)(HOTKEY_CONN_TAB_1 + k)))
+      continue;
+    size_t seen = 0;
+    for (size_t i = 0; ws && i < ws->num_tabs; i++) {
+      if (!ws->tabs[i].active)
+        continue;
+      if (seen++ == (size_t)k) {
+        if (i != ws->current_tab)
+          tab_switch(state, i);
+        return true;
+      }
+    }
+    return true; /* no such tab */
+  }
+  if (!tab)
+    return false;
+  if (tab->type == TAB_TYPE_QUERY &&
+      (hotkey_matches(cfg, event, HOTKEY_SPLIT_UP) || hotkey_matches(cfg, event, HOTKEY_SPLIT_DOWN))) {
+    int rows = state->main_win ? getmaxy(state->main_win) : 0;
+    int er = query_editor_height(tab, rows) + (hotkey_matches(cfg, event, HOTKEY_SPLIT_UP) ? -1 : 1);
+    if (er < 3)
+      er = 3;
+    if (er > rows - 3)
+      er = rows - 3;
+    tab->query_editor_rows = er;
+    return true;
+  }
+  bool narrower = hotkey_matches(cfg, event, HOTKEY_COLUMN_NARROWER);
+  bool wider = hotkey_matches(cfg, event, HOTKEY_COLUMN_WIDER);
+  if (!narrower && !wider)
+    return false;
+  bool results = tab->type == TAB_TYPE_QUERY && ui && ui->query_focus_results && !ui->query_unfocused &&
+                 tab->query_results && tab->query_result_col_widths;
+  bool grid = tab->type == TAB_TYPE_TABLE && tab->subview == SUBVIEW_DATA && !tui_sidebar_focused(state) &&
+              !tui_filters_focused(state) && tab->data;
+  if (!results && !grid)
+    return false;
+  size_t col = results ? tab->query_result_col : tab->cursor_col;
+  int cur = results ? (col < tab->query_result_num_cols ? tab->query_result_col_widths[col] : DEFAULT_COL_WIDTH)
+                    : tui_get_column_width(state, col);
+  int w = cur + (wider ? 4 : -4);
+  if (w < MIN_COL_WIDTH)
+    w = MIN_COL_WIDTH;
+  if (w > 200)
+    w = 200;
+  tab_set_user_width(tab, col, w);
+  if (results && col < tab->query_result_num_cols) {
+    tab->query_result_col_widths[col] = w;
+  } else {
+    VmTable *vm = tui_vm_table(state);
+    if (vm && vm->col_widths && col < vm->num_col_widths)
+      vm->col_widths[col] = w;
+  }
+  return true;
+}
+
+/* One input event through every handler, in priority order: the palette
+ * runs its actions through here with the action's key */
+void tui_dispatch_event(TuiState *state, UiEvent *event) {
+  /* Clear status message on any keypress */
+  if (state->status_msg) {
+    free(state->status_msg);
+    state->status_msg = NULL;
+    state->status_is_error = false;
+  }
+
+  /* Handle mouse events first - they should work regardless of mode */
+  if (event->type == UI_EVENT_MOUSE) {
+    if (tui_handle_mouse_event(state, event)) {
+      tui_refresh(state);
+    }
+    return;
+  }
+
+  /* Handle resize events */
+  if (event->type == UI_EVENT_RESIZE) {
+    tui_recreate_windows(state);
+    tui_calculate_column_widths(state);
+    tui_refresh(state);
+    return;
+  }
+
+  /* The palette by a chord (Ctrl+P) from anywhere, an editor or a form
+   * included; a plain key (:) only where it is not typed, through the
+   * dialog hotkeys below */
+  if (!state->editing && !state->adding_row && event->type == UI_EVENT_KEY &&
+      (event->key.is_special || (event->key.mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SUPER))) &&
+      hotkey_matches(state->app->config, event, HOTKEY_PALETTE)) {
+    tui_palette_open(state);
+    return;
+  }
+
+  /* A connection form takes its keys first (its own Tab ring too); the
+   * keys it leaves go to the global hotkeys below */
+  Tab *form_tab = TUI_TAB(state);
+  if (form_tab && form_tab->type == TAB_TYPE_FORM) {
+    if (form_tab_handle_key(state, form_tab, event)) {
+      tui_refresh(state);
+      return;
+    }
+  }
+
+  /* Handle edit mode input */
+  if (state->editing && tui_handle_edit_input(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* Handle add-row mode input */
+  if (state->adding_row && tui_handle_add_row_input(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* Tab / Shift+Tab move focus between panels. Exceptions keep their own
+   * meaning: Tab inserts a tab in a focused query editor, the filters panel
+   * walks its fields first, and an inline result edit consumes keys. */
+  if (render_event_is_special(event, UI_KEY_TAB) ||
+      render_event_is_special(event, UI_KEY_BTAB)) {
+    bool is_tab = render_event_is_special(event, UI_KEY_TAB);
+    Tab *ft = TUI_TAB(state);
+    UITabState *fui = TUI_TAB_UI(state);
+    bool in_main = ft && !state->sidebar_focused;
+    bool editor_tab = in_main && is_tab && ft->type == TAB_TYPE_QUERY &&
+                      fui && !fui->query_unfocused &&
+                      !fui->query_focus_results;
+    bool result_edit = in_main && ft->type == TAB_TYPE_QUERY && fui &&
+                       fui->query_result_editing;
+    bool filters_walk = in_main && ft->type == TAB_TYPE_TABLE &&
+                        tui_filters_visible(state) &&
+                        tui_filters_focused(state);
+    if (!editor_tab && !result_edit && !filters_walk) {
+      tui_focus_cycle(state, is_tab ? 1 : -1);
+      tui_refresh(state);
+      return;
+    }
+  }
+
+  /* The notcurses TUI's keys this TUI has too: Alt+1..9, the query
+   * split, column widths */
+  if (handle_extra_keys(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* Handle query tab input */
+  Tab *query_tab = TUI_TAB(state);
+  if (query_tab && !state->sidebar_focused) {
+    if (query_tab->type == TAB_TYPE_QUERY) {
+      if (tui_handle_query_input(state, event)) {
+        tui_refresh(state);
+        return;
+      }
+    }
+  }
+
+  /* Handle sidebar input (filter text or navigation) */
+  if (state->sidebar_focused && tui_handle_sidebar_input(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* A table tab's sub-views: the switch keys, and a list's own keys */
+  if (tui_handle_subview_input(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* The table's actions (table_menu) on a table tab, before the general
+   * keys: its default m is toggle_header's too, which keeps it elsewhere */
+  {
+    Tab *mt = TUI_TAB(state);
+    if (mt && mt->type == TAB_TYPE_TABLE && !tui_sidebar_focused(state) && !tui_filters_focused(state) &&
+        hotkey_matches(state->app->config, event, HOTKEY_TABLE_MENU)) {
+      tui_table_menu(state);
+      tui_refresh(state);
+      return;
+    }
+  }
+
+  /* Handle filters panel input if visible */
+  if (tui_filters_visible(state) && tui_handle_filters_input(state, event)) {
+    tui_refresh(state);
+    return;
+  }
+
+  /* Dispatch actions based on key input using platform-independent UiEvent.
+   * All key checks use render_event_* helpers for portability. */
+  Action action = {0};
+  bool handled = true;
+  (void)render_event_get_char(event); /* May be used for debugging */
+  (void)render_event_get_fkey(event); /* May be used for debugging */
+
+  /* Dispatch via lookup tables - order matters for priority */
+  if (lookup_simple_hotkey(state->app->config, event, &action)) {
+    /* Simple hotkey matched - action already set */
+  } else if (lookup_dialog_hotkey(state, state->app->config, event)) {
+    /* Dialog hotkey handled directly */
+    tui_refresh(state);
+    return;
+  } else if (lookup_context_hotkey(state, state->app->config, event,
+                                   &action)) {
+    /* Context-aware hotkey matched - action set by handler */
+  } else if (lookup_stateful_hotkey(state, state->app->config, event,
+                                    &action)) {
+    /* Stateful hotkey handled - may or may not set action */
+  } else {
+    handled = false;
+  }
+
+  /* Dispatch action if one was created */
+  if (handled && action.type != ACTION_NONE) {
+    /* Sync TuiState to workspace before dispatch so core sees current state
+     */
+    tui_sync_to_workspace(state);
+    UICallbacks callbacks = tui_make_callbacks(state);
+    ChangeFlags changes = app_dispatch(state->app, &action, &callbacks);
+
+    /* Sync core changes from workspace to TuiState */
+    if (changes & (CHANGED_SIDEBAR | CHANGED_FILTERS | CHANGED_FOCUS |
+                   CHANGED_WORKSPACE | CHANGED_CONNECTION | CHANGED_TABLES |
+                   CHANGED_LAYOUT)) {
+      tui_sync_from_app(state);
+    }
+    /* Tab is now the source of truth - draw code reads from Tab directly */
+  }
+
+  tui_refresh(state);
 }
 
 void tui_run(TuiState *state) {
@@ -781,157 +1045,6 @@ void tui_run(TuiState *state) {
       continue;
     }
 
-    /* Clear status message on any keypress */
-    if (state->status_msg) {
-      free(state->status_msg);
-      state->status_msg = NULL;
-      state->status_is_error = false;
-    }
-
-    /* Handle mouse events first - they should work regardless of mode */
-    if (event.type == UI_EVENT_MOUSE) {
-      if (tui_handle_mouse_event(state, &event)) {
-        tui_refresh(state);
-      }
-      continue;
-    }
-
-    /* Handle resize events */
-    if (event.type == UI_EVENT_RESIZE) {
-      tui_recreate_windows(state);
-      tui_calculate_column_widths(state);
-      tui_refresh(state);
-      continue;
-    }
-
-    /* A connection form takes its keys first (its own Tab ring too); the
-     * keys it leaves go to the global hotkeys below */
-    Tab *form_tab = TUI_TAB(state);
-    if (form_tab && form_tab->type == TAB_TYPE_FORM) {
-      if (form_tab_handle_key(state, form_tab, &event)) {
-        tui_refresh(state);
-        continue;
-      }
-    }
-
-    /* Handle edit mode input */
-    if (state->editing && tui_handle_edit_input(state, &event)) {
-      tui_refresh(state);
-      continue;
-    }
-
-    /* Handle add-row mode input */
-    if (state->adding_row && tui_handle_add_row_input(state, &event)) {
-      tui_refresh(state);
-      continue;
-    }
-
-    /* Tab / Shift+Tab move focus between panels. Exceptions keep their own
-     * meaning: Tab inserts a tab in a focused query editor, the filters panel
-     * walks its fields first, and an inline result edit consumes keys. */
-    if (render_event_is_special(&event, UI_KEY_TAB) ||
-        render_event_is_special(&event, UI_KEY_BTAB)) {
-      bool is_tab = render_event_is_special(&event, UI_KEY_TAB);
-      Tab *ft = TUI_TAB(state);
-      UITabState *fui = TUI_TAB_UI(state);
-      bool in_main = ft && !state->sidebar_focused;
-      bool editor_tab = in_main && is_tab && ft->type == TAB_TYPE_QUERY &&
-                        fui && !fui->query_unfocused &&
-                        !fui->query_focus_results;
-      bool result_edit = in_main && ft->type == TAB_TYPE_QUERY && fui &&
-                         fui->query_result_editing;
-      bool filters_walk = in_main && ft->type == TAB_TYPE_TABLE &&
-                          tui_filters_visible(state) &&
-                          tui_filters_focused(state);
-      if (!editor_tab && !result_edit && !filters_walk) {
-        tui_focus_cycle(state, is_tab ? 1 : -1);
-        tui_refresh(state);
-        continue;
-      }
-    }
-
-    /* Handle query tab input */
-    Tab *query_tab = TUI_TAB(state);
-    if (query_tab && !state->sidebar_focused) {
-      if (query_tab->type == TAB_TYPE_QUERY) {
-        if (tui_handle_query_input(state, &event)) {
-          tui_refresh(state);
-          continue;
-        }
-      }
-    }
-
-    /* Handle sidebar input (filter text or navigation) */
-    if (state->sidebar_focused && tui_handle_sidebar_input(state, &event)) {
-      tui_refresh(state);
-      continue;
-    }
-
-    /* A table tab's sub-views: the switch keys, and a list's own keys */
-    if (tui_handle_subview_input(state, &event)) {
-      tui_refresh(state);
-      continue;
-    }
-
-    /* The table's actions (table_menu) on a table tab, before the general
-     * keys: its default m is toggle_header's too, which keeps it elsewhere */
-    {
-      Tab *mt = TUI_TAB(state);
-      if (mt && mt->type == TAB_TYPE_TABLE && !tui_sidebar_focused(state) && !tui_filters_focused(state) &&
-          hotkey_matches(state->app->config, &event, HOTKEY_TABLE_MENU)) {
-        tui_table_menu(state);
-        tui_refresh(state);
-        continue;
-      }
-    }
-
-    /* Handle filters panel input if visible */
-    if (tui_filters_visible(state) && tui_handle_filters_input(state, &event)) {
-      tui_refresh(state);
-      continue;
-    }
-
-    /* Dispatch actions based on key input using platform-independent UiEvent.
-     * All key checks use render_event_* helpers for portability. */
-    Action action = {0};
-    bool handled = true;
-    (void)render_event_get_char(&event); /* May be used for debugging */
-    (void)render_event_get_fkey(&event); /* May be used for debugging */
-
-    /* Dispatch via lookup tables - order matters for priority */
-    if (lookup_simple_hotkey(state->app->config, &event, &action)) {
-      /* Simple hotkey matched - action already set */
-    } else if (lookup_dialog_hotkey(state, state->app->config, &event)) {
-      /* Dialog hotkey handled directly */
-      tui_refresh(state);
-      continue;
-    } else if (lookup_context_hotkey(state, state->app->config, &event,
-                                     &action)) {
-      /* Context-aware hotkey matched - action set by handler */
-    } else if (lookup_stateful_hotkey(state, state->app->config, &event,
-                                      &action)) {
-      /* Stateful hotkey handled - may or may not set action */
-    } else {
-      handled = false;
-    }
-
-    /* Dispatch action if one was created */
-    if (handled && action.type != ACTION_NONE) {
-      /* Sync TuiState to workspace before dispatch so core sees current state
-       */
-      tui_sync_to_workspace(state);
-      UICallbacks callbacks = tui_make_callbacks(state);
-      ChangeFlags changes = app_dispatch(state->app, &action, &callbacks);
-
-      /* Sync core changes from workspace to TuiState */
-      if (changes & (CHANGED_SIDEBAR | CHANGED_FILTERS | CHANGED_FOCUS |
-                     CHANGED_WORKSPACE | CHANGED_CONNECTION | CHANGED_TABLES |
-                     CHANGED_LAYOUT)) {
-        tui_sync_from_app(state);
-      }
-      /* Tab is now the source of truth - draw code reads from Tab directly */
-    }
-
-    tui_refresh(state);
+    tui_dispatch_event(state, &event);
   }
 }

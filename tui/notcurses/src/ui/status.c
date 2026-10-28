@@ -13,60 +13,25 @@
 #include <string.h>
 
 static const char *tx_label(NcTxState s) {
-  switch (s) {
-  case NC_TX_OPEN: return "[TX] ";
-  case NC_TX_FAILED: return "[TX FAILED] ";
-  case NC_TX_LOST: return "[TX LOST] ";
-  default: return "";
-  }
+  return chrome_tx_label(s == NC_TX_OPEN || s == NC_TX_FAILED, s == NC_TX_FAILED, s == NC_TX_LOST);
 }
 
-/* A hint is a key and a label; one with an action runs it when clicked */
-typedef struct { const char *text; int action; } Hint; /* action HOTKEY_COUNT: none */
-#define NOACT HOTKEY_COUNT
+/* A hint is a key and a label; one with an action runs it when clicked
+ * (core/chrome.h holds the sets, shared with the ncurses TUI) */
+typedef ChromeHint Hint;
+#define NOACT CHROME_NOACT
 #define CTRL "\xe2\x8c\x83"
-static const Hint H_EDIT[] = {{"Enter save", NOACT}, {"Esc cancel", NOACT}, {CTRL "N NULL", NOACT},
-                              {CTRL "D empty", NOACT}, {CTRL "K copy", NOACT}, {CTRL "U paste", NOACT}, {NULL, 0}};
-static const Hint H_EDITOR[] = {{CTRL "R run", HOTKEY_EXECUTE_QUERY}, {CTRL "A run all", HOTKEY_EXECUTE_ALL},
-                                {CTRL "T transaction", HOTKEY_EXECUTE_TRANSACTION},
-                                {"Esc results", HINT_FOCUS_RESULTS}, {CTRL "\xe2\x86\x91/" CTRL "\xe2\x86\x93 split", NOACT}, {NULL, 0}};
-static const Hint H_RESULTS[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"Enter editor", HINT_FOCUS_EDITOR},
-                                 {"e edit", HOTKEY_EDIT_MODAL}, {"x delete", HOTKEY_DELETE_ROW},
-                                 {"r refresh", HOTKEY_REFRESH}, {"p new query", HOTKEY_OPEN_QUERY},
-                                 {"? keys", HOTKEY_HELP}, {NULL, 0}};
-static const Hint H_TABLE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
-                               {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
-                               {"e editor", HOTKEY_EDIT_MODAL}, {"+ add", HOTKEY_ROW_ADD},
-                               {"x delete", HOTKEY_DELETE_ROW}, {"m actions", HOTKEY_TABLE_MENU},
-                               {"t tables", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
-/* the same with the cursor on a foreign key column */
-static const Hint H_TABLE_FK[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ filter", HOTKEY_TOGGLE_FILTERS},
-                                  {"o sort", HOTKEY_CYCLE_SORT}, {"Enter edit", HOTKEY_EDIT_INLINE},
-                                  {CTRL "Enter follow", HOTKEY_FOLLOW_FK}, {"e editor", HOTKEY_EDIT_MODAL},
-                                  {"+ add", HOTKEY_ROW_ADD}, {"x delete", HOTKEY_DELETE_ROW},
-                                  {"t tables", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
-static const Hint H_RESULTS_FK[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"Enter editor", HINT_FOCUS_EDITOR},
-                                    {CTRL "Enter follow", HOTKEY_FOLLOW_FK}, {"e edit", HOTKEY_EDIT_MODAL},
-                                    {"x delete", HOTKEY_DELETE_ROW}, {"r refresh", HOTKEY_REFRESH},
-                                    {"p new query", HOTKEY_OPEN_QUERY}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
-static const Hint H_FILTERS[] = {{"+ add", HOTKEY_ADD_FILTER}, {"- remove", HOTKEY_REMOVE_FILTER},
-                                 {"X clear", HOTKEY_CLEAR_FILTERS}, {"Enter edit", NOACT}, {"Tab next", NOACT},
-                                 {"Esc table", NOACT}, {"/ close", HOTKEY_TOGGLE_FILTERS}, {NULL, 0}};
-static const Hint H_SIDEBAR[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"/ search", HOTKEY_SIDEBAR_FILTER},
-                                 {"Enter open", NOACT}, {"+ new tab", HOTKEY_NEW_TAB}, {"Tab content", NOACT}, {"Esc back", NOACT},
-                                 {"t hide", HOTKEY_TOGGLE_SIDEBAR}, {"? keys", HOTKEY_HELP}, {NULL, 0}};
-static const Hint H_FORM[] = {{"Enter open", HOTKEY_CONN_OPEN}, {CTRL "B background", HOTKEY_CONN_OPEN_BACKGROUND},
-                              {CTRL "N workspace", HOTKEY_CONN_OPEN_NEW_WORKSPACE},
-                              {CTRL "O to\xe2\x80\xa6", HOTKEY_CONN_OPEN_TO_WORKSPACE}, {CTRL "S save", HOTKEY_CONN_SAVE},
-                              {CTRL "T test", HOTKEY_CONN_TEST}, {CTRL "L clear", HOTKEY_CONN_CLEAR},
-                              {CTRL "P palette", HOTKEY_PALETTE}, {NULL, 0}};
-static const Hint H_FORM_LIST[] = {{"Enter open", HOTKEY_CONN_OPEN}, {"N folder", HOTKEY_CONN_NEW_FOLDER},
-                                   {"r rename", HOTKEY_CONN_RENAME}, {"d duplicate", HOTKEY_CONN_DUPLICATE},
-                                   {"Space move", HOTKEY_CONN_MOVE}, {"x delete", HOTKEY_CONN_DELETE},
-                                   {"/ filter", HOTKEY_CONN_FILTER}, {CTRL "S save", HOTKEY_CONN_SAVE},
-                                   {CTRL "P palette", HOTKEY_PALETTE}, {NULL, 0}};
-static const Hint H_NONE[] = {{CTRL "P palette", HOTKEY_PALETTE}, {"? keys", HOTKEY_HELP},
-                              {"q quit", HOTKEY_QUIT}, {NULL, 0}};
+#define H_EDIT chrome_hints(HINTS_EDIT)
+#define H_EDITOR chrome_hints(HINTS_EDITOR)
+#define H_RESULTS chrome_hints(HINTS_RESULTS)
+#define H_RESULTS_FK chrome_hints(HINTS_RESULTS_FK)
+#define H_TABLE chrome_hints(HINTS_TABLE)
+#define H_TABLE_FK chrome_hints(HINTS_TABLE_FK)
+#define H_FILTERS chrome_hints(HINTS_FILTERS)
+#define H_SIDEBAR chrome_hints(HINTS_SIDEBAR)
+#define H_FORM chrome_hints(HINTS_FORM)
+#define H_FORM_LIST chrome_hints(HINTS_FORM_LIST)
+#define H_NONE chrome_hints(HINTS_NONE)
 
 /* The cursor column of the grid is a foreign key's first column */
 static bool on_fk_column(const View *v) {
@@ -103,15 +68,7 @@ static Hint *subview_hints(NcApp *app, const View *v, char **texts) {
   return hs;
 }
 
-static char *hints_join(const Hint *hs) {
-  char *out = str_dup("");
-  for (; hs->text; hs++) {
-    char *n = str_printf("%s%s%s", out, *out ? "  " : "", hs->text);
-    free(out);
-    out = n;
-  }
-  return out;
-}
+static char *hints_join(const Hint *hs) { return chrome_hints_join(hs); }
 
 /* Record where each hint with an action sits when the hints start at column x0;
  * a hint is cut at limit */

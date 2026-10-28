@@ -73,13 +73,13 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
   }
 
   /* Calculate visible columns using actual window width */
-  int x = 1;
+  int x = 0;
   size_t first_visible_col = scroll_col;
   size_t last_visible_col = scroll_col;
 
   for (size_t col = scroll_col; col < num_cols; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > layout.win_cols)
+    if (x + width + 1 > layout.win_cols)
       break;
     x += width + 1;
     last_visible_col = col;
@@ -91,10 +91,10 @@ void tui_move_cursor(TuiState *state, int row_delta, int col_delta) {
     /* Scroll right */
     scroll_col = cursor_col;
     /* Adjust to show as many columns as possible */
-    x = 1;
+    x = 0;
     while (scroll_col > 0) {
       int width = tui_get_column_width(state, scroll_col);
-      if (x + width + 3 > layout.win_cols)
+      if (x + width + 1 > layout.win_cols)
         break;
       x += width + 1;
       if (scroll_col == cursor_col)
@@ -314,11 +314,11 @@ void tui_column_last(TuiState *state) {
   LayoutInfo layout = tui_get_layout_info(state);
 
   /* Calculate last visible column with current scroll */
-  int x = 1;
+  int x = 0;
   size_t last_visible_col = scroll_col;
   for (size_t col = scroll_col; col < num_cols; col++) {
     int width = tui_get_column_width(state, col);
-    if (x + width + 3 > layout.win_cols)
+    if (x + width + 1 > layout.win_cols)
       break;
     x += width + 1;
     last_visible_col = col;
@@ -327,10 +327,10 @@ void tui_column_last(TuiState *state) {
   /* Only scroll if cursor is not visible */
   if (cursor_col > last_visible_col) {
     scroll_col = cursor_col;
-    x = 1;
+    x = 0;
     while (scroll_col > 0) {
       int width = tui_get_column_width(state, scroll_col);
-      if (x + width + 3 > layout.win_cols)
+      if (x + width + 1 > layout.win_cols)
         break;
       x += width + 1;
       if (scroll_col == cursor_col)

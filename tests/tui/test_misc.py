@@ -29,9 +29,9 @@ def test_filter(home):
         t.keys("Enter")
         t.type("42")
         t.keys("Enter")
-        t.wait_status("Row 1/1")
+        t.wait_header("1 of 1")
         t.keys("X")  # Clear filters
-        t.wait_status("Row 1/100")
+        t.wait_header("1 of 100")
 
 
 def test_session_restore(home):
@@ -42,15 +42,15 @@ def test_session_restore(home):
     with Tui(home, []) as t:
         t.wait("testdb")  # No session yet: a connection form lists it
         t.keys("Down", "Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("Enter")
-        t.wait_status(re.compile(r"Row 1/500"))
+        t.wait_header(re.compile(r"1 of 500"))
         t.keys("Right", "o", "o")  # v DESC
-        t.wait("▼")
+        t.wait("\u2193")              # a descending sort
         t.keys("C-g")
         t.type("123")
         t.keys("Enter")
-        t.wait_status("Row 123/500")
+        t.wait_header("123 of 500")
         assert t.quit() == 0
     session = home.read("session.json")
     conn = session["workspaces"][0]["connections"][0]
@@ -58,8 +58,8 @@ def test_session_restore(home):
     assert conn["saved_id"] == SAVED_ID and tab["table"] == "big"
     assert tab["sorts"][0]["column"] == "v"
     with Tui(home, []) as t:
-        t.wait_status("Row 123/500")
-        t.wait("▼")
+        t.wait_header("123 of 500")
+        t.wait("\u2193")              # a descending sort
         assert cursor_id(t) == 500 - 123 + 1
 
 
@@ -68,7 +68,7 @@ def test_dialogs_open_and_close(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         t.open_table("big")
         # "?" is the hotkey list of the configuration dialog
-        for key, marker in [("w", "search workspaces"), (",", "Configuration"),
+        for key, marker in [("w", "search workspaces"), (",", "Preferences"),
                             ("?", "Previous tab"), ("i", "History")]:
             t.keys(key)
             t.wait(marker)
@@ -93,7 +93,7 @@ def test_tiny_terminal(home):
         assert t.cpu_seconds() - before < 1.0
         t.keys("Down", "Down")
         t.resize(120, 30)
-        t.wait_status("Row 3/50")
+        t.wait_header("3 of 50")
         assert t.quit() == 0
 
 
@@ -113,14 +113,28 @@ def test_cli_query_mode(home):
         CREATE TABLE c (id INTEGER PRIMARY KEY, s TEXT);
         INSERT INTO c VALUES (1, 'a'), (2, 'b');
     """)
-    out = subprocess.run([LACE, "-q", "SELECT id, s FROM c ORDER BY id",
-                          "sqlite://" + db], capture_output=True, text=True,
-                         timeout=30, env={"HOME": home.path,
-                                          "PATH": LACED_DIR + ":/usr/bin:/bin"})
-    assert out.returncode == 0, out.stderr
-    # Tab-separated, with a rule under the header and a row count
-    assert out.stdout.split("\n") == ["id\ts", "---\t---", "1\ta", "2\tb", "",
-                                      "2 rows", ""], out.stdout
+    def q(*args):
+        out = subprocess.run([LACE, "-q", *args, "sqlite://" + db], capture_output=True, text=True,
+                             timeout=30, env={"HOME": home.path, "PATH": LACED_DIR + ":/usr/bin:/bin"})
+        assert out.returncode == 0, out.stderr
+        return out.stdout
+    sql = "SELECT id, s FROM c ORDER BY id"
+    # The default: an aligned table, numbers right-aligned, a row count
+    assert q(sql) == ("+----+---+\n| id | s |\n+----+---+\n|  1 | a |\n|  2 | b |\n"
+                      "+----+---+\n2 rows\n"), q(sql)
+    assert q(sql, "-f", "csv") == "id,s\n1,a\n2,b\n"
+    assert q(sql, "--format=json") == '[\n {"id": 1, "s": "a"},\n {"id": 2, "s": "b"}\n]\n'
+    assert q(sql, "-f", "tsv") == "id\ts\n1\ta\n2\tb\n"
+    # MySQL's \G at the end, or -f vertical: a block per row
+    vertical = ("*************************** 1. row ***************************\nid: 1\n s: a\n"
+                "*************************** 2. row ***************************\nid: 2\n s: b\n2 rows\n")
+    assert q(sql + "\\G") == vertical
+    assert q(sql, "-f", "vertical") == vertical
+    # A statement without rows: its count
+    assert q("UPDATE c SET s = s") == "2 rows affected\n"
+    bad = subprocess.run([LACE, "-q", sql, "-f", "xml", "sqlite://" + db], capture_output=True,
+                         text=True, timeout=30, env={"HOME": home.path})
+    assert bad.returncode != 0 and "Unknown format 'xml'" in bad.stderr
 
 
 def test_socket_daemon_spawn(home):
@@ -207,7 +221,7 @@ def test_detect_uses_unix_daemon(home):
         db = make_db(h, rows=5)
         with Tui(h, ["-s", "sqlite://" + db], env={"XDG_RUNTIME_DIR": ""}) as t:
             t.open_table("big")
-            t.wait_status("Row 1/5")
+            t.wait_header("1 of 5")
             assert t.child_daemons() == [], "started a private daemon"
             assert t.quit() == 0
         assert daemon.poll() is None, "the shared daemon went away"
@@ -232,7 +246,7 @@ def test_detect_uses_tcp_daemon(home):
         db = make_db(h, rows=5)
         with Tui(h, ["-s", "sqlite://" + db], env={"XDG_RUNTIME_DIR": ""}) as t:
             t.open_table("big")
-            t.wait_status("Row 1/5")
+            t.wait_header("1 of 5")
             assert t.child_daemons() == [], "started a private daemon"
             assert t.quit() == 0
         with open(token) as f:
@@ -242,7 +256,7 @@ def test_detect_uses_tcp_daemon(home):
         try:
             with Tui(h, ["-s", "sqlite://" + db], env={"XDG_RUNTIME_DIR": ""}) as t:
                 t.open_table("big")
-                t.wait_status("Row 1/5")
+                t.wait_header("1 of 5")
                 assert len(t.child_daemons()) == 1, "did not fall back to a private daemon"
                 assert t.quit() == 0
         finally:
@@ -260,7 +274,7 @@ def test_detect_private_daemon(home):
         db = make_db(h, rows=5)
         with Tui(h, ["-s", "sqlite://" + db], env={"XDG_RUNTIME_DIR": ""}) as t:
             t.open_table("big")
-            t.wait_status("Row 1/5")
+            t.wait_header("1 of 5")
             assert len(t.child_daemons()) == 1, "no private daemon"
             assert t.quit() == 0
         cache = _cache_dir(h)
@@ -280,7 +294,7 @@ def test_detect_again_after_loss(home):
         db = make_db(h, rows=5)
         with Tui(h, ["-s", "sqlite://" + db], env={"XDG_RUNTIME_DIR": ""}) as t:
             t.open_table("big")
-            t.wait_status("Row 1/5")
+            t.wait_header("1 of 5")
             private = t.child_daemons()
             assert len(private) == 1, "no private daemon"
             sock = os.path.join(_cache_dir(h), "laced.sock")
@@ -293,7 +307,7 @@ def test_detect_again_after_loss(home):
             t.wait_status("Refreshed")
             assert t.child_daemons() == [], "still on a private daemon"
             t.keys("Down")
-            t.wait_status("Row 2/5")
+            t.wait_header("2 of 5")
             assert t.quit() == 0
     finally:
         if daemon:

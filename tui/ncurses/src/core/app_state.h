@@ -98,6 +98,7 @@ typedef struct {
   DbConnection *conn;  /* Database connection handle (wrapper for liblace) */
   char *connstr;       /* Connection string (for display/reconnect) */
   char *saved_conn_id; /* UUID of saved connection (for session persistence) */
+  char *database;      /* the server's current database, for the header (NULL: SQLite) */
 
   /* Tables list (from this connection) */
   char **tables;
@@ -138,6 +139,8 @@ typedef enum { SUBVIEW_DATA, SUBVIEW_STRUCTURE, SUBVIEW_INDEXES, SUBVIEW_FOREIGN
 typedef struct {
   TabType type; /* Type of tab content */
   bool active;  /* Is this tab active/used */
+  bool preview; /* the sidebar's single click shows tables here, replacing each other;
+                 * a sort, a filter or an edit keeps it (runtime only) */
   /* A TABLE tab shows a table, or a database view, routine or trigger (as
    * lace_list_objects names them; a trigger's table, a routine's kind) */
   LaceObjectKind object;
@@ -196,6 +199,9 @@ typedef struct {
 
   /* Sort state (per-table) - multi-column sorting */
   SortEntry sort_entries[MAX_SORT_COLUMNS]; /* Sort columns in priority order */
+  int *user_widths;       /* column widths set by column_narrower/wider (0: measured) */
+  int query_editor_rows;  /* a query tab's editor height set by split_up/down (0: a third) */
+  size_t num_user_widths;
   size_t num_sort_entries;                  /* Number of active sort columns */
 
   /* Query tab: editor text, results and their view state */
@@ -467,6 +473,17 @@ void app_mark_table_tabs_dirty(AppState *app, size_t connection_index,
  * those). */
 /* Whether the tab's object has that sub-view */
 bool tab_has_subview(const Tab *tab, TabSubView sv);
+
+/* A schema column's sort on the tab: off, ascending, descending, off
+ * again (a column added last while there is room); false when nothing
+ * changed. The caller reloads. */
+bool tab_cycle_sort(Tab *tab, size_t col);
+
+/* Column widths the user set (column_narrower/wider), kept over the
+ * measured ones until the tab shows other columns */
+void tab_set_user_width(Tab *tab, size_t col, int width);
+void tab_clear_user_widths(Tab *tab);
+void tab_apply_user_widths(const Tab *tab, int *widths, size_t n);
 /* Drop what the sub-views read (info, dependents, definition): a refresh */
 void tab_drop_catalog(Tab *tab);
 /* The session's names: "data", "structure", ...; "definition" for an object

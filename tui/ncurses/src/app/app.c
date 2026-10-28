@@ -10,6 +10,7 @@
 #include "../config/config.h"
 #include "../config/session.h"
 #include "../core/app_state.h"
+#include "../core/query_mode.h"
 #include "util/connstr.h"
 #include "../db_compat.h"
 #include "../tui.h"
@@ -110,6 +111,7 @@ static void scrub_url_passwords(char *url) {
 
 static struct option long_options[] = {{"help", no_argument, NULL, 'h'},
                                        {"query", required_argument, NULL, 'q'},
+                                       {"format", required_argument, NULL, 'f'},
                                        {"no-session", no_argument, NULL, 's'},
                                        {NULL, 0, NULL, 0}};
 
@@ -120,14 +122,26 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
   memset(config, 0, sizeof(AppConfig));
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "hq:s", long_options, NULL)) != -1) {
+  while ((opt = getopt_long(argc, argv, "hq:f:s", long_options, NULL)) != -1) {
     switch (opt) {
     case 'h':
       config->help = true;
       break;
     case 'q':
+      str_secure_free(config->query);
       config->query = str_dup(optarg);
       break;
+    case 'f': {
+      QueryOutFormat fmt;
+      if (!query_out_format_from_name(optarg, &fmt)) {
+        fprintf(stderr, "Unknown format '%s' (%s)\n", optarg, query_out_format_names());
+        str_secure_free(config->query);
+        return false;
+      }
+      config->format = (int)fmt;
+      config->format_set = true;
+      break;
+    }
     case 's':
       config->skip_session = true;
       break;
@@ -135,6 +149,13 @@ bool app_parse_args(int argc, char **argv, AppConfig *config) {
       return false;
     }
   }
+  if (config->format_set && !config->query) {
+    fprintf(stderr, "-f/--format goes with -q\n");
+    return false;
+  }
+  /* MySQL's \G at the end of the statement: vertical output */
+  if (config->query && query_out_strip_vertical(config->query) && !config->format_set)
+    config->format = QUERY_OUT_VERTICAL;
 
   /* Get connection string from remaining argument */
   if (optind < argc) {
@@ -201,15 +222,19 @@ void app_print_usage(const char *prog) {
   printf("  ./database.db, /path/to/file.sqlite, etc.\n");
   printf("\n");
   printf("Options:\n");
-  printf("  -h, --help        Show this help message\n");
-  printf("  -q, --query SQL   Execute query and exit\n");
-  printf("  -s, --no-session  Don't restore previous session\n");
+  printf("  -h, --help         Show this help message\n");
+  printf("  -q, --query SQL    Run SQL, print the result and exit\n");
+  printf("  -f, --format FMT   How -q prints it: %s\n", query_out_format_names());
+  printf("                     (default table; SQL ending in \\G prints vertical)\n");
+  printf("  -s, --no-session   Don't restore previous session\n");
   printf("\n");
   printf("Examples:\n");
   printf("  %s ./data.db\n", prog);
   printf("  %s sqlite:///data.db\n", prog);
   printf("  %s postgres://localhost/mydb\n", prog);
   printf("  %s -q 'SELECT * FROM users' sqlite:///data.db\n", prog);
+  printf("  %s -q 'SELECT * FROM users' -f csv ./data.db > users.csv\n", prog);
+  printf("  %s -q 'SELECT * FROM users WHERE id = 1\\G' ./data.db\n", prog);
   printf("\n");
   printf("Press ? or F1 in TUI for keyboard shortcuts.\n");
 }
@@ -230,105 +255,17 @@ static LaceSpawnMode convert_spawn_mode(int tui_mode) {
 }
 
 static int run_query_mode(AppConfig *config) {
-  /* Load application config to get spawn mode preference */
+  /* The daemon config.json names (spawn mode, idle timeout) */
   Config *app_config = config_load(NULL);
-  LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX; /* Default */
+  LaceSpawnMode spawn_mode = LACE_SPAWN_UNIX;
   int idle_timeout = CONFIG_IDLE_TIMEOUT_DEFAULT;
   if (app_config) {
     spawn_mode = convert_spawn_mode(app_config->general.daemon_spawn_mode);
     idle_timeout = app_config->general.daemon_idle_timeout;
   }
-
-  /* Create liblace client with configured spawn mode */
-  lace_client_t *client = create_client_with_mode(spawn_mode, idle_timeout);
   config_free(app_config);
-
-  if (!client) {
-    fprintf(stderr, "Failed to allocate client\n");
-    return 1;
-  }
-  if (!lace_client_connected(client)) {
-    fprintf(stderr, "Failed to connect to lace daemon: %s\n",
-            lace_client_error(client));
-    lace_client_destroy(client);
-    return 1;
-  }
-
-  char *err = NULL;
-  DbConnection *conn = db_connect(client, config->connstr, &err);
-
-  if (!conn) {
-    fprintf(stderr, "Connection failed: %s\n", err ? err : "Unknown error");
-    free(err);
-    lace_client_destroy(client);
-    return 1;
-  }
-
-  ResultSet *rs = db_query(conn, config->query, &err);
-  if (!rs) {
-    fprintf(stderr, "Query failed: %s\n", err ? err : "Unknown error");
-    free(err);
-    db_disconnect(conn);
-    lace_client_destroy(client);
-    return 1;
-  }
-
-  /* Statements without a result set (INSERT/UPDATE/DDL) report a count */
-  if (rs->num_columns == 0) {
-    printf("%lld rows affected\n", (long long)rs->rows_affected);
-    db_result_free(rs);
-    db_disconnect(conn);
-    lace_client_destroy(client);
-    return 0;
-  }
-
-  /* Validate result set structure */
-  if (!rs->columns || (rs->num_rows > 0 && !rs->rows)) {
-    fprintf(stderr, "Invalid result set structure\n");
-    db_result_free(rs);
-    db_disconnect(conn);
-    lace_client_destroy(client);
-    return 1;
-  }
-
-  /* Print column headers */
-  for (size_t i = 0; i < rs->num_columns; i++) {
-    if (i > 0)
-      printf("\t");
-    printf("%s", rs->columns[i].name ? rs->columns[i].name : "");
-  }
-  printf("\n");
-
-  /* Print separator */
-  for (size_t i = 0; i < rs->num_columns; i++) {
-    if (i > 0)
-      printf("\t");
-    printf("---");
-  }
-  printf("\n");
-
-  /* Print rows */
-  for (size_t row = 0; row < rs->num_rows; row++) {
-    Row *r = &rs->rows[row];
-    for (size_t col = 0; col < rs->num_columns; col++) {
-      if (col > 0)
-        printf("\t");
-      if (r->cells && col < r->num_cells) {
-        char *str = db_value_to_string(&r->cells[col]);
-        printf("%s", str ? str : "");
-        free(str);
-      }
-    }
-    printf("\n");
-  }
-
-  printf("\n%zu rows%s\n", rs->num_rows,
-         rs->truncated ? " (truncated: result exceeded the daemon's limit)" : "");
-
-  db_result_free(rs);
-  db_disconnect(conn);
-  lace_client_destroy(client);
-  return 0;
+  return query_mode_run((int)spawn_mode, idle_timeout, config->connstr, config->query,
+                        (QueryOutFormat)config->format);
 }
 
 /* Password callback for session restore - wraps TUI password dialog */

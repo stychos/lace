@@ -22,6 +22,8 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
   var onOpen: ((CatalogObject) -> Void)?
   var onStructure: ((CatalogObject) -> Void)?
   var onNewQuery: ((String?) -> Void)?
+  /// The table list arrived (every reload)
+  var onLoaded: (() -> Void)?
 
   /// A row of the list: a section header (folds), or an object
   enum Row: Equatable {
@@ -145,6 +147,7 @@ final class SidebarViewController: NSViewController, NSTableViewDataSource, NSTa
         loadError = "\(error)"
       }
       applyFilter()
+      onLoaded?()
     }
   }
 

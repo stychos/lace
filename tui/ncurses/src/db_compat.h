@@ -141,6 +141,11 @@ bool db_table_dependents(DbConnection *conn, const char *table, LaceDependent **
 /* The catalog reads of the sub-views (lace_list_objects, lace_table_info +
  * lace_autoincrement_get, lace_object_definition); reads, retried once */
 bool db_list_objects(DbConnection *conn, LaceObject **objects, size_t *n, char **err);
+/* The database the connection is in (PostgreSQL current_database(), MySQL
+ * DATABASE()); *name NULL for SQLite or none selected */
+bool db_current_database(DbConnection *conn, char **name, char **err);
+/* The databases the server lets this user into (lace_list_databases) */
+bool db_list_databases(DbConnection *conn, char ***names, size_t *n, char **err);
 bool db_table_info(DbConnection *conn, const char *table, LaceTableInfo **info, LaceAutoInc **autoinc, char **err);
 bool db_object_definition(DbConnection *conn, const LaceObject *obj, char **sql, char **err);
 /* The names a structure editor's picker lists: what is "types", "collations"

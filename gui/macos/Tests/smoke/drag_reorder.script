@@ -1,0 +1,28 @@
+# Dragging tabs reorders them: a window's entries (the strip order is the
+# session's), and a connection's table and query tabs
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action background
+new-connection-tab
+expect-entry-titles Local|New connection|Local
+drag-entry 0 3
+expect-entry-titles New connection|Local|Local
+drag-entry 2 0
+expect-entry-titles Local|New connection|Local
+drag-entry 1 1
+expect-entry-titles Local|New connection|Local
+drag-entry 1 2
+expect-entry-titles Local|New connection|Local
+form-pick Local
+expect-entry-titles Local|Local|Local
+connect $LACE_SMOKE_DB
+table big
+query SELECT 1
+query SELECT 2
+expect-tab-titles big|SELECT 1|SELECT 2
+drag-tab 2 0
+expect-tab-titles SELECT 2|big|SELECT 1
+drag-tab 0 2
+expect-tab-titles big|SELECT 2|SELECT 1
+expect-tabs 3
+quit

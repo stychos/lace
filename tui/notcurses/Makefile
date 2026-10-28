@@ -34,9 +34,9 @@ SRC_DIRS = $(addprefix $(SRC_DIR)/,$(SRC_SUBDIRS))
 SRCS := $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-SHARED_NAMES = config/config config/connections config/recent config/saved_workspaces \
+SHARED_NAMES = core/chrome core/sqlhl config/config config/connections config/recent config/saved_workspaces \
                config/workspace_json core/history core/utf8 core/ui_event \
-               core/connstr_display core/conn_fields core/undo_stack core/catalog_rows views/text_input platform/posix/platform_posix
+               core/connstr_display core/conn_fields core/undo_stack core/catalog_rows core/query_mode core/theme_rgb core/fuzzy core/prefs_model core/list_model views/text_input platform/posix/platform_posix
 SHARED_OBJS = $(addprefix $(BUILD_DIR)/shared/,$(addsuffix .o,$(notdir $(SHARED_NAMES))))
 
 DEPS := $(OBJS:.o=.d) $(SHARED_OBJS:.o=.d)

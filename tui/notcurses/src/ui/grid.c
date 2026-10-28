@@ -360,9 +360,25 @@ bool grid_do_action(NcApp *app, View *v, HotkeyAction a) {
   Rect r = grid_view_rect(app, v);
   long vis = (long)grid_rows_visible(r);
   switch (a) {
-  case HOTKEY_MOVE_UP: view_move(v, -1, 0); break;
+  case HOTKEY_MOVE_UP:
+    /* Spatial navigation (as the ncurses TUI): over the top edge into the
+     * filter panel, or a query's results into its editor */
+    if (v->cursor_row == 0 && v->kind == VIEW_TABLE && filter_panel_rows(app, v) > 0) {
+      filter_panel_focus(app, v, true);
+      return true;
+    }
+    if (v->cursor_row == 0 && v->kind == VIEW_QUERY && v->focus_results) {
+      v->focus_results = false;
+      return true;
+    }
+    view_move(v, -1, 0);
+    break;
   case HOTKEY_MOVE_DOWN: view_move(v, 1, 0); break;
-  case HOTKEY_MOVE_LEFT: view_move(v, 0, -1); break;
+  case HOTKEY_MOVE_LEFT:
+    if (v->cursor_col == 0 && sidebar_enter(app, app_view_tab(app, v), false)) /* over the left edge */
+      return true;
+    view_move(v, 0, -1);
+    break;
   case HOTKEY_MOVE_RIGHT: view_move(v, 0, 1); break;
   case HOTKEY_PAGE_UP: view_move(v, -(vis > 1 ? vis : 1), 0); break;
   case HOTKEY_PAGE_DOWN: view_move(v, vis > 1 ? vis : 1, 0); break;

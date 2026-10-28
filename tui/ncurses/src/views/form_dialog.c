@@ -6,6 +6,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "theme.h"
+#include "overlay.h"
 #include "form_dialog.h"
 #include "list_picker.h"
 #include "text_input_draw.h"
@@ -229,13 +231,7 @@ bool form_dialog_run(FormDialog *f) {
     if (focus >= scroll + (size_t)vis)
       scroll = focus - (size_t)vis + 1;
     werase(dlg);
-    DRAW_BOX(dlg, COLOR_BORDER);
-    char *t = str_printf(" %s ", f->title);
-    int tw = utf8_width(t, strlen(t));
-    if (tw > width - 4)
-      tw = width - 4;
-    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, (width - tw) / 2, tw, t));
-    free(t);
+    tui_frame_window(dlg, f->title, "\xe2\x86\x91\xe2\x86\x93 field  Enter edit/pick  F2 save  Esc cancel");
     int cursor_x = -1, cursor_y = -1;
     for (int i = 0; i < vis; i++) {
       size_t k = scroll + (size_t)i;

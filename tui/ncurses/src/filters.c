@@ -16,6 +16,9 @@
 #include "views/text_input_draw.h"
 #include "tui_internal.h"
 #include "views/list_picker.h"
+#include "../../liblace/include/util/str.h"
+#include "core/chrome.h"
+#include "views/theme.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,234 +80,129 @@ static void filters_clamp_view(TuiState *state, const TableFilters *f) {
     state->filters_scroll = state->filters_cursor_row;
 }
 
-/* Where the BETWEEN second value starts (the draw and click code agree) */
-static int filters_val2_x(int val_x, int val_width) {
-  int half_width = (val_width - 5) / 2; /* -5 for " AND " */
-  if (half_width < 5)
-    half_width = 5;
-  return val_x + half_width + 5;
+/* A field of a filter row: the focused one in the cursor colours */
+static void draw_field(WINDOW *w, int y, int x, int width, const char *text, bool focused, bool dim) {
+  if (width <= 0)
+    return;
+  if (focused)
+    tui_style(w, TC_CURSOR_FG, TC_CURSOR_BG, A_BOLD);
+  else
+    tui_style(w, dim ? TC_DIM : TC_FG, TC_BG, 0);
+  tui_print_fit(w, y, x, width, text ? text : "");
 }
 
-/* Draw the filters panel */
+/* The first key of an action, for the title's hints */
+static char *first_key(const Config *c, HotkeyAction a, const char *dflt) {
+  char *all = hotkey_get_display(c, a);
+  if (!all || !*all) {
+    free(all);
+    return str_dup(dflt);
+  }
+  char *comma = strchr(all, ',');
+  if (comma)
+    *comma = '\0';
+  return all;
+}
+
+/* A filter row's name for its column */
+static const char *filter_column_name(TuiState *state, const ColumnFilter *cf) {
+  VmTable *vm = tui_vm_table(state);
+  Tab *tab = TUI_TAB(state);
+  if (vm) {
+    const char *name = table_vm_column_name(vm, cf->column_index);
+    if (name)
+      return name;
+  } else if (tab && tab->schema && cf->column_index < tab->schema->num_columns) {
+    return tab->schema->columns[cf->column_index].name;
+  }
+  return "???";
+}
+
+/* Draw the filters panel, as the notcurses TUI's: a title row ("Filters
+ * (n)" and the keys), then a row per filter with its column, operator and
+ * value fields (two for BETWEEN) and a × that removes it */
 void tui_draw_filters_panel(TuiState *state) {
   if (!state || !tui_filters_visible(state))
     return;
-
   Tab *tab = TUI_TAB(state);
   if (!tab)
     return;
   TableFilters *f = &tab->filters;
-
+  WINDOW *w = state->main_win;
   int panel_height = tui_get_filters_panel_height(state);
-
-  /* Get actual window dimensions */
-  int win_cols;
-  int win_rows;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_rows;
-
-  int panel_width = win_cols;
-
-  /* Draw within main_win under the sub-view strip */
-  int start_x = 0;
-  int start_y = tui_subview_strip_rows(state);
-
-  /* Draw panel background */
-  for (int row = 0; row < panel_height; row++) {
-    mvwhline(state->main_win, start_y + row, start_x, ' ', panel_width);
-  }
-
-  /* Ensure at least one filter exists */
-  if (f->num_filters == 0) {
+  int win_cols = getmaxx(w);
+  int start_y = tui_subview_strip_rows(state); /* under the sub-view strip */
+  tui_style(w, TC_FG, TC_BG, 0);
+  for (int row = 0; row < panel_height; row++)
+    tui_print_fit(w, start_y + row, 0, win_cols, "");
+  if (f->num_filters == 0) /* at least one row */
     filters_add(f, 0, FILTER_OP_EQ, "");
-  }
 
-  /* Count active filters */
-  size_t active_count = 0;
-  for (size_t i = 0; i < f->num_filters; i++) {
-    ColumnFilter *cf = &f->filters[i];
-    bool is_raw = (cf->column_index == FILTER_COL_RAW);
-    if (cf->value[0] == '\0' && (is_raw || cf->op == FILTER_OP_EQ)) {
-      continue;
-    }
-    active_count++;
-  }
+  size_t active = 0;
+  for (size_t i = 0; i < f->num_filters; i++)
+    active += f->filters[i].value[0] != '\0' || !filter_op_needs_value(f->filters[i].op);
+  char *title = active ? str_printf("Filters (%zu)", active) : str_dup("Filters");
+  tui_style(w, TC_ACCENT, TC_BG, A_BOLD);
+  int tw = utf8_width(title, strlen(title));
+  tui_print_fit(w, start_y, 1, tw < win_cols - 2 ? tw : win_cols - 2, title);
+  const Config *cfg = state->app->config;
+  char *ka = first_key(cfg, HOTKEY_ADD_FILTER, "+"), *kr = first_key(cfg, HOTKEY_REMOVE_FILTER, "-");
+  char *kc = first_key(cfg, HOTKEY_CLEAR_FILTERS, "X"), *kt = first_key(cfg, HOTKEY_TOGGLE_FILTERS, "/");
+  char *hints = str_printf("%s add  %s remove  %s clear  Enter edit  Tab next  Esc table  %s close", ka, kr, kc, kt);
+  free(ka);
+  free(kr);
+  free(kc);
+  free(kt);
+  int vis = panel_height - 1;
+  char *pos = f->num_filters > (size_t)vis ? str_printf("%zu/%zu", state->filters_cursor_row + 1, f->num_filters) : NULL;
+  int pw = pos ? utf8_width(pos, strlen(pos)) : 0;
+  int hx = 1 + tw + 2, hw = win_cols - 1 - pw - (pw ? 2 : 0) - hx;
+  tui_style(w, TC_DIM, TC_BG, 0);
+  if (hw > 8)
+    tui_print_fit(w, start_y, hx, hw, hints);
+  if (pos)
+    tui_print_fit(w, start_y, win_cols - 1 - pw, pw, pos);
+  free(title);
+  free(hints);
+  free(pos);
 
-  /* Column positions */
-  int col_x = start_x + 1; /* Align with title */
-  int op_x = start_x + 17;
-  int val_x = start_x + 31;
-  int del_x = panel_width - 4;
-  int val_width = del_x - val_x - 1; /* Dynamic width to fill available space */
-  if (val_width < 10)
-    val_width = 10;
-  if (val_width > 255)
-    val_width = 255;
-
-  /* Title bar with hotkeys (like SQL editor) */
-  wattron(state->main_win, A_BOLD);
-  char *add_key = hotkey_get_display(state->app->config, HOTKEY_ADD_FILTER);
-  char *rem_key = hotkey_get_display(state->app->config, HOTKEY_REMOVE_FILTER);
-  char *clr_key = hotkey_get_display(state->app->config, HOTKEY_CLEAR_FILTERS);
-  if (active_count > 0) {
-    mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%zu) (%s/%s:add/del, %s:clear, Tab:next, Esc:close)",
-              active_count, add_key ? add_key : "+", rem_key ? rem_key : "-",
-              clr_key ? clr_key : "c");
-  } else {
-    mvwprintw(state->main_win, start_y, col_x,
-              "Filters (%s/%s:add/del, %s:clear, Tab:next, Esc:close)",
-              add_key ? add_key : "+", rem_key ? rem_key : "-",
-              clr_key ? clr_key : "c");
-  }
-  free(add_key);
-  free(rem_key);
-  free(clr_key);
-  wattroff(state->main_win, A_BOLD);
-
-  /* Position indicator - right-aligned with delete button */
-  if (f->num_filters > 1) {
-    wattron(state->main_win, A_DIM);
-    mvwprintw(state->main_win, start_y, del_x, "%zu/%zu",
-              state->filters_cursor_row + 1, f->num_filters);
-    wattroff(state->main_win, A_DIM);
-  }
-
-  int y = start_y + 1;
-
-  /* Draw filter rows */
   filters_clamp_view(state, f);
-  size_t visible_start = state->filters_scroll;
-  size_t visible_count = f->num_filters - visible_start;
-  if (visible_count > MAX_VISIBLE_FILTERS)
-    visible_count = MAX_VISIBLE_FILTERS;
-
-  for (size_t i = 0; i < visible_count; i++) {
-    size_t filter_idx = visible_start + i;
-    ColumnFilter *cf = &f->filters[filter_idx];
-    bool row_selected =
-        tui_filters_focused(state) && (state->filters_cursor_row == filter_idx);
-    bool is_raw = (cf->column_index == FILTER_COL_RAW);
-
-    /* Column name - use VmTable if available, fallback to Tab */
-    const char *col_name = is_raw ? "(RAW)" : "???";
-    if (!is_raw) {
-      VmTable *vm = tui_vm_table(state);
-      Tab *tab = TUI_TAB(state);
-      if (vm) {
-        const char *name = table_vm_column_name(vm, cf->column_index);
-        if (name)
-          col_name = name;
-      } else if (tab && tab->schema &&
-                 cf->column_index < tab->schema->num_columns) {
-        col_name = tab->schema->columns[cf->column_index].name;
-      }
+  bool focused = tui_filters_focused(state);
+  for (size_t i = state->filters_scroll; i < f->num_filters && i < state->filters_scroll + (size_t)vis; i++) {
+    ColumnFilter *cf = &f->filters[i];
+    int y = start_y + 1 + (int)(i - state->filters_scroll);
+    bool raw = cf->column_index == FILTER_COL_RAW;
+    bool two = !raw && cf->op == FILTER_OP_BETWEEN;
+    bool on = focused && i == state->filters_cursor_row;
+    size_t fc = state->filters_cursor_col;
+    bool inactive = cf->value[0] == '\0' && (raw || filter_op_needs_value(cf->op));
+    ChromeFilterLayout L;
+    chrome_filter_layout(win_cols, two, &L);
+    draw_field(w, y, L.col_x, L.col_w, raw ? "(raw SQL)" : filter_column_name(state, cf), on && fc == 0, inactive);
+    draw_field(w, y, L.op_x, L.op_w, raw ? "-" : filter_op_name(cf->op), on && fc == 1, inactive || raw);
+    if (raw || filter_op_needs_value(cf->op)) {
+      if (on && fc == 2 && state->filters_editing)
+        text_input_draw(w, &state->filters_edit, y, L.val_x, L.val_w, tui_theme_attr(TC_FG, TC_EDIT_BG), true);
+      else
+        draw_field(w, y, L.val_x, L.val_w, cf->value, on && fc == 2, false);
     }
-
-    /* Column field */
-    if (row_selected && state->filters_cursor_col == 0) {
-      wattron(state->main_win, A_REVERSE);
+    if (two) {
+      tui_style(w, TC_DIM, TC_BG, 0);
+      tui_print_fit(w, y, L.val_x + L.val_w, 5, " and ");
+      if (on && fc == 3 && state->filters_editing)
+        text_input_draw(w, &state->filters_edit, y, L.val2_x, L.val2_w, tui_theme_attr(TC_FG, TC_EDIT_BG), true);
+      else
+        draw_field(w, y, L.val2_x, L.val2_w, cf->value2, on && fc == 3, false);
     }
-    tui_print_fit(state->main_win, y, col_x, 14, col_name);
-    if (row_selected && state->filters_cursor_col == 0) {
-      wattroff(state->main_win, A_REVERSE);
-    }
-
-    /* Operator field - show "-" for RAW filters */
-    if (is_raw) {
-      wattron(state->main_win, A_DIM);
-      mvwprintw(state->main_win, y, op_x, "%-12.12s", "-");
-      wattroff(state->main_win, A_DIM);
-    } else {
-      if (row_selected && state->filters_cursor_col == 1) {
-        wattron(state->main_win, A_REVERSE);
-      }
-      mvwprintw(state->main_win, y, op_x, "%-12.12s", filter_op_name(cf->op));
-      if (row_selected && state->filters_cursor_col == 1) {
-        wattroff(state->main_win, A_REVERSE);
-      }
-    }
-
-    /* Value field(s) - BETWEEN has two values, others have one */
-    bool is_between = (cf->op == FILTER_OP_BETWEEN);
-    if (is_raw || filter_op_needs_value(cf->op)) {
-      bool show_placeholder = is_raw && cf->value[0] == '\0';
-
-      if (is_between) {
-        /* BETWEEN: two value fields split evenly */
-        int val2_x = filters_val2_x(val_x, val_width);
-        int half_width = val2_x - val_x - 5;
-
-        /* Value 1 */
-        if (row_selected && state->filters_cursor_col == 2) {
-          if (state->filters_editing) {
-            text_input_draw(state->main_win, &state->filters_edit, y, val_x, half_width,
-                                COLOR_PAIR(COLOR_EDIT), true);
-          } else {
-            wattron(state->main_win, A_REVERSE);
-            tui_print_fit(state->main_win, y, val_x, half_width, cf->value);
-            wattroff(state->main_win, A_REVERSE);
-          }
-        } else {
-          tui_print_fit(state->main_win, y, val_x, half_width, cf->value);
-        }
-
-        /* " AND " separator */
-        mvwprintw(state->main_win, y, val_x + half_width, " AND ");
-
-        /* Value 2 */
-        if (row_selected && state->filters_cursor_col == 3) {
-          if (state->filters_editing) {
-            text_input_draw(state->main_win, &state->filters_edit, y, val2_x, half_width,
-                                COLOR_PAIR(COLOR_EDIT), true);
-          } else {
-            wattron(state->main_win, A_REVERSE);
-            tui_print_fit(state->main_win, y, val2_x, half_width, cf->value2);
-            wattroff(state->main_win, A_REVERSE);
-          }
-        } else {
-          tui_print_fit(state->main_win, y, val2_x, half_width, cf->value2);
-        }
-      } else {
-        /* Regular: single value field */
-        const char *display_val = cf->value;
-        if (row_selected && state->filters_cursor_col == 2) {
-          if (state->filters_editing) {
-            text_input_draw(state->main_win, &state->filters_edit, y, val_x, val_width,
-                                COLOR_PAIR(COLOR_EDIT), true);
-          } else {
-            wattron(state->main_win, A_REVERSE);
-            if (show_placeholder) {
-              wattron(state->main_win, A_DIM);
-              tui_print_fit(state->main_win, y, val_x, val_width, "WHERE ...");
-              wattroff(state->main_win, A_DIM);
-            } else {
-              tui_print_fit(state->main_win, y, val_x, val_width, display_val);
-            }
-            wattroff(state->main_win, A_REVERSE);
-          }
-        } else {
-          if (show_placeholder) {
-            wattron(state->main_win, A_DIM);
-            tui_print_fit(state->main_win, y, val_x, val_width, "WHERE ...");
-            wattroff(state->main_win, A_DIM);
-          } else {
-            tui_print_fit(state->main_win, y, val_x, val_width, display_val);
-          }
-        }
-      }
-    }
-
-    /* Delete button - column 3 for regular ops, column 4 for BETWEEN */
-    int del_col = is_between ? 4 : 3;
-    if (row_selected && state->filters_cursor_col == (size_t)del_col)
-      wattron(state->main_win, A_REVERSE);
-    mvwprintw(state->main_win, y, del_x, "[x]");
-    if (row_selected && state->filters_cursor_col == (size_t)del_col)
-      wattroff(state->main_win, A_REVERSE);
-
-    y++;
+    /* the remove mark: a field of the row here (Tab reaches it) */
+    size_t del_col = two ? 4 : 3;
+    if (on && fc == del_col)
+      tui_style(w, TC_CURSOR_FG, TC_CURSOR_BG, A_BOLD);
+    else
+      tui_style(w, TC_DIM, TC_BG, 0);
+    tui_print_fit(w, y, L.del_x, 1, "\xc3\x97");
   }
+  tui_style(w, TC_FG, TC_BG, 0);
 }
 
 /* Show column dropdown and return selected index, or -1 if cancelled.
@@ -422,21 +320,14 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
   /* Navigation mode */
   const Config *cfg = state->app ? state->app->config : NULL;
 
-  /* Escape - close panel */
+  /* Escape - back to the table, the panel stays (as the notcurses TUI) */
   if (render_event_is_special(event, UI_KEY_ESCAPE)) {
-    tui_set_filters_visible(state, false);
     tui_set_filters_focused(state, false);
   }
-  /* Filter hotkey (/) - switch focus to table if filters exist, else close */
+  /* The filter hotkey (/) with the panel focused hides it */
   else if (hotkey_matches(cfg, event, HOTKEY_TOGGLE_FILTERS)) {
-    if (f && f->num_filters > 0) {
-      /* Filters exist - just switch focus to table, keep panel visible */
-      tui_set_filters_focused(state, false);
-    } else {
-      /* No filters - close the panel */
-      tui_set_filters_visible(state, false);
-      tui_set_filters_focused(state, false);
-    }
+    tui_set_filters_visible(state, false);
+    tui_set_filters_focused(state, false);
   }
   /* Up / k - move cursor up */
   else if (hotkey_matches(cfg, event, HOTKEY_MOVE_UP)) {
@@ -766,6 +657,9 @@ bool tui_handle_filters_input(TuiState *state, const UiEvent *event) {
 
 /* Apply current filters and reload data */
 void tui_apply_filters(TuiState *state) {
+  Tab *pin = TUI_TAB(state);
+  if (pin)
+    pin->preview = false; /* a filtered view is kept */
   Tab *tab = TUI_TAB(state);
   if (!tab || tab->type != TAB_TYPE_TABLE || !tab->table_name)
     return;
@@ -828,41 +722,23 @@ bool tui_handle_filters_click(TuiState *state, int rel_x, int rel_y) {
   if (target_filter >= f->num_filters)
     return true; /* Clicked below filters - just focus */
 
-  /* Column positions (from tui_draw_filters_panel):
-   * Column field: x = 1, width = 14
-   * Operator field: x = 17, width = 12
-   * Value field: x = 31, width = dynamic
-   * Delete button: x = panel_width - 4, width = 3 */
-  int col_x = 1;
-  int op_x = 17;
-  int val_x = 31;
+  /* The fields where tui_draw_filters_panel puts them */
+  int win_cols = getmaxx(state->main_win);
+  const ColumnFilter *tf = &f->filters[target_filter];
+  bool row_between = tf->column_index != FILTER_COL_RAW && tf->op == FILTER_OP_BETWEEN;
+  ChromeFilterLayout L;
+  chrome_filter_layout(win_cols, row_between, &L);
 
-  /* Get panel width for delete button position */
-  int win_cols;
-  int win_rows;
-  getmaxyx(state->main_win, win_rows, win_cols);
-  (void)win_rows;
-  int del_x = win_cols - 4;
-  int val_width = del_x - val_x - 1; /* As tui_draw_filters_panel */
-  if (val_width < 10)
-    val_width = 10;
-  if (val_width > 255)
-    val_width = 255;
-  /* BETWEEN rows have two value fields, and the delete button is the
-   * fifth field (cursor column 4) */
-  bool row_between = f->filters[target_filter].op == FILTER_OP_BETWEEN;
-
-  /* Determine which field was clicked */
   size_t target_col;
-  if (rel_x >= del_x && rel_x < del_x + 3) {
-    target_col = row_between ? 4 : 3; /* Delete button */
-  } else if (row_between && rel_x >= filters_val2_x(val_x, val_width)) {
+  if (rel_x == L.del_x) {
+    target_col = row_between ? 4 : 3; /* the remove mark */
+  } else if (row_between && rel_x >= L.val2_x) {
     target_col = 3; /* Second value */
-  } else if (rel_x >= val_x) {
+  } else if (rel_x >= L.val_x) {
     target_col = 2; /* Value field */
-  } else if (rel_x >= op_x) {
+  } else if (rel_x >= L.op_x) {
     target_col = 1; /* Operator field */
-  } else if (rel_x >= col_x) {
+  } else if (rel_x >= L.col_x) {
     target_col = 0; /* Column field */
   } else {
     return true; /* Clicked in margin */

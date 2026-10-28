@@ -1,0 +1,12 @@
+# A saved connection highlighted in the form names the entry; Open here
+# puts the connection in the form's place
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+expect-title Local
+expect-field name Local
+form-action open
+expect-entry connection
+expect-entries 1
+expect-title Local
+expect-open-connections 1
+quit

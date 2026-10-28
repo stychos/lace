@@ -24,6 +24,7 @@ typedef struct ConnTab {
   size_t sidebar_cursor, sidebar_scroll;
   size_t sidebar_search_pos; /* the search field's cursor (byte offset) */
   bool sidebar_focused;
+  bool sidebar_from_panel; /* the arrows entered the sidebar from the filter panel: Right goes back (runtime) */
   bool auto_open; /* open the first table once the list is known (general.auto_open_first_table; runtime) */
   uint64_t sidebar_view_uid; /* the view the sidebar cursor last followed (runtime) */
   bool sidebar_search_visible; /* the search field was called (sidebar_filter); it hides again

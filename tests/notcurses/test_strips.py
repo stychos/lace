@@ -178,14 +178,14 @@ def test_filter_panel_edit_add_remove_clear(home):
     with open_big(home, 100) as t:
         t.keys("Right", "/")                              # a row for v, its value field focused
         t.wait("Filters")
-        t.wait(lambda s: "v " in s.split("\n")[3] and "=" in s.split("\n")[3])
+        t.wait(lambda s: "v " in s.split("\n")[4] and "=" in s.split("\n")[4])
         t.type("42"); t.keys("Enter")                     # typing edits the value; Enter applies
         t.wait("Filters (1)")
         t.wait("v = 42")
         assert wait_id(t, 42) == 42
         t.wait(at(1, 1))
         t.keys("+")                                       # a second row, ready to type
-        t.wait(lambda s: len([l for l in s.split("\n")[3:6] if " = " in l or "=" in l]) >= 2)
+        t.wait(lambda s: len([l for l in s.split("\n")[4:7] if " = " in l or "=" in l]) >= 2)
         t.type("41"); t.keys("Enter")                     # v = 42 AND v = 41: nothing
         t.wait("Filters (2)")
         t.wait(at(0, 0))                                  # "0 of 0"
@@ -199,7 +199,7 @@ def test_filter_panel_edit_add_remove_clear(home):
         t.keys("/")                                       # a blank row for the cursor column again
         t.wait("Filters")
         t.keys("+")                                       # a blank row does not stop another being added
-        t.wait(lambda s: len([l for l in s.split("\n")[3:6] if "=" in l]) >= 2)
+        t.wait(lambda s: len([l for l in s.split("\n")[4:7] if "=" in l]) >= 2)
         t.type("42"); t.keys("Enter")
         t.wait("Filters (1)")                             # one active, one blank
         t.wait(at(1, 1))
@@ -223,7 +223,7 @@ def test_filter_panel_pickers_and_tab_ring(home):
         t.keys("Enter")                                   # its picker
         t.wait("Operator")
         t.type("contains"); t.keys("Enter")
-        t.wait(lambda s: "contains" in s.split("\n")[3])
+        t.wait(lambda s: "contains" in s.split("\n")[4])
         t.keys("Tab")                                     # the value
         t.type("9"); t.keys("Enter")
         t.wait("name contains '9'")
@@ -235,7 +235,7 @@ def test_filter_panel_pickers_and_tab_ring(home):
         t.keys("Escape")
         t.wait(lambda s: "Raw SQL" not in s)
         t.keys("M-Right", "M-Right")                      # Alt+Right cycles the operator from any field
-        t.wait(lambda s: "ends with" in s.split("\n")[3])
+        t.wait(lambda s: "ends with" in s.split("\n")[4])
         t.wait("name ends with '9'")
         t.wait(at(1, 10))
         t.keys("BTab")                                   # before the first field: the sidebar
@@ -249,7 +249,7 @@ def test_filter_panel_pickers_and_tab_ring(home):
         t.keys("BTab")                                   # grid -> panel (its last field)
         t.wait("Enter edit")
         t.keys("q")                                       # a letter on the value field types, no quit
-        t.wait(lambda s: "q" in s.split("\n")[3])
+        t.wait(lambda s: "q" in s.split("\n")[4])
         t.keys("Escape")                                  # cancels the edit
         t.keys("Escape")                                  # leaves the panel
         t.keys("q"); assert t.quit() == 0
@@ -313,5 +313,5 @@ def test_filter_panel_restored_with_the_session(home):
         t.wait("Filters (1)")
         t.wait("v = 7")
         t.wait(at(1, 1))
-        assert len([l for l in t.text().split("\n")[3:6] if "v " in l and "=" in l]) == 1
+        assert len([l for l in t.text().split("\n")[4:7] if "v " in l and "=" in l]) == 1
         t.keys("q"); assert t.quit() == 0

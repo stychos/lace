@@ -40,6 +40,8 @@ checkHistory(tmp: tmp)
 checkRecents()
 checkKeyset()
 checkDdl()
+checkSharedFiles(tmp: tmp)
+checkConnectionFields()
 if let laced = findLaced() {
   await checkConnection(laced: laced, tmp: tmp)
 } else {

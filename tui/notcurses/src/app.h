@@ -1,5 +1,6 @@
 #ifndef LACE_NC_APP_H
 #define LACE_NC_APP_H
+#include "core/chrome.h"
 #include "config/config.h"
 #include "config/connections.h"
 #include "config/recent.h"
@@ -81,8 +82,8 @@ bool app_busy(const NcApp *app);
 void app_quit(NcApp *app);
 bool app_quit_needs_confirm(const NcApp *app);
 /* Status-hint actions that are not hotkeys (HitSpan values past HOTKEY_COUNT) */
-#define HINT_FOCUS_EDITOR (HOTKEY_COUNT + 1)
-#define HINT_FOCUS_RESULTS (HOTKEY_COUNT + 2)
+#define HINT_FOCUS_EDITOR CHROME_FOCUS_EDITOR /* core/chrome.h */
+#define HINT_FOCUS_RESULTS CHROME_FOCUS_RESULTS
 int64_t app_now_ms(void);
 /* Dispatch one translated event: overlays first, then the content */
 void app_handle_event(NcApp *app, const UiEvent *ev);

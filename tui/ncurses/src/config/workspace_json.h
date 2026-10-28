@@ -33,5 +33,8 @@ cJSON *session_json_to_v1(const cJSON *root, char **error);
 /* FilterOperator integer <-> lace_filter_op_key() string; -1 / NULL unknown */
 int workspace_json_op_from_key(const char *key);
 const char *workspace_json_op_key(int op);
+/* This TUI's FilterOperator as liblace's LaceFilterOp (LACE_FILTER_EQ for
+ * one out of range) */
+int workspace_json_op_lace(int op);
 
 #endif

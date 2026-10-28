@@ -51,10 +51,13 @@ public final class Connection: @unchecked Sendable {
   /// May hold passwords; never shown (see displayName)
   public let connectionString: String
   public let driver: Driver
-  /// Transaction changes, notices and the close, in order; ends after close()
+  /// Transaction changes, notices and the close, in order; ends after close().
+  /// One consumer; every other one takes its own stream from subscribe().
   public let events: AsyncStream<Event>
 
   private let eventSink: AsyncStream<Event>.Continuation
+  /// The streams subscribe() handed out (a connection shown in several windows)
+  private var subscribers: [UUID: AsyncStream<Event>.Continuation] = [:]
   private let queue: DispatchQueue
   private let lock = NSLock()
   private var connID: Int32
@@ -77,7 +80,9 @@ public final class Connection: @unchecked Sendable {
     generation = client.generation
     driver = Driver(connectionString: connectionString) ?? .sqlite
     queue = DispatchQueue(label: "dev.hexed.lace.connection", qos: .userInitiated)
-    let stream = AsyncStream<Event>.makeStream()
+    // Bounded: an app that reads only subscribe() streams leaves this one
+    // unread for the connection's life
+    let stream = AsyncStream<Event>.makeStream(bufferingPolicy: .bufferingNewest(256))
     events = stream.stream
     eventSink = stream.continuation
   }
@@ -106,6 +111,37 @@ public final class Connection: @unchecked Sendable {
     lock.withLock { userJobs.first.map { UserStatement(what: $0.what, since: userSince) } }
   }
   public var isClosed: Bool { lock.withLock { closed || closing } }
+
+  /// A stream of its own for one more consumer: the events from now on, in
+  /// order, ending after close() (at once when already closed)
+  public func subscribe() -> AsyncStream<Event> {
+    let (stream, cont) = AsyncStream<Event>.makeStream()
+    let id = UUID()
+    let added: Bool = lock.withLock {
+      if closed { return false }
+      subscribers[id] = cont
+      return true
+    }
+    if !added {
+      cont.yield(.closed)
+      cont.finish()
+      return stream
+    }
+    cont.onTermination = { [weak self] _ in
+      guard let self else { return }
+      _ = lock.withLock { self.subscribers.removeValue(forKey: id) }
+    }
+    return stream
+  }
+
+  /// To every consumer (never under the lock: a finished stream's
+  /// onTermination takes it)
+  private func emit(_ event: Event) {
+    eventSink.yield(event)
+    for sink in lock.withLock({ Array(subscribers.values) }) {
+      sink.yield(event)
+    }
+  }
 
   // MARK: Jobs
 
@@ -277,9 +313,18 @@ public final class Connection: @unchecked Sendable {
     }
     guard first else { return }
     defer {
-      lock.withLock { closed = true }
+      let sinks: [AsyncStream<Event>.Continuation] = lock.withLock {
+        closed = true
+        let all = Array(subscribers.values)
+        subscribers.removeAll()
+        return all
+      }
       eventSink.yield(.closed)
       eventSink.finish()
+      for sink in sinks {
+        sink.yield(.closed)
+        sink.finish()
+      }
     }
     try await submit(
       Job(disconnect: true) { [client] id in
@@ -371,7 +416,7 @@ public final class Connection: @unchecked Sendable {
       throw LaceError(code: LACE_ERR_CONNECTION_CLOSED, message: "The connection is closed")
     }
     if firstUser {
-      eventSink.yield(.userBusyChanged(true))
+      emit(.userBusyChanged(true))
     }
     return try await withCheckedThrowingContinuation { cont in
       queue.async { [self] in
@@ -386,7 +431,7 @@ public final class Connection: @unchecked Sendable {
           return self.userJobs.isEmpty
         }
         if lastUser {
-          self.eventSink.yield(.userBusyChanged(false))
+          self.emit(.userBusyChanged(false))
         }
         cont.resume(with: outcome)
       }
@@ -458,7 +503,7 @@ public final class Connection: @unchecked Sendable {
       return open
     }
     client.expectGeneration(lock.withLock { generation })
-    eventSink.yield(
+    emit(
       .notice(
         txWasOpen
           ? "The daemon was replaced. The open transaction is lost."
@@ -501,7 +546,7 @@ public final class Connection: @unchecked Sendable {
       return txState
     }
     if let change {
-      eventSink.yield(.transactionChanged(change))
+      emit(.transactionChanged(change))
     }
   }
 
@@ -540,5 +585,19 @@ public final class Connection: @unchecked Sendable {
     if !ok {
       throw LaceError(code: LACE_ERR_ROW_NOT_FOUND, message: takeCString(why) ?? "row check failed")
     }
+  }
+}
+
+/// Whether two connections are the same database (the TUIs' conn_key_matches):
+/// by saved id when either has one, else by the connection string without
+/// its passwords
+public enum ConnectionKey {
+  public static func matches(savedA: String?, _ a: String?, savedB: String?, _ b: String?) -> Bool {
+    conn_key_matches(savedA, a, savedB, b)
+  }
+
+  /// The connection string without its passwords (the key of a typed URL)
+  public static func passwordless(_ connectionString: String) -> String {
+    RecentConnections.stripPasswords(connectionString) ?? connectionString
   }
 }

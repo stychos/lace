@@ -1,0 +1,33 @@
+# Dragging a connection's tab onto another window's strip moves the entry
+# there with its connection (nothing reconnects); the window it left
+# closes when that was its last entry; the moved entry belongs to its new
+# window: its badge shows there, and closing its last tab leaves a form there
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action open
+table big
+new-window
+expect-windows 2
+drag-entry-to 2 0
+wait 300
+expect-windows 1
+window 2
+expect-entries 2
+expect-entry connection
+expect-entry-titles Local|New connection
+expect-open-connections 1
+expect-tabs 1
+query BEGIN
+run
+expect-badge 1
+query ROLLBACK
+run
+expect-badge 0
+expect-tabs 3
+close-tab
+close-tab
+close-tab
+expect-entry form
+expect-entries 2
+expect-open-connections 0
+quit

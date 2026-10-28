@@ -24,8 +24,13 @@
 #include "util/json_helpers.h"
 #include <cjson/cJSON.h>
 #include "app/app.h"
+#include "core/query_mode.h"
+#include "core/theme_rgb.h"
+#include "core/chrome.h"
+#include "views/theme.h"
 #include <getopt.h>
 #include <locale.h>
+#include <math.h>
 #include <unistd.h>
 
 /* ---- Statement splitting --------------------------------------------- */
@@ -885,7 +890,7 @@ static void test_hotkey_parse(void) {
   CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_CONN_TAB_3), "Alt+3");
   CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_NEXT_CONN_TAB), "Ctrl+PgDn");
   CHECK(hotkey_action_frontends(HOTKEY_QUIT) == CONFIG_FE_ALL);
-  CHECK(hotkey_action_frontends(HOTKEY_PALETTE) == CONFIG_FE_NOTCURSES);
+  CHECK(hotkey_action_frontends(HOTKEY_PALETTE) == CONFIG_FE_ALL); /* both TUIs have the palette */
   CHECK(hotkey_action_frontends(HOTKEY_SIDEBAR_FILTER) == CONFIG_FE_ALL); /* the notcurses sidebar's search key */
   CHECK(hotkey_action_frontends(HOTKEY_TOGGLE_HEADER) == CONFIG_FE_NCURSES);
   CHECK_STR_FREE(hotkey_get_display(c, HOTKEY_QUIT), "q, Ctrl+X, F10");
@@ -991,18 +996,19 @@ static void test_hotkey_frontend_mask(void) {
   Config *c = config_get_defaults();
   CHECK(c->frontend == CONFIG_FE_NCURSES);
   CHECK(config_validate(c, &err) && !err);
-  /* palette (notcurses only, CTRL+P) is not this frontend's */
-  CHECK(hotkey_add_key(c, HOTKEY_QUIT, "CTRL+P"));
-  CHECK(config_validate(c, &err) && !err);
-  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "CTRL+P") == HOTKEY_COUNT);
-  CHECK(hotkey_find_conflict(c, HOTKEY_PALETTE, "CTRL+P") == HOTKEY_COUNT);
-  Config *d = config_copy(c);
-  CHECK(d && d->frontend == CONFIG_FE_NCURSES);
-  config_free(d);
-  /* In the notcurses frontend both exist: a conflict */
+  /* toggle_header (ncurses only, H) is not the notcurses frontend's */
   c->frontend = CONFIG_FE_NOTCURSES;
-  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "CTRL+P") == HOTKEY_PALETTE);
-  CHECK(!config_validate(c, &err) && err && strstr(err, "CTRL+P"));
+  CHECK(hotkey_add_key(c, HOTKEY_QUIT, "H"));
+  CHECK(config_validate(c, &err) && !err);
+  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "H") == HOTKEY_COUNT);
+  CHECK(hotkey_find_conflict(c, HOTKEY_TOGGLE_HEADER, "H") == HOTKEY_COUNT);
+  Config *d = config_copy(c);
+  CHECK(d && d->frontend == CONFIG_FE_NOTCURSES);
+  config_free(d);
+  /* In the ncurses frontend both exist: a conflict */
+  c->frontend = CONFIG_FE_NCURSES;
+  CHECK(hotkey_find_conflict(c, HOTKEY_QUIT, "H") == HOTKEY_TOGGLE_HEADER);
+  CHECK(!config_validate(c, &err) && err && strstr(err, "H"));
   free(err);
   err = NULL;
   config_free(c);
@@ -1447,7 +1453,173 @@ static void test_form_names(void) {
   form_dialog_free(&f);
 }
 
+
+/* ---- Query mode output (-q -f) --------------------------------------- */
+
+static char *render(const LaceResult *r, QueryOutFormat fmt) {
+  char *buf = NULL;
+  size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  CHECK(f && query_out_write(f, r, fmt));
+  fclose(f);
+  return buf;
+}
+
+static LaceValue qv_text(const char *s) {
+  LaceValue v = {.type = LACE_TYPE_TEXT};
+  v.text.data = str_dup(s);
+  v.text.len = strlen(s);
+  return v;
+}
+
+static void test_query_out(void) {
+  setlocale(LC_CTYPE, "");
+  LaceColumn cols[4] = {{.name = "id"}, {.name = "t"}, {.name = "r"}, {.name = "b"}};
+  static uint8_t bytes[] = {0x00, 0xff};
+  LaceValue row1[4] = {{.type = LACE_TYPE_INT, .int_val = 1}, qv_text("a, \"q\""),
+                       {.type = LACE_TYPE_FLOAT, .float_val = 1.5}, {.type = LACE_TYPE_BLOB}};
+  row1[3].blob.data = bytes;
+  row1[3].blob.len = 2;
+  LaceValue row2[4] = {{.type = LACE_TYPE_INT, .int_val = 22}, qv_text(""), {.is_null = true}, {.is_null = true}};
+  LaceValue row3[4] = {{.type = LACE_TYPE_INT, .int_val = 3}, qv_text("x\ty\nü"), {.type = LACE_TYPE_DECIMAL},
+                       {.is_null = true}};
+  row3[2].text.data = str_dup("12345678901234567890.5");
+  LaceRow rows[3] = {{row1, 4}, {row2, 4}, {row3, 4}};
+  LaceResult r = {.columns = cols, .num_columns = 4, .rows = rows, .num_rows = 3, .rows_affected = -1};
+
+  /* table: framed, numbers right-aligned, widths by display width */
+  char *t = render(&r, QUERY_OUT_TABLE);
+  CHECK_STR(t, "+----+---------+------------------------+---------+\n"
+               "| id | t       | r                      | b       |\n"
+               "+----+---------+------------------------+---------+\n"
+               "|  1 | a, \"q\"  |                    1.5 | x'00ff' |\n"
+               "| 22 |         |                   NULL | NULL    |\n"
+               "|  3 | x\\ty\\nü | 12345678901234567890.5 | NULL    |\n"
+               "+----+---------+------------------------+---------+\n"
+               "3 rows\n");
+  free(t);
+  /* vertical: MySQL's \G */
+  t = render(&r, QUERY_OUT_VERTICAL);
+  const char *first = "*************************** 1. row ***************************\n"
+                      "id: 1\n t: a, \"q\"\n r: 1.5\n b: x'00ff'\n";
+  CHECK(t && strncmp(t, first, strlen(first)) == 0);
+  CHECK(t && strstr(t, "\n t: x\ty\nü\n") && strstr(t, "3 rows\n"));
+  free(t);
+  /* csv: quoted where needed, NULL empty, '' as "" */
+  t = render(&r, QUERY_OUT_CSV);
+  CHECK_STR(t, "id,t,r,b\n1,\"a, \"\"q\"\"\",1.5,x'00ff'\n22,\"\",,\n3,\"x\ty\nü\",12345678901234567890.5,\n");
+  free(t);
+  /* json: exact numbers, null, escaped strings */
+  t = render(&r, QUERY_OUT_JSON);
+  CHECK_STR(t, "[\n {\"id\": 1, \"t\": \"a, \\\"q\\\"\", \"r\": 1.5, \"b\": \"x'00ff'\"},\n"
+               " {\"id\": 22, \"t\": \"\", \"r\": null, \"b\": null},\n"
+               " {\"id\": 3, \"t\": \"x\\ty\\nü\", \"r\": 12345678901234567890.5, \"b\": null}\n]\n");
+  free(t);
+  /* tsv: escaped, NULL as NULL */
+  t = render(&r, QUERY_OUT_TSV);
+  CHECK_STR(t, "id\tt\tr\tb\n1\ta, \"q\"\t1.5\tx'00ff'\n22\t\tNULL\tNULL\n3\tx\\ty\\nü\t12345678901234567890.5\tNULL\n");
+  free(t);
+  /* NaN is no JSON number */
+  LaceValue nan_row[1] = {{.type = LACE_TYPE_FLOAT, .float_val = NAN}};
+  LaceRow nrows[1] = {{nan_row, 1}};
+  LaceResult nr = {.columns = cols, .num_columns = 1, .rows = nrows, .num_rows = 1};
+  t = render(&nr, QUERY_OUT_JSON);
+  CHECK_STR(t, "[\n {\"id\": \"NaN\"}\n]\n");
+  free(t);
+  /* no columns: the affected count */
+  LaceResult dml = {.rows_affected = 1};
+  t = render(&dml, QUERY_OUT_TABLE);
+  CHECK_STR(t, "1 row affected\n");
+  free(t);
+  t = render(&dml, QUERY_OUT_JSON);
+  CHECK_STR(t, "{\"rows_affected\": 1}\n");
+  free(t);
+  t = render(&dml, QUERY_OUT_CSV);
+  CHECK_STR(t, "");
+  free(t);
+  /* no rows: the header, then the count */
+  LaceResult empty = {.columns = cols, .num_columns = 1};
+  t = render(&empty, QUERY_OUT_TABLE);
+  CHECK_STR(t, "+----+\n| id |\n+----+\n0 rows\n");
+  free(t);
+  t = render(&empty, QUERY_OUT_JSON);
+  CHECK_STR(t, "[]\n");
+  free(t);
+  for (int i = 1; i < 2; i++) {
+    free(row1[i].text.data);
+    free(row2[i].text.data);
+    free(row3[i].text.data);
+  }
+  free(row3[2].text.data);
+
+  /* names and \G */
+  QueryOutFormat fmt;
+  CHECK(query_out_format_from_name("csv", &fmt) && fmt == QUERY_OUT_CSV);
+  CHECK(query_out_format_from_name("G", &fmt) && fmt == QUERY_OUT_VERTICAL);
+  CHECK(!query_out_format_from_name("xml", &fmt));
+  char q1[] = "SELECT 1\\G";
+  CHECK(query_out_strip_vertical(q1));
+  CHECK_STR(q1, "SELECT 1");
+  char q2[] = "SELECT 1 \\G ; ";
+  CHECK(query_out_strip_vertical(q2));
+  CHECK_STR(q2, "SELECT 1 ");
+  char q3[] = "SELECT '\\G' FROM t";
+  CHECK(!query_out_strip_vertical(q3));
+}
+
+/* ---- The theme's colours on 256-colour terminals --------------------- */
+
+static void test_chrome_text(void) {
+  /* the header's position: commas, an estimate, a lower bound */
+  CHECK_STR_FREE(chrome_position(2, 1200, true, false), "3 of 1,200");
+  CHECK_STR_FREE(chrome_position(0, 200000, true, true), "1 of \xe2\x89\x88" "200,000");
+  CHECK_STR_FREE(chrome_position(0, 1000, false, false), "1 of 1,000+");
+  CHECK_STR_FREE(chrome_position(0, 0, true, false), "0 of 0");
+  CHECK(chrome_position(0, 0, false, false) == NULL);
+  /* filters as the header writes them */
+  CHECK_STR_FREE(chrome_filter_text("v", LACE_FILTER_EQ, "42", NULL, true), "v = 42");
+  CHECK_STR_FREE(chrome_filter_text("name", LACE_FILTER_CONTAINS, "x", NULL, false), "name contains 'x'");
+  CHECK_STR_FREE(chrome_filter_text("v", LACE_FILTER_BETWEEN, "1", "5", true), "v between 1 and 5");
+  CHECK_STR_FREE(chrome_filter_text(NULL, LACE_FILTER_RAW, "a > 1", NULL, false), "(a > 1)");
+  /* the right side: the sorts and filters give way to the position */
+  CHECK_STR_FREE(chrome_header_right("\xe2\x86\x91id", "1 of 3", 40), "\xe2\x86\x91id  1 of 3");
+  CHECK_STR_FREE(chrome_header_right("abcdefghijklmnop", "1 of 3", 16), "abcdefg\xe2\x80\xa6  1 of 3");
+  CHECK(chrome_header_right(NULL, NULL, 40) == NULL);
+  /* the path: a repeated connection name gets its position */
+  const char *names[] = {"t.sqlite", "t.sqlite"};
+  CHECK_STR_FREE(chrome_header_format("Workspace", names, 2, 1, NULL, "big", 0, 0, 80, NULL, NULL, NULL, NULL,
+                                      NULL, NULL),
+                 "Workspace \xe2\x96\xb8 t.sqlite 2 \xe2\x96\xb8 big");
+  CHECK_STR_FREE(chrome_connstr_short_name("sqlite:///tmp/a/data.db"), "data.db");
+  CHECK_STR_FREE(chrome_connstr_short_name("postgres://u@db.example/shop"), "shop on db.example");
+  CHECK_STR_FREE(chrome_hints_join(chrome_hints(HINTS_NONE)), "\xe2\x8c\x83P palette  ? keys  q quit");
+  CHECK(!strcmp(chrome_tx_label(true, true, false), "[TX FAILED] "));
+}
+
+static void test_theme_colors(void) {
+  CHECK(theme_xterm256(0x000000) == 16);  /* the cube's black */
+  CHECK(theme_xterm256(0xffffff) == 231); /* and white */
+  CHECK(theme_xterm256(0xff0000) == 196);
+  CHECK(theme_xterm256(0x808080) == 244); /* a grey: the ramp */
+  CHECK(theme_xterm256(0x5f87af) == 67);  /* an exact cube colour */
+  CHECK(theme_xterm256(theme_palette(true)[TC_CURSOR_BG]) == 239);
+  CHECK(theme_xterm256(theme_palette(false)[TC_CURSOR_BG]) == 251);
+  CHECK(theme_ansi8(0xcd0000) == 1);
+  CHECK(theme_ansi8(0x101010) == 0);
+  CHECK(theme_is_dark(0, true) && !theme_is_dark(0, false));
+  CHECK(!theme_is_dark(1, true) && theme_is_dark(2, false));
+  /* the terminal's replies to the colour query come out of what was read; keys stay */
+  char buf[] = "ab\033]11;rgb:1e1e/1e1e/2e2e\033\\c\033[?62;22c\033[Ad";
+  size_t n = tui_strip_replies(buf, sizeof buf - 1);
+  CHECK(n == 7 && memcmp(buf, "abc\033[Ad", 7) == 0);
+  char bel[] = "\033]11;rgb:ffff/ffff/ffff\007x";
+  CHECK(tui_strip_replies(bel, sizeof bel - 1) == 1 && bel[0] == 'x');
+}
+
 int main(void) {
+  test_chrome_text();
+  test_theme_colors();
+  test_query_out();
   test_recent_passwords();
   test_session_connstr_password();
   test_config_file();

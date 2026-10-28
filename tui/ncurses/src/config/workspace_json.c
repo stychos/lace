@@ -26,6 +26,8 @@ const char *workspace_json_op_key(int op) {
   return lace_filter_op_key(OP_TO_LACE[op]);
 }
 
+int workspace_json_op_lace(int op) { return op >= 0 && op < FILTER_OP_COUNT ? (int)OP_TO_LACE[op] : (int)LACE_FILTER_EQ; }
+
 int workspace_json_op_from_key(const char *key) {
   if (!key)
     return -1;

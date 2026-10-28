@@ -1,3 +1,4 @@
+#include "core/chrome.h"
 #include "model/view.h"
 #include "core/utf8.h"
 #include "core/catalog_rows.h"
@@ -537,18 +538,7 @@ const char *view_title(const View *v) {
   if (v->kind == VIEW_TABLE) return v->table ? v->table : "";
   /* Valid until the next call on this thread */
   static _Thread_local char buf[256];
-  const char *s = v->text ? v->text : "";
-  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
-  if (!*s) return "New query";
-  size_t len = 0;
-  while (s[len] && s[len] != '\n') len++;
-  while (len && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r')) len--;
-  int cols;
-  size_t fit = utf8_fit(s, len, 40, &cols);
-  if (fit > sizeof buf - 1) fit = utf8_truncate(s, sizeof buf - 1);
-  memcpy(buf, s, fit);
-  buf[fit] = '\0';
-  return buf;
+  return chrome_query_title(v->text, buf, sizeof buf);
 }
 
 bool view_row_numbers(const View *v, const Config *config) {

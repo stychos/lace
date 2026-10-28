@@ -19,17 +19,17 @@ def test_session_v2_round_trip(home):
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
         t.keys("Down", "Enter")         # highlight it in the form, open it
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("Enter")
-        t.wait_status("Row 1/500")
+        t.wait_header("1 of 500")
         t.keys("Right", "o", "o")  # v DESC
-        t.wait("▼")
+        t.wait("\u2193")              # a descending sort
         t.keys("C-g")
         t.type("123")
         t.keys("Enter")
-        t.wait_status("Row 123/500")
+        t.wait_header("123 of 500")
         t.keys("p")  # a query tab on the same connection
-        t.wait("SQL Query")
+        t.wait("runs the statement at the cursor")
         assert t.quit() == 0
     s = home.read("session.json")
     assert s["version"] == 2 and s["notcurses"] == {"theme": "dark"}
@@ -43,10 +43,10 @@ def test_session_v2_round_trip(home):
     assert tab["order"] == 0 and conn["tabs"][1]["order"] == 1
     assert "settings" not in s and "ncurses" in s
     with Tui(home, []) as t:
-        t.wait("SQL Query")  # the current tab (the query) is restored
+        t.wait("runs the statement at the cursor")  # the current tab (the query) is restored
         t.keys("[")    # back to the table tab
-        t.wait_status("Row 123/500")
-        t.wait("▼")
+        t.wait_header("123 of 500")
+        t.wait("\u2193")              # a descending sort
         assert cursor_id(t) == 500 - 123 + 1
 
 
@@ -65,7 +65,7 @@ def test_session_v2_from_gui(home):
              "tabs": [{"type": "query", "text": "SELECT 7"}]}]}]})
     with Tui(home, []) as t:
         # name1, name10..name19, name100: 12 rows
-        t.wait_status("Row 1/12")
+        t.wait_header("1 of 12")
         t.keys("]")
         t.wait("SELECT 7")
 
@@ -87,7 +87,7 @@ def test_session_v2_form_kept(home):
         t.wait("SELECT 7")                   # the current tab, the query after the form
         assert "name1" not in t.text()       # not the table tab
         t.keys("]")
-        t.wait_status("Row 1/5")
+        t.wait_header("1 of 5")
         status = t.status().lower()
         assert "skip" not in status and "fail" not in status and "error" not in status
         assert t.quit() == 0
@@ -108,9 +108,9 @@ def test_session_v2_unparsable_kept(home):
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
         t.keys("Down", "Enter")         # highlight it in the form, open it
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("Enter")
-        t.wait_status("Row 1/5")
+        t.wait_header("1 of 5")
         with open(home.cfg_dir + "/session.json", "w") as f:
             f.write(BAD)
         t.quit()
@@ -127,8 +127,8 @@ def test_session_v1_still_loads(home):
                                     {"type": "TABLE", "connection_id": SAVED_ID, "table_name": "big",
                                      "sort": [{"column": "v", "direction": 2}], "ui": {}}]}]})
     with Tui(home, []) as t:
-        t.wait_status("Row 1/50")
-        t.wait("▼")
+        t.wait_header("1 of 50")
+        t.wait("\u2193")              # a descending sort
         assert cursor_id(t) == 50
 
 
@@ -140,16 +140,16 @@ def test_session_connection_tab_only(home):
     with Tui(home, ["-s"]) as t:
         t.wait("testdb")
         t.keys("Down", "Enter")         # highlight it in the form, open it
-        t.wait("Tables")
+        t.wait("TABLES")
         assert t.quit() == 0
     conn = home.read("session.json")["workspaces"][0]["connections"][0]
     assert conn["saved_id"] == SAVED_ID and conn["tabs"] == [] and conn["order"] == 0
     with Tui(home, []) as t:
-        t.wait("Tables")
+        t.wait("TABLES")
         t.wait("big")
         assert "CONNECTIONS" not in t.text()
         t.keys("Enter")  # the sidebar has focus: open the table
-        t.wait_status("Row 1/5")
+        t.wait_header("1 of 5")
 
 
 def test_session_url_connection_kept(home):
@@ -159,14 +159,14 @@ def test_session_url_connection_kept(home):
     with Tui(home, ["-s"]) as t:  # Nothing to pick: the input has focus
         t.type("sqlite://" + db)
         t.keys("Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("Enter")
-        t.wait_status("Row 1/7")
+        t.wait_header("1 of 7")
         assert t.quit() == 0
     conn = home.read("session.json")["workspaces"][0]["connections"][0]
     assert "saved_id" not in conn and conn["connstr"].endswith(db)
     with Tui(home, []) as t:
-        t.wait_status("Row 1/7")
+        t.wait_header("1 of 7")
         assert t.quit() == 0
     # And again: it is written back the same way
     conn = home.read("session.json")["workspaces"][0]["connections"][0]
@@ -185,7 +185,7 @@ def test_session_bad_workspace_skipped(home):
             {"type": "table", "table": "big",
              "filters": [{"column": "v", "op": "someday", "value": "1"}]}]}]}]})
     with Tui(home, []) as t:
-        t.wait("Row 1/9")
+        t.wait("1 of 9")
         t.wait("someday")
         assert "Future" in t.text()
 
@@ -239,7 +239,7 @@ def test_session_forms_only_workspace(home):
             {"form": True, "order": 0}, {"form": True, "order": 1}]}]})
     with Tui(home, []) as t:
         t.wait("URI")
-        t.wait("W2]")
+        t.wait_workspace("Forms")           # the restored name
         assert t.screen()[1].count("New connection") == 2
         assert t.quit() == 0
 

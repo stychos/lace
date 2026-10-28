@@ -1,0 +1,6 @@
+python3 - "$CONFIG_DIR/connections.json" "$CONFIG_DIR/../../../keychain.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))["root"]["children"][0]
+assert c["user"] == "app2" and c["save_password"] is True and not c.get("password"), c
+assert json.load(open(sys.argv[2])) == {c["id"]: "sekret"}, "the Keychain item went"
+PY

@@ -25,15 +25,15 @@ def two_workspaces(home, t):
     t.keys("Down")
     t.wait(lambda s: re.search(r"Name\s+Alpha db", s))
     t.keys("Enter")
-    t.wait("Tables")
+    t.wait("TABLES")
     t.keys("Enter")                      # the first table
-    t.wait_status("Row 1/3")
+    t.wait_header("1 of 3")
     t.keys("C-t")
     t.wait("URI")
     t.keys("Down")
     t.wait(lambda s: re.search(r"Name\s+Alpha db", s))
     t.keys("C-n")
-    t.wait("W2]")
+    t.wait_workspace("Workspace 2")
 
 
 def test_lists_and_switches(home):
@@ -42,10 +42,10 @@ def test_lists_and_switches(home):
         two_workspaces(home, t)
         t.keys("w")
         t.wait("OPEN")
-        t.wait("2  Alpha db")
+        t.wait("2  Workspace 2")              # named after its place
         x, y = t.find("1  Workspace")         # the first workspace is named
         t.click(x, y, double=True)
-        t.wait("W1]")
+        t.wait_workspace("Workspace")
         assert t.quit() == 0
 
 
@@ -78,7 +78,7 @@ def test_rename_save_close(home):
         t.wait("Closed")
         assert "1  Mine" not in t.text()
         t.keys("End", "Enter")               # the saved one
-        t.wait_status("Row 1/3")
+        t.wait_header("1 of 3")
         assert t.quit() == 0
 
 
@@ -109,7 +109,7 @@ def test_new_workspace(home):
         t.keys("w")                # the panel leaves w to the hotkeys
         t.wait("OPEN")
         t.keys("n")
-        t.wait("W2]")
+        t.wait_workspace("Workspace 2")
         t.wait("URI")
         assert t.quit() == 0
 
@@ -127,7 +127,7 @@ def test_no_connections_section(home):
         t.type(db)
         t.keys("Enter")
         t.wait("nothing matches")
-        assert "Tables" not in t.text()
+        assert "TABLES" not in t.text()
         assert t.quit() == 0
 
 

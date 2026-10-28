@@ -1,8 +1,9 @@
 //
 // Lace macOS frontend
-// Preferences (⌘,): macos.json's settings in one window; every change is
-// written at once. Daemon settings apply to the next launch; the rest to
-// tabs opened from now on.
+// Preferences (⌘,): config.json's settings in one window (general, shared
+// with the other frontends, and the macos section); every change is written
+// at once. Daemon settings apply to the next launch; the rest to tabs opened
+// from now on.
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -23,11 +24,15 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
   private let restoreSession = NSButton(checkboxWithTitle: "Reopen the last session at launch", target: nil, action: nil)
   private let keychain = NSButton(
     checkboxWithTitle: "Keep saved passwords in the Keychain, not in connections.json", target: nil, action: nil)
+  private let keepTab = NSButton(
+    checkboxWithTitle: "Closing a connection's last tab leaves a connection form", target: nil, action: nil)
+  private let lastWindowPopup = NSPopUpButton()
+  private let autoOpen = NSButton(checkboxWithTitle: "Open the first table on connect", target: nil, action: nil)
   private let note = NSTextField(labelWithString: "")
 
   init() {
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "Preferences"
     window.center()
@@ -39,7 +44,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
   required init?(coder: NSCoder) { fatalError("not used") }
 
   private func makeContent() -> NSView {
-    let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 420))
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 520))
     for title in ["Shared daemon (Unix socket)", "Private daemon (stdio)", "Shared daemon (TCP 7433)", "Detect: a running daemon, else private"] {
       spawnPopup.addItem(withTitle: title)
     }
@@ -53,7 +58,12 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     idleRow.spacing = 8
     (idleRow.views[1] as? NSTextField)?.textColor = .secondaryLabelColor
     (idleRow.views[1] as? NSTextField)?.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-    for b in [confirmDelete, approximate, restoreSession, keychain] {
+    for title in ["Quit Lace", "Open a new window"] {
+      lastWindowPopup.addItem(withTitle: title)
+    }
+    lastWindowPopup.target = self
+    lastWindowPopup.action = #selector(changed)
+    for b in [confirmDelete, approximate, restoreSession, keychain, keepTab, autoOpen] {
       b.target = self
       b.action = #selector(changed)
     }
@@ -107,6 +117,10 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     row("Row numbers", rowNumbersPopup)
     row("Counts", approximate)
     row("Deleting", confirmDelete)
+    section("Connections")
+    row("Last tab", keepTab)
+    row("Last window", lastWindowPopup)
+    row("Connecting", autoOpen)
     section("History")
     row("Query history", historyPopup)
     row("Size", historyRow)
@@ -117,7 +131,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
 
     note.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
     note.textColor = .secondaryLabelColor
-    note.stringValue = "Written to \(Prefs.path.path). Table and history settings apply to tabs opened from now on."
+    note.stringValue =
+      "Written to \(LaceApp.shared.config.filePath), shared with the other Lace frontends. Table and history settings apply to tabs opened from now on."
     note.lineBreakMode = .byTruncatingMiddle
 
     let stack = NSStackView(views: [grid, note])
@@ -149,6 +164,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     historySizeField.stringValue = String(p.historyMaxSize)
     restoreSession.state = p.restoreSession ? .on : .off
     keychain.state = p.keychainPasswords ? .on : .off
+    keepTab.state = p.keepConnectionTab ? .on : .off
+    lastWindowPopup.selectItem(at: Int(p.lastWorkspaceClose.rawValue))
+    autoOpen.state = p.autoOpenFirstTable ? .on : .off
   }
 
   @objc private func changed() {
@@ -184,9 +202,11 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     }
     p.restoreSession = restoreSession.state == .on
     p.keychainPasswords = keychain.state == .on
-    LaceApp.shared.prefs = p
+    p.keepConnectionTab = keepTab.state == .on
+    p.lastWorkspaceClose = SharedConfig.LastWorkspaceClose(rawValue: Int32(lastWindowPopup.indexOfSelectedItem)) ?? .quit
+    p.autoOpenFirstTable = autoOpen.state == .on
     do {
-      try p.save()
+      try LaceApp.shared.savePrefs(p)
     } catch {
       Alerts.error("Preferences not saved", "\(error)", window: window)
     }

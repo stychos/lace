@@ -1,4 +1,5 @@
 #include "ui/sidebar.h"
+#include "ui/filter_panel.h"
 #include "core/utf8.h"
 #include "model/workspace.h"
 #include "ui/input.h"
@@ -363,6 +364,22 @@ static void move(ConnTab *t, long delta) {
   t->sidebar_cursor = (size_t)c;
 }
 
+bool sidebar_enter(NcApp *app, ConnTab *t, bool from_panel) {
+  if (!t || !t->sidebar || !sidebar_width(app)) return false;
+  if (t->sidebar_focused) return true; /* already there: where it came from stays */
+  t->sidebar_focused = true;
+  t->sidebar_from_panel = from_panel;
+  return true;
+}
+
+void sidebar_leave(NcApp *app, ConnTab *t) {
+  t->sidebar_focused = false;
+  View *v = conntab_current_view(t);
+  if (t->sidebar_from_panel && v && v->kind == VIEW_TABLE && v->subview == SV_DATA && filter_panel_rows(app, v) > 0)
+    v->fp.focused = true;
+  t->sidebar_from_panel = false;
+}
+
 bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev) {
   if (ev->type != UI_EVENT_KEY || !t->sidebar || !sidebar_width(app)) return false;
   bool focused = t->sidebar_focused;
@@ -400,6 +417,10 @@ bool sidebar_handle_key(NcApp *app, ConnTab *t, const UiEvent *ev) {
     if (hotkey_matches(cfg, ev, HOTKEY_FIRST_ROW)) { t->sidebar_cursor = 0; return true; }
     if (hotkey_matches(cfg, ev, HOTKEY_LAST_ROW)) { move(t, (long)count_items(t)); return true; }
     if (soft) return false;
+    if (hotkey_matches(cfg, ev, HOTKEY_MOVE_RIGHT)) { /* back to the panel it was entered from */
+      sidebar_leave(app, t);
+      return true;
+    }
     if (hotkey_matches(cfg, ev, HOTKEY_SIDEBAR_FILTER)) { /* the one key that calls the field */
       sidebar_show_search(t);
       return true;

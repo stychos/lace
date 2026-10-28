@@ -1,9 +1,9 @@
-/* SQL highlighting for the query editor: the next token of a text and its
+/* SQL highlighting for the query editor (both TUIs): the next token of a text and its
  * class, found with liblace's lexer so strings, comments and quoted names
  * agree with the statement splitter. */
-#ifndef NC_SQLHL_H
-#define NC_SQLHL_H
-#include <lace.h>
+#ifndef LACE_CORE_SQLHL_H
+#define LACE_CORE_SQLHL_H
+#include "../../../liblace/include/lace.h"
 #include <stddef.h>
 
 typedef enum { HL_PLAIN, HL_KEYWORD, HL_STRING, HL_COMMENT, HL_NUMBER } HlClass;

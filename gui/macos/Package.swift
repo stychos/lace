@@ -35,8 +35,11 @@ if let archive = Context.environment["LACE_CJSON_STATIC"], !archive.isEmpty {
 
 // The TUI headers in CLace.h reach liblace through "../../../liblace/..."
 // paths that resolve only with the TUI's source directory on the include
-// path (the TUI compiles with -Isrc), so the Clang importer gets it too
-let importerFlags: [SwiftSetting] = [.unsafeFlags(["-Xcc", "-I\(root)/tui/ncurses/src"])]
+// path (the TUI compiles with -Isrc), and core/conn_fields.h names
+// <config/saved_connection.h>, so the Clang importer gets both directories
+let importerFlags: [SwiftSetting] = [
+  .unsafeFlags(["-Xcc", "-I\(root)/tui/ncurses/src", "-Xcc", "-I\(root)/liblace/include"])
+]
 
 let package = Package(
   name: "Lace",

@@ -1,0 +1,6 @@
+# A new window starts with one connection form
+expect-windows 1
+expect-entries 1
+expect-entry form
+expect-title New connection
+quit

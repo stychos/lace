@@ -12,6 +12,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "theme.h"
+#include "overlay.h"
 #include "connect_internal.h"
 #include "text_input_draw.h"
 #include "../config/session.h"
@@ -837,7 +839,7 @@ static void draw_hints(DialogState *ds, int y) {
 static void draw_frame(DialogState *ds) {
   WINDOW *win = ds->win;
   int h = ds->term_h, w = ds->term_w;
-  DRAW_BOX(win, COLOR_BORDER);
+  tui_frame_window(win, NULL, NULL);
   int split = ds->wide ? ds->list_x + ds->list_w : -1;
   wattron(win, COLOR_PAIR(COLOR_BORDER));
   int rules[2] = {2, h - 4};
@@ -853,7 +855,9 @@ static void draw_frame(DialogState *ds) {
     mvwaddch(win, h - 4, split, ACS_BTEE);
   }
   wattroff(win, COLOR_PAIR(COLOR_BORDER));
-  WITH_ATTR(win, A_BOLD, tui_print_clip(win, 0, 2, w - 4, " Workspaces "));
+  tui_style(win, TC_ACCENT, TC_OVERLAY_BG, A_BOLD);
+  tui_print_clip(win, 0, 2, w - 4, " Workspaces ");
+  tui_style(win, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
 }
 
 /* The input line; where its cursor goes in *cy, *cx (-1: hidden) */
@@ -950,11 +954,7 @@ bool connect_confirm(WINDOW *parent, const char *title, const char *message) {
   bool result = false, running = true;
   while (running) {
     werase(dlg);
-    DRAW_BOX(dlg, COLOR_BORDER);
-    char *t = str_printf(" %s ", title);
-    int tw = utf8_width(t, strlen(t));
-    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, (w - tw) / 2 > 1 ? (w - tw) / 2 : 1, w - 2, t));
-    free(t);
+    tui_frame_window(dlg, title, NULL);
     int mx = (w - msg_w) / 2;
     if (mx < 2)
       mx = 2;
@@ -1187,8 +1187,7 @@ static void show_help(DialogState *ds) {
   WINDOW *dlg = dialog_create(h, w, term_h, term_w);
   if (dlg) {
     werase(dlg);
-    DRAW_BOX(dlg, COLOR_BORDER);
-    WITH_ATTR(dlg, A_BOLD, tui_print_clip(dlg, 0, 2, w - 4, " Keys "));
+    tui_frame_window(dlg, "Keys", "any key closes");
     for (int i = 0; i < n && i + 1 < h - 1; i++)
       tui_print_clip(dlg, i + 1, 2, w - 4, lines[i]);
     curs_set(0);

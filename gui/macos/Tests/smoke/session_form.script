@@ -1,0 +1,13 @@
+# then: session_form_after.script
+# A form saved in the session is {"form": true, "order": N} at its place
+# and comes back empty there, selected
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action open
+expect-entries 1
+new-connection-tab
+form-uri postgres://app:hunter2@db1/shop
+expect-entries 2
+expect-entry form
+save-session
+quit

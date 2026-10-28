@@ -1,0 +1,18 @@
+# A tab moved out of a window that keeps other entries: that window stays;
+# a tab dropped back on the strip it came from changes nothing
+connect $LACE_SMOKE_DB
+expect-entries 2
+new-window
+window 1
+drag-entry-to 1 0
+expect-entries 2
+drag-entry-to 2 1
+expect-windows 2
+expect-entries 1
+expect-entry form
+window 2
+expect-entries 2
+expect-entry-titles New connection|t.sqlite
+expect-entry connection
+expect-open-connections 1
+quit

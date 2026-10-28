@@ -1,0 +1,9 @@
+# config: {"general": {"daemon_spawn_mode": 1, "keep_connection_tab": false}, "macos": {"keychain_passwords": false}}
+# expect-exit
+# keep_connection_tab off: the last tab's close closes the entry, the
+# window left without one closes, and the last window's close quits
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action open
+table big
+close-tab

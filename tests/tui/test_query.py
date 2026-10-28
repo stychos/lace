@@ -9,9 +9,9 @@ from test_table import cursor_id, make_db
 
 def open_query(t, sql):
     """A new query tab (starts in the editor) with sql in it"""
-    t.wait("Tables")
+    t.wait("TABLES")
     t.keys("p")
-    t.wait("SQL Query")
+    t.wait("runs the statement at the cursor")
     t.type(sql)
 
 
@@ -20,11 +20,11 @@ def test_run_and_page(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         open_query(t, "SELECT id, name FROM big ORDER BY id DESC")
         t.keys("C-r")
-        t.wait_status(re.compile(r"Row 1/"))
+        t.wait_header(re.compile(r"1 of "))
         t.keys("Escape", "Down")  # Leave the editor, into the results
         assert cursor_id(t) == 3000
         t.keys("G")
-        t.wait_status("Row 3000/3000")
+        t.wait_header("3,000 of 3,000")
         assert cursor_id(t) == 1
 
 
@@ -41,7 +41,7 @@ def test_edit_result_cell(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         open_query(t, "SELECT id, name FROM big ORDER BY id")
         t.keys("C-r")
-        t.wait_status(re.compile(r"Row 1/5"))
+        t.wait_header(re.compile(r"1 of 5"))
         t.keys("Escape", "Down", "Right", "Enter")
         t.keys("End", *["BSpace"] * 8)
         t.type("from query")
@@ -55,7 +55,7 @@ def test_aliased_column_not_written(home):
     with Tui(home, ["-s", "sqlite://" + db]) as t:
         open_query(t, "SELECT id, v AS name FROM big ORDER BY id")
         t.keys("C-r")
-        t.wait_status(re.compile(r"Row 1/5"))
+        t.wait_header(re.compile(r"1 of 5"))
         t.keys("Escape", "Down", "Right", "Enter")
         t.type("9")
         t.keys("Enter")
@@ -78,5 +78,5 @@ def test_run_all(home):
         open_query(t, "INSERT INTO t VALUES (1);\nINSERT INTO t VALUES (2);\n"
                       "SELECT COUNT(*) AS n FROM t;")
         t.keys("C-a")
-        t.wait_status(re.compile(r"Row 1/1"))
+        t.wait_header(re.compile(r"1 of 1"))
     assert sqlite_rows(db, "SELECT COUNT(*) FROM t") == [(2,)]

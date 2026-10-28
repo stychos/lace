@@ -435,45 +435,22 @@ static void open_with(TuiState *state, Tab *tab, FormTab *f, PlaceKind kind, siz
       conn_fields_set_message(&f->fields, true, "These fields do not make a connection");
     goto done;
   }
-  size_t idx = app_find_open_connection(app, saved_id, connstr);
-  if (idx == SIZE_MAX) {
-    char *final = NULL, *err = NULL;
+  {
+    char *msg = NULL;
     bool cancelled = false;
-    DbConnection *db = tui_open_connection(state, model, connstr, &final, &err, &cancelled);
-    if (!db) {
+    /* Open here turns this tab (and frees this form): nothing of f after it */
+    if (!tui_connect_and_place(state, model, saved_id, connstr, kind,
+                               kind == PLACE_WORKSPACE ? target_ws : ws_idx, tab_idx, &msg, &cancelled)) {
       if (cancelled) {
         conn_fields_set_message(&f->fields, false, "Connecting cancelled");
       } else {
-        char *m = tui_connect_failure_message(err);
-        char *flat = connect_flatten_message(m);
+        char *flat = connect_flatten_message(msg);
         conn_fields_set_message(&f->fields, true, "%s", flat ? flat : "Connection failed");
         free(flat);
-        free(m);
       }
-      free(err);
-      goto done;
+      free(msg);
     }
-    free(err);
-    idx = tui_add_open_connection(state, db, final, saved_id);
-    if (!saved_id) {
-      RecentList *rl = tui_recent(state);
-      if (recent_add(rl, final)) {
-        char *rerr = NULL;
-        if (!recent_save(rl, &rerr))
-          tui_set_error(state, "recent.json: %s", rerr ? rerr : "cannot save");
-        free(rerr);
-      }
-    }
-    str_secure_free(final);
-    if (idx == SIZE_MAX)
-      goto done;
-  } else if (!saved_id) {
-    RecentList *rl = tui_recent(state);
-    if (recent_add(rl, connstr))
-      recent_save(rl, NULL);
   }
-  /* Open here turns this tab (and frees this form): nothing of f after it */
-  tui_place_connection(state, idx, kind, kind == PLACE_WORKSPACE ? target_ws : ws_idx, tab_idx);
 done:
   str_secure_free(connstr);
   free(saved_id);
@@ -1293,6 +1270,11 @@ void form_tab_draw(TuiState *state, Tab *tab) {
     free(own);
   }
   wrefresh(win);
+}
+
+bool form_tab_list_focused(TuiState *state, Tab *tab) {
+  FormTab *f = form_of(state, tab);
+  return f && f->focus == FF_PANEL && !f->filter_focused;
 }
 
 void form_tab_status(TuiState *state, Tab *tab, char *buf, size_t n) {

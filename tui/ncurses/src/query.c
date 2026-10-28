@@ -57,8 +57,22 @@ bool tab_create_query(TuiState *state) {
     }
   }
 
-  /* Create new tab with connection reference */
-  Tab *tab = workspace_create_query_tab(ws, connection_index);
+  /* A connection's own tab (no view open yet) becomes the query view, so a
+   * connection never keeps an empty cell next to its views (as the
+   * notcurses TUI); otherwise a new tab */
+  Tab *tab;
+  if (current_tab && current_tab->type == TAB_TYPE_CONNECTION) {
+    uint64_t uid = current_tab->uid;
+    tab_free_data(current_tab);
+    tab_init(current_tab);
+    current_tab->uid = uid;
+    current_tab->type = TAB_TYPE_QUERY;
+    current_tab->connection_index = connection_index;
+    current_tab->active = true;
+    tab = current_tab;
+  } else {
+    tab = workspace_create_query_tab(ws, connection_index);
+  }
   if (!tab)
     return false;
 
@@ -89,6 +103,7 @@ bool tab_create_query(TuiState *state) {
   }
 
   /* Initialize query buffer */
+  free(tab->query_text);
   tab->query_capacity = QUERY_INITIAL_CAPACITY;
   tab->query_text = safe_calloc(tab->query_capacity, 1);
   tab->query_len = 0;
@@ -108,12 +123,6 @@ bool tab_create_query(TuiState *state) {
   state->filters_cursor_col = 0;
   state->filters_scroll = 0;
 
-  char *run_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_QUERY);
-  char *all_key = hotkey_get_display(state->app->config, HOTKEY_EXECUTE_ALL);
-  tui_set_status(state, "Query tab opened. %s to run, %s to run all",
-                 run_key ? run_key : "Ctrl+R", all_key ? all_key : "Ctrl+A");
-  free(run_key);
-  free(all_key);
   return true;
 }
 
@@ -158,31 +167,8 @@ bool query_load_rows_at(TuiState *state, Tab *tab, size_t offset) {
   tab->query_loaded_offset = offset;
   tab->query_loaded_count = data->num_rows;
 
-  /* Recalculate column widths based on content */
-  free(tab->query_result_col_widths);
-  tab->query_result_col_widths = NULL;
-  if (data->num_columns > 0) {
-    tab->query_result_col_widths = safe_calloc(data->num_columns, sizeof(int));
-    for (size_t c = 0; c < data->num_columns; c++) {
-      int w = data->columns[c].name ? (int)strlen(data->columns[c].name) : 0;
-      if (w < MIN_COL_WIDTH)
-        w = MIN_COL_WIDTH;
-      for (size_t r = 0; r < data->num_rows && r < 100; r++) {
-        if (r < data->num_rows && c < data->rows[r].num_cells) {
-          char *str = db_value_to_string(&data->rows[r].cells[c]);
-          if (str) {
-            int vw = (int)strlen(str);
-            if (vw > w)
-              w = vw;
-            free(str);
-          }
-        }
-      }
-      if (w > DEFAULT_COL_WIDTH)
-        w = DEFAULT_COL_WIDTH;
-      tab->query_result_col_widths[c] = w;
-    }
-  }
+  /* Column widths as the grid measures them */
+  query_calculate_result_widths(tab);
 
   tab_clear_selections(tab); /* Selections are row positions */
   tui_set_status(state, "Loaded %zu/%zu rows", offset + tab->query_loaded_count,

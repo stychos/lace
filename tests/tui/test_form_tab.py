@@ -63,7 +63,7 @@ def test_form_opens_here(home):
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.wait("big")
         assert "New connection" not in t.text()
         assert t.quit() == 0
@@ -76,7 +76,7 @@ def test_typed_url_opens_and_goes_to_recent(home):
     with start(home) as t:
         t.type(db)
         t.keys("Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         recent = home.read("recent.json")["recent"]
         assert len(recent) == 1 and recent[0]["url"].startswith("sqlite://")
         t.keys("C-t")                       # new_connection: a form after this tab
@@ -93,11 +93,12 @@ def test_background_and_new_workspace(home):
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("C-b")
-        t.wait(lambda s: "t.sqlite" in s.splitlines()[1] if len(s.splitlines()) > 1 else False)
+        # the strip: the form, then the connection's tab (its saved name)
+        t.wait(lambda s: len(s.splitlines()) > 1 and s.splitlines()[1].count("Local") == 2)
         assert "URI" in t.text()            # the form is still current
         t.keys("C-n")
-        t.wait("Tables")
-        t.wait("W2]")      # the header: workspace 2
+        t.wait("TABLES")
+        t.wait_workspace("Workspace 2")      # the header: workspace 2
         assert t.quit() == 0
 
 
@@ -111,14 +112,14 @@ def test_to_workspace_picks(home):
         t.keys("C-o")
         t.wait("No other workspace")
         t.keys("C-n")                       # a second workspace, with the connection
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("{")                         # back to the first, still a form
         t.wait("URI")
         t.keys("C-o")
         t.wait("Open in workspace")
         t.keys("Enter")
-        t.wait("Tables")
-        t.wait("W2]")
+        t.wait("TABLES")
+        t.wait_workspace("Workspace 2")
         assert t.quit() == 0
 
 
@@ -130,14 +131,20 @@ def test_same_connection_opens_once(home):
         t.keys("Down")
         t.wait(lambda s: re.search(r"Name\s+Local", s))
         t.keys("Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("p")
         t.type("BEGIN")
         t.keys("C-r")
         t.wait_status("[TX]")
         t.keys("Escape")
         time.sleep(0.2)                      # Esc and a key at once is Alt+key
-        t.keys("[", "C-t")         # a query tab's Ctrl+T runs the transaction
+        # a query tab's Ctrl+T runs the transaction: the palette opens the
+        # form (it does not send Ctrl+T there)
+        t.keys("C-p")
+        t.wait("Command palette")
+        t.type("new connection")
+        t.wait("New connection")
+        t.keys("Enter")
         t.wait("URI")
         t.keys("Down")
         t.wait("open in 1")
@@ -145,7 +152,7 @@ def test_same_connection_opens_once(home):
         t.keys("Escape")                    # to the panel, then the next tab
         t.wait_status("folder")
         t.keys("]")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.wait_status("[TX]")
         assert t.quit() == 0
 
@@ -174,7 +181,7 @@ def test_unparsable_uri_does_not_open(home):
         t.type("::nonsense")
         t.keys("Enter")
         t.wait("Not a connection URL")
-        assert "Tables" not in t.text()
+        assert "TABLES" not in t.text()
         t.keys("C-u", "C-l")
         assert t.quit() == 0
 
@@ -211,7 +218,7 @@ def test_password_prompt(home, db):
         t.wait("Wrong password? Try again", timeout=20)
         t.type(password)
         t.keys("Enter")
-        t.wait("Tables", timeout=20)
+        t.wait("TABLES", timeout=20)
         assert t.quit() == 0
     recent = home.read("recent.json")["recent"]
     assert len(recent) == 1 and password not in json.dumps(recent)
@@ -329,7 +336,7 @@ def test_forget_recent(home):
     with start(home) as t:
         t.type(db)
         t.keys("Enter")
-        t.wait("Tables")
+        t.wait("TABLES")
         t.keys("C-t")
         t.wait("RECENT")
         t.keys("Escape")                     # the panel (Esc and a key at once is Alt+key)
@@ -369,7 +376,7 @@ def test_mouse(home):
         t.click(bx + 1, by)
         t.wait("Connection works")
         t.click(x, y, double=True)           # the panel row found before
-        t.wait("Tables")
+        t.wait("TABLES")
         assert t.quit() == 0
 
 
@@ -398,7 +405,7 @@ def test_filter_keeps_saved_identity(home):
         t.type("Lo")
         t.keys("Enter")                      # leaves the filter
         t.keys("Enter")                      # opens what the form shows
-        t.wait("Tables")
+        t.wait("TABLES")
         r = home.read("recent.json")
         assert not r or r["recent"] == [], r
         assert t.quit() == 0

@@ -1,9 +1,10 @@
 #include "ui/query_view.h"
+#include "ui/sidebar.h"
 #include "core/utf8.h"
 #include "edit_ops.h"
 #include "model/workspace.h"
 #include "ui/input.h"
-#include "ui/sqlhl.h"
+#include "core/sqlhl.h"
 #include "ui/textbuf.h"
 #include "util/mem.h"
 #include "util/str.h"
@@ -221,13 +222,20 @@ static void draw_placeholder(NcApp *app, const View *v, Rect r) {
                     : v->affected >= 0 ? ""
                     : v->ran ? "No rows" : "^R runs the statement at the cursor";
   if (!*msg) return;
+  /* wrapped and centred, so a long error is read whole */
   char *flat = str_dup(msg);
   for (char *c = flat; *c; c++)
-    if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
+    if (*c == '\r' || *c == '\t') *c = ' ';
+  char **lines;
+  size_t n = chrome_wrap(flat, r.cols - 4 > 1 ? r.cols - 4 : 1, &lines), shown = n;
+  if (shown > (size_t)r.rows) shown = (size_t)r.rows;
   nc_style(app->std, &app->theme, v->error && !v->running ? TC_ERROR_FG : TC_DIM, TC_BG, 0);
-  int w = nc_text_width(flat);
-  if (w > r.cols - 2) w = r.cols - 2;
-  if (w > 0) nc_put(app->std, r.y + (r.rows - 1) / 2, r.x + (r.cols - w) / 2, w, flat);
+  int top = r.y + (r.rows - (int)shown) / 2;
+  for (size_t i = 0; i < shown; i++) {
+    int w = nc_text_width(lines[i]);
+    nc_put(app->std, top + (int)i, r.x + ((r.cols - w) / 2 > 0 ? (r.cols - w) / 2 : 0), w, lines[i]);
+  }
+  chrome_wrap_free(lines, n);
   free(flat);
 }
 
@@ -354,11 +362,32 @@ static const HotkeyAction RESULT_ACTIONS[] = {
     HOTKEY_COLUMN_NARROWER, HOTKEY_COLUMN_WIDER, HOTKEY_EDIT_MODAL, HOTKEY_SET_NULL,
     HOTKEY_SET_EMPTY, HOTKEY_DELETE_ROW, HOTKEY_CELL_COPY, HOTKEY_CELL_CUT, HOTKEY_CELL_PASTE, HOTKEY_UNDO, HOTKEY_FOLLOW_FK, HOTKEY_REFERENCED_BY};
 
+/* The results hold rows the cursor can go to */
+static bool has_rows(const View *v) {
+  return v->cache && page_cache_num_columns(v->cache) > 0 && page_cache_extent(v->cache) > 0;
+}
+
 static bool editor_key(NcApp *app, View *v, const UiEvent *ev, Rect ed) {
   if (nc_key_special(ev, UI_KEY_ESCAPE)) {
     v->focus_results = true;
     v->text_sel_anchor = SIZE_MAX;
     return true;
+  }
+  /* Spatial navigation (as the ncurses TUI): Left at the very start goes to
+   * the sidebar, Right at the end or Down on the last line to the results */
+  if (ev->key.is_special && !(ev->key.mods & (UI_MOD_CTRL | UI_MOD_ALT | UI_MOD_SHIFT))) {
+    const char *text = v->text ? v->text : "";
+    size_t len = strlen(text), cur = v->text_cursor < len ? v->text_cursor : len;
+    if (ev->key.key == UI_KEY_LEFT && cur == 0 && sidebar_enter(app, app_view_tab(app, v), false)) {
+      v->text_sel_anchor = SIZE_MAX;
+      return true;
+    }
+    bool last_line = !strchr(text + cur, '\n');
+    if (((ev->key.key == UI_KEY_RIGHT && cur == len) || (ev->key.key == UI_KEY_DOWN && last_line)) && has_rows(v)) {
+      v->focus_results = true;
+      v->text_sel_anchor = SIZE_MAX;
+      return true;
+    }
   }
   TextBuf tb;
   tb_load(&tb, v);

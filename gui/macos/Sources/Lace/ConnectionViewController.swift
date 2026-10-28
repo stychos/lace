@@ -15,7 +15,7 @@
 import AppKit
 import LaceKit
 
-final class ConnectionViewController: NSSplitViewController {
+final class ConnectionViewController: NSSplitViewController, WorkspaceEntry {
   let id = UUID()
   let connection: Connection
   let prefs: Prefs
@@ -24,15 +24,28 @@ final class ConnectionViewController: NSSplitViewController {
   let history: History
   let sidebar: SidebarViewController
   let content: ContentViewController
-  private(set) var transactionState: Connection.TxState = .none
+  private(set) var transactionState: Connection.TxState
   /// The transaction state changed: the workspace redraws the tab
   var onStateChanged: (() -> Void)?
+  /// The user closed the last inner tab (not a table dropped from under it):
+  /// the workspace applies keep_connection_tab
+  var onLastTabClosed: (() -> Void)?
   private var eventsTask: Task<Void, Never>?
+  /// The connection's events for this entry (subscribed at init)
+  private let events: AsyncStream<Connection.Event>
+  /// The connection was let go (tearDown)
+  private var released = false
+  /// Open the first table once the sidebar has the list (auto_open_first_table)
+  private var openFirstOnLoad = false
 
   init(connection: Connection, prefs: Prefs, saved: SavedConnection? = nil) {
     self.connection = connection
     self.prefs = prefs
     self.saved = saved
+    // Shared with other entries: a transaction opened elsewhere shows here
+    // too. Subscribed first, so no change falls between the two.
+    events = connection.subscribe()
+    transactionState = connection.transactionState
     history = History(connectionID: saved?.id, mode: prefs.historyMode, maxSize: prefs.historyMaxSize)
     sidebar = SidebarViewController(connection: connection)
     content = ContentViewController(connection: connection, prefs: prefs)
@@ -67,10 +80,12 @@ final class ConnectionViewController: NSSplitViewController {
     }
     sidebar.onNewQuery = { [weak self] text in self?.content.newQuery(text: text) }
     content.onTablesChanged = { [weak self] in self?.sidebar.reload() }
+    sidebar.onLoaded = { [weak self] in self?.tablesLoaded() }
+    content.onLastTabClosed = { [weak self] in self?.onLastTabClosed?() }
     content.objectsProvider = { [weak self] in self?.sidebar.objects ?? [] }
     content.tablesProvider = { [weak self] in self?.sidebar.tables ?? [] }
 
-    let events = connection.events
+    let events = self.events
     eventsTask = Task { [weak self] in
       for await event in events {
         guard let self else { break }
@@ -90,6 +105,32 @@ final class ConnectionViewController: NSSplitViewController {
       content.setLocked(connection.userStatement)  // the lock banner on every tab
     case .closed:
       break
+    }
+  }
+
+  var stripItem: TabStripView.Item {
+    TabStripView.Item(
+      id: id, title: tabTitle, symbol: "cylinder", tooltip: connection.displayName, badge: transactionBadge)
+  }
+
+  func focusEntry() {
+    focusContent()
+  }
+
+  /// With general.auto_open_first_table: the first table opens (kept, not a
+  /// preview) as soon as the sidebar lists the tables, unless a tab is open
+  func openFirstTableWhenLoaded() {
+    openFirstOnLoad = true
+    if sidebar.isViewLoaded, !sidebar.tables.isEmpty {
+      tablesLoaded()
+    }
+  }
+
+  private func tablesLoaded() {
+    guard openFirstOnLoad else { return }
+    openFirstOnLoad = false
+    if content.tabControllers.isEmpty, let first = sidebar.tables.first {
+      content.openTable(first, preview: false)
     }
   }
 
@@ -114,6 +155,9 @@ final class ConnectionViewController: NSSplitViewController {
     content.newQuery(text: text)
   }
 
+  /// Whether any table or query tab is open
+  var hasTabs: Bool { !content.tabControllers.isEmpty }
+
   /// Close the current inner tab; false when there is none
   func closeCurrentTab() -> Bool {
     content.closeCurrentTab()
@@ -125,13 +169,18 @@ final class ConnectionViewController: NSSplitViewController {
     }
   }
 
-  /// Stop everything and disconnect (the daemon rolls an open transaction back)
+  /// Stop everything and let the connection go: the last entry holding it,
+  /// in any window, closes it (the daemon rolls an open transaction back)
   func tearDown() {
+    guard !released else { return }
+    released = true
     eventsTask?.cancel()
     content.tearDown()
-    let connection = self.connection
-    Task { try? await connection.close() }
+    LaceApp.shared.connections.release(connection)
   }
+
+  /// No other entry, in any window, holds the connection
+  var isLastHolder: Bool { LaceApp.shared.connections.holders(connection) <= 1 }
 
   @objc func showHistory(_ sender: Any?) {
     let vc = HistoryViewController(history: history, connectionName: tabTitle)
@@ -162,6 +211,8 @@ final class ContentViewController: NSViewController {
   let prefs: Prefs
   /// A query wrote something (DDL, DML): the sidebar reloads its tables
   var onTablesChanged: (() -> Void)?
+  /// The user closed the last tab (a drop closing it does not count)
+  var onLastTabClosed: (() -> Void)?
   /// A statement to record in the connection's history
   var record: ((String) -> Void)?
   /// The connection's objects (the sidebar's list), for the Information view
@@ -189,6 +240,7 @@ final class ContentViewController: NSViewController {
   override func loadView() {
     let root = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
     strip.translatesAutoresizingMaskIntoConstraints = false
+    strip.onMove = { [weak self] id, index in self?.moveTab(id: id, to: index) }  // within this strip only
     strip.onSelect = { [weak self] id in self?.select(id) }
     strip.onClose = { [weak self] id in self?.closeTab(id: id) }
     strip.onCloseOthers = { [weak self] id in self?.closeOtherTabs(keeping: id) }
@@ -283,7 +335,6 @@ final class ContentViewController: NSViewController {
 
   @discardableResult
   func openObject(_ object: CatalogObject, preview: Bool) -> TableViewController {
-    let name = object.name
     if let i = tabs.firstIndex(where: { $0.object.map { sameObject($0, object) } ?? false }),
       let existing = tabs[i].controller as? TableViewController
     {
@@ -368,7 +419,7 @@ final class ContentViewController: NSViewController {
       guard let vc = tab.controller as? TableViewController else { continue }
       switch after {
       case .drop:
-        closeTab(id: tab.id)
+        closeTab(id: tab.id, byUser: false)
         sidebar = true
       case .rename(let name):
         vc.rename(to: name)
@@ -450,7 +501,20 @@ final class ContentViewController: NSViewController {
     strip.isHidden = tabs.isEmpty
   }
 
-  func closeTab(id: UUID) {
+  /// The strip (the script driver drops on it as a drag does)
+  var stripView: TabStripView { strip }
+
+  /// A tab dragged elsewhere in the strip: it moves to index (session order too)
+  func moveTab(id: UUID, to index: Int) {
+    guard let from = tabs.firstIndex(where: { $0.id == id }) else { return }
+    let tab = tabs.remove(at: from)
+    tabs.insert(tab, at: max(0, min(index, tabs.count)))
+    refreshStrip()
+  }
+
+  /// byUser: closed by the user (the last one tells onLastTabClosed); a
+  /// table dropped from under its tab is not
+  func closeTab(id: UUID, byUser: Bool = true) {
     guard let i = tabs.firstIndex(where: { $0.id == id }) else { return }
     let tab = tabs.remove(at: i)
     detach(tab.controller)
@@ -459,6 +523,9 @@ final class ContentViewController: NSViewController {
     }
     refreshStrip()
     _ = focusCurrent()
+    if byUser && tabs.isEmpty {
+      onLastTabClosed?()
+    }
   }
 
   func closeCurrentTab() -> Bool {

@@ -135,3 +135,40 @@ def test_hotkeys_editor_adds_removes_and_resets(home):
         t.keys("q"); assert t.quit() == 0
     cfg = home.read("config.json")
     assert cfg["hotkeys"]["prev_tab"] == ["[", "F7", "F12"]
+
+
+def test_spatial_navigation(home):
+    """The arrows cross panel edges as in the ncurses TUI: Left from the
+    grid's first column (or the filter panel's first field, or a query's
+    results, or the editor's start) into the sidebar, Right back to where
+    the focus came from; Up from the grid's top into the filter panel and
+    Down from its last row back; Up from the results into the editor and
+    Down from its last line (or Right at its end) back into the results"""
+    db = make_db(home, rows=5)
+    grid, sidebar, panel = "/ filter", "/ search", "Esc table"
+    with Nc(home, ["-s", "sqlite://" + db]) as t:
+        t.wait("big"); t.keys("Enter"); t.wait("1 of 5")
+        t.wait_status(grid)
+        t.keys("Right"); t.keys("Left")              # back to the first column
+        t.keys("Left"); t.wait_status(sidebar)       # over the left edge
+        t.keys("Right"); t.wait_status(grid)
+        t.keys("/"); t.wait_status(panel)            # the filter panel, focused
+        t.keys("Down"); t.wait_status(grid)          # below its last row
+        t.keys("Up"); t.wait_status(panel)           # over the grid's top edge
+        for _ in range(4):
+            t.keys("Left")                           # its fields, then the sidebar
+        t.wait_status(sidebar)
+        t.keys("Right"); t.wait_status(panel)        # back to the panel it came from
+        t.keys("Escape"); t.wait_status(grid)
+        t.keys("p"); t.wait("⌃R run")
+        t.type("SELECT 1")
+        t.keys("C-r"); t.wait("1 row")
+        editor, results = "⌃R run", "Enter editor"
+        t.wait_status(editor)
+        t.keys("Down"); t.wait_status(results)       # below the editor's last line
+        t.keys("Left"); t.wait_status(sidebar)       # the results' left edge
+        t.keys("Right"); t.wait_status(results)
+        t.keys("Up"); t.wait_status(editor)          # over the results' top edge
+        t.keys("End"); t.keys("Right"); t.wait_status(results)   # past the text's end
+        t.keys("Up"); t.keys("Home"); t.keys("Left"); t.wait_status(sidebar)   # before its start
+        t.keys("q"); assert t.quit() == 0

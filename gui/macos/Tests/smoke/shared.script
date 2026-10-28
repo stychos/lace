@@ -1,0 +1,27 @@
+# A connection used by two windows: closing it in one asks nothing and
+# leaves it open; the other window keeps using it, transaction included;
+# the last holder asks
+connect $LACE_SMOKE_DB
+new-window
+window 2
+connect $LACE_SMOKE_DB
+expect-open-connections 1
+query BEGIN
+run
+expect-badge 1
+window 1
+expect-badge 1
+close-connection
+expect-no-alert
+expect-open-connections 1
+window 2
+query SELECT 1
+run
+expect-badge 1
+close-connection
+expect-alert transaction
+answer-alert cancel
+expect-no-alert
+expect-open-connections 1
+expect-entry connection
+quit

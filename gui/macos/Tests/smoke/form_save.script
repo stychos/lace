@@ -1,0 +1,20 @@
+# Save updates the highlighted entry (renamed in the form), Save as new
+# adds one; a bad port refuses with the reason and saves nothing
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-field name Renamed
+form-action save
+expect-saved 1
+expect-title Renamed
+expect-form-message Saved Renamed
+form-field name Copy
+form-action save-as-new
+expect-saved 2
+expect-title Copy
+form-field driver postgres
+form-field host h
+form-field port 99999
+form-action save
+expect-form-message 1 to 65535
+expect-saved 2
+quit

@@ -12,6 +12,8 @@
 #include "tui_internal.h"
 #include "util/mem.h"
 #include "views/config_view.h"
+#include "views/theme.h"
+#include "core/chrome.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,7 +27,23 @@ static int section_of(LaceObjectKind k) {
   return k == LACE_OBJ_VIEW ? 1 : k == LACE_OBJ_ROUTINE ? 2 : k == LACE_OBJ_TRIGGER ? 3 : 0;
 }
 
-static const char *const SECTION_TITLE[] = {"TABLES", "VIEWS", "FUNCTIONS", "TRIGGERS"};
+static const char *const SECTION_TITLE[] = {"TABLES", "VIEWS", "FUNCTIONS", "TRIGGERS", "QUERIES"};
+
+#define SIDEBAR_MAX 28
+#define SIDEBAR_MIN 10
+
+int tui_sidebar_width(TuiState *state) {
+  if (!state || !tui_sidebar_shown(state))
+    return 0;
+  int w = state->term_cols / 3 < SIDEBAR_MAX ? state->term_cols / 3 : SIDEBAR_MAX;
+  return w < SIDEBAR_MIN ? 0 : w;
+}
+
+/* A query tab's title (valid until the next call) */
+static const char *query_title(const Tab *t) {
+  static char buf[256];
+  return chrome_query_title(t->query_text, buf, sizeof buf);
+}
 
 size_t tui_sidebar_entries(TuiState *state, SidebarEntry **out) {
   *out = NULL;
@@ -55,6 +73,22 @@ size_t tui_sidebar_entries(TuiState *state, SidebarEntry **out) {
       if (section_of(objs[i].kind) == sec && name_matches(state, objs[i].name))
         e[n++] = (SidebarEntry){SB_OBJECT, i, sec};
   }
+  /* QUERIES: the connection's query tabs here */
+  Workspace *ws = TUI_WORKSPACE(state);
+  Tab *cur = TUI_TAB(state);
+  size_t nq = 0;
+  for (size_t i = 0; ws && cur && i < ws->num_tabs; i++) {
+    Tab *t = &ws->tabs[i];
+    if (!t->active || t->type != TAB_TYPE_QUERY || t->connection_index != cur->connection_index ||
+        !name_matches(state, query_title(t)))
+      continue;
+    if (!nq++) {
+      e = safe_realloc(e, (n + 1 + ws->num_tabs + 1) * sizeof *e);
+      e[n++] = (SidebarEntry){SB_HEADER, 0, 4};
+    }
+    if (!(state->sidebar_collapsed & (1u << 4)))
+      e[n++] = (SidebarEntry){SB_QUERY, i, 4};
+  }
   *out = e;
   return n;
 }
@@ -75,6 +109,10 @@ const char *tui_sidebar_entry_name(TuiState *state, const SidebarEntry *e) {
   if (e->kind == SB_TABLE) {
     char **tables = TUI_TABLES(state);
     return e->idx < TUI_NUM_TABLES(state) ? tables[e->idx] : "";
+  }
+  if (e->kind == SB_QUERY) {
+    Workspace *ws = TUI_WORKSPACE(state);
+    return ws && e->idx < ws->num_tabs ? query_title(&ws->tabs[e->idx]) : "";
   }
   Connection *conn = TUI_TAB_CONNECTION(state);
   return conn && e->idx < conn->num_objects && conn->objects[e->idx].name ? conn->objects[e->idx].name : "";
@@ -137,7 +175,7 @@ void tui_update_sidebar_scroll_animation(TuiState *state) {
   if (!name)
     return;
 
-  int max_name_len = SIDEBAR_WIDTH - 4;
+  int max_name_len = tui_sidebar_width(state) - 2;
   if (max_name_len < 1)
     max_name_len = 1;
   int name_len = utf8_width(name, strlen(name)); /* In columns */
@@ -237,6 +275,7 @@ static void open_in_current(TuiState *state, LaceObjectKind kind, const char *na
      * both refer to columns of the old table by index */
     filters_clear(&tab->filters);
     tab->num_sort_entries = 0;
+    tab_clear_user_widths(tab); /* other columns */
   }
   free(tab->table_name);
   free(tab->object_table);
@@ -251,34 +290,141 @@ static void open_in_current(TuiState *state, LaceObjectKind kind, const char *na
   tui_load_table_data(state, new_name);
 }
 
-void sidebar_open_entry(TuiState *state, const SidebarEntry *e, bool new_tab) {
-  if (e->kind == SB_HEADER) { /* fold or unfold the section */
-    state->sidebar_collapsed ^= 1u << e->section;
+/* The workspace's tab showing the object on the current connection
+ * (tables and database views share a namespace); SIZE_MAX: none */
+static size_t object_tab(TuiState *state, LaceObjectKind kind, const char *name) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  Tab *cur = TUI_TAB(state);
+  if (!ws || !cur)
+    return SIZE_MAX;
+  bool relation = kind == LACE_OBJ_TABLE || kind == LACE_OBJ_VIEW;
+  for (size_t i = 0; i < ws->num_tabs; i++) {
+    Tab *t = &ws->tabs[i];
+    bool t_relation = t->object == LACE_OBJ_TABLE || t->object == LACE_OBJ_VIEW;
+    if (t->active && t->type == TAB_TYPE_TABLE && t->table_name && str_eq(t->table_name, name) &&
+        (relation ? t_relation : t->object == kind) && t->connection_index == cur->connection_index)
+      return i;
+  }
+  return SIZE_MAX;
+}
+
+/* The connection's preview tab here; SIZE_MAX: none */
+static size_t preview_tab(TuiState *state) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  Tab *cur = TUI_TAB(state);
+  for (size_t i = 0; ws && cur && i < ws->num_tabs; i++)
+    if (ws->tabs[i].active && ws->tabs[i].preview && ws->tabs[i].type == TAB_TYPE_TABLE &&
+        ws->tabs[i].connection_index == cur->connection_index)
+      return i;
+  return SIZE_MAX;
+}
+
+/* Open for keeps, as the notcurses TUI (Enter, a double click, the
+ * palette): an open tab of the object is switched to and kept, the
+ * connection's own tab takes its first view, else a new tab */
+static void open_for_keeps(TuiState *state, LaceObjectKind kind, const char *name, const char *table,
+                           const char *detail) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  size_t i = object_tab(state, kind, name);
+  if (i != SIZE_MAX) {
+    if (i != ws->current_tab)
+      tab_switch(state, i);
+    ws->tabs[i].preview = false;
     return;
   }
+  Tab *cur = TUI_TAB(state);
+  if (!ws || ws->num_tabs == 0 || (cur && cur->type == TAB_TYPE_CONNECTION)) {
+    open_in_current(state, kind, name, table, detail);
+    return;
+  }
+  tab_create_object(state, kind, name, table, detail);
+}
+
+/* Show the object in the connection's preview tab (a single click): an open
+ * tab of it is switched to as it is; the preview tab shows it instead of
+ * what it showed; else the connection's own tab or a new tab becomes the
+ * preview */
+static void open_preview(TuiState *state, LaceObjectKind kind, const char *name, const char *table,
+                         const char *detail) {
+  Workspace *ws = TUI_WORKSPACE(state);
+  size_t i = object_tab(state, kind, name);
+  if (i != SIZE_MAX) {
+    if (i != ws->current_tab)
+      tab_switch(state, i);
+    return;
+  }
+  size_t p = preview_tab(state);
+  if (p != SIZE_MAX) {
+    if (p != ws->current_tab)
+      tab_switch(state, p);
+    open_in_current(state, kind, name, table, detail);
+    return;
+  }
+  Tab *cur = TUI_TAB(state);
+  if (cur && cur->type == TAB_TYPE_CONNECTION)
+    open_in_current(state, kind, name, table, detail);
+  else
+    tab_create_object(state, kind, name, table, detail);
+  if (TUI_TAB(state))
+    TUI_TAB(state)->preview = true;
+}
+
+/* What an entry opens; false for a header (folded) or a query tab (switched to) */
+static bool entry_target(TuiState *state, const SidebarEntry *e, LaceObjectKind *kind, char **name, char **table,
+                         char **detail) {
+  if (e->kind == SB_HEADER) { /* fold or unfold the section (QUERIES does not) */
+    if (e->section != 4)
+      state->sidebar_collapsed ^= 1u << e->section;
+    return false;
+  }
+  if (e->kind == SB_QUERY) { /* a query tab: switch to it */
+    Workspace *ws = TUI_WORKSPACE(state);
+    if (ws && e->idx < ws->num_tabs && e->idx != ws->current_tab)
+      tab_switch(state, e->idx);
+    return false;
+  }
+  *table = *detail = NULL;
   if (e->kind == SB_TABLE) {
     char **tables = TUI_TABLES(state);
     if (!tables || e->idx >= TUI_NUM_TABLES(state))
-      return;
-    char *name = str_dup(tables[e->idx]); /* a refresh may replace the list */
-    if (new_tab)
-      tab_create_object(state, LACE_OBJ_TABLE, name, NULL, NULL);
-    else
-      open_in_current(state, LACE_OBJ_TABLE, name, NULL, NULL);
-    free(name);
-    return;
+      return false;
+    *kind = LACE_OBJ_TABLE;
+    *name = str_dup(tables[e->idx]); /* a refresh may replace the list */
+    return true;
   }
   Connection *conn = TUI_TAB_CONNECTION(state);
   if (!conn || e->idx >= conn->num_objects)
-    return;
+    return false;
   const LaceObject *o = &conn->objects[e->idx];
-  LaceObjectKind kind = o->kind;
-  char *name = str_dup(o->name), *table = o->table ? str_dup(o->table) : NULL;
-  char *detail = o->detail ? str_dup(o->detail) : NULL;
-  if (new_tab)
+  *kind = o->kind;
+  *name = str_dup(o->name);
+  *table = o->table ? str_dup(o->table) : NULL;
+  *detail = o->detail ? str_dup(o->detail) : NULL;
+  return true;
+}
+
+void sidebar_open_entry(TuiState *state, const SidebarEntry *e, bool new_tab) {
+  LaceObjectKind kind;
+  char *name, *table, *detail;
+  if (!entry_target(state, e, &kind, &name, &table, &detail))
+    return;
+  /* the connection's own tab (no view yet) takes the first view itself */
+  Tab *cur = TUI_TAB(state);
+  if (new_tab && cur && cur->type != TAB_TYPE_CONNECTION)
     tab_create_object(state, kind, name, table, detail);
   else
-    open_in_current(state, kind, name, table, detail);
+    open_for_keeps(state, kind, name, table, detail);
+  free(name);
+  free(table);
+  free(detail);
+}
+
+void sidebar_preview_entry(TuiState *state, const SidebarEntry *e) {
+  LaceObjectKind kind;
+  char *name, *table, *detail;
+  if (!entry_target(state, e, &kind, &name, &table, &detail))
+    return;
+  open_preview(state, kind, name, table, detail);
   free(name);
   free(table);
   free(detail);
@@ -491,6 +637,8 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_HEADER) ||
            hotkey_matches(cfg, event, HOTKEY_TOGGLE_STATUS) ||
            hotkey_matches(cfg, event, HOTKEY_GOTO_ROW) ||
+           hotkey_matches(cfg, event, HOTKEY_PALETTE) ||
+           hotkey_matches(cfg, event, HOTKEY_TOGGLE_HISTORY) ||
            hotkey_matches(cfg, event, HOTKEY_CONFIG)) {
     return false;
   }
@@ -498,171 +646,156 @@ bool tui_handle_sidebar_input(TuiState *state, const UiEvent *event) {
   return true;
 }
 
-/* Draw sidebar */
+/* The entry the current tab shows (SIZE_MAX: none) */
+static size_t open_entry(TuiState *state, const SidebarEntry *e, size_t n) {
+  Tab *t = TUI_TAB(state);
+  Workspace *ws = TUI_WORKSPACE(state);
+  if (!t || !ws)
+    return SIZE_MAX;
+  for (size_t i = 0; i < n; i++) {
+    if (t->type == TAB_TYPE_QUERY && e[i].kind == SB_QUERY && e[i].idx == ws->current_tab)
+      return i;
+    if (t->type != TAB_TYPE_TABLE || !t->table_name || (e[i].kind != SB_TABLE && e[i].kind != SB_OBJECT))
+      continue;
+    bool kind = e[i].kind == SB_TABLE ? t->object == LACE_OBJ_TABLE || t->object == LACE_OBJ_VIEW
+                                      : section_of(t->object) == e[i].section;
+    if (kind && str_eq(tui_sidebar_entry_name(state, &e[i]), t->table_name))
+      return i;
+  }
+  return SIZE_MAX;
+}
+
+/* Whether the search field shows: while it is used or holds text */
+static bool search_shown(TuiState *state) { return state->sidebar_filter_active || state->sidebar_filter_len > 0; }
+
+int tui_sidebar_list_top(TuiState *state) { return (search_shown(state) ? 1 : 0) + 1; }
+
+/* A note right under TABLES while no table shows ("loading…", "none", "no match") */
+static const char *note_of(TuiState *state, const SidebarEntry *e, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    if (e[i].kind == SB_TABLE)
+      return NULL;
+  if (!TUI_TABLES(state) && TUI_NUM_TABLES(state) == 0 && !TUI_TAB_CONNECTION(state))
+    return "loading\xe2\x80\xa6";
+  return state->sidebar_filter_len ? "no match" : "none";
+}
+
+bool tui_sidebar_has_note(TuiState *state) {
+  SidebarEntry *e;
+  size_t n = tui_sidebar_entries(state, &e);
+  bool note = note_of(state, e, n) != NULL;
+  free(e);
+  return note;
+}
+
+/* Draw the sidebar as the notcurses TUI's: no frame, a rule on the right,
+ * the search field only while it is used, TABLES pinned at the top and the
+ * rest scrolling under it, the current tab's entry in the accent colour,
+ * the highlight while the sidebar has the keys */
 void tui_draw_sidebar(TuiState *state) {
   if (!state || !state->sidebar_win || !state->sidebar_visible)
     return;
-
-  const char *filter_text = state->sidebar_filter;
-  size_t filter_len = state->sidebar_filter_len;
-  size_t highlight = state->sidebar_highlight;
-  size_t scroll = state->sidebar_scroll;
-
-  werase(state->sidebar_win);
-
-  /* Draw border and title */
-  DRAW_BOX(state->sidebar_win, COLOR_BORDER);
-  WITH_ATTR(state->sidebar_win, A_BOLD,
-            mvwprintw(state->sidebar_win, 0, 2, " Tables "));
-
-  int y = 1;
-  int max_name_len = SIDEBAR_WIDTH - 4;
-
-  /* Draw filter input - use COLOR_EDIT for active filter (black on yellow) */
-  if (state->sidebar_filter_active) {
-    wattron(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
-  }
-  mvwaddch(state->sidebar_win, y, 1, '/');
-  tui_print_fit(state->sidebar_win, y, 2, max_name_len,
-                filter_len > 0 ? filter_text : "");
-  if (state->sidebar_filter_active) {
-    wattroff(state->sidebar_win, COLOR_PAIR(COLOR_EDIT));
-  }
-  int filter_y = y; /* Remember filter line position for cursor */
-  y++;
-
-  /* Separator with T-junctions connecting to borders */
-  wattron(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
-  mvwaddch(state->sidebar_win, y, 0, ACS_LTEE);
-  mvwhline(state->sidebar_win, y, 1, ACS_HLINE, SIDEBAR_WIDTH - 2);
-  mvwaddch(state->sidebar_win, y, SIDEBAR_WIDTH - 1, ACS_RTEE);
-  wattroff(state->sidebar_win, COLOR_PAIR(COLOR_BORDER));
-  y++;
-
-  Tab *current_tab = TUI_TAB(state);
-  SidebarEntry *entries;
-  size_t n = tui_sidebar_entries(state, &entries);
-
-  if (TUI_NUM_TABLES(state) == 0 && n == 0) {
-    mvwprintw(state->sidebar_win, y, 2, "(no tables)");
-    /* Position cursor in filter field if active */
-    if (state->sidebar_filter_active) {
-      curs_set(1);
-      wmove(state->sidebar_win, filter_y,
-            2 + utf8_width(filter_text, filter_len));
-    }
-    free(entries);
-    wrefresh(state->sidebar_win);
+  WINDOW *w = state->sidebar_win;
+  int rows, width;
+  getmaxyx(w, rows, width);
+  int cw = width - 1;
+  wbkgd(w, tui_theme_attr(TC_FG, TC_BG) | ' ');
+  werase(w);
+  tui_style(w, TC_DIM, TC_BG, 0);
+  for (int y = 0; y < rows; y++)
+    mvwaddstr(w, y, cw, "\xe2\x94\x82");
+  if (cw < 4 || rows < 3) {
+    wrefresh(w);
     return;
   }
-
-  /* Get actual sidebar window height */
-  int win_height, win_width;
-  getmaxyx(state->sidebar_win, win_height, win_width);
-  (void)win_width;
-
-  /* Content area height: window height minus top border(1), filter(1),
-   * separator(1), bottom border(1) */
-  int list_height = win_height - 4;
-
-  if (n == 0) {
-    mvwprintw(state->sidebar_win, y, 2, "(no matches)");
-    /* Position cursor in filter field if active */
-    if (state->sidebar_filter_active) {
-      curs_set(1);
-      wmove(state->sidebar_win, filter_y,
-            2 + utf8_width(filter_text, filter_len));
-    }
-    free(entries);
-    wrefresh(state->sidebar_win);
-    return;
+  SidebarEntry *e;
+  size_t n = tui_sidebar_entries(state, &e);
+  /* the highlight follows the current tab when it changes */
+  Tab *cur_tab = TUI_TAB(state);
+  size_t open = open_entry(state, e, n);
+  uint64_t uid = cur_tab ? cur_tab->uid : 0;
+  if (uid != state->sidebar_view_uid) {
+    state->sidebar_view_uid = uid;
+    if (open != SIZE_MAX)
+      state->sidebar_highlight = open;
   }
+  if (n && state->sidebar_highlight >= n)
+    state->sidebar_highlight = n - 1;
 
-  /* Adjust scroll if highlight is out of view */
-  size_t draw_scroll = scroll;
-  if (highlight < draw_scroll) {
-    draw_scroll = highlight;
-  } else if (highlight >= draw_scroll + (size_t)list_height) {
-    draw_scroll = highlight - (size_t)list_height + 1;
+  int top = 0, cursor_y = -1, cursor_x = 0;
+  if (search_shown(state)) {
+    ThemeColor bg = state->sidebar_filter_active ? TC_EDIT_BG : TC_BG;
+    tui_style(w, TC_FG, bg, 0);
+    tui_print_fit(w, 0, 0, cw, "");
+    tui_style(w, TC_DIM, bg, 0);
+    mvwaddstr(w, 0, 1, "/");
+    tui_style(w, TC_FG, bg, 0);
+    tui_print_fit(w, 0, 2, cw - 2, state->sidebar_filter);
+    cursor_y = 0;
+    int fw = utf8_width(state->sidebar_filter, state->sidebar_filter_len);
+    cursor_x = 2 + (fw < cw - 3 ? fw : cw - 3);
+    top = 1;
   }
-  /* Sync adjusted scroll back to state for next frame */
-  if (draw_scroll != scroll) {
-    state->sidebar_scroll = draw_scroll;
-  }
+  tui_style(w, TC_DIM, TC_BG, A_BOLD);
+  tui_print_fit(w, top, 1, cw - 1, SECTION_TITLE[0]);
 
-  /* Draw the entries from the scroll position */
-  for (size_t i = draw_scroll; i < n && y < win_height - 1; i++) {
-    const SidebarEntry *e = &entries[i];
-    bool is_highlighted = (i == highlight);
-    bool focused_hl = is_highlighted && state->sidebar_focused && !state->sidebar_filter_active;
-    if (e->kind == SB_HEADER) { /* a section: "▾ VIEWS", "▸ VIEWS" when folded */
-      char *title = str_printf("%s %s", state->sidebar_collapsed & (1u << e->section) ? "\xe2\x96\xb8" : "\xe2\x96\xbe",
-                               tui_sidebar_entry_name(state, e));
-      attr_t attr = A_BOLD | (focused_hl ? A_REVERSE : A_DIM);
-      wattron(state->sidebar_win, attr);
-      tui_print_fit(state->sidebar_win, y, 1, max_name_len + 1, title);
-      wattroff(state->sidebar_win, attr);
-      free(title);
-      y++;
+  const char *note = note_of(state, e, n);
+  size_t body = n + (note ? 1 : 0);
+  int vis = rows - 1 - top;
+  size_t cur_body = (n ? state->sidebar_highlight : 0) + (note ? 1 : 0);
+  if (cur_body < state->sidebar_scroll)
+    state->sidebar_scroll = cur_body;
+  if (vis > 0 && cur_body >= state->sidebar_scroll + (size_t)vis)
+    state->sidebar_scroll = cur_body - (size_t)vis + 1;
+  if (state->sidebar_scroll > 0 && body <= (size_t)vis)
+    state->sidebar_scroll = 0;
+  bool driven = state->sidebar_focused && !state->sidebar_filter_active;
+  for (int row = 0; row < vis; row++) {
+    size_t line = state->sidebar_scroll + (size_t)row;
+    if (line >= body)
+      break;
+    int y = top + 1 + row;
+    if (note && line == 0) {
+      tui_style(w, TC_DIM, TC_BG, 0);
+      tui_print_fit(w, y, 1, cw - 1, note);
       continue;
     }
-    const char *name = tui_sidebar_entry_name(state, e);
-    /* the current tab's entry: the same object */
-    bool is_current = current_tab && current_tab->type == TAB_TYPE_TABLE && current_tab->table_name &&
-                      str_eq(current_tab->table_name, name) &&
-                      (e->kind == SB_TABLE ? current_tab->object == LACE_OBJ_TABLE || current_tab->object == LACE_OBJ_VIEW
-                                           : section_of(current_tab->object) == e->section);
-
-    if (focused_hl) {
-      wattron(state->sidebar_win, A_REVERSE);
+    size_t i = note ? line - 1 : line;
+    const SidebarEntry *en = &e[i];
+    bool cur = i == state->sidebar_highlight && (driven || !cur_tab || cur_tab->type == TAB_TYPE_CONNECTION);
+    if (en->kind == SB_HEADER) {
+      tui_style(w, cur ? TC_CURSOR_FG : TC_DIM, cur ? TC_CURSOR_BG : TC_BG, A_BOLD);
+      tui_print_fit(w, y, 0, cw, "");
+      char *title = en->section == 4 /* QUERIES does not fold */
+                        ? str_dup(SECTION_TITLE[4])
+                        : str_printf("%s %s", state->sidebar_collapsed & (1u << en->section) ? "\xe2\x96\xb8" : "\xe2\x96\xbe",
+                                     SECTION_TITLE[en->section]);
+      tui_print_fit(w, y, 1, cw - 1, title);
+      free(title);
+      continue;
     }
-
-    /* Truncate name if too long (by display columns, never mid-character) */
-    size_t name_bytes = strlen(name);
-    int name_len = utf8_width(name, name_bytes);
-    char *display_name = NULL;
-    if (name_len > max_name_len) {
-      if (focused_hl) {
-        /* Apply scroll animation for highlighted item (scroll is columns) */
-        size_t name_scroll = state->sidebar_name_scroll;
-        if (name_scroll > (size_t)(name_len - max_name_len)) {
-          name_scroll = (size_t)(name_len - max_name_len);
-        }
-        display_name =
-            str_dup(name + utf8_offset_at_col(name, name_bytes, (int)name_scroll));
-      } else {
-        int cols = 0;
-        size_t keep = utf8_fit(name, name_bytes, max_name_len - 2, &cols);
-        display_name = str_printf("%.*s..", (int)keep, name);
-      }
-    } else {
-      display_name = str_dup(name);
+    const char *name = tui_sidebar_entry_name(state, en);
+    if (i == open && !cur)
+      tui_style(w, TC_ACCENT, TC_BG, A_BOLD);
+    else
+      tui_style(w, cur ? TC_CURSOR_FG : TC_FG, cur ? TC_CURSOR_BG : TC_BG, i == open ? A_BOLD : 0);
+    tui_print_fit(w, y, 0, cw, "");
+    /* a long name scrolls in place on the highlighted entry */
+    size_t nb = strlen(name);
+    int nw = utf8_width(name, nb);
+    if (nw > cw - 1 && cur && driven) {
+      size_t sc = state->sidebar_name_scroll;
+      if (sc > (size_t)(nw - (cw - 1)))
+        sc = (size_t)(nw - (cw - 1));
+      name += utf8_offset_at_col(name, nb, (int)sc);
     }
-
-    if (is_current) {
-      wattron(state->sidebar_win, A_BOLD);
-    }
-
-    tui_print_fit(state->sidebar_win, y, 2, max_name_len, display_name);
-    free(display_name);
-
-    if (is_current) {
-      wattroff(state->sidebar_win, A_BOLD);
-    }
-    if (focused_hl) {
-      wattroff(state->sidebar_win, A_REVERSE);
-    }
-
-    y++;
+    tui_print_fit(w, y, 1, cw - 1, name);
   }
-  free(entries);
-
-  /* Position cursor in filter field if active, before refresh */
-  if (state->sidebar_filter_active) {
+  free(e);
+  tui_style(w, TC_FG, TC_BG, 0);
+  if (state->sidebar_filter_active && cursor_y >= 0) {
     curs_set(1);
-    wmove(state->sidebar_win, filter_y,
-            2 + utf8_width(filter_text, filter_len));
+    wmove(w, cursor_y, cursor_x);
   }
-
-  wrefresh(state->sidebar_win);
+  wrefresh(w);
 }

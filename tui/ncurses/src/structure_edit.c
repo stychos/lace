@@ -260,7 +260,7 @@ static void move_column(TuiState *state, Tab *tab, const LaceColumn *c) {
       targets[k++] = tab->schema->columns[i].name;
     }
   char *title = str_printf("Move column %s", c->name);
-  int x = state->sidebar_visible ? SIDEBAR_WIDTH + 2 : 2;
+  int x = state->sidebar_visible ? tui_sidebar_width(state) + 2 : 2;
   int sel = tui_pick_from_list(state->app->config, title, (const char *const *)items, k, 0, 3, x, 30,
                                state->term_cols - 4, state->term_rows - 6);
   free(title);

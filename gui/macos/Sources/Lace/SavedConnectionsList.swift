@@ -1,8 +1,9 @@
 //
 // Lace macOS frontend
-// The saved-connections list (the welcome page and the connect sheet):
-// folders as group rows, connections with their name and what they reach,
-// a filter, a context menu. The owner connects, edits or deletes.
+// The saved-connections list (the connection form's left panel): folders
+// as group rows, connections with their name, what they reach and the
+// windows they are open in, then Recent; a filter, a context menu. The
+// owner fills its form from the selected row and connects on activation.
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -18,20 +19,35 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     /// The "Recent" header
     case recentHeader
     case recent(RecentConnections.Entry)
+
+    /// What names the row across rebuilds
+    var key: Key? {
+      switch self {
+      case .connection(let e): .saved(e.connection.id)
+      case .recent(let r): .recent(r.url)
+      default: nil
+      }
+    }
   }
 
-  /// Double-click or Return
-  var onActivate: ((SavedConnection) -> Void)?
-  var onSelect: ((SavedConnection?) -> Void)?
-  var onEdit: ((SavedConnection) -> Void)?
+  /// A selectable row: a saved connection by id, a recent one by URL
+  enum Key: Equatable {
+    case saved(String)
+    case recent(String)
+  }
+
+  /// The selection moved (keys, a click), not during a rebuild
+  var onSelect: ((Row?) -> Void)?
+  /// Double-click or Return on a connection or a recent row
+  var onActivate: ((Row) -> Void)?
   var onDuplicate: ((SavedConnection) -> Void)?
   var onDelete: ((SavedConnection) -> Void)?
   var onNewConnection: ((_ folder: [Int]) -> Void)?
+  var onNewFolder: ((_ parent: [Int]) -> Void)?
   var onRenameFolder: ((SavedConnectionStore.Folder) -> Void)?
   var onDeleteFolder: ((SavedConnectionStore.Folder) -> Void)?
-  var onConnectRecent: ((String) -> Void)?
-  /// Put a recent URL into the connect form
-  var onSaveRecent: ((String) -> Void)?
+  /// "1, 3": the windows a saved connection is open in ("" for none)
+  var openIn: ((String) -> String)?
   /// Recent connections shown after the saved ones
   var showsRecents = true
   /// Case-insensitive, over names and what they reach
@@ -44,6 +60,8 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
   private(set) var rows: [Row] = []
   private let emptyLabel = NSTextField(wrappingLabelWithString: "")
   private let store = LaceApp.shared.saved
+  /// Selection changes made here (rebuilds, select(key:)) are not the user's
+  private var quiet = false
 
   override init(frame: NSRect) {
     super.init(frame: frame)
@@ -86,9 +104,10 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
 
   required init?(coder: NSCoder) { fatalError("not used") }
 
-  /// Rebuild from the store (after any change)
+  /// Rebuild from the store and recent.json (after any change); the
+  /// selection stays on the row it named
   func reload() {
-    let selected = selectedConnection?.id
+    let selected = selectedKey
     let needle = filter.trimmingCharacters(in: .whitespaces).lowercased()
     func matches(_ e: SavedConnectionStore.Entry) -> Bool {
       needle.isEmpty || e.connection.name.lowercased().contains(needle)
@@ -114,14 +133,14 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
       }
     }
     self.rows = rows
+    quiet = true
     tableView.reloadData()
-    if let selected {
-      select(id: selected)
-    }
+    select(key: selected)
+    quiet = false
     if store.entries.isEmpty && rows.isEmpty {
       emptyLabel.stringValue =
         store.loadError.map { "connections.json could not be read: \($0)" }
-        ?? "No saved connections yet. Connect to a database and save it, or press New."
+        ?? "No saved connections yet. Fill in the form and press Save."
     } else if rows.isEmpty {
       emptyLabel.stringValue = "No saved connection matches"
     } else {
@@ -130,43 +149,54 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     emptyLabel.isHidden = emptyLabel.stringValue.isEmpty
   }
 
-  var selectedConnection: SavedConnection? {
+  var selectedRow: Row? {
     let i = tableView.selectedRow
-    guard i >= 0, i < rows.count, case .connection(let e) = rows[i] else { return nil }
+    return i >= 0 && i < rows.count ? rows[i] : nil
+  }
+
+  var selectedKey: Key? { selectedRow?.key }
+
+  var selectedConnection: SavedConnection? {
+    guard case .connection(let e) = selectedRow else { return nil }
     return e.connection
   }
 
   var selectedRecent: RecentConnections.Entry? {
-    let i = tableView.selectedRow
-    guard i >= 0, i < rows.count, case .recent(let e) = rows[i] else { return nil }
+    guard case .recent(let e) = selectedRow else { return nil }
     return e
   }
 
-  func select(id: String) {
-    if let i = rows.firstIndex(where: {
-      if case .connection(let e) = $0 { return e.connection.id == id }
-      return false
-    }) {
-      tableView.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false)
-      tableView.scrollRowToVisible(i)
+  /// The row a key names now, if the list holds it
+  func row(for key: Key?) -> Row? {
+    guard let key else { return nil }
+    return rows.first { $0.key == key }
+  }
+
+  /// Select the row a key names (nil, or one not in the list: none),
+  /// without telling onSelect
+  func select(key: Key?) {
+    let was = quiet
+    quiet = true
+    defer { quiet = was }
+    guard let key, let i = rows.firstIndex(where: { $0.key == key }) else {
+      tableView.deselectAll(nil)
+      return
     }
+    tableView.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false)
+    tableView.scrollRowToVisible(i)
+  }
+
+  func select(id: String) {
+    select(key: .saved(id))
   }
 
   func focus() {
     window?.makeFirstResponder(tableView)
-    if tableView.selectedRow < 0, let first = rows.firstIndex(where: {
-      if case .connection = $0 { return true }
-      return false
-    }) {
-      tableView.selectRowIndexes(IndexSet(integer: first), byExtendingSelection: false)
-    }
   }
 
   @objc private func activate() {
-    if let c = selectedConnection {
-      onActivate?(c)
-    } else if let r = selectedRecent {
-      onConnectRecent?(r.url)
+    if let row = selectedRow, row.key != nil {
+      onActivate?(row)
     }
   }
 
@@ -205,10 +235,13 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     case .connection(let e):
       let cell = TwoLineCellView.make(in: tableView)
       let c = e.connection
+      var subtitle = c.name.isEmpty ? c.driverKind.displayName : "\(c.driverKind.displayName) · \(c.summary)"
+      if let open = openIn?(c.id), !open.isEmpty {
+        subtitle = "● open in \(open) · " + subtitle
+      }
       cell.configure(
         symbol: c.isSQLite ? "doc.fill" : (c.ssh ? "lock.shield" : "cylinder.fill"), title: c.displayName,
-        subtitle: c.name.isEmpty ? c.driverKind.displayName : "\(c.driverKind.displayName) · \(c.summary)",
-        indent: CGFloat(e.depth) * 14)
+        subtitle: subtitle, indent: CGFloat(e.depth) * 14)
       return cell
     case .recentHeader:
       let cell = TextCellView.make(in: tableView, text: "Recent")
@@ -238,7 +271,9 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
   }
 
   func tableViewSelectionDidChange(_ notification: Notification) {
-    onSelect?(selectedConnection)
+    if !quiet {
+      onSelect?(selectedRow)
+    }
   }
 
   // MARK: Context menu
@@ -247,25 +282,25 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     menu.removeAllItems()
     let row = tableView.clickedRow
     guard row >= 0, row < rows.count else {
-      add(menu, "New Connection…", #selector(menuNew))
+      add(menu, "New Connection", #selector(menuNew))
+      add(menu, "New Folder…", #selector(menuNewFolder))
       return
     }
     switch rows[row] {
     case .connection:
       tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-      add(menu, "Connect", #selector(activate))
-      add(menu, "Edit…", #selector(menuEdit))
+      add(menu, "Open Here", #selector(activate))
       add(menu, "Duplicate", #selector(menuDuplicate))
       menu.addItem(.separator())
       add(menu, "Delete…", #selector(menuDelete))
     case .folder:
-      add(menu, "New Connection Here…", #selector(menuNewInFolder))
+      add(menu, "New Connection Here", #selector(menuNewInFolder))
+      add(menu, "New Folder Here…", #selector(menuNewFolderInFolder))
       add(menu, "Rename Folder…", #selector(menuRenameFolder))
       add(menu, "Delete Folder", #selector(menuDeleteFolder))
     case .recent:
       tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-      add(menu, "Connect", #selector(activate))
-      add(menu, "Save…", #selector(menuSaveRecent))
+      add(menu, "Open Here", #selector(activate))
       menu.addItem(.separator())
       add(menu, "Forget", #selector(menuForgetRecent))
     case .recentHeader:
@@ -273,20 +308,15 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
     }
   }
 
-  @objc private func menuSaveRecent() {
-    if let r = selectedRecent { onSaveRecent?(r.url) }
-  }
   @objc private func menuForgetRecent() {
     if let r = selectedRecent {
       LaceApp.shared.recents.remove(url: r.url)
-      reload()
     }
   }
   @objc private func menuForgetAllRecent() {
     for r in LaceApp.shared.recents.entries {
       LaceApp.shared.recents.remove(url: r.url)
     }
-    reload()
   }
 
   private func add(_ menu: NSMenu, _ title: String, _ action: Selector) {
@@ -301,11 +331,12 @@ final class SavedListView: NSView, NSTableViewDataSource, NSTableViewDelegate, N
   }
 
   @objc private func menuNew() { onNewConnection?([]) }
+  @objc private func menuNewFolder() { onNewFolder?([]) }
   @objc private func menuNewInFolder() {
     if let f = clickedFolder { onNewConnection?(f.path) }
   }
-  @objc private func menuEdit() {
-    if let c = selectedConnection { onEdit?(c) }
+  @objc private func menuNewFolderInFolder() {
+    if let f = clickedFolder { onNewFolder?(f.path) }
   }
   @objc private func menuDuplicate() {
     if let c = selectedConnection { onDuplicate?(c) }
@@ -397,7 +428,7 @@ enum SavedActions {
   }
 
   static func duplicate(_ c: SavedConnection, window: NSWindow?) -> SavedConnection? {
-    var copy = c
+    var copy = LaceApp.shared.savedConnection(id: c.id) ?? c  // its saved passwords too
     copy.id = SavedConnection.newID()
     copy.name = c.name.isEmpty ? "" : "\(c.name) copy"
     do {

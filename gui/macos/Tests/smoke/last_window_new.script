@@ -1,0 +1,13 @@
+# config: {"general": {"daemon_spawn_mode": 1, "on_last_workspace_close": "new"}, "macos": {"keychain_passwords": false}}
+# on_last_workspace_close "new": closing the last window's only entry
+# opens a fresh window with a form
+close-tab
+wait 400
+expect-windows 1
+expect-entries 1
+expect-entry form
+close-window
+wait 400
+expect-windows 1
+expect-entry form
+quit

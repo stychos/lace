@@ -11,6 +11,8 @@
 #include "../async/async.h"
 #include "../tui_internal.h"
 #include "prompt.h"
+#include "form_tab.h"
+#include "../config/recent.h"
 #include "../../liblace/include/util/str.h"
 #include <stdlib.h>
 #include <string.h>
@@ -173,3 +175,45 @@ bool tui_test_connection(TuiState *state, const SavedConnection *conn, const cha
   return false;
 }
 
+
+bool tui_connect_and_place(TuiState *state, const SavedConnection *model, const char *saved_id,
+                           const char *connstr, int kind, size_t ws_idx, size_t tab_idx, char **message,
+                           bool *cancelled) {
+  AppState *app = state->app;
+  *message = NULL;
+  *cancelled = false;
+  size_t idx = app_find_open_connection(app, saved_id, connstr);
+  if (idx == SIZE_MAX) {
+    char *final = NULL, *err = NULL;
+    DbConnection *db = tui_open_connection(state, model, connstr, &final, &err, cancelled);
+    if (!db) {
+      if (!*cancelled)
+        *message = tui_connect_failure_message(err);
+      free(err);
+      return false;
+    }
+    free(err);
+    idx = tui_add_open_connection(state, db, final, saved_id);
+    if (!saved_id) {
+      RecentList *rl = tui_recent(state);
+      if (recent_add(rl, final)) {
+        char *rerr = NULL;
+        if (!recent_save(rl, &rerr))
+          tui_set_error(state, "recent.json: %s", rerr ? rerr : "cannot save");
+        free(rerr);
+      }
+    }
+    str_secure_free(final);
+    if (idx == SIZE_MAX) {
+      *message = str_dup("The connection could not be added");
+      return false;
+    }
+  } else if (!saved_id) {
+    RecentList *rl = tui_recent(state);
+    if (recent_add(rl, connstr))
+      recent_save(rl, NULL);
+  }
+  /* PLACE_HERE turns the form at (ws_idx, tab_idx) into this tab */
+  tui_place_connection(state, idx, (PlaceKind)kind, ws_idx, tab_idx);
+  return true;
+}

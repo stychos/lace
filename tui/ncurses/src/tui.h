@@ -115,6 +115,15 @@ struct TuiState {
   int sidebar_name_scroll_dir;
   int sidebar_name_scroll_delay;
   size_t sidebar_last_highlight;
+  uint64_t sidebar_view_uid; /* the tab the sidebar's highlight last followed */
+  bool terminal_dark;        /* the terminal's background at startup, for color_scheme "system" */
+
+  /* The log: every status message, newest last (TUI_LOG_MAX kept) */
+  struct TuiLogLine {
+    char *line; /* "HH:MM:SS  text" */
+    bool error;
+  } *log;
+  size_t num_log, log_cap;
 
   /* Track state before sidebar focus for restoration */
   bool filters_was_focused;     /* Was filters focused before sidebar? */
@@ -389,6 +398,13 @@ void tui_disconnect(TuiState *state);
 
 /* Main loop */
 void tui_run(TuiState *state);
+/* One input event through every handler, as the main loop does (the
+ * palette runs an action through its key) */
+void tui_dispatch_event(TuiState *state, UiEvent *event);
+/* Run an action that opens a dialog (go to row, workspaces, a new
+ * connection tab, history, configuration, the palette) without its key;
+ * false for any other action */
+bool tui_run_dialog_action(TuiState *state, HotkeyAction a);
 
 /* Refresh display */
 void tui_refresh(TuiState *state);
@@ -427,6 +443,7 @@ bool tui_load_table_data(TuiState *state, const char *table);
 /* subviews.c: the sub-views of a table tab */
 int tui_subview_strip_rows(TuiState *state); /* 1 on a table tab: the strip's row at the top of main_win */
 void tui_draw_subview_strip(TuiState *state);
+const char *tui_subview_label(const Tab *tab, TabSubView sv); /* "Data", "Structure" or "Definition", ... */
 void tui_draw_subview(TuiState *state);      /* the current list (not Data) under the strip */
 void tui_set_subview(TuiState *state, TabSubView sv);
 bool tui_handle_subview_input(TuiState *state, const UiEvent *event); /* the switch keys; a list's keys */
@@ -437,14 +454,20 @@ void tui_referenced_by(TuiState *state);   /* a pick list of the tables referenc
 /* A new tab of an object (as lace_list_objects names it; a table is LACE_OBJ_TABLE) */
 bool tab_create_object(TuiState *state, LaceObjectKind kind, const char *name, const char *table, const char *detail);
 /* The sidebar's entries: tables, then the VIEWS, FUNCTIONS and TRIGGERS
- * sections (headers fold), filtered by the search text */
-typedef enum { SB_TABLE, SB_OBJECT, SB_HEADER } SidebarEntryKind;
-typedef struct { SidebarEntryKind kind; size_t idx; int section; } SidebarEntry; /* section 1 views, 2 routines, 3 triggers */
+ * sections (headers fold), then QUERIES (the connection's query tabs in the
+ * workspace; idx is the tab's index), filtered by the search text */
+typedef enum { SB_TABLE, SB_OBJECT, SB_HEADER, SB_QUERY } SidebarEntryKind;
+typedef struct { SidebarEntryKind kind; size_t idx; int section; } SidebarEntry; /* section 1 views, 2 routines, 3 triggers, 4 queries */
+/* The sidebar's width, as the notcurses TUI's: a third of the terminal, at
+ * most 28 columns (0 when it is hidden or narrower than 10) */
+int tui_sidebar_width(TuiState *state);
 size_t tui_sidebar_entries(TuiState *state, SidebarEntry **out);
 bool tui_sidebar_entry_at(TuiState *state, size_t i, SidebarEntry *out);
 const char *tui_sidebar_entry_name(TuiState *state, const SidebarEntry *e);
 /* Open the entry in the current tab (Enter, a click); keep: a new tab */
 void sidebar_open_entry(TuiState *state, const SidebarEntry *e, bool new_tab);
+/* Show the entry in the connection's preview tab (a single click) */
+void sidebar_preview_entry(TuiState *state, const SidebarEntry *e);
 bool tui_refresh_table(TuiState *state);
 bool tui_load_schema(TuiState *state, const char *table);
 

@@ -16,6 +16,8 @@ typedef struct {
   char *connstr;     /* Connection string */
   bool help;         /* Show help */
   char *query;       /* Direct query mode */
+  int format;        /* -f: a QueryOutFormat (core/query_mode.h) */
+  bool format_set;   /* -f was given (else a trailing \G picks vertical) */
   bool skip_session; /* --no-session flag */
 } AppConfig;
 

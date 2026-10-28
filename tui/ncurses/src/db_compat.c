@@ -397,6 +397,29 @@ bool db_list_objects(DbConnection *conn, LaceObject **objects, size_t *n, char *
   return true;
 }
 
+bool db_current_database(DbConnection *conn, char **name, char **err) {
+  if (name) *name = NULL;
+  if (!conn || !name) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  if (conn->driver_type == LACE_DRIVER_SQLITE)
+    return true; /* one file, one database */
+  CATALOG_READ(conn, err, lace_current_database(conn->client, conn->conn_id, name));
+  return true;
+}
+
+bool db_list_databases(DbConnection *conn, char ***names, size_t *n, char **err) {
+  if (names) *names = NULL;
+  if (n) *n = 0;
+  if (!conn || !names || !n) {
+    if (err) *err = str_dup("Invalid arguments");
+    return false;
+  }
+  CATALOG_READ(conn, err, lace_list_databases(conn->client, conn->conn_id, names, n));
+  return true;
+}
+
 bool db_table_info(DbConnection *conn, const char *table, LaceTableInfo **info, LaceAutoInc **autoinc, char **err) {
   if (info) *info = NULL;
   if (autoinc) *autoinc = NULL;

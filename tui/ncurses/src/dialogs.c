@@ -9,6 +9,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "core/chrome.h"
+#include "views/overlay.h"
 #include "async/async.h"
 #include "config/config.h"
 #include "core/history.h"
@@ -26,63 +28,93 @@
 
 /* Show confirmation dialog - returns true if user confirms */
 bool tui_show_confirm_dialog(TuiState *state, const char *message) {
+  return tui_confirm(state, "Confirm", message, "Yes", false);
+}
+
+/* As the notcurses TUI's confirmation: an overlay with the message
+ * wrapped, Cancel (the default) and the yes button in its last row (red
+ * when destructive); y and n answer */
+bool tui_confirm(TuiState *state, const char *title, const char *message, const char *yes_label, bool destructive) {
   if (!state)
     return false;
-
-  int msg_len = (int)strlen(message);
-  int width = msg_len + 6;
-  if (width < 30)
-    width = 30;
-
-  DialogContext ctx;
-  if (!dialog_ctx_init(&ctx, 7, width, COLOR_BORDER, "Confirm"))
+  int sr, sc;
+  getmaxyx(stdscr, sr, sc);
+  (void)sr;
+  int cols = sc - 8 < 60 ? sc - 8 : 60;
+  if (cols < 20)
+    cols = 20;
+  char **lines;
+  size_t n = chrome_wrap(message, cols - 2, &lines);
+  TuiOverlay o;
+  if (!tui_overlay_open(&o, title && *title ? title : "Confirm", "y yes  n no  Esc cancel", (int)n + 2, cols, -1,
+                        -1)) {
+    chrome_wrap_free(lines, n);
     return false;
-
-  static const char *buttons[] = {"Yes", "No"};
+  }
+  const char *cancel = "[ Cancel ]";
+  char *yes = str_printf("[ %s ]", yes_label && *yes_label ? yes_label : "Yes");
+  int cw = 10, yw = utf8_width(yes, strlen(yes)), total = cw + 2 + yw;
   bool result = false;
-
-  while (ctx.running) {
-    dialog_ctx_draw_frame(&ctx);
-
-    /* Message */
-    mvwprintw(ctx.win, 2, (ctx.width - msg_len) / 2, "%s", message);
-
-    /* Buttons */
-    dialog_ctx_draw_buttons(&ctx, buttons, 2, ctx.selected);
-    wrefresh(ctx.win);
-
-    int ch = dialog_ctx_getch(&ctx);
-    switch (ch) {
-    case KEY_LEFT:
-    case KEY_RIGHT:
-    case '\t':
-    case KEY_BTAB:
-    case 'h':
-    case 'l':
-      dialog_ctx_cycle_button(&ctx, 2); /* Two buttons: either way toggles */
+  int focus = 0; /* 0 Cancel, 1 Yes */
+  for (;;) {
+    tui_overlay_frame(&o);
+    for (size_t i = 0; i < n && (int)i < o.rows - 2; i++)
+      tui_overlay_put(&o, (int)i, 1, o.cols - 2, TC_OVERLAY_FG, 0, lines[i]);
+    int cx = (o.cols - total) / 2 > 0 ? (o.cols - total) / 2 : 0, yx = cx + cw + 2;
+    int by = o.rows - 1;
+    tui_style(o.win, focus == 0 ? TC_CURSOR_FG : TC_OVERLAY_FG, focus == 0 ? TC_CURSOR_BG : TC_OVERLAY_BG, 0);
+    tui_print_fit(o.win, by + 1, cx + 1, cw, cancel);
+    ThemeColor yfg = focus == 1 ? TC_CURSOR_FG : destructive ? TC_ERROR_FG : TC_OVERLAY_FG;
+    tui_style(o.win, yfg, focus == 1 ? TC_CURSOR_BG : TC_OVERLAY_BG, destructive ? A_BOLD : 0);
+    tui_print_fit(o.win, by + 1, yx + 1, yw, yes);
+    tui_overlay_refresh(&o);
+    UiEvent ev;
+    if (!render_translate_key(wgetch(o.win), &ev))
+      continue;
+    if (ev.type == UI_EVENT_RESIZE)
       break;
-
-    case 'y':
-    case 'Y':
-      result = true;
-      ctx.running = false;
+    if (ev.type == UI_EVENT_MOUSE) {
+      if (ev.mouse.button == UI_MOUSE_SCROLL_UP || ev.mouse.button == UI_MOUSE_SCROLL_DOWN)
+        continue;
+      if (!tui_overlay_contains(&o, ev.mouse.y, ev.mouse.x))
+        break; /* a click outside cancels */
+      int ry = ev.mouse.y - o.y - 1, rx = ev.mouse.x - o.x - 1;
+      if (ry == by && rx >= cx && rx < cx + cw)
+        break;
+      if (ry == by && rx >= yx && rx < yx + yw) {
+        result = true;
+        break;
+      }
+      continue;
+    }
+    if (ev.type != UI_EVENT_KEY)
+      continue;
+    if (render_event_is_special(&ev, UI_KEY_ESCAPE))
       break;
-
-    case 'n':
-    case 'N':
-    case 27: /* Escape */
-      ctx.running = false;
-      break;
-
-    case '\n':
-    case KEY_ENTER:
-      result = (ctx.selected == 0);
-      ctx.running = false;
+    if (render_event_is_special(&ev, UI_KEY_ENTER)) {
+      result = focus == 1;
       break;
     }
+    if (render_event_is_special(&ev, UI_KEY_LEFT) || render_event_is_special(&ev, UI_KEY_RIGHT) ||
+        render_event_is_special(&ev, UI_KEY_TAB) || render_event_is_special(&ev, UI_KEY_BTAB)) {
+      focus = !focus;
+      continue;
+    }
+    if (ev.key.is_special || (ev.key.mods & (UI_MOD_CTRL | UI_MOD_ALT)))
+      continue;
+    if (ev.key.key == 'y' || ev.key.key == 'Y') {
+      result = true;
+      break;
+    }
+    if (ev.key.key == 'n' || ev.key.key == 'N')
+      break;
+    if (ev.key.key == 'h' || ev.key.key == 'l')
+      focus = !focus;
   }
-
-  dialog_ctx_destroy(&ctx);
+  tui_overlay_close(&o);
+  chrome_wrap_free(lines, n);
+  free(yes);
+  tui_refresh(state);
   return result;
 }
 
@@ -135,257 +167,166 @@ void tui_show_goto_dialog(TuiState *state) {
   if (total_rows == 0)
     return;
 
-  int term_rows, term_cols;
-  getmaxyx(stdscr, term_rows, term_cols);
-
-  int height = 7;
-  int width = 50;
-  int starty, startx;
-  dialog_center_position(&starty, &startx, height, width, term_rows, term_cols);
-
-  WINDOW *win = newwin(height, width, starty, startx);
-  if (!win)
+  /* As the notcurses TUI: a prompt for the row, digits with thousands
+   * separators and blanks allowed */
+  PromptOptions opts = {.title = "Go to row", .label = "Row number (1-based)"};
+  char *text = tui_prompt(&opts);
+  tui_refresh(state);
+  if (!text)
     return;
-
-  keypad(win, TRUE);
-  curs_set(1);
-
-  char input[32] = {0};
-  size_t input_len = 0;
-  int selected = 0; /* 0 = Go, 1 = Cancel */
-
-  bool running = true;
-  while (running) {
-    werase(win);
-    DRAW_BOX(win, COLOR_BORDER);
-    WITH_ATTR(win, A_BOLD, mvwprintw(win, 0, (width - 14) / 2, " Go to Row "));
-
-    mvwprintw(win, 2, 2, "Enter row number (1-%zu):", total_rows);
-
-    /* Draw input field */
-    mvwprintw(win, 3, 2, "%s", input);
-    mvwhline(win, 3, 2 + (int)input_len, '_', width - 4 - (int)input_len);
-
-    /* Buttons */
-    int btn_y = height - 2;
-    int go_x = width / 2 - 12;
-    int cancel_x = width / 2 + 2;
-
-    if (selected == 0) {
-      wattron(win, A_REVERSE);
-      mvwprintw(win, btn_y, go_x, "[ Go ]");
-      wattroff(win, A_REVERSE);
-      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
-    } else {
-      mvwprintw(win, btn_y, go_x, "[ Go ]");
-      wattron(win, A_REVERSE);
-      mvwprintw(win, btn_y, cancel_x, "[ Cancel ]");
-      wattroff(win, A_REVERSE);
-    }
-
-    wmove(win, 3, 2 + (int)input_len);
-    wrefresh(win);
-
-    int ch = wgetch(win);
-
-    switch (ch) {
-    case '\t':
-    case KEY_BTAB:
-      selected = 1 - selected; /* Two buttons: either way toggles */
-      break;
-
-    case 27: /* Escape */
-      running = false;
-      break;
-
-    case '\n':
-    case KEY_ENTER:
-      if (selected == 1) {
-        /* Cancel button selected */
-        running = false;
+  unsigned long long n = 0;
+  bool any = false, bad = false;
+  for (const char *c = text; *c; c++) {
+    if (*c >= '0' && *c <= '9') {
+      if (n > (unsigned long long)(SIZE_MAX / 20)) {
+        bad = true;
         break;
       }
-      if (input_len > 0) {
-        errno = 0;
-        char *endptr;
-        long long parsed = strtoll(input, &endptr, 10);
-        if (errno != 0 || endptr == input || parsed <= 0 ||
-            (unsigned long long)parsed > total_rows) {
-          flash();
-          break;
-        }
-        size_t row_num = (size_t)parsed;
-        if (row_num > 0 && row_num <= total_rows) {
-          size_t target_row = row_num - 1; /* 0-indexed */
+      n = n * 10 + (unsigned)(*c - '0');
+      any = true;
+    } else if (*c != ',' && *c != ' ' && *c != '_') {
+      bad = true;
+    }
+  }
+  free(text);
+  if (bad || !any || n == 0) {
+    tui_set_error(state, "Not a row number: rows start at 1");
+    return;
+  }
+  if (n > total_rows)
+    n = total_rows;
+  size_t target_row = (size_t)n - 1; /* 0-indexed */
+  tab = TUI_TAB(state);
+  ui = TUI_TAB_UI(state);
+  if (!tab)
+    return;
 
-          /* Close dialog immediately before loading data */
-          curs_set(0);
-          delwin(win);
-          win = NULL;
-          touchwin(stdscr);
-          tui_refresh(state);
-
-          if (is_query) {
-            /* Handle query results navigation */
-            if (tab->query_paginated) {
-              /* Check if target is in currently loaded range */
-              if (target_row >= tab->query_loaded_offset &&
-                  target_row <
-                      tab->query_loaded_offset + tab->query_loaded_count) {
-                /* Already loaded, just move cursor */
-                tab->query_result_row = target_row - tab->query_loaded_offset;
-              } else {
-                /* Need to load new data - use async with progress */
-                size_t load_offset =
-                    target_row > TUI_PAGE_SIZE / 2 ? target_row - TUI_PAGE_SIZE / 2 : 0;
-                bool loaded = query_load_rows_at(state, tab, load_offset);
-                tab = TUI_TAB(state); /* The load dialog ran the event loop */
-                if (!loaded || !tab || target_row < tab->query_loaded_offset ||
-                    target_row >= tab->query_loaded_offset + tab->query_loaded_count) {
-                  /* Cancelled or failed: the cursor stays where it was */
-                  tui_refresh(state);
-                  return;
-                }
-                tab->query_result_row = target_row - tab->query_loaded_offset;
-              }
-            } else {
-              /* Non-paginated - just move cursor */
-              tab->query_result_row = target_row;
-            }
-
-            /* Adjust scroll */
-            int visible = query_visible_result_rows(state);
-
-            if (tab->query_result_row < tab->query_result_scroll_row) {
-              tab->query_result_scroll_row = tab->query_result_row;
-            } else if (tab->query_result_row >=
-                       tab->query_result_scroll_row + (size_t)visible) {
-              tab->query_result_scroll_row =
-                  tab->query_result_row - (size_t)visible + 1;
-            }
-
-            /* Ensure focus is on results */
-            if (ui) {
-              ui->query_focus_results = true;
-              ui->query_unfocused = false;
-            }
-          } else {
-            /* Handle regular table navigation */
-            /* Data rows on screen (header, sort row and filters excluded) */
-            size_t visible = (size_t)tui_get_layout_info(state).visible_rows;
-            /* Check if target is in currently loaded range */
-            if (target_row >= tab->loaded_offset &&
-                target_row < tab->loaded_offset + tab->loaded_count) {
-              /* Already loaded, just move cursor */
-              tab->cursor_row = target_row - tab->loaded_offset;
-
-              /* Adjust scroll */
-              if (tab->cursor_row < tab->scroll_row) {
-                tab->scroll_row = tab->cursor_row;
-              } else if (tab->cursor_row >= tab->scroll_row + visible) {
-                tab->scroll_row = tab->cursor_row - visible + 1;
-              }
-            } else {
-              /* Need to load new data. tui_load_rows_at applies the tab's
-               * filters and sort, like every other page load. */
-              size_t load_offset =
-                  target_row > TUI_PAGE_SIZE / 2 ? target_row - TUI_PAGE_SIZE / 2 : 0;
-              bool loaded = tui_load_rows_at_with_dialog(state, load_offset);
-              Tab *cur_tab = TUI_TAB(state);
-
-              /* An approximate total can promise rows that do not exist:
-               * count exactly, clamp the target and load again */
-              if (loaded && cur_tab && cur_tab->data &&
-                  cur_tab->data->num_rows == 0 &&
-                  cur_tab->row_count_approximate && load_offset > 0) {
-                AsyncOperation count_op;
-                async_init(&count_op);
-                count_op.op_type = ASYNC_OP_COUNT_ROWS;
-                count_op.conn = TUI_CONN(state);
-                count_op.table_name = str_dup(cur_tab->table_name);
-                count_op.use_approximate = false; /* Force exact */
-                loaded = false;
-                if (count_op.table_name && async_start(&count_op)) {
-                  bool count_done = tui_show_processing_dialog(
-                      state, &count_op, "Counting rows (exact)...");
-                  cur_tab = TUI_TAB(state);
-                  if (count_done && cur_tab &&
-                      count_op.state == ASYNC_STATE_COMPLETED &&
-                      count_op.count > 0) {
-                    cur_tab->total_rows = (size_t)count_op.count;
-                    cur_tab->row_count_approximate = false;
-                    if (target_row >= cur_tab->total_rows)
-                      target_row = cur_tab->total_rows - 1;
-                    load_offset = target_row > TUI_PAGE_SIZE / 2
-                                      ? target_row - TUI_PAGE_SIZE / 2
-                                      : 0;
-                    loaded = tui_load_rows_at_with_dialog(state, load_offset);
-                    cur_tab = TUI_TAB(state);
-                  }
-                }
-                async_free(&count_op);
-              }
-
-              /* Move the cursor to the target, clamped to the loaded rows.
-               * If cancelled/failed, keep current view unchanged. */
-              if (loaded && cur_tab && cur_tab->data) {
-                size_t actual_target =
-                    target_row >= cur_tab->loaded_offset
-                        ? target_row - cur_tab->loaded_offset
-                        : 0;
-                if (actual_target >= cur_tab->data->num_rows) {
-                  actual_target = cur_tab->data->num_rows > 0
-                                      ? cur_tab->data->num_rows - 1
-                                      : 0;
-                }
-                cur_tab->cursor_row = actual_target;
-
-                /* Adjust scroll */
-                if (cur_tab->cursor_row < cur_tab->scroll_row) {
-                  cur_tab->scroll_row = cur_tab->cursor_row;
-                } else if (cur_tab->cursor_row >= cur_tab->scroll_row + visible) {
-                  cur_tab->scroll_row = cur_tab->cursor_row - visible + 1;
-                }
-              }
-            }
-          }
-
-          /* Dialog already closed, exit loop */
+  if (is_query) {
+    /* Handle query results navigation */
+    if (tab->query_paginated) {
+      /* Check if target is in currently loaded range */
+      if (target_row >= tab->query_loaded_offset &&
+          target_row <
+              tab->query_loaded_offset + tab->query_loaded_count) {
+        /* Already loaded, just move cursor */
+        tab->query_result_row = target_row - tab->query_loaded_offset;
+      } else {
+        /* Need to load new data - use async with progress */
+        size_t load_offset =
+            target_row > TUI_PAGE_SIZE / 2 ? target_row - TUI_PAGE_SIZE / 2 : 0;
+        bool loaded = query_load_rows_at(state, tab, load_offset);
+        tab = TUI_TAB(state); /* The load dialog ran the event loop */
+        if (!loaded || !tab || target_row < tab->query_loaded_offset ||
+            target_row >= tab->query_loaded_offset + tab->query_loaded_count) {
+          /* Cancelled or failed: the cursor stays where it was */
           tui_refresh(state);
           return;
-        } else {
-          /* Invalid row number - flash or beep */
-          flash();
-          continue;
+        }
+        tab->query_result_row = target_row - tab->query_loaded_offset;
+      }
+    } else {
+      /* Non-paginated - just move cursor */
+      tab->query_result_row = target_row;
+    }
+
+    /* Adjust scroll */
+    int visible = query_visible_result_rows(state);
+
+    if (tab->query_result_row < tab->query_result_scroll_row) {
+      tab->query_result_scroll_row = tab->query_result_row;
+    } else if (tab->query_result_row >=
+               tab->query_result_scroll_row + (size_t)visible) {
+      tab->query_result_scroll_row =
+          tab->query_result_row - (size_t)visible + 1;
+    }
+
+    /* Ensure focus is on results */
+    if (ui) {
+      ui->query_focus_results = true;
+      ui->query_unfocused = false;
+    }
+  } else {
+    /* Handle regular table navigation */
+    /* Data rows on screen (header, sort row and filters excluded) */
+    size_t visible = (size_t)tui_get_layout_info(state).visible_rows;
+    /* Check if target is in currently loaded range */
+    if (target_row >= tab->loaded_offset &&
+        target_row < tab->loaded_offset + tab->loaded_count) {
+      /* Already loaded, just move cursor */
+      tab->cursor_row = target_row - tab->loaded_offset;
+
+      /* Adjust scroll */
+      if (tab->cursor_row < tab->scroll_row) {
+        tab->scroll_row = tab->cursor_row;
+      } else if (tab->cursor_row >= tab->scroll_row + visible) {
+        tab->scroll_row = tab->cursor_row - visible + 1;
+      }
+    } else {
+      /* Need to load new data. tui_load_rows_at applies the tab's
+       * filters and sort, like every other page load. */
+      size_t load_offset =
+          target_row > TUI_PAGE_SIZE / 2 ? target_row - TUI_PAGE_SIZE / 2 : 0;
+      bool loaded = tui_load_rows_at_with_dialog(state, load_offset);
+      Tab *cur_tab = TUI_TAB(state);
+
+      /* An approximate total can promise rows that do not exist:
+       * count exactly, clamp the target and load again */
+      if (loaded && cur_tab && cur_tab->data &&
+          cur_tab->data->num_rows == 0 &&
+          cur_tab->row_count_approximate && load_offset > 0) {
+        AsyncOperation count_op;
+        async_init(&count_op);
+        count_op.op_type = ASYNC_OP_COUNT_ROWS;
+        count_op.conn = TUI_CONN(state);
+        count_op.table_name = str_dup(cur_tab->table_name);
+        count_op.use_approximate = false; /* Force exact */
+        loaded = false;
+        if (count_op.table_name && async_start(&count_op)) {
+          bool count_done = tui_show_processing_dialog(
+              state, &count_op, "Counting rows (exact)...");
+          cur_tab = TUI_TAB(state);
+          if (count_done && cur_tab &&
+              count_op.state == ASYNC_STATE_COMPLETED &&
+              count_op.count > 0) {
+            cur_tab->total_rows = (size_t)count_op.count;
+            cur_tab->row_count_approximate = false;
+            if (target_row >= cur_tab->total_rows)
+              target_row = cur_tab->total_rows - 1;
+            load_offset = target_row > TUI_PAGE_SIZE / 2
+                              ? target_row - TUI_PAGE_SIZE / 2
+                              : 0;
+            loaded = tui_load_rows_at_with_dialog(state, load_offset);
+            cur_tab = TUI_TAB(state);
+          }
+        }
+        async_free(&count_op);
+      }
+
+      /* Move the cursor to the target, clamped to the loaded rows.
+       * If cancelled/failed, keep current view unchanged. */
+      if (loaded && cur_tab && cur_tab->data) {
+        size_t actual_target =
+            target_row >= cur_tab->loaded_offset
+                ? target_row - cur_tab->loaded_offset
+                : 0;
+        if (actual_target >= cur_tab->data->num_rows) {
+          actual_target = cur_tab->data->num_rows > 0
+                              ? cur_tab->data->num_rows - 1
+                              : 0;
+        }
+        cur_tab->cursor_row = actual_target;
+
+        /* Adjust scroll */
+        if (cur_tab->cursor_row < cur_tab->scroll_row) {
+          cur_tab->scroll_row = cur_tab->cursor_row;
+        } else if (cur_tab->cursor_row >= cur_tab->scroll_row + visible) {
+          cur_tab->scroll_row = cur_tab->cursor_row - visible + 1;
         }
       }
-      running = false;
-      break;
-
-    case KEY_BACKSPACE:
-    case 127:
-    case 8:
-      if (input_len > 0) {
-        input[--input_len] = '\0';
-      }
-      break;
-
-    default:
-      if (ch >= '0' && ch <= '9' && input_len < sizeof(input) - 1) {
-        input[input_len++] = (char)ch;
-        input[input_len] = '\0';
-      }
-      break;
     }
   }
 
-  /* Clean up if dialog wasn't already closed */
-  if (win) {
-    curs_set(0);
-    delwin(win);
-    touchwin(stdscr);
-    tui_refresh(state);
-  }
+  tui_refresh(state);
 }
 
 /* The Workspaces window (the workspaces manager) */
@@ -475,21 +416,21 @@ bool tui_show_processing_dialog_ex(TuiState *state, AsyncOperation *op,
 
     if (dialog) {
       /* Draw dialog */
-      werase(dialog);
-      DRAW_BOX(dialog, COLOR_BORDER);
-      WITH_ATTR(dialog, A_BOLD,
-                mvwprintw(dialog, 0, (width - 14) / 2, " Processing "));
+      tui_frame_window(dialog, "Processing", "Esc cancel");
 
       /* Spinner and message */
       char spinner = SPINNER_CHARS[spinner_frame];
-      mvwprintw(dialog, 2, 2, "%c %s", spinner, message);
+      tui_style(dialog, TC_ACCENT, TC_OVERLAY_BG, A_BOLD);
+      mvwprintw(dialog, 2, 2, "%c", spinner);
+      tui_style(dialog, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
+      tui_print_fit(dialog, 2, 4, width - 6, message);
 
       /* Cancel button - centered, 1 line gap before it */
       const char *btn_text = "[ Cancel ]";
       int btn_len = (int)strlen(btn_text);
-      wattron(dialog, A_REVERSE);
+      tui_style(dialog, TC_CURSOR_FG, TC_CURSOR_BG, 0);
       mvwprintw(dialog, height - 2, (width - btn_len) / 2, "%s", btn_text);
-      wattroff(dialog, A_REVERSE);
+      tui_style(dialog, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
 
       wrefresh(dialog);
 

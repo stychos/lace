@@ -122,7 +122,7 @@ typedef struct {
   int win_rows;       /* Total window height */
   int win_cols;       /* Total window width */
   int filters_height; /* Rows above the grid: the sub-view strip and the filters panel */
-  int header_rows;    /* Number of header rows (typically 3) */
+  int header_rows;    /* Rows above the data: the column names */
   int visible_rows;   /* Rows available for data display */
   int data_start_y;   /* Y offset where data rows begin */
 } LayoutInfo;
@@ -130,7 +130,7 @@ typedef struct {
 /* Calculate layout information for main table view.
  * Returns populated LayoutInfo, or zeros if state/main_win is invalid. */
 static inline LayoutInfo tui_get_layout_info(TuiState *state) {
-  LayoutInfo layout = {0, 0, 0, 3, 1, 3}; /* Default: 3 header rows */
+  LayoutInfo layout = {0, 0, 0, 1, 1, 1}; /* one header row */
 
   if (!state || !state->main_win)
     return layout;
@@ -141,12 +141,8 @@ static inline LayoutInfo tui_get_layout_info(TuiState *state) {
   layout.filters_height = tui_subview_strip_rows(state) +
       (tui_filters_visible(state) ? tui_get_filters_panel_height(state) : 0);
 
-  /* Header rows: border + column names + separator = 3
-   * Add 1 more row when sorting is active (sort indicator row) */
-  Tab *tab = TUI_TAB(state);
-  if (tab && tab->num_sort_entries > 0) {
-    layout.header_rows = 4;
-  }
+  /* One header row: the column names (the sorts are marked in it) */
+  layout.header_rows = 1;
 
   /* Visible rows = window height - header rows - filters panel */
   layout.visible_rows =
@@ -416,7 +412,9 @@ void workspace_init(Workspace *ws);
 void tab_restore(TuiState *state);
 
 /* Columns a tab takes in the tab bar (label, padding, separator) */
-int tui_tab_width(const Tab *tab);
+/* The header, the tabs strip and the status line take a click on their
+ * rows (chrome.c) */
+bool tui_chrome_mouse(TuiState *state, const UiEvent *ev);
 void tui_bind_connection(TuiState *state);
 void sidebar_open_table(TuiState *state, size_t actual_idx);
 
@@ -431,6 +429,9 @@ bool tab_create_query(TuiState *state);
 
 /* Close current tab */
 void tab_close(TuiState *state);
+/* Remove tab tab_idx of workspace ws_idx outright (no question, the
+ * connection stays): its UITabState goes and the later ones shift */
+void tui_close_tab_at(TuiState *state, size_t ws_idx, size_t tab_idx);
 
 void workspace_close(TuiState *state);
 
@@ -471,8 +472,16 @@ void tui_ensure_tab(TuiState *state);
 void tui_new_workspace_form(TuiState *state);
 /* A form right after the current tab (new_connection) */
 void tui_new_connection_tab(TuiState *state);
+/* Where the keys go now, as a hotkey context (HOTKEY_CTX_GRID, _LIST,
+ * _RESULTS, _EDITOR, _UNFOCUSED, _FILTERS, _SIDEBAR, _CONNECT): what the
+ * palette lists and the status line's hints follow */
+unsigned tui_focus_context(TuiState *state);
 /* Whether the table sidebar's window exists now (not while a form is current) */
 bool tui_sidebar_shown(TuiState *state);
+/* The sidebar's first list row (under the search field and TABLES) and
+ * whether a note ("none", "no match") takes the list's first line */
+int tui_sidebar_list_top(TuiState *state);
+bool tui_sidebar_has_note(TuiState *state);
 
 /* ============================================================================
  * Sidebar functions (sidebar.c)
@@ -698,6 +707,13 @@ bool tui_handle_mouse_event(TuiState *state, const UiEvent *event);
 
 /* Show confirmation dialog - returns true if user confirms */
 bool tui_show_confirm_dialog(TuiState *state, const char *message);
+/* The same with a title, the yes button's label, and that button in red
+ * for a destructive change */
+bool tui_confirm(TuiState *state, const char *title, const char *message, const char *yes_label, bool destructive);
+
+/* Switch the current connection to another database of its server
+ * (database_switch.c) */
+void tui_switch_database(TuiState *state);
 
 /* Show go-to row dialog */
 void tui_show_goto_dialog(TuiState *state);

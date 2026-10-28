@@ -1,0 +1,13 @@
+# Closing a connection's last tab leaves a form in its place
+# (keep_connection_tab, the default) and lets the connection go
+saved-add Local sqlite://$LACE_SMOKE_DB
+form-pick Local
+form-action open
+table big
+expect-tabs 1
+close-tab
+expect-entry form
+expect-entries 1
+expect-open-connections 0
+expect-windows 1
+quit

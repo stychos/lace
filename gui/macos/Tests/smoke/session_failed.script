@@ -1,0 +1,8 @@
+# session: {"version": 2, "workspaces": [{"name": "W", "connections": [{"connstr": "sqlite:///nonexistent/lace-smoke.sqlite", "tabs": []}]}], "current": 0}
+# A restored window whose connections all fail keeps one form
+restore-session
+expect-windows 1
+expect-entries 1
+expect-entry form
+expect-open-connections 0
+quit

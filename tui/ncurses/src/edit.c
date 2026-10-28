@@ -149,6 +149,8 @@ static void undo_key(const RowKey *pk, const char *column, const LaceValue *valu
 
 bool tui_edit_write_cell(TuiState *state, const EditTarget *t, size_t row,
                          size_t col, const char *text, const char *done_msg) {
+  if (t && t->tab)
+    t->tab->preview = false; /* an edited view is kept */
   DbValue *cell = target_cell(t, row, col);
   if (!cell)
     return false;
@@ -251,6 +253,8 @@ void tui_edit_paste_cell(TuiState *state, const EditTarget *t, size_t row,
 
 bool tui_edit_delete_row(const EditTarget *t, size_t row, char **err) {
   *err = NULL;
+  if (t && t->tab)
+    t->tab->preview = false;
   RowKey pk = {0};
   const char *pk_why = NULL;
   if (target_row_key(t, row, &pk, &pk_why) != ROW_KEY_OK) {

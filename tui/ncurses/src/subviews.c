@@ -11,6 +11,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "core/chrome.h"
+#include "views/theme.h"
 #include "core/catalog_rows.h"
 #include "ddl_edit.h"
 #include "tui_internal.h"
@@ -31,7 +33,7 @@ int tui_subview_strip_rows(TuiState *state) {
   return tab && tab->type == TAB_TYPE_TABLE && state->main_win ? 1 : 0;
 }
 
-static const char *subview_label(const Tab *tab, TabSubView sv) {
+const char *tui_subview_label(const Tab *tab, TabSubView sv) {
   switch (sv) {
   case SUBVIEW_DATA: return "Data";
   case SUBVIEW_STRUCTURE: return tab->object == LACE_OBJ_TABLE ? "Structure" : "Definition";
@@ -53,7 +55,7 @@ void tui_set_subview(TuiState *state, TabSubView sv) {
   if (!tab || tab->type != TAB_TYPE_TABLE)
     return;
   if (!tab_has_subview(tab, sv)) {
-    tui_set_status(state, "A %s has no %s", catalog_object_word(tab->object), subview_label(tab, sv));
+    tui_set_status(state, "A %s has no %s", catalog_object_word(tab->object), tui_subview_label(tab, sv));
     return;
   }
   if (tab->subview == SUBVIEW_DATA && sv != SUBVIEW_DATA) { /* the grid goes behind the list */
@@ -78,45 +80,78 @@ static const char *key_hint(TuiState *state, HotkeyAction a) {
   return b->keys[0];
 }
 
+/* The strip as the notcurses TUI draws it: a cell per sub-view the object
+ * has, led by its key (without the keys when they do not fit), the current
+ * one in the content's colours, scroll marks when they still do not fit */
 void tui_draw_subview_strip(TuiState *state) {
   g_strip_n = 0;
   if (!tui_subview_strip_rows(state))
     return;
   Tab *tab = TUI_TAB(state);
   WINDOW *win = state->main_win;
-  int rows, cols;
-  getmaxyx(win, rows, cols);
-  (void)rows;
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  mvwhline(win, 0, 0, ' ', cols);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
-  int x = 0;
-  for (int i = 0; i < SUBVIEW_COUNT && x < cols; i++) {
-    TabSubView sv = (TabSubView)i;
-    if (!tab_has_subview(tab, sv))
-      continue;
-    const char *key = key_hint(state, subview_action(sv));
-    char *label = key ? str_printf(" %s %s ", key, subview_label(tab, sv)) : str_printf(" %s ", subview_label(tab, sv));
-    int w = utf8_width(label, strlen(label));
-    if (x + w > cols)
-      w = cols - x;
-    bool cur = sv == tab->subview;
-    /* the current cell in reverse video, not the cursor's black on cyan */
-    attr_t attr = cur ? A_REVERSE | A_BOLD : COLOR_PAIR(COLOR_BORDER);
-    wattron(win, attr);
-    tui_print_fit(win, 0, x, w, label);
-    wattroff(win, attr);
-    if (g_strip_n < SUBVIEW_COUNT)
-      g_strip[g_strip_n++] = (StripCell){x, x + w, sv};
-    x += w;
-    if (x < cols) {
-      wattron(win, COLOR_PAIR(COLOR_BORDER));
-      mvwaddch(win, 0, x, ACS_VLINE);
-      wattroff(win, COLOR_PAIR(COLOR_BORDER));
-      x++;
+  int cols = getmaxx(win);
+  tui_style(win, TC_DIM, TC_STRIPE_BG, 0);
+  tui_print_fit(win, 0, 0, cols, "");
+  if (cols < 4)
+    return;
+  TabSubView svs[SUBVIEW_COUNT];
+  size_t n = 0, current = 0;
+  for (int i = 0; i < SUBVIEW_COUNT; i++)
+    if (tab_has_subview(tab, (TabSubView)i)) {
+      if ((TabSubView)i == tab->subview)
+        current = n;
+      svs[n++] = (TabSubView)i;
     }
-    free(label);
+  if (!n)
+    return;
+  const char *keys[SUBVIEW_COUNT] = {0};
+  char *labels[SUBVIEW_COUNT] = {0};
+  int w[SUBVIEW_COUNT], x0[SUBVIEW_COUNT], x1[SUBVIEW_COUNT];
+  size_t first = 0;
+  for (int pass = 0; pass < 2; pass++) { /* with the keys; without them when they do not fit */
+    for (size_t i = 0; i < n; i++) {
+      free(labels[i]);
+      keys[i] = pass == 0 ? key_hint(state, subview_action(svs[i])) : NULL;
+      labels[i] = keys[i] ? str_printf("%s %s", keys[i], tui_subview_label(tab, svs[i]))
+                          : str_dup(tui_subview_label(tab, svs[i]));
+      w[i] = utf8_width(labels[i], strlen(labels[i]));
+    }
+    first = chrome_strip_layout(w, n, current, cols, x0, x1);
+    if (first == 0 && x1[n - 1] > 0)
+      break;
   }
+  if (first)
+    tui_print_fit(win, 0, 0, 1, "\xe2\x80\xb9");
+  size_t last = first;
+  for (size_t i = first; i < n; i++) {
+    if (x1[i] == x0[i])
+      break;
+    last = i;
+    bool cur = i == current;
+    if (cur)
+      tui_style(win, TC_FG, TC_BG, A_BOLD);
+    else
+      tui_style(win, TC_DIM, TC_STRIPE_BG, 0);
+    tui_print_fit(win, 0, x0[i], x1[i] - x0[i], "");
+    tui_print_fit(win, 0, x0[i] + 1, w[i], labels[i]);
+    if (keys[i]) { /* the key stands out from the label */
+      tui_style(win, TC_KEY_FG, cur ? TC_BG : TC_STRIPE_BG, cur ? A_BOLD : 0);
+      tui_print_fit(win, 0, x0[i] + 1, utf8_width(keys[i], strlen(keys[i])), keys[i]);
+    }
+    if (g_strip_n < SUBVIEW_COUNT)
+      g_strip[g_strip_n++] = (StripCell){x0[i], x1[i], svs[i]};
+    if (i + 1 < n && x1[i + 1] > x1[i]) {
+      tui_style(win, TC_DIM, TC_STRIPE_BG, 0);
+      tui_print_fit(win, 0, x1[i], 1, "\xe2\x94\x82");
+    }
+  }
+  if (last + 1 < n) {
+    tui_style(win, TC_DIM, TC_STRIPE_BG, 0);
+    tui_print_fit(win, 0, cols - 1, 1, "\xe2\x80\xba");
+  }
+  tui_style(win, TC_FG, TC_BG, 0);
+  for (size_t i = 0; i < n; i++)
+    free(labels[i]);
 }
 
 /* ==========================================================================
@@ -301,16 +336,20 @@ void tui_draw_subview(TuiState *state) {
   int rows, cols;
   getmaxyx(win, rows, cols);
   int top = tui_subview_strip_rows(state);
+  tui_style(win, TC_FG, TC_BG, 0);
   for (int y = top; y < rows; y++)
-    mvwhline(win, y, 0, ' ', cols);
+    tui_print_fit(win, y, 0, cols, "");
   CatalogRows t;
   char *msg = NULL;
   if (!build_rows(state, tab, &t, &msg)) {
     const char *m = msg ? msg : "Nothing to show";
+    bool error = msg && strncmp(msg, "Loading", 7) != 0;
     int w = utf8_width(m, strlen(m));
     if (w > cols)
       w = cols;
-    tui_print_fit(win, top + (rows - top) / 2, (cols - w) / 2, w, m);
+    tui_style(win, error ? TC_ERROR_FG : TC_DIM, TC_BG, 0);
+    tui_print_fit(win, top + 1 + (rows - top - 1) / 2, (cols - w) / 2, w, m);
+    tui_style(win, TC_FG, TC_BG, 0);
     free(msg);
     catalog_rows_free(&t);
     return;
@@ -328,15 +367,15 @@ void tui_draw_subview(TuiState *state) {
     }
   }
   int y = top;
-  if (t.head) {
-    wattron(win, A_BOLD | A_UNDERLINE);
+  if (t.head) { /* the header row, as the grid's */
+    tui_style(win, TC_HEADER_FG, TC_HEADER_BG, A_BOLD);
+    tui_print_fit(win, y, 0, cols, "");
     int x = 1;
     for (size_t i = 0; i < t.ncols && x < cols; i++) {
       int cw = w[i] < cols - x ? w[i] : cols - x;
       tui_print_fit(win, y, x, cw, t.head[i]);
       x += w[i] + 2;
     }
-    wattroff(win, A_BOLD | A_UNDERLINE);
     y++;
   }
   size_t *cursor = &tab->sv_cursor[tab->subview], *scroll = &tab->sv_scroll[tab->subview];
@@ -350,16 +389,19 @@ void tui_draw_subview(TuiState *state) {
     if (t.nrows <= (size_t)vis)
       *scroll = 0;
   }
-  bool focused = !tui_sidebar_focused(state);
   for (int i = 0; i < vis; i++, y++) {
     size_t r = *scroll + (size_t)i;
     if (r >= t.nrows)
       break;
-    bool cur = r == *cursor && !t.heading[r] && focused;
-    attr_t attr = t.heading[r] ? A_BOLD : cur ? A_REVERSE : A_NORMAL;
-    wattron(win, attr);
-    if (cur)
-      mvwhline(win, y, 0, ' ', cols);
+    bool cur = r == *cursor && !t.heading[r];
+    ThemeColor bg = cur ? TC_CURSOR_BG : (i % 2 ? TC_STRIPE_BG : TC_ROW_BG);
+    if (t.heading[r] && !t.span[r])
+      tui_style(win, TC_HEADER_FG, TC_HEADER_BG, A_BOLD);
+    else if (t.heading[r])
+      tui_style(win, TC_ACCENT, TC_BG, A_BOLD);
+    else
+      tui_style(win, cur ? TC_CURSOR_FG : TC_FG, bg, 0);
+    tui_print_fit(win, y, 0, cols, "");
     if (t.span[r]) {
       tui_print_fit(win, y, 1, cols - 1, t.cells[r][0]);
     } else {
@@ -370,8 +412,8 @@ void tui_draw_subview(TuiState *state) {
         x += w[c] + 2;
       }
     }
-    wattroff(win, attr);
   }
+  tui_style(win, TC_FG, TC_BG, 0);
   free(w);
   catalog_rows_free(&t);
 }
@@ -714,7 +756,7 @@ static void open_filtered(TuiState *state, const char *table, char *const *colum
 }
 
 static int pick(TuiState *state, const char *title, char **items, size_t n) {
-  int x = state->sidebar_visible ? SIDEBAR_WIDTH + 2 : 2;
+  int x = state->sidebar_visible ? tui_sidebar_width(state) + 2 : 2;
   return tui_pick_from_list(state->app->config, title, (const char *const *)items, n, 0, 3, x, 30,
                             state->term_cols - 4, state->term_rows - 6);
 }

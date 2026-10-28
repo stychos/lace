@@ -19,14 +19,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.mainMenu = makeMainMenu()
     let first = LaceApp.shared.newWorkspace()
     if ScriptDriver.isRequested {
-      ScriptDriver.startIfRequested(in: first.workspace)
+      ScriptDriver.startIfRequested(in: first)
     } else if LaceApp.shared.prefs.restoreSession, !Session.disabledByArguments {
       Task { await Session.restore(into: first) }
     }
   }
 
+  /// general.on_last_workspace_close: "quit" ends the app with its last
+  /// window ("new" opens another one, see LaceApp.lastWorkspaceClosed)
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-    false
+    let app = LaceApp.shared
+    return app.prefs.lastWorkspaceClose == .quit && !app.isTerminating && app.workspaces.isEmpty
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -57,6 +60,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     for workspace in LaceApp.shared.workspaces {
       workspace.workspace.closeAllConnections()
+    }
+    // A scripted run the app ends by itself (the last window closed) says
+    // whether its expectations held
+    if ScriptDriver.isRequested && ScriptDriver.failureCount > 0 {
+      FileHandle.standardError.write(Data("script: \(ScriptDriver.failureCount) failed (the app quit)\n".utf8))
+      exit(1)
     }
   }
 
@@ -91,7 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let file = NSMenu(title: "File")
     file.addItem(withTitle: "New Workspace", action: #selector(newWorkspace(_:)), keyEquivalent: "n")
-    file.addItem(withTitle: "Connect…", action: #selector(WorkspaceViewController.connect(_:)), keyEquivalent: "t")
+    file.addItem(
+      withTitle: "New Connection Tab", action: #selector(WorkspaceViewController.newConnectionTab(_:)),
+      keyEquivalent: "t")
     file.addItem(
       withTitle: "Open SQLite File…", action: #selector(WorkspaceViewController.openSQLiteFile(_:)),
       keyEquivalent: "o")
@@ -104,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     file.addItem(.separator())
     file.addItem(withTitle: "Close Tab", action: #selector(WorkspaceViewController.closeTab(_:)), keyEquivalent: "w")
     file.addItem(
-      withTitle: "Close Connection", action: #selector(WorkspaceViewController.closeConnection(_:)),
+      withTitle: "Close Connection Tab", action: #selector(WorkspaceViewController.closeConnection(_:)),
       keyEquivalent: "W")
     let closeWindow = file.addItem(
       withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")

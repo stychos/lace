@@ -5,6 +5,7 @@
  * R rename (PostgreSQL renames the constraint, the others drop and add);
  * every change goes through app_ddl_confirm. SQLite can do none of it and
  * says why. */
+#include "core/chrome.h"
 #include "ui/subviews.h"
 #include "app_ddl.h"
 #include "model/workspace.h"
@@ -319,4 +320,4 @@ static void fks_activate(NcApp *app, View *v, int tag) {
   free(name);
 }
 
-const SvOps sv_fks_ops = {fks_build, fks_activate, "Enter edit/open", fks_action, "+ add  x drop  R rename"};
+const SvOps sv_fks_ops = {fks_build, fks_activate, CHROME_SV_FKS_ENTER, fks_action, CHROME_SV_FKS_KEYS};

@@ -1,3 +1,4 @@
+#include "ui/subviews.h"
 #include "ui/filter_panel.h"
 #include "model/workspace.h"
 #include "ui/input.h"
@@ -32,7 +33,8 @@ int filter_panel_rows(const NcApp *app, const View *v) {
 Rect filter_panel_rect(const NcApp *app, const View *v) {
   Rect c = content_rect(app);
   int sw = sidebar_width(app);
-  return (Rect){c.y, sw, filter_panel_rows(app, v), c.cols - sw};
+  /* under the sub-view strip (the grid starts under both) */
+  return (Rect){c.y + subviews_rows(app), sw, filter_panel_rows(app, v), c.cols - sw};
 }
 
 bool filter_panel_cursor(int *y, int *x) {
@@ -42,28 +44,7 @@ bool filter_panel_cursor(int *y, int *x) {
   return true;
 }
 
-void filter_panel_layout(int cols, bool two_values, FpLayout *L) {
-  bool narrow = cols < 60;
-  L->col_x = 1;
-  L->col_w = narrow ? 10 : 14;
-  L->op_x = L->col_x + L->col_w + 2;
-  L->op_w = narrow ? 9 : 12;
-  L->val_x = L->op_x + L->op_w + 2;
-  L->del_x = cols - 2;
-  int vw = L->del_x - L->val_x - 1;
-  if (vw < 4) vw = 4;
-  if (two_values) {
-    int half = (vw - 5) / 2;
-    if (half < 3) half = 3;
-    L->val_w = half;
-    L->val2_x = L->val_x + half + 5; /* " and " */
-    L->val2_w = vw - half - 5 > 3 ? vw - half - 5 : 3;
-  } else {
-    L->val_w = vw;
-    L->val2_x = L->val_x + vw;
-    L->val2_w = 0;
-  }
-}
+void filter_panel_layout(int cols, bool two_values, FpLayout *L) { chrome_filter_layout(cols, two_values, L); }
 
 /* ---- the rows ---- */
 
@@ -550,6 +531,10 @@ bool filter_panel_handle_key(NcApp *app, View *v, const UiEvent *ev) {
     return true;
   }
   if (up || down) {
+    if (down && v->fp.row + 1 >= v->num_filters) { /* below the last row: the grid (as the ncurses TUI) */
+      leave_to_grid(v);
+      return true;
+    }
     if (down && v->fp.row + 1 < v->num_filters) v->fp.row++;
     else if (up && v->fp.row > 0) v->fp.row--;
     if (!field_ok(&v->filters[v->fp.row], v->fp.field)) v->fp.field = FP_COLUMN;
@@ -558,7 +543,12 @@ bool filter_panel_handle_key(NcApp *app, View *v, const UiEvent *ev) {
   if (plain_special(ev, UI_KEY_LEFT) || plain_special(ev, UI_KEY_RIGHT)) {
     size_t row = v->fp.row;
     int f = v->fp.field;
-    if (!move_field(v, ev->key.key == UI_KEY_LEFT ? -1 : 1) || v->fp.row != row) { v->fp.row = row; v->fp.field = f; }
+    if (!move_field(v, ev->key.key == UI_KEY_LEFT ? -1 : 1) || v->fp.row != row) {
+      v->fp.row = row;
+      v->fp.field = f;
+      /* Left at a row's first field: the sidebar, which Right leaves for here again */
+      if (ev->key.key == UI_KEY_LEFT && sidebar_enter(app, app_view_tab(app, v), true)) v->fp.focused = false;
+    }
     return true;
   }
   if (nc_key_special(ev, UI_KEY_LEFT) || nc_key_special(ev, UI_KEY_RIGHT)) { /* Alt: the operator, from any field */

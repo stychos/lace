@@ -31,6 +31,7 @@ static Tab *vm_tab(const TableViewModel *vm) {
 #include "../core/constants.h"
 #include "../core/catalog_rows.h"
 #include "../core/utf8.h"
+#include "../../liblace/include/sql_builder.h"
 #include "../../liblace/include/util/mem.h"
 #include "../../liblace/include/util/str.h"
 #include <stdlib.h>
@@ -239,6 +240,34 @@ size_t table_vm_loaded_count(const TableViewModel *vm) {
  * ============================================================================
  */
 
+int grid_measure_column(const ResultSet *data, size_t col, const TableSchema *keys, size_t from, size_t to) {
+  if (!data || col >= data->num_columns)
+    return DEFAULT_COL_WIDTH;
+  const char *name = data->columns[col].name ? data->columns[col].name : "";
+  int w = utf8_width(name, strlen(name));
+  size_t ki = keys ? db_schema_column_index(keys, name) : SIZE_MAX;
+  const ColumnDef *kc = ki != SIZE_MAX ? &keys->columns[ki] : NULL;
+  if (kc && kc->primary_key)
+    w += 2; /* " ⚷" */
+  if (catalog_fk_first_column(keys, name))
+    w += 2; /* " ⇒" */
+  for (size_t r = from; data->rows && r < to && r < data->num_rows; r++) {
+    const Row *row = &data->rows[r];
+    if (!row->cells || col >= row->num_cells)
+      continue;
+    char *t = lace_value_display_text(&row->cells[col], 200);
+    if (t) {
+      int tw = utf8_width(t, strlen(t));
+      if (tw > w)
+        w = tw;
+      free(t);
+    }
+  }
+  if (w < 1)
+    w = 1;
+  return w > DEFAULT_COL_WIDTH ? DEFAULT_COL_WIDTH : w;
+}
+
 void table_vm_recalc_column_widths(TableViewModel *vm) {
   if (!vm || !VM_T(vm)->data)
     return;
@@ -253,44 +282,11 @@ void table_vm_recalc_column_widths(TableViewModel *vm) {
     vm->num_col_widths = num_cols;
   }
 
-  /* Calculate width for each column */
-  for (size_t col = 0; col < num_cols; col++) {
-    int width = MIN_COL_WIDTH;
-
-    /* Consider header width */
-    if (VM_T(vm)->schema && col < VM_T(vm)->schema->num_columns &&
-        VM_T(vm)->schema->columns[col].name) {
-      int header_len = utf8_width(VM_T(vm)->schema->columns[col].name,
-                                  strlen(VM_T(vm)->schema->columns[col].name));
-      /* room for the header's ⇒ on a foreign key's first column */
-      if (catalog_fk_first_column(VM_T(vm)->schema, VM_T(vm)->schema->columns[col].name))
-        header_len += 2;
-      if (header_len > width)
-        width = header_len;
-    }
-
-    /* Consider data width (sample first TUI_PAGE_SIZE rows) - handle all types */
-    size_t sample_count =
-        VM_T(vm)->data->num_rows < TUI_PAGE_SIZE ? VM_T(vm)->data->num_rows : TUI_PAGE_SIZE;
-    for (size_t row = 0; row < sample_count; row++) {
-      const DbValue *val = table_vm_cell(vm, row, col);
-      if (val) {
-        char *str = db_value_to_string(val);
-        if (str) {
-          int cell_len = utf8_width(str, strlen(str));
-          if (cell_len > width)
-            width = cell_len;
-          free(str);
-        }
-      }
-    }
-
-    /* Clamp to max width: content-based sizing up to 15 chars */
-    if (width > DEFAULT_COL_WIDTH)
-      width = DEFAULT_COL_WIDTH;
-
-    vm->col_widths[col] = width;
-  }
+  /* Each column as the grid measures it: name and marks, the values of
+   * the first TUI_PAGE_SIZE rows */
+  for (size_t col = 0; col < num_cols; col++)
+    vm->col_widths[col] = grid_measure_column(VM_T(vm)->data, col, VM_T(vm)->schema, 0, TUI_PAGE_SIZE);
+  tab_apply_user_widths(VM_T(vm), vm->col_widths, num_cols);
 
   vm_mark_dirty(&vm->base, TABLE_VM_CHANGE_COLUMN_WIDTHS);
 }
@@ -323,6 +319,7 @@ void table_vm_update_column_widths(TableViewModel *vm) {
       }
     }
     free(old);
+    tab_apply_user_widths(tab, vm->col_widths, vm->num_col_widths); /* a narrowed column stays narrow */
   }
   vm->widths_data = data;
   vm->widths_rows = data->num_rows;

@@ -47,6 +47,20 @@ enum Alerts {
   /// Also told about every error shown (the script driver logs them)
   static var logger: ((String, String) -> Void)?
 
+  /// An alert on screen and the window it is a sheet of (the script driver
+  /// looks for one and answers it)
+  @MainActor
+  struct Shown {
+    let alert: NSAlert
+    weak var window: NSWindow?
+    /// The button that declines (Cancel, Keep, Don't Store)
+    let cancel: Int
+    var text: String { "\(alert.messageText) \(alert.informativeText)" }
+  }
+
+  /// The alerts showing now, oldest first
+  private(set) static var shown: [Shown] = []
+
   static func error(_ title: String, _ message: String, window: NSWindow?) {
     logger?(title, message)
     let alert = NSAlert()
@@ -54,25 +68,38 @@ enum Alerts {
     alert.informativeText = message
     alert.alertStyle = .warning
     if let window {
-      alert.beginSheetModal(for: window)
+      shown.append(Shown(alert: alert, window: window, cancel: 0))
+      alert.beginSheetModal(for: window) { _ in forget(alert) }
     } else {
       alert.runModal()
     }
   }
 
-  /// A destructive confirmation; Cancel is the default (Return) and Esc
-  static func confirm(_ title: String, _ message: String, action: String, window: NSWindow?) async
-    -> Bool
-  {
+  /// A destructive confirmation; the declining button (Cancel) is the
+  /// default (Return) and Esc
+  static func confirm(
+    _ title: String, _ message: String, action: String, cancel: String = "Cancel", window: NSWindow?
+  ) async -> Bool {
     let alert = NSAlert()
     alert.messageText = title
     alert.informativeText = message
     alert.alertStyle = .warning
-    alert.addButton(withTitle: "Cancel")
+    let no = alert.addButton(withTitle: cancel)
+    no.keyEquivalent = "\r"
     let go = alert.addButton(withTitle: action)
     go.hasDestructiveAction = true
     go.keyEquivalent = ""
-    return await run(alert, window) == .alertSecondButtonReturn
+    return await run(alert, window, cancel: 0) == .alertSecondButtonReturn
+  }
+
+  /// A question with two answers: true for yes (the default button)
+  static func ask(_ title: String, _ message: String, yes: String, no: String, window: NSWindow?) async -> Bool {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = message
+    alert.addButton(withTitle: yes)
+    alert.addButton(withTitle: no)
+    return await run(alert, window, cancel: 1) == .alertFirstButtonReturn
   }
 
   /// One line of text; nil when cancelled
@@ -91,14 +118,32 @@ enum Alerts {
     alert.addButton(withTitle: action)
     alert.addButton(withTitle: "Cancel")
     alert.window.initialFirstResponder = field
-    let response = await run(alert, window)
+    let response = await run(alert, window, cancel: 1)
     return response == .alertFirstButtonReturn ? field.stringValue : nil
   }
 
-  private static func run(_ alert: NSAlert, _ window: NSWindow?) async -> NSApplication.ModalResponse {
+  /// Press one of an alert's buttons, as a click does: the declining one,
+  /// or the other (the action)
+  static func answer(_ shown: Shown, go: Bool) {
+    let buttons = shown.alert.buttons
+    guard !buttons.isEmpty else { return }
+    let cancel = buttons[min(shown.cancel, buttons.count - 1)]
+    let target = go ? (buttons.first { $0 !== cancel } ?? cancel) : cancel
+    target.performClick(nil)
+  }
+
+  private static func forget(_ alert: NSAlert) {
+    shown.removeAll { $0.alert === alert }
+  }
+
+  private static func run(_ alert: NSAlert, _ window: NSWindow?, cancel: Int) async -> NSApplication.ModalResponse {
     guard let window else { return alert.runModal() }
+    shown.append(Shown(alert: alert, window: window, cancel: cancel))
     return await withCheckedContinuation { cont in
-      alert.beginSheetModal(for: window) { cont.resume(returning: $0) }
+      alert.beginSheetModal(for: window) { response in
+        forget(alert)
+        cont.resume(returning: response)
+      }
     }
   }
 }

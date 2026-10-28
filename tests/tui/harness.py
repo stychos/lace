@@ -43,7 +43,9 @@ class Home:
     """A private HOME with a config.json (stdio daemon by default)"""
 
     def __init__(self, general=None):
-        self.path = tempfile.mkdtemp(prefix="lace-tui-")
+        # Under /tmp (as on Linux): macOS's $TMPDIR is a long path, which the
+        # screens clip, and paths on them must stay recognisable
+        self.path = tempfile.mkdtemp(prefix="lace-tui-", dir="/tmp" if os.path.isdir("/tmp") else None)
         self.cfg_dir = config_dir(self.path)
         os.makedirs(self.cfg_dir, exist_ok=True)
         settings = {"daemon_spawn_mode": 1, "restore_session": True,
@@ -190,11 +192,11 @@ class Tui:
     def open_table(self, name):
         """Open a table from the sidebar through its filter (works at
         startup, where the sidebar has focus)"""
-        self.wait("Tables")
+        self.wait("TABLES")
         self.keys("/")
         self.type(name)
         self.keys("Enter", "Enter")
-        return self.wait_status(re.compile(r"Row \d+/\d+"))
+        return self.wait_header(self.POSITION)
 
     # -- input --------------------------------------------------------------
 
@@ -208,16 +210,17 @@ class Tui:
         self.tmux("send-keys", "-t", "t", "-l", text)
         time.sleep(0.05)
 
-    def click(self, x, y, double=False, wheel=None):
+    def click(self, x, y, double=False, wheel=None, button=0):
         """Mouse at screen column x, row y (0-based), as an xterm X10 report:
-        a left click (two for double), or wheel="up"/"down" """
+        a click (button 0 left, 1 middle; two for double), or
+        wheel="up"/"down" """
         def report(b):
             return "\x1b[M" + chr(32 + b) + chr(33 + x) + chr(33 + y)
         if wheel:
             self.type(report(64 if wheel == "up" else 65))
             return
         for _ in range(2 if double else 1):
-            self.type(report(0))
+            self.type(report(button))
             self.type(report(3))
         time.sleep(0.1)
 
@@ -246,33 +249,90 @@ class Tui:
         lines = [l for l in self.screen()]
         return lines[self.rows - 1] if len(lines) >= self.rows else ""
 
-    def cursor_row_text(self):
-        """Text of the row holding the cursor cell, which is drawn black on
-        cyan (other cyan backgrounds, like the sidebar filter, are not)"""
-        raw = self.tmux("capture-pane", "-t", "t", "-p", "-e", capture=True)
-        for line in raw.split("\n"):
-            plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
-            # Table rows start with a border; the header, tab and status
-            # bars (also black on cyan) do not
-            if "\x1b[30m\x1b[46m" in line and plain[:1] in ("│", "└", "├", "┌"):
-                return plain
+    # The cursor cell's colours: the theme's (its cursor background, dark
+    # 45475a or light bcc0cc, as the nearest of the 256 colours), or black
+    # on cyan on a terminal of fewer colours
+    CURSOR = re.compile(r"\x1b\[30m\x1b\[46m|48;5;(?:239|251)m")
+    # Backgrounds (the nearest of the 256 colours, dark and light theme):
+    # the grid's header row, the cursor row and the cursor cell (accent)
+    BG_HEADER = {237, 252}
+    BG_CURSOR = {239, 251}
+    BG_ACCENT = {116, 38}
+    SGR = re.compile(r"\x1b\[([0-9;:]*)m")
+
+    @classmethod
+    def _cells(cls, line):
+        """A captured line as (character, background) pairs; the background
+        is a 256-colour index, or None for the terminal's"""
+        out, bg, pos = [], None, 0
+        for m in cls.SGR.finditer(line):
+            out.extend((ch, bg) for ch in line[pos:m.start()])
+            pos = m.end()
+            ps = [int(p) if p.isdigit() else 0 for p in re.split(r"[;:]", m.group(1) or "0")]
+            i = 0
+            while i < len(ps):
+                if ps[i] == 0 or ps[i] == 49:
+                    bg = None
+                elif ps[i] in (38, 48) and i + 2 < len(ps) and ps[i + 1] == 5:
+                    if ps[i] == 48:
+                        bg = ps[i + 2]
+                    i += 2
+                elif ps[i] in (38, 48) and i + 4 < len(ps) and ps[i + 1] == 2:
+                    i += 4
+                elif 40 <= ps[i] <= 47:
+                    bg = ps[i] - 40
+                i += 1
+        out.extend((ch, bg) for ch in line[pos:])
+        return out
+
+    def _grid(self):
+        """(header cells, cursor row cells, x0, x1) of the grid that holds
+        the cursor: its header row is the one in the header colour above a
+        row whose cell at the grid's left edge has the cursor's or the
+        accent colour; None when there is none"""
+        raw = self.tmux("capture-pane", "-t", "t", "-p", "-e", capture=True).split("\n")[: self.rows]
+        rows = [self._cells(l) for l in raw]
+        for h in range(len(rows) - 2, 1, -1):
+            xs = [i for i, (_, bg) in enumerate(rows[h]) if bg in self.BG_HEADER]
+            if not xs:
+                continue
+            x0 = xs[0]
+            for r in rows[h + 1:len(rows) - 1]:
+                if len(r) > x0 and (r[x0][1] in self.BG_CURSOR or r[x0][1] in self.BG_ACCENT):
+                    # tmux leaves out trailing blanks: the row ends where its text does
+                    return rows[h], r, x0, max(len(rows[h]), len(r))
         return None
 
-    def cursor_cells(self):
-        """The cells of the cursor row (sidebar excluded), stripped"""
-        line = self.cursor_row_text()
-        if line is None:
+    def cursor_row_text(self):
+        """Text of the grid row holding the cursor, from the grid's left edge"""
+        g = self._grid()
+        if not g:
             return None
-        # With the sidebar shown, its column comes first, closed by │, ┘, ┤
-        # or ┐ depending on the row
-        m = re.match(r"^[│└├┌][^│┘┤┐]*[│┘┤┐]", line)
-        if m:
-            line = line[m.end():]
-        return [p.strip() for p in line.split("│")]
+        _, row, x0, x1 = g
+        return "".join(ch for ch, _ in row[x0:x1])
+
+    MARKS = "\u26b7\u21d2"  # a key's and a foreign key's marks after a name
+
+    def cursor_cells(self):
+        """The cells of the cursor row, split where the grid's header starts
+        each column's name, stripped"""
+        g = self._grid()
+        if not g:
+            return None
+        head, row, x0, x1 = g
+        names = "".join(ch for ch, _ in head[x0:x1])
+        starts = [i for i, ch in enumerate(names)
+                  if ch != " " and (i == 0 or names[i - 1] == " ") and ch not in self.MARKS]
+        text = "".join(ch for ch, _ in row[x0:x1])
+        bounds = starts + [len(text)]
+        return [text[a:b].strip() for a, b in zip(bounds, bounds[1:])]
+
+    # The header's cursor position: "3 of 1,200", "1 of \u2248200", "1 of 1,000+"
+    POSITION = re.compile(r"([\d,]+) of \u2248?([\d,]+)\+?")
 
     def row_number(self):
-        m = re.search(r"Row (\d+)/", self.status())
-        return int(m.group(1)) if m else None
+        m = self.POSITION.search(self.header())
+        return int(m.group(1).replace(",", "")) if m else None
 
     def wait(self, what, timeout=10.0, where=None):
         """Wait until what (a string or regex, or a predicate on the screen
@@ -297,6 +357,36 @@ class Tui:
 
     def wait_status(self, what, timeout=10.0):
         return self.wait(what, timeout, where=self.status)
+
+    def wait_stable(self, quiet=0.4, timeout=10.0):
+        """Wait until the screen has not changed for quiet seconds (the keys
+        sent are all handled)"""
+        end = time.time() + timeout
+        last, since = self.text(), time.time()
+        while time.time() < end:
+            time.sleep(0.05)
+            now = self.text()
+            if now != last:
+                last, since = now, time.time()
+            elif time.time() - since >= quiet:
+                return
+        raise TuiError(f"the screen kept changing\n{last}")
+
+    def header(self):
+        """The top line: the path to the current tab, the sorts and filters
+        and the cursor position ("3 of 1,200")"""
+        lines = self.screen()
+        return lines[0] if lines else ""
+
+    def wait_header(self, what, timeout=10.0):
+        return self.wait(what, timeout, where=self.header)
+
+    def workspace(self):
+        """The current workspace's name: the header's first segment"""
+        return self.header().strip().split(" \u25b8 ")[0].strip()
+
+    def wait_workspace(self, name, timeout=10.0):
+        return self.wait(lambda s: self.workspace() == name, timeout)
 
     def quit(self, timeout=10.0):
         """Quit with q from wherever the main screen is; returns the exit code"""
@@ -358,7 +448,7 @@ class Db:
     def _run(self, sql):
         env = dict(os.environ, HOME=self.home.path,
                    PATH=LACED_DIR + os.pathsep + os.environ.get("PATH", ""))
-        r = subprocess.run([LACE, "-q", sql, self.url], capture_output=True,
+        r = subprocess.run([LACE, "-q", sql, "-f", "tsv", self.url], capture_output=True,
                            text=True, timeout=120, env=env)
         if r.returncode != 0:
             raise TuiError(f"lace -q failed: {r.stderr.strip()}\n  {sql}")
@@ -368,10 +458,10 @@ class Db:
         self._run(sql)
 
     def rows(self, sql):
-        """Rows as tuples of strings (NULL is "NULL")"""
+        """Rows as tuples of strings (NULL is "NULL"; tsv escapes \\t \\n \\r \\\\)"""
         lines = self._run(sql).split("\n")
         out = []
-        for line in lines[2:]:  # Header and "---" rule
+        for line in lines[1:]:  # past the header
             if line == "":
                 break
             out.append(tuple(line.split("\t")))

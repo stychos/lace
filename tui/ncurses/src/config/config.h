@@ -310,6 +310,11 @@ char *config_get_path(void);
 typedef struct UiEvent UiEvent;
 
 /* Check if event matches action */
+/* The key event a key string ("CTRL+P", "k", "F5") stands for, as the
+ * translators make it; false when the string does not parse (the palette
+ * runs an action through its first key) */
+bool hotkey_key_event(const char *key, UiEvent *out);
+
 bool hotkey_matches(const Config *config, const UiEvent *event,
                     HotkeyAction action);
 

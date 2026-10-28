@@ -1,7 +1,10 @@
 //
 // Lace macOS frontend
-// Preferences: macos.json next to the TUI's files (the GTK frontend's
-// gtk.json keys), written owner-only through a temp file and a rename
+// Preferences: a view over the shared config.json (LaceKit's SharedConfig,
+// the TUI's config.c): "general" for the settings every frontend has, the
+// "macos" section for the Keychain switch. macos.json is migrated into it
+// once. Files live next to the TUI's, written owner-only through a temp
+// file and a rename.
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -24,13 +27,20 @@ struct Prefs {
   var approximateCounts = true
   var pageSize = RowModel.defaultPageSize
   var rowNumbers: RowNumbers = .auto
-  /// Off, this session only, or history/<saved id>.json (the GTK keys)
+  /// Off, this session only, or history/<saved id>.json
   var historyMode: History.Mode = .persistent
   var historyMaxSize = History.defaultSize
   /// Saved passwords go to the Keychain instead of connections.json
   var keychainPasswords = true
+  /// Closing a connection's last tab leaves a connection form in its place
+  var keepConnectionTab = true
+  /// The last window closing quits, or opens a new window with a form
+  var lastWorkspaceClose: SharedConfig.LastWorkspaceClose = .quit
+  /// A connection placed in a window opens its first table
+  var autoOpenFirstTable = false
 
-  static let fileName = "macos.json"
+  /// The app's old preferences file, migrated into config.json once
+  static let legacyFileName = "macos.json"
 
   /// $HOME when set (as the TUI and liblace take it, so a test's private
   /// HOME is honoured), else the account's home
@@ -46,49 +56,44 @@ struct Prefs {
     homeDirectory.appendingPathComponent("Library/Application Support/lace", isDirectory: true)
   }
 
-  static var path: URL { configDirectory.appendingPathComponent(fileName) }
+  static var legacyPath: URL { configDirectory.appendingPathComponent(legacyFileName) }
 
-  /// Defaults, then whatever macos.json holds (out-of-range values are ignored)
-  static func load() -> Prefs {
+  /// config.json's values (defaults for what it lacks; out-of-range values
+  /// were already clamped by config.c)
+  static func load(_ config: SharedConfig) -> Prefs {
     var p = Prefs()
-    guard let data = try? Data(contentsOf: path),
-      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return p }
-    if let v = json["daemon_spawn_mode"] as? Int, let mode = LaceClient.SpawnMode(rawValue: Int32(v)) {
-      p.daemonSpawnMode = mode
-    }
-    if let v = json["daemon_idle_timeout"] as? Int, (0...86400).contains(v) {
-      p.daemonIdleTimeout = Int32(v)
-    }
-    if let v = json["confirm_delete"] as? Bool { p.confirmDelete = v }
-    if let v = json["restore_session"] as? Bool { p.restoreSession = v }
-    if let v = json["approximate_counts"] as? Bool { p.approximateCounts = v }
-    if let v = json["page_size"] as? Int, (100...100_000).contains(v) { p.pageSize = v }
-    if let v = json["row_numbers"] as? Int, let r = RowNumbers(rawValue: v) { p.rowNumbers = r }
-    if let v = json["history_mode"] as? Int, let m = History.Mode(rawValue: v) { p.historyMode = m }
-    if let v = json["history_max_size"] as? Int, History.sizeRange.contains(v) { p.historyMaxSize = v }
-    if let v = json["keychain_passwords"] as? Bool { p.keychainPasswords = v }
+    p.daemonSpawnMode = LaceClient.SpawnMode(rawValue: config.daemonSpawnMode) ?? .unix
+    p.daemonIdleTimeout = (0...86400).contains(config.daemonIdleTimeout) ? config.daemonIdleTimeout : 0
+    p.confirmDelete = config.deleteConfirmation
+    p.restoreSession = config.restoreSession
+    p.approximateCounts = config.approximateCounts
+    p.pageSize = config.pageSize
+    p.rowNumbers = RowNumbers(rawValue: config.rowNumbers) ?? .auto
+    p.historyMode = History.Mode(rawValue: config.historyMode) ?? .persistent
+    p.historyMaxSize = History.sizeRange.contains(config.historyMaxSize) ? config.historyMaxSize : History.defaultSize
+    p.keychainPasswords = config.keychainPasswords
+    p.keepConnectionTab = config.keepConnectionTab
+    p.lastWorkspaceClose = config.lastWorkspaceClose
+    p.autoOpenFirstTable = config.autoOpenFirstTable
     return p
   }
 
-  func save() throws {
-    let dir = Prefs.configDirectory
-    try FileManager.default.createDirectory(
-      at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    let json: [String: Any] = [
-      "daemon_spawn_mode": Int(daemonSpawnMode.rawValue),
-      "daemon_idle_timeout": Int(daemonIdleTimeout),
-      "confirm_delete": confirmDelete,
-      "restore_session": restoreSession,
-      "approximate_counts": approximateCounts,
-      "page_size": pageSize,
-      "row_numbers": rowNumbers.rawValue,
-      "history_mode": historyMode.rawValue,
-      "history_max_size": historyMaxSize,
-      "keychain_passwords": keychainPasswords,
-    ]
-    let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-    try Prefs.writePrivate(data, to: Prefs.path)
+  /// Into config.json: general and macos replaced, everything else kept
+  func save(to config: SharedConfig) throws {
+    config.daemonSpawnMode = daemonSpawnMode.rawValue
+    config.daemonIdleTimeout = daemonIdleTimeout
+    config.deleteConfirmation = confirmDelete
+    config.restoreSession = restoreSession
+    config.approximateCounts = approximateCounts
+    config.pageSize = pageSize
+    config.rowNumbers = rowNumbers.rawValue
+    config.historyMode = historyMode.rawValue
+    config.historyMaxSize = historyMaxSize
+    config.keychainPasswords = keychainPasswords
+    config.keepConnectionTab = keepConnectionTab
+    config.lastWorkspaceClose = lastWorkspaceClose
+    config.autoOpenFirstTable = autoOpenFirstTable
+    try config.save()
   }
 
   /// Like the TUI's platform_write_file_private(): a 0600 temp file in the

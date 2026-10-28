@@ -21,39 +21,16 @@ void query_calculate_result_widths(Tab *tab) {
 
   size_t num_cols = tab->query_results->num_columns;
 
+  free(tab->query_result_col_widths);
   tab->query_result_col_widths = safe_calloc(num_cols, sizeof(int));
+  if (tab->num_user_widths > num_cols) /* another result's columns */
+    tab_clear_user_widths(tab);
   tab->query_result_num_cols = num_cols;
 
-  /* Start with column name widths */
-  for (size_t c = 0; c < num_cols; c++) {
-    const char *name = tab->query_results->columns[c].name;
-    int w = name ? utf8_width(name, strlen(name)) : 4;
-    if (w < MIN_COL_WIDTH)
-      w = MIN_COL_WIDTH;
-    tab->query_result_col_widths[c] = w;
-  }
-
-  /* Check data values */
-  for (size_t r = 0; r < tab->query_results->num_rows && r < 100; r++) {
-    Row *row = &tab->query_results->rows[r];
-    for (size_t c = 0; c < num_cols && c < row->num_cells; c++) {
-      char *str = db_value_to_string(&row->cells[c]);
-      if (str) {
-        int w = utf8_width(str, strlen(str));
-        if (w > tab->query_result_col_widths[c]) {
-          tab->query_result_col_widths[c] = w;
-        }
-        free(str);
-      }
-    }
-  }
-
-  /* Clamp to max width: content-based sizing up to 15 chars */
-  for (size_t c = 0; c < num_cols; c++) {
-    if (tab->query_result_col_widths[c] > DEFAULT_COL_WIDTH) {
-      tab->query_result_col_widths[c] = DEFAULT_COL_WIDTH;
-    }
-  }
+  for (size_t c = 0; c < num_cols; c++)
+    tab->query_result_col_widths[c] =
+        grid_measure_column(tab->query_results, c, tab->query_source_schema, 0, 100);
+  tab_apply_user_widths(tab, tab->query_result_col_widths, num_cols);
 }
 
 /* Load more rows at end of current query results */

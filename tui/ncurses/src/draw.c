@@ -17,6 +17,8 @@
 #include "core/catalog_rows.h"
 #include "tui_internal.h"
 #include "views/form_tab.h"
+#include "views/theme.h"
+#include "views/overlay.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,20 +30,6 @@
  * ============================================================================
  */
 
-/* Check if tab has active filters (filters that affect the query) */
-static bool has_active_filters(Tab *tab) {
-  if (!tab || tab->filters.num_filters == 0)
-    return false;
-
-  for (size_t i = 0; i < tab->filters.num_filters; i++) {
-    ColumnFilter *cf = &tab->filters.filters[i];
-    /* Filter is active if it has a value OR doesn't need one (IS NULL, etc.) */
-    if (cf->value[0] != '\0' || !filter_op_needs_value(cf->op)) {
-      return true;
-    }
-  }
-  return false;
-}
 
 /* Helper to get column width from params */
 static int grid_get_col_width(GridDrawParams *params, size_t col) {
@@ -56,289 +44,153 @@ static int grid_get_col_width(GridDrawParams *params, size_t col) {
  * ============================================================================
  */
 
-/* Draw a result set grid - shared between table view and query results */
-void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
-  if (!params || !params->win || !params->data ||
-      params->data->num_columns == 0 || !params->data->columns) {
-    return;
-  }
+/* The sort marks' ranks after the arrow: ¹ ² ³ ... */
+static const char *const SUPER[] = {"\xe2\x81\xb0", "\xc2\xb9", "\xc2\xb2", "\xc2\xb3", "\xe2\x81\xb4",
+                                    "\xe2\x81\xb5", "\xe2\x81\xb6", "\xe2\x81\xb7", "\xe2\x81\xb8"};
 
+/* The schema column a result column is, by name (NULL: none) */
+static const ColumnDef *schema_col(const TableSchema *sc, const char *name) {
+  size_t i = db_schema_column_index(sc, name);
+  return i != SIZE_MAX ? &sc->columns[i] : NULL;
+}
+
+/* One cell, as the notcurses grid draws it: NULL and numbers in their
+ * colours (numbers right), the cursor cell in the accent colour */
+static void draw_cell(WINDOW *win, int y, int x, int w, const DbValue *val, ThemeColor bg, bool cursor_cell,
+                      bool selected) {
+  ThemeColor fg = TC_FG;
+  bool right = false;
+  if (val->omitted)
+    fg = TC_DIM;
+  else if (val->is_null)
+    fg = TC_NULL_FG;
+  else if (lace_type_is_numeric(val->type))
+    fg = TC_NUMBER_FG, right = true;
+  else if (selected)
+    fg = TC_SELECTED_FG;
+  if (cursor_cell)
+    tui_style(win, TC_BG, TC_ACCENT, A_BOLD);
+  else
+    tui_style(win, fg, bg, 0);
+  char *text = lace_value_display_text(val, (size_t)w);
+  if (!text)
+    text = str_dup("");
+  for (char *c = text; *c; c++)
+    if (*c == '\n' || *c == '\r' || *c == '\t')
+      *c = ' ';
+  int tw = utf8_width(text, strlen(text));
+  if (right && tw < w) {
+    tui_print_fit(win, y, x, w - tw, "");
+    tui_print_fit(win, y, x + w - tw, tw, text);
+  } else {
+    tui_print_fit(win, y, x, w, text);
+  }
+  free(text);
+}
+
+/* Draw a result set grid, as the notcurses TUI's: a header row of the
+ * column names (the cursor's in the accent colour, a sort's arrow before a
+ * name, ⚷ after a key column's, ⇒ after a foreign key's first column),
+ * then the rows, striped, the cursor row highlighted and its cell in the
+ * accent colour; columns one space apart, the last one cut at the edge.
+ * Shared by table tabs and query results. */
+void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
+  if (!params || !params->win || !params->data || params->data->num_columns == 0 || !params->data->columns)
+    return;
   WINDOW *win = params->win;
   ResultSet *data = params->data;
-  int y = params->start_y;
-  int x_base = params->start_x;
-  int max_y = params->start_y + params->height;
-  int max_x = params->start_x + params->width;
-
-  /* Calculate column divider positions for intersection characters */
-  int divider_positions[MAX_VISIBLE_COLUMNS];
-  size_t num_dividers = 0;
-
-  {
-    int calc_x = x_base + 1;
-    for (size_t col = params->scroll_col; col < data->num_columns; col++) {
-      int width = grid_get_col_width(params, col);
-      if (calc_x + width + 3 > max_x)
-        break;
-      calc_x += width + 1;
-      if (num_dividers < MAX_VISIBLE_COLUMNS) {
-        divider_positions[num_dividers++] = calc_x - 1;
-      }
-    }
-  }
-
-  /* Draw top border if requested */
-  if (params->show_header_line && y < max_y) {
-    wattron(win, A_BOLD | COLOR_PAIR(COLOR_BORDER));
-    mvwhline(win, y, x_base, ACS_HLINE, params->width);
-    /* Add T-junctions where column dividers will be */
-    for (size_t i = 0; i < num_dividers; i++) {
-      mvwaddch(win, y, divider_positions[i], ACS_TTEE);
-    }
-    wattroff(win, A_BOLD | COLOR_PAIR(COLOR_BORDER));
-    y++;
-  }
-
-  if (y >= max_y)
+  int y0 = params->start_y, x0 = params->start_x;
+  int end_y = params->start_y + params->height, end = params->start_x + params->width;
+  if (params->height < 1 || params->width < 4)
     return;
+  Tab *tab = state ? TUI_TAB(state) : NULL;
+  const TableSchema *keys = tab && tab->type == TAB_TYPE_QUERY ? tab->query_source_schema : tab ? tab->schema : NULL;
+  const TableSchema *sorts = params->sort_schema;
 
-  /* Draw column headers */
-  wattron(win, A_BOLD);
-  int x = x_base + 1;
-  for (size_t col = params->scroll_col; col < data->num_columns; col++) {
-    int width = grid_get_col_width(params, col);
-    if (x + width + 3 > max_x)
+  for (int y = y0; y < end_y; y++) {
+    tui_style(win, TC_FG, TC_BG, 0);
+    tui_print_fit(win, y, x0, params->width, "");
+  }
+
+  /* the header */
+  tui_style(win, TC_HEADER_FG, TC_HEADER_BG, A_BOLD);
+  tui_print_fit(win, y0, x0, params->width, "");
+  int x = x0;
+  for (size_t col = params->scroll_col; col < data->num_columns && x < end; col++) {
+    int w = grid_get_col_width(params, col);
+    if (w > end - x)
+      w = end - x;
+    const char *name = data->columns[col].name ? data->columns[col].name : "";
+    char *label = NULL;
+    size_t sc = sorts ? db_schema_column_index(sorts, name) : SIZE_MAX;
+    for (size_t i = 0; sc != SIZE_MAX && i < params->num_sort_entries; i++) {
+      if (params->sort_entries[i].column != sc)
+        continue;
+      const char *rank = params->num_sort_entries > 1 && i < 8 ? SUPER[i + 1] : "";
+      label = str_printf("%s%s%s", params->sort_entries[i].direction == SORT_DESC ? "\xe2\x86\x93" : "\xe2\x86\x91",
+                         name, rank);
       break;
-
-    /* Show column header selection when focused */
-    if (col == params->cursor_col && params->is_focused) {
-      wattron(win, A_REVERSE);
     }
-
-    const char *name = data->columns[col].name;
-
-    /* Draw column name at full width; a foreign key's first column gets ⇒
-     * after the name (it can be followed) when there is room */
-    tui_print_fit(win, y, x, width, name ? name : "");
-    if (name && catalog_fk_first_column(params->sort_schema, name)) {
-      int nw = utf8_width(name, strlen(name));
-      if (nw + 2 <= width) {
-        wattron(win, COLOR_PAIR(COLOR_SELECTED));
-        mvwprintw(win, y, x + nw + 1, "\xe2\x87\x92");
-        wattroff(win, COLOR_PAIR(COLOR_SELECTED));
-      }
+    if (!label)
+      label = str_dup(name);
+    tui_style(win, col == params->cursor_col ? TC_ACCENT : TC_HEADER_FG, TC_HEADER_BG, A_BOLD);
+    int lw = utf8_width(label, strlen(label));
+    const ColumnDef *kc = schema_col(keys, name);
+    bool pk = kc && kc->primary_key && lw + 2 <= w;
+    tui_print_fit(win, y0, x, w, label);
+    if (pk) {
+      tui_style(win, TC_PK_FG, TC_HEADER_BG, A_BOLD);
+      tui_print_fit(win, y0, x + lw + 1, 1, "\xe2\x9a\xb7"); /* ⚷ */
     }
-
-    if (col == params->cursor_col && params->is_focused) {
-      wattroff(win, A_REVERSE);
+    int fx = x + lw + (pk ? 3 : 1); /* a foreign key column can be followed */
+    if (catalog_fk_first_column(keys, name) && fx < x + w) {
+      tui_style(win, TC_ACCENT, TC_HEADER_BG, A_BOLD);
+      tui_print_fit(win, y0, fx, 1, "\xe2\x87\x92"); /* ⇒ */
     }
-
-    x += width + 1;
-    wattron(win, COLOR_PAIR(COLOR_BORDER));
-    mvwaddch(win, y, x - 1, ACS_VLINE);
-    wattroff(win, COLOR_PAIR(COLOR_BORDER));
+    free(label);
+    x += w + 1;
   }
-  wattroff(win, A_BOLD);
-  y++;
 
-  if (y >= max_y)
+  /* the rows */
+  if (!data->rows)
     return;
-
-  /* Second header row for sort indicators (only if sorting is active) */
-  if (params->num_sort_entries > 0 && params->sort_entries) {
-    x = x_base + 1;
-    for (size_t col = params->scroll_col; col < data->num_columns; col++) {
-      int width = grid_get_col_width(params, col);
-      if (x + width + 3 > max_x)
-        break;
-
-      /* Check if this column is sorted */
-      bool found = false;
-      /* Sort entries index the schema: find this result column there */
-      size_t schema_col = db_schema_column_index(params->sort_schema,
-                                                 data->columns[col].name);
-      for (size_t i = 0; i < params->num_sort_entries; i++) {
-        if (schema_col == SIZE_MAX)
-          break;
-        if (params->sort_entries[i].column == schema_col) {
-          /* Show: arrow + direction + priority (e.g., "▲ asc, 1") */
-          const char *arrow = (params->sort_entries[i].direction == SORT_ASC)
-                                  ? "\xE2\x96\xB2"  /* ▲ UTF-8 */
-                                  : "\xE2\x96\xBC"; /* ▼ UTF-8 */
-          const char *dir_text =
-              (params->sort_entries[i].direction == SORT_ASC) ? "asc" : "desc";
-          char sort_info[24];
-          snprintf(sort_info, sizeof(sort_info), "%s %s, %d", arrow, dir_text,
-                   (int)(i + 1));
-          tui_print_fit(win, y, x, width, sort_info);
-          found = true;
-          break;
-        }
-      }
-      if (!found) {
-        /* Empty cell for non-sorted columns */
-        mvwprintw(win, y, x, "%-*s", width, "");
-      }
-
-      x += width + 1;
-      wattron(win, COLOR_PAIR(COLOR_BORDER));
-      mvwaddch(win, y, x - 1, ACS_VLINE);
-      wattroff(win, COLOR_PAIR(COLOR_BORDER));
-    }
-    y++;
-
-    if (y >= max_y)
-      return;
-  }
-
-  /* Header separator */
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  mvwhline(win, y, x_base, ACS_HLINE, params->width);
-  /* Add cross/plus junctions where column dividers are */
-  for (size_t i = 0; i < num_dividers; i++) {
-    mvwaddch(win, y, divider_positions[i], ACS_PLUS);
-  }
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
-  y++;
-
-  /* Draw data rows */
-  if (!data->rows) {
-    return;
-  }
-
-  for (size_t row = params->scroll_row; row < data->num_rows && y < max_y;
-       row++) {
-
+  int y = y0 + 1;
+  for (size_t row = params->scroll_row; row < data->num_rows && y < end_y; row++, y++) {
     Row *r = &data->rows[row];
+    bool cur = row == params->cursor_row;
+    bool sel = tab && tab_is_row_selected(tab, params->selection_offset + row);
+    size_t global = params->selection_offset + row;
+    ThemeColor bg = cur ? TC_CURSOR_BG : (global % 2 ? TC_STRIPE_BG : TC_ROW_BG);
+    tui_style(win, TC_FG, bg, 0);
+    tui_print_fit(win, y, x0, params->width, "");
     if (!r->cells)
       continue;
-
-    x = x_base + 1;
-    bool is_cursor_row = (row == params->cursor_row) && params->is_focused;
-
-    /* Check if row is in selection set (for bulk operations) */
-    bool is_marked_row = false;
-    Tab *tab = state ? TUI_TAB(state) : NULL;
-    if (tab) {
-      size_t global_row = params->selection_offset + row;
-      is_marked_row = tab_is_row_selected(tab, global_row);
-    }
-
-    /* Determine effective schema for PK detection */
-    TableSchema *effective_schema = NULL;
-    if (tab && tab->type == TAB_TYPE_QUERY && tab->query_source_schema) {
-      effective_schema = tab->query_source_schema;
-    } else if (tab) {
-      effective_schema = tab->schema;
-    }
-
-    /* Apply row-level styling */
-    if (is_marked_row || is_cursor_row) {
-      wattron(win, A_BOLD);
-    }
-
-    for (size_t col = params->scroll_col;
-         col < data->num_columns && col < r->num_cells; col++) {
-      int width = grid_get_col_width(params, col);
-      if (x + width + 3 > max_x)
-        break;
-
-      bool is_selected = is_cursor_row && (col == params->cursor_col);
-      bool is_editing_cell = is_selected && params->is_editing;
-
-      if (is_editing_cell) {
-        /* Draw edit field with distinctive background */
-        int cursor_x =
-            tui_draw_edit_field(win, y, x, width, params->edit_buffer,
-                                params->edit_pos, COLOR_PAIR(COLOR_EDIT));
-        if (cursor_x >= 0) {
-          /* Store cursor screen position for later use */
-          if (state) {
-            state->edit_cursor_y = y;
-            state->edit_cursor_x = cursor_x;
-          }
-        }
-      } else if (is_selected) {
-        /* Check if this column is a primary key */
-        size_t sc = db_schema_column_index(effective_schema, data->columns[col].name);
-        bool is_pk_col = sc != SIZE_MAX && effective_schema->columns[sc].primary_key;
-
-        /* Use reverse video for PK on marked row to show white text */
-        if (is_pk_col && is_marked_row) {
-          wattron(win, A_REVERSE);
-        } else {
-          wattron(win, COLOR_PAIR(COLOR_SELECTED));
-        }
-
-        DbValue *val = &r->cells[col];
-        if (val->is_null) {
-          mvwprintw(win, y, x, "%-*s", width, "NULL");
-        } else {
-          char *str = db_value_to_string(val);
-          if (str) {
-            char *safe = tui_sanitize_for_display(str);
-            tui_print_fit(win, y, x, width, safe ? safe : str);
-            free(safe);
-            free(str);
-          }
-        }
-
-        if (is_pk_col && is_marked_row) {
-          wattroff(win, A_REVERSE);
-        } else {
-          wattroff(win, COLOR_PAIR(COLOR_SELECTED));
+    x = x0;
+    for (size_t col = params->scroll_col; col < data->num_columns && col < r->num_cells && x < end; col++) {
+      int w = grid_get_col_width(params, col);
+      if (w > end - x)
+        w = end - x;
+      bool cursor_cell = cur && col == params->cursor_col;
+      if (cursor_cell && params->is_editing && params->is_focused) {
+        int cx = tui_draw_edit_field(win, y, x, w, params->edit_buffer, params->edit_pos,
+                                     tui_theme_attr(TC_FG, TC_EDIT_BG));
+        if (cx >= 0 && state) {
+          state->edit_cursor_y = y;
+          state->edit_cursor_x = cx;
         }
       } else {
-        DbValue *val = &r->cells[col];
-        /* Check if this column is a primary key */
-        size_t sc = db_schema_column_index(effective_schema, data->columns[col].name);
-        bool is_pk_col = sc != SIZE_MAX && effective_schema->columns[sc].primary_key;
-
-        if (val->is_null) {
-          wattron(win, COLOR_PAIR(COLOR_NULL));
-          mvwprintw(win, y, x, "%-*s", width, "NULL");
-          wattroff(win, COLOR_PAIR(COLOR_NULL));
-        } else {
-          char *str = db_value_to_string(val);
-          if (str) {
-            char *safe = tui_sanitize_for_display(str);
-            if (is_pk_col && is_marked_row && is_cursor_row) {
-              /* White text for PK on cursor row - no color attr needed */
-            } else if (is_pk_col && is_marked_row) {
-              wattron(win, COLOR_PAIR(COLOR_ERROR_TEXT));
-            } else if (is_pk_col) {
-              wattron(win, COLOR_PAIR(COLOR_PK));
-            } else if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
-              wattron(win, COLOR_PAIR(COLOR_NUMBER));
-            }
-            tui_print_fit(win, y, x, width, safe ? safe : str);
-            if (is_pk_col && is_marked_row && is_cursor_row) {
-              /* White text for PK on cursor row - no color attr needed */
-            } else if (is_pk_col && is_marked_row) {
-              wattroff(win, COLOR_PAIR(COLOR_ERROR_TEXT));
-            } else if (is_pk_col) {
-              wattroff(win, COLOR_PAIR(COLOR_PK));
-            } else if (val->type == DB_TYPE_INT || val->type == DB_TYPE_FLOAT) {
-              wattroff(win, COLOR_PAIR(COLOR_NUMBER));
-            }
-            free(safe);
-            free(str);
-          }
-        }
+        draw_cell(win, y, x, w, &r->cells[col], bg, cursor_cell, sel);
       }
-
-      x += width + 1;
-      wattron(win, COLOR_PAIR(COLOR_BORDER));
-      mvwaddch(win, y, x - 1, ACS_VLINE);
-      wattroff(win, COLOR_PAIR(COLOR_BORDER));
+      x += w + 1;
     }
-
-    /* Remove row-level styling */
-    if (is_marked_row || is_cursor_row) {
-      wattroff(win, A_BOLD);
-    }
-
-    y++;
+  }
+  tui_style(win, TC_FG, TC_BG, 0);
+  if (data->num_rows == 0 && y0 + 1 + (end_y - y0 - 1) / 2 < end_y) {
+    tui_style(win, TC_DIM, TC_BG, 0);
+    const char *msg = "No rows";
+    int mx = x0 + (params->width - 7) / 2;
+    tui_print_fit(win, y0 + 1 + (end_y - y0 - 1) / 2, mx > x0 ? mx : x0, 7, msg);
+    tui_style(win, TC_FG, TC_BG, 0);
   }
 }
 
@@ -349,60 +201,6 @@ void tui_draw_result_grid(TuiState *state, GridDrawParams *params) {
 
 char *tui_connstr_display(const char *connstr) {
   return connstr_display(connstr);
-}
-
-void tui_draw_header(TuiState *state) {
-  if (!state || !state->header_win || !state->header_visible)
-    return;
-
-  werase(state->header_win);
-  wbkgd(state->header_win, COLOR_PAIR(COLOR_HEADER));
-
-  /* What the user connected to, from the connection string they used (the
-   * daemon's view of an SSH tunnel is a local socket path): never a
-   * password, fitted to the left two thirds of the line */
-  Connection *app_conn = TUI_TAB_CONNECTION(state);
-  char *where = app_conn ? tui_connstr_display(app_conn->connstr) : NULL;
-  Tab *form = TUI_TAB(state);
-  if (!where && form && form->type == TAB_TYPE_FORM) { /* lace ▸ the form's label */
-    char *label = form_tab_label(form);
-    where = str_printf("lace \xE2\x96\xB8 %s", label);
-    free(label);
-  }
-  if (where) {
-    int max_x = getmaxx(state->header_win);
-    tui_print_clip(state->header_win, 0, 1, max_x * 2 / 3, where);
-    free(where);
-  }
-
-  /* Right side: combined connection/workspace indicator */
-  if (state->app) {
-    Tab *tab = TUI_TAB(state);
-    bool multi_conn = state->app->num_connections > 1 && tab && tab->type != TAB_TYPE_FORM;
-    bool multi_ws = state->app->num_workspaces > 1;
-
-    if (multi_conn || multi_ws) {
-      char indicator[32];
-      if (multi_conn && multi_ws) {
-        snprintf(indicator, sizeof(indicator), "[C%zu W%zu]",
-                 tab ? tab->connection_index + 1 : 1,
-                 state->app->current_workspace + 1);
-      } else if (multi_conn) {
-        snprintf(indicator, sizeof(indicator), "[C%zu]",
-                 tab ? tab->connection_index + 1 : 1);
-      } else {
-        snprintf(indicator, sizeof(indicator), "[W%zu]",
-                 state->app->current_workspace + 1);
-      }
-      int ind_len = (int)strlen(indicator);
-      int ind_x = state->term_cols - ind_len - 1;
-      if (ind_x > 0) {
-        mvwprintw(state->header_win, 0, ind_x, "%s", indicator);
-      }
-    }
-  }
-
-  wrefresh(state->header_win);
 }
 
 /* ============================================================================
@@ -506,57 +304,60 @@ static void draw_add_row_cell(WINDOW *win, int y, int x, int width,
   }
 }
 
-/* Draw the add-row as overlay at the bottom of the table */
+/* The new row as the notcurses TUI's "Add row" overlay: one field per
+ * column (its name, then its value or placeholder), the cursor's field
+ * highlighted, over the grid */
 static void tui_draw_add_row_overlay(TuiState *state, GridDrawParams *params) {
   if (!state || !state->adding_row || !params || !params->win)
     return;
-
   WINDOW *win = params->win;
-  int win_rows, win_cols;
-  getmaxyx(win, win_rows, win_cols);
-  (void)win_cols;
-
-  /* Calculate the Y position for the overlay */
-  int overlay_y = win_rows - 2;
-  if (overlay_y < params->start_y + 3)
+  Tab *tab = TUI_TAB(state);
+  TableSchema *schema = tab ? tab->schema : NULL;
+  size_t n = state->new_row_num_cols;
+  if (!schema || n == 0)
     return;
-
-  /* Draw separator line */
-  wattron(win, COLOR_PAIR(COLOR_BORDER));
-  mvwhline(win, overlay_y, params->start_x, ACS_HLINE, params->width);
-  wattroff(win, COLOR_PAIR(COLOR_BORDER));
-
-  int row_y = overlay_y + 1;
-
-  /* Use the table's scroll_col for horizontal alignment */
-  Tab *overlay_tab = TUI_TAB(state);
-  size_t scroll_col = overlay_tab ? overlay_tab->scroll_col : 0;
-
-  /* Draw cells aligned with the main table */
-  int x = params->start_x + 1;
-  ResultSet *data = params->data;
-  if (!data)
-    return;
-
-  for (size_t col = scroll_col; col < data->num_columns; col++) {
-    if (col >= state->new_row_num_cols)
-      break;
-
-    int width = grid_get_col_width(params, col);
-    if (x + width + 3 > params->start_x + params->width)
-      break;
-
-    bool is_selected = (col == state->new_row_cursor_col);
-    bool is_editing = is_selected && state->new_row_cell_editing;
-
-    draw_add_row_cell(win, row_y, x, width, state, col, is_selected,
-                      is_editing);
-
-    x += width + 1;
-    wattron(win, COLOR_PAIR(COLOR_BORDER));
-    mvwaddch(win, row_y, x - 1, ACS_VLINE);
-    wattroff(win, COLOR_PAIR(COLOR_BORDER));
+  int name_w = 4;
+  for (size_t i = 0; i < n && i < schema->num_columns; i++) {
+    const char *nm = schema->columns[i].name ? schema->columns[i].name : "";
+    int w = utf8_width(nm, strlen(nm));
+    if (w > name_w)
+      name_w = w;
   }
+  if (name_w > 24)
+    name_w = 24;
+  int cols = params->width - 8 < 70 ? params->width - 8 : 70;
+  if (cols < 30)
+    cols = 30 < params->width - 2 ? 30 : params->width - 2;
+  int rows = (int)n + 1; /* the fields, then the message line */
+  int max_rows = params->height - 4;
+  if (rows > max_rows)
+    rows = max_rows;
+  if (rows < 2 || cols < 12)
+    return;
+  int h = rows + 2, w = cols + 2;
+  int y0 = params->start_y + (params->height - h) / 2, x0 = params->start_x + (params->width - w) / 2;
+  if (y0 < params->start_y)
+    y0 = params->start_y;
+  if (x0 < params->start_x)
+    x0 = params->start_x;
+  tui_frame_rect(win, y0, x0, h, w, "Add row",
+                 "\xe2\x86\x91\xe2\x86\x93 field  Enter edit  ^N NULL  ^D empty  F2 save  Esc cancel");
+  int vis = rows - 1;
+  size_t cur = state->new_row_cursor_col;
+  size_t scroll = cur >= (size_t)vis ? cur - (size_t)vis + 1 : 0;
+  int vx = x0 + 2 + name_w + 2, vw = x0 + w - 1 - vx;
+  for (int i = 0; i < vis; i++) {
+    size_t col = scroll + (size_t)i;
+    if (col >= n || col >= schema->num_columns)
+      break;
+    int y = y0 + 1 + i;
+    bool is_cur = col == cur;
+    tui_style(win, is_cur ? TC_CURSOR_FG : TC_OVERLAY_FG, is_cur ? TC_CURSOR_BG : TC_OVERLAY_BG, is_cur ? A_BOLD : 0);
+    tui_print_fit(win, y, x0 + 1, w - 2, "");
+    tui_print_fit(win, y, x0 + 2, name_w, schema->columns[col].name ? schema->columns[col].name : "");
+    draw_add_row_cell(win, y, vx, vw, state, col, is_cur, is_cur && state->new_row_cell_editing);
+  }
+  tui_style(win, TC_OVERLAY_FG, TC_OVERLAY_BG, 0);
 }
 
 /* Print text centered on row y, clipped to the window width (UTF-8 aware) */
@@ -654,9 +455,11 @@ void tui_draw_table(TuiState *state) {
     return;
   }
 
-  if (!data || data->num_columns == 0 || !data->columns) {
-    int msg_y = filters_height + (win_rows - filters_height) / 2;
-    mvwprintw(state->main_win, msg_y, (win_cols - 7) / 2, "No data");
+  if (!data || data->num_columns == 0 || !data->columns) { /* as the notcurses grid says it */
+    int msg_y = filters_height + 1 + (win_rows - filters_height - 1) / 2;
+    tui_style(state->main_win, TC_DIM, TC_BG, 0);
+    tui_print_fit(state->main_win, msg_y, (win_cols - 8) / 2, 8, "Loading\xe2\x80\xa6");
+    tui_style(state->main_win, TC_FG, TC_BG, 0);
     wrefresh(state->main_win);
     return;
   }
@@ -701,273 +504,20 @@ void tui_draw_table(TuiState *state) {
  * ============================================================================
  */
 
+/* A connection with no table or query open: what to do, as the notcurses
+ * TUI says it */
 void tui_draw_connection_tab(TuiState *state) {
   if (!state || !state->main_win)
     return;
-
-  werase(state->main_win);
-
-  int win_rows, win_cols;
-  getmaxyx(state->main_win, win_rows, win_cols);
-
-  Tab *tab = TUI_TAB(state);
-  /* Get full connection string from connection object */
-  const char *connstr = NULL;
-  char *masked_connstr = NULL;
-  if (tab) {
-    Connection *conn = app_get_connection(state->app, tab->connection_index);
-    if (conn) {
-      /* Mask password for display */
-      masked_connstr = connstr_mask_password(conn->connstr);
-      connstr = masked_connstr;
-    }
-  }
-  if (!connstr) {
-    connstr = tab ? tab->table_name : "Connection";
-  }
-
-  /* Center the content vertically */
-  int center_y = win_rows / 2 - 2;
-  if (center_y < 1)
-    center_y = 1;
-
-  /* Draw connection info */
-  wattron(state->main_win, A_BOLD);
-  const char *title = "Connection";
-  int title_x = (win_cols - (int)strlen(title)) / 2;
-  if (title_x < 0)
-    title_x = 0;
-  mvwprintw(state->main_win, center_y, title_x, "%s", title);
-  wattroff(state->main_win, A_BOLD);
-
-  /* Show connection string (truncated if needed) */
-  wattron(state->main_win, COLOR_PAIR(COLOR_STATUS));
-  int max_connstr_len = win_cols - 4;
-  if (max_connstr_len < 10)
-    max_connstr_len = 10;
-  int connstr_x = (win_cols - (int)strlen(connstr)) / 2;
-  if (connstr_x < 2)
-    connstr_x = 2;
-  tui_print_clip(state->main_win, center_y + 2, connstr_x, max_connstr_len, connstr);
-  wattroff(state->main_win, COLOR_PAIR(COLOR_STATUS));
-
-  free(masked_connstr);
-
-  /* Show instruction */
-  wattron(state->main_win, A_DIM);
-  const char *hint = "Select a table from the sidebar to view data";
-  int hint_x = (win_cols - (int)strlen(hint)) / 2;
-  if (hint_x < 0)
-    hint_x = 0;
-  mvwprintw(state->main_win, center_y + 4, hint_x, "%s", hint);
-
-  char *close_key = hotkey_get_display(state->app->config, HOTKEY_CLOSE_TAB);
-  char hint2[128];
-  snprintf(hint2, sizeof(hint2), "Press [%s] to close this connection",
-           close_key ? close_key : "-");
-  free(close_key);
-  int hint2_x = (win_cols - (int)strlen(hint2)) / 2;
-  if (hint2_x < 0)
-    hint2_x = 0;
-  mvwprintw(state->main_win, center_y + 5, hint2_x, "%s", hint2);
-  wattroff(state->main_win, A_DIM);
-
-  wrefresh(state->main_win);
+  WINDOW *w = state->main_win;
+  wbkgd(w, tui_theme_attr(TC_FG, TC_BG) | ' ');
+  werase(w);
+  int cols = getmaxx(w);
+  tui_style(w, TC_DIM, TC_BG, 0);
+  if (cols > 3)
+    tui_print_fit(w, 0, 1, cols - 2, state->sidebar_win ? "Pick a table from the list" : "Press t to show the sidebar");
+  tui_style(w, TC_FG, TC_BG, 0);
+  wrefresh(w);
 }
 
 
-/* Row position at the right of the status bar, prefixed with the
- * connection's transaction state so an open (or lost) transaction is never
- * invisible */
-static void draw_status_position(TuiState *state, int right_pos, const char *pos) {
-  const char *tx = "";
-  if (TUI_CONN(state) && TUI_CONN(state)->transaction_lost) {
-    tx = "[TX LOST] ";
-  } else if (TUI_CONN(state) && TUI_CONN(state)->in_transaction &&
-             TUI_CONN(state)->transaction_failed) {
-    tx = "[TX FAILED] ";
-  } else if (TUI_CONN(state) && TUI_CONN(state)->in_transaction) {
-    tx = "[TX] ";
-  }
-  char text[160];
-  snprintf(text, sizeof(text), "%s%s", tx, pos);
-  int len = (int)strlen(text);
-  int x = right_pos - len;
-  mvwprintw(state->status_win, 0, x < 0 ? 0 : x, "%s", text);
-}
-
-/* ============================================================================
- * Status Bar Drawing
- * ============================================================================
- */
-
-/* Status bar, left: name, type and flags of a column, clipped to the bar */
-static void draw_column_info(TuiState *state, const char *prefix,
-                             const ColumnDef *col) {
-  StringBuilder *sb = sb_new(128);
-  sb_printf(sb, "%s%s", prefix, col->name ? col->name : "?");
-  if (col->type_name)
-    sb_printf(sb, " : %s", col->type_name);
-  if (col->primary_key)
-    sb_append(sb, " [PK]");
-  if (col->auto_increment)
-    sb_append(sb, " [AI]");
-  if (!col->nullable)
-    sb_append(sb, " NOT NULL");
-  if (col->default_val)
-    sb_printf(sb, " DEFAULT %s", col->default_val);
-  char *info = sb_finish(sb);
-  if (info) {
-    tui_print_clip(state->status_win, 0, 1, state->term_cols - 2, info);
-    free(info);
-  }
-}
-
-void tui_draw_status(TuiState *state) {
-  if (!state || !state->status_win || !state->status_visible)
-    return;
-
-  werase(state->status_win);
-
-  if (state->status_is_error) {
-    /* Error: default background with red text for better contrast */
-    wbkgd(state->status_win, A_NORMAL);
-    wattron(state->status_win, COLOR_PAIR(COLOR_ERROR_TEXT));
-  } else {
-    wbkgd(state->status_win, COLOR_PAIR(COLOR_STATUS));
-  }
-
-  /* Check if we're in a query tab with results focus */
-  Tab *tab = TUI_TAB(state);
-  UITabState *ui = TUI_TAB_UI(state);
-  VmTable *widget = state->vm_table;
-  bool query_results_active = false;
-  if (tab && ui) {
-    query_results_active = (tab->type == TAB_TYPE_QUERY &&
-                            ui->query_focus_results && !ui->query_unfocused &&
-                            tab->query_results);
-  }
-
-  /* Left: show the highlighted entry when sidebar focused, otherwise column info */
-  SidebarEntry entry;
-  if (tui_sidebar_focused(state) && tui_sidebar_entry_at(state, tui_sidebar_highlight(state), &entry)) {
-    const char *name = tui_sidebar_entry_name(state, &entry);
-    if (name)
-      mvwprintw(state->status_win, 0, 1, "%s", name);
-  } else if (query_results_active && tab->query_results->columns &&
-             tab->query_result_col < tab->query_results->num_columns) {
-    /* Query results column info */
-    ColumnDef *col = &tab->query_results->columns[tab->query_result_col];
-    ColumnDef *schema_col = NULL;
-
-    /* Try to get richer info from schema if available */
-    if (tab->query_source_schema && col->name) {
-      for (size_t i = 0; i < tab->query_source_schema->num_columns; i++) {
-        if (tab->query_source_schema->columns[i].name &&
-            strcmp(tab->query_source_schema->columns[i].name, col->name) == 0) {
-          schema_col = &tab->query_source_schema->columns[i];
-          break;
-        }
-      }
-    }
-
-    /* Use schema column if found, otherwise use result column */
-    ColumnDef *display_col = schema_col ? schema_col : col;
-
-    draw_column_info(state, "", display_col);
-  } else if (state->adding_row && tab && tab->schema &&
-             state->new_row_cursor_col < tab->schema->num_columns) {
-    /* Add-row mode: show column info for current cursor position */
-    ColumnDef *col = &tab->schema->columns[state->new_row_cursor_col];
-
-    draw_column_info(state, "[+] ", col);
-  } else if (tab && tab->schema && widget && tab->data &&
-             tab->cursor_col < tab->data->num_columns) {
-    /* The cursor is on a result column: its schema column by name */
-    size_t sc = db_schema_column_index(tab->schema,
-                                       tab->data->columns[tab->cursor_col].name);
-    if (sc != SIZE_MAX) {
-      draw_column_info(state, "", &tab->schema->columns[sc]);
-    }
-  }
-
-  /* A connection form: its keys, unless there is something to say */
-  if (tab && tab->type == TAB_TYPE_FORM && !state->status_msg) {
-    char hints[320];
-    form_tab_status(state, tab, hints, sizeof hints);
-    tui_print_clip(state->status_win, 0, 1, state->term_cols - 2, hints);
-  }
-
-  /* Center: status/error message */
-  if (state->status_msg) {
-    int msg_len = (int)strlen(state->status_msg);
-    int center_x = (state->term_cols - msg_len) / 2;
-    if (center_x < 1)
-      center_x = 1;
-    mvwprintw(state->status_win, 0, center_x, "%s", state->status_msg);
-  }
-
-  /* Right: row position and loading indicator */
-  int right_pos = state->term_cols - 1;
-
-  /* Background loading indicator */
-  if (state->bg_loading_active) {
-    const char *loading = "[Loading...]";
-    int loading_len = (int)strlen(loading);
-    right_pos -= loading_len + 1;
-    wattron(state->status_win, A_BOLD);
-    mvwprintw(state->status_win, 0, right_pos + 1, "%s", loading);
-    wattroff(state->status_win, A_BOLD);
-  }
-
-  if (query_results_active) {
-    /* Query results row position */
-    char pos[64];
-    if (tab->query_results->num_rows == 0) {
-      snprintf(pos, sizeof(pos), "No rows");
-    } else if (tab->query_paginated) {
-      /* Paginated: show actual row number in total dataset ("N+" while the
-       * total is still being counted) */
-      size_t actual_row = tab->query_loaded_offset + tab->query_result_row + 1;
-      if (tab->query_total_known) {
-        snprintf(pos, sizeof(pos), "Row %zu/%zu", actual_row,
-                 tab->query_total_rows);
-      } else {
-        snprintf(pos, sizeof(pos), "Row %zu/%zu+", actual_row,
-                 tab->query_loaded_offset + tab->query_loaded_count);
-      }
-    } else {
-      /* Non-paginated */
-      snprintf(pos, sizeof(pos), "Row %zu/%zu", tab->query_result_row + 1,
-               tab->query_results->num_rows);
-    }
-    draw_status_position(state, right_pos, pos);
-  } else if (tab && tab->data && widget) {
-    char pos[96];
-    size_t actual_row = tab->loaded_offset + tab->cursor_row + 1;
-    size_t total =
-        tab->total_rows > 0 ? tab->total_rows : tab->data->num_rows;
-    if (tab->data->num_rows == 0)
-      actual_row = 0; /* "Row 0/0": nothing under the cursor */
-    /* Show ~ prefix for approximate counts */
-    bool approx = tab->row_count_approximate;
-    bool filtered = has_active_filters(tab);
-    if (filtered && tab->unfiltered_total_rows > 0) {
-      snprintf(pos, sizeof(pos), "Row %zu/%s%zu [%zu]", actual_row,
-               approx ? "~" : "", total, tab->unfiltered_total_rows);
-    } else {
-      snprintf(pos, sizeof(pos), "Row %zu/%s%zu", actual_row, approx ? "~" : "",
-               total);
-    }
-    draw_status_position(state, right_pos, pos);
-  } else if (TUI_CONN(state) &&
-             (TUI_CONN(state)->in_transaction || TUI_CONN(state)->transaction_lost)) {
-    draw_status_position(state, right_pos, "");
-  }
-
-  if (state->status_is_error) {
-    wattroff(state->status_win, COLOR_PAIR(COLOR_ERROR_TEXT));
-  }
-
-  wrefresh(state->status_win);
-}

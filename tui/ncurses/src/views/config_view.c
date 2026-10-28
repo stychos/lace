@@ -6,6 +6,8 @@
  * https://github.com/stychos/lace
  */
 
+#include "theme.h"
+#include "overlay.h"
 #include "config_view.h"
 #include "../config/config.h"
 #include "../core/history.h"
@@ -672,9 +674,7 @@ static void draw_buttons(WINDOW *win, DialogState *ds, int y, int width) {
 static void draw_dialog(WINDOW *win, DialogState *ds, int *cursor_y,
                         int *cursor_x) {
   werase(win);
-  DRAW_BOX(win, COLOR_BORDER);
-  WITH_ATTR(win, A_BOLD,
-            mvwprintw(win, 0, (ds->width - 15) / 2, " Configuration "));
+  tui_frame_window(win, "Configuration", NULL);
 
   /* Tab bar */
   draw_tab_bar(win, ds, 2, ds->width);
@@ -753,9 +753,7 @@ static char *capture_hotkey(WINDOW *parent) {
   keypad(dlg, TRUE);
 
   werase(dlg);
-  DRAW_BOX(dlg, COLOR_BORDER);
-  WITH_ATTR(dlg, A_BOLD,
-            mvwprintw(dlg, 0, (dlg_width - 14) / 2, " Capture Key "));
+  tui_frame_window(dlg, "Capture key", "Esc cancel");
   mvwprintw(dlg, 3, (dlg_width - 20) / 2, "Press a key to add...");
   mvwprintw(dlg, 4, (dlg_width - 18) / 2, "(Esc to cancel)");
   wrefresh(dlg);

@@ -26,7 +26,7 @@ enum Follow {
       guard let v = model.value(row: row, column: c) else { return .failure(FollowProblem("\(name) is not loaded yet")) }
       if v.isNull { return .failure(FollowProblem("\(name) is NULL: nothing to follow")) }
       if v.isOmitted { return .failure(FollowProblem("\(name) is too large to load")) }
-      out.append(v.editText ?? "")
+      out.append(v.editText)
     }
     return .success(out)
   }

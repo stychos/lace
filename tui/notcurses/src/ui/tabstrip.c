@@ -1,5 +1,6 @@
 #include "ui/tabstrip.h"
 #include "conn/connection.h"
+#include "core/chrome.h"
 #include "core/utf8.h"
 #include "model/workspace.h"
 #include "ui/form_tab.h"
@@ -10,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define STRIP_MIN_ROWS 14 /* below this the strip gives its row to the content */
+#define STRIP_MIN_ROWS CHROME_STRIP_MIN_ROWS
 
 int tabstrip_rows(const NcApp *app) {
   if (app->rows < STRIP_MIN_ROWS || !prefs_section_bool(app->config, "tabs_strip", true)) return 0;
@@ -19,41 +20,10 @@ int tabstrip_rows(const NcApp *app) {
 }
 
 size_t tabstrip_layout(const int *widths, size_t n, size_t current, int width, int *x0, int *x1) {
-  for (size_t i = 0; i < n; i++) x0[i] = x1[i] = 0;
-  if (!n || width < 4) return 0;
-  if (current >= n) current = n - 1;
-  size_t first = 0;
-  for (;;) {
-    /* a scroll mark on the left when tabs are hidden there, one on the right when some follow */
-    int x = first ? 2 : 0;
-    bool fits = false;
-    size_t i;
-    for (i = first; i < n; i++) {
-      int cell = widths[i] + 2;
-      int limit = width - (i + 1 < n ? 2 : 0); /* room for the right mark */
-      if (x + cell > limit) break;
-      if (i == current) fits = true;
-      x += cell + 1;
-    }
-    if (fits || first == current || first + 1 >= n) break;
-    first++;
-  }
-  int x = first ? 2 : 0;
-  for (size_t i = first; i < n; i++) {
-    int cell = widths[i] + 2;
-    int limit = width - (i + 1 < n ? 2 : 0);
-    if (x + cell > limit) break;
-    x0[i] = x;
-    x1[i] = x + cell;
-    x += cell + 1;
-  }
-  return first;
+  return chrome_strip_layout(widths, n, current, width, x0, x1);
 }
 
-static int label_width(const char *label) {
-  int w = utf8_width(label, strlen(label));
-  return w > TABSTRIP_LABEL_MAX ? TABSTRIP_LABEL_MAX : w;
-}
+static int label_width(const char *label) { return chrome_strip_label_width(label); }
 
 size_t tabstrip_entries(const NcWorkspace *ws, StripEntry **out, size_t *current) {
   *current = SIZE_MAX;

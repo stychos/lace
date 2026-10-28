@@ -139,3 +139,30 @@ def test_switch_database_needs_a_server(home):
         t.keys("C-p"); t.wait("ACTIONS"); t.type("switch data"); time.sleep(0.3)
         assert "Switch database" not in t.text()                          # and the palette does not list it
         t.keys("Escape", "q"); assert t.quit() == 0
+
+
+def test_cli_query_mode(home):
+    """lace-nc -q: the TUIs' query mode, every format, without starting the screen"""
+    import subprocess
+    from harness import LACE_NC, LACED_DIR, sqlite_db
+    db = sqlite_db(home.file("q.sqlite"), """
+        CREATE TABLE c (id INTEGER PRIMARY KEY, s TEXT);
+        INSERT INTO c VALUES (1, 'a'), (2, NULL);
+    """)
+    env = {"HOME": home.path, "PATH": LACED_DIR + ":/usr/bin:/bin"}
+
+    def q(*args, ok=True):
+        r = subprocess.run([LACE_NC, *args], capture_output=True, text=True, timeout=30, env=env)
+        assert (r.returncode == 0) == ok, (r.returncode, r.stderr)
+        return r
+    sql = "SELECT id, s FROM c ORDER BY id"
+    assert q("-q", sql, db).stdout == ("+----+------+\n| id | s    |\n+----+------+\n|  1 | a    |\n"
+                                       "|  2 | NULL |\n+----+------+\n2 rows\n")
+    assert q("-q", sql, "-f", "csv", "sqlite://" + db).stdout == "id,s\n1,a\n2,\n"
+    assert q("--query=" + sql, "--format", "json", db).stdout == \
+        '[\n {"id": 1, "s": "a"},\n {"id": 2, "s": null}\n]\n'
+    assert q("-q", sql + "\\G", db).stdout.startswith("*************************** 1. row")
+    assert "unknown format" in q("-q", sql, "-f", "xml", db, ok=False).stderr
+    assert "exactly one" in q("-q", sql, ok=False).stderr
+    assert "goes with -q" in q("-f", "csv", db, ok=False).stderr
+    assert q("--help").stdout.startswith("Usage:")
