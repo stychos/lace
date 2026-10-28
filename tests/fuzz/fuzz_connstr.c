@@ -14,6 +14,12 @@ static bool same(const char *a, const char *b) {
   return strcmp(a ? a : "", b ? b : "") == 0;
 }
 
+/* connstr_parse refuses a string over LACE_MAX_CONNSTR_LEN, and encoding
+ * can triple what parsed under it (a '?' becomes %3F) */
+static bool over_limit(const char *s) {
+  return strlen(s) > LACE_MAX_CONNSTR_LEN;
+}
+
 /* Characters a host can hold in a URL as connstr_build writes it */
 static bool plain_host(const char *h) {
   return h && h[0] && !strpbrk(h, ":/@?#[]%&= ");
@@ -40,12 +46,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
       char *built = connstr_build(cs->driver, cs->user, cs->password, cs->host,
                                   cs->port, cs->database, NULL, NULL, 0);
       ConnString *again = built ? connstr_parse(built, NULL) : NULL;
-      if (!again)
-        FUZZ_FAIL("rebuilt [%s] from [%s] does not parse", built ? built : "", s);
-      if (!same(cs->user, again->user) || !same(cs->password, again->password) ||
-          !same(cs->host, again->host) || !same(cs->database, again->database) ||
-          cs->port != again->port)
-        FUZZ_FAIL("[%s] rebuilt as [%s] parses differently", s, built);
+      if (built && over_limit(built)) {
+        if (again)
+          FUZZ_FAIL("rebuilt [%s] is over the length limit but parses", built);
+      } else {
+        if (!again)
+          FUZZ_FAIL("rebuilt [%s] from [%s] does not parse", built ? built : "", s);
+        if (!same(cs->user, again->user) || !same(cs->password, again->password) ||
+            !same(cs->host, again->host) || !same(cs->database, again->database) ||
+            cs->port != again->port)
+          FUZZ_FAIL("[%s] rebuilt as [%s] parses differently", s, built);
+      }
       connstr_free(again);
       free(built);
     }
@@ -66,7 +77,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     char *p = connstr_encode_path(s);
     char *url = str_printf("sqlite://%s", p);
     ConnString *sq = connstr_parse(url, NULL);
-    if (!sq || !same(sq->database, s))
+    if (over_limit(url)) {
+      if (sq)
+        FUZZ_FAIL("[%s] is over the length limit but parses", url);
+    } else if (!sq || !same(sq->database, s))
       FUZZ_FAIL("path [%s] as [%s] parses as [%s]", s, url,
                 sq && sq->database ? sq->database : "(null)");
     connstr_free(sq);
