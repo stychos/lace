@@ -447,4 +447,65 @@ extension Connection {
       return takeCString(sql) ?? ""
     }
   }
+
+  // MARK: Databases (the database switch)
+
+  /// The database the connection is in (PostgreSQL current_database(),
+  /// MySQL DATABASE()); nil for SQLite or a MySQL session without one
+  public func currentDatabase() async throws -> String? {
+    try await submitRead { [client] id in
+      var name: UnsafeMutablePointer<CChar>? = nil
+      try client.check(lace_current_database(client.raw, id, &name))
+      return takeCString(name)
+    }
+  }
+
+  /// The server's databases this user may connect to (none for SQLite)
+  public func databases() async throws -> [String] {
+    try await submitRead { [client] id in
+      var names: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>? = nil
+      var count = 0
+      try client.check(lace_list_databases(client.raw, id, &names, &count))
+      defer { lace_tables_free(names, count) }
+      return (0..<count).compactMap { names?[$0].map { String(cString: $0) } }
+    }
+  }
+
+  /// This connection's string pointed at another database of the same
+  /// server: user, passwords, SSH tunnel and URL options kept (rebuilt
+  /// through lace_saved_conn_build_connstr); nil when the string does not parse
+  public func connectionString(database: String) -> String? {
+    Connection.connectionString(connectionString, database: database)
+  }
+
+  public static func connectionString(_ cs: String, database: String) -> String? {
+    guard let sc = lace_saved_conn_from_connstr(cs, nil) else { return nil }
+    defer { lace_saved_conn_free(sc) }
+    free(sc.pointee.database)
+    sc.pointee.database = strdup(database)
+    guard let built = lace_saved_conn_build_connstr(sc, nil, nil) else { return nil }
+    defer { str_secure_free(built) }  // it holds the passwords
+    var out = String(cString: built)
+    // The URL's options (sslmode, connect_timeout, ...) a saved connection
+    // has no field for: carried over, or a switch would quietly drop TLS
+    // settings; the ones the rebuild wrote itself (ssh_key) are not repeated
+    guard let original = connstr_parse(cs, nil) else { return out }
+    defer { connstr_free(original) }
+    var have = Set<String>()
+    if let rebuilt = connstr_parse(out, nil) {
+      for i in 0..<rebuilt.pointee.num_options {
+        if let k = rebuilt.pointee.option_keys[i] { have.insert(String(cString: k)) }
+      }
+      connstr_free(rebuilt)
+    }
+    for i in 0..<original.pointee.num_options {
+      guard let k = original.pointee.option_keys[i], let v = original.pointee.option_values[i] else { continue }
+      let key = String(cString: k)
+      guard !have.contains(key), key != "lace_socket",
+        let ek = takeCString(str_url_encode(k)), let ev = takeCString(str_url_encode(v))
+      else { continue }
+      out += (out.contains("?") ? "&" : "?") + ek + "=" + ev
+    }
+    return out
+  }
 }

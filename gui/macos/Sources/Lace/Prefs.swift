@@ -9,7 +9,7 @@
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
 
-import Foundation
+import AppKit
 import LaceKit
 
 struct Prefs {
@@ -38,6 +38,12 @@ struct Prefs {
   var lastWorkspaceClose: SharedConfig.LastWorkspaceClose = .quit
   /// A connection placed in a window opens its first table
   var autoOpenFirstTable = false
+  /// Session restore puts the cursor back (a table's row and column, a query's caret)
+  var restoreCursor = true
+  /// ⌘Q (and the last window's close when it quits) asks first
+  var confirmQuit = false
+  /// System, light or dark (NSApp.appearance)
+  var colorScheme: SharedConfig.ColorScheme = .system
 
   /// The app's old preferences file, migrated into config.json once
   static let legacyFileName = "macos.json"
@@ -75,6 +81,9 @@ struct Prefs {
     p.keepConnectionTab = config.keepConnectionTab
     p.lastWorkspaceClose = config.lastWorkspaceClose
     p.autoOpenFirstTable = config.autoOpenFirstTable
+    p.restoreCursor = config.restoreCursorPosition
+    p.confirmQuit = config.quitConfirmation
+    p.colorScheme = config.colorScheme
     return p
   }
 
@@ -93,7 +102,19 @@ struct Prefs {
     config.keepConnectionTab = keepConnectionTab
     config.lastWorkspaceClose = lastWorkspaceClose
     config.autoOpenFirstTable = autoOpenFirstTable
+    config.restoreCursorPosition = restoreCursor
+    config.quitConfirmation = confirmQuit
+    config.colorScheme = colorScheme
     try config.save()
+  }
+
+  /// The appearance color_scheme asks for (nil: the system's)
+  var appearance: NSAppearance? {
+    switch colorScheme {
+    case .system: nil
+    case .light: NSAppearance(named: .aqua)
+    case .dark: NSAppearance(named: .darkAqua)
+    }
   }
 
   /// Like the TUI's platform_write_file_private(): a 0600 temp file in the

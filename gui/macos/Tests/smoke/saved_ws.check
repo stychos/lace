@@ -1,0 +1,12 @@
+python3 - "$CONFIG_DIR/workspaces.json" <<'PY'
+import json, sys
+w = json.load(open(sys.argv[1]))["workspaces"]
+assert [x["name"] for x in w] == ["Crew"], w
+ws = w[0]["workspace"]
+conns = ws["connections"]
+assert len(conns) == 1 and conns[0].get("saved_id"), conns
+assert "connstr" not in conns[0], conns[0]
+assert [t["type"] for t in conns[0]["tabs"]] == ["table", "query"], conns[0]["tabs"]
+assert all("cursor" not in t for t in conns[0]["tabs"]), conns[0]["tabs"]
+assert "macos" not in ws and not any(c.get("form") for c in conns), ws
+PY

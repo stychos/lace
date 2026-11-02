@@ -34,8 +34,68 @@ final class LaceApp {
 
   /// The preferences into config.json (general and macos; the rest kept)
   func savePrefs(_ p: Prefs) throws {
+    let schemeChanged = p.colorScheme != prefs.colorScheme
     prefs = p
+    if schemeChanged {
+      applyColorScheme()
+    }
     try p.save(to: config)
+  }
+
+  /// general.color_scheme as the app's appearance (nil follows the system)
+  func applyColorScheme() {
+    NSApp.appearance = prefs.appearance
+  }
+
+  // MARK: Quitting
+
+  /// The quit was asked about and confirmed (the last window's close, ⌘Q):
+  /// applicationShouldTerminate asks no more
+  var quitConfirmed = false
+
+  /// What quitting would need confirmed, or nil: a transaction open on a
+  /// connection (rolled back by the quit), else general.quit_confirmation;
+  /// destructive: the transaction case (Cancel is the default answer)
+  func quitQuestion() -> (message: String, destructive: Bool)? {
+    if let tx = connections.openTransactionName() {
+      return ("A transaction is open on \(tx). Quit and roll it back?", true)
+    }
+    if prefs.confirmQuit {
+      return ("Every connection closes.", false)
+    }
+    return nil
+  }
+
+  /// The quit question is on screen (a second ⌘Q meanwhile asks nothing more)
+  private var quitAsking = false
+
+  /// Ask quitQuestion() over window; true when the app may quit
+  func confirmQuit(window: NSWindow?) async -> Bool {
+    guard !quitConfirmed, let q = quitQuestion() else { return true }
+    guard !quitAsking else { return false }
+    quitAsking = true
+    defer { quitAsking = false }
+    // A sheet only on a window that can be seen; else (the app hidden, as
+    // a quit from the Dock leaves it, or the window minimized) a modal alert
+    var window = window
+    if NSApp.isHidden || window?.isVisible != true || window?.isMiniaturized == true {
+      window = nil
+      NSApp.unhide(nil)
+      NSApp.activate(ignoringOtherApps: true)
+    }
+    let ok =
+      q.destructive
+      ? await Alerts.confirm("Quit Lace?", q.message, action: "Quit", window: window)
+      : await Alerts.ask("Quit Lace?", q.message, yes: "Quit", no: "Cancel", window: window)
+    if ok {
+      quitConfirmed = true
+    }
+    return ok
+  }
+
+  /// The preferences changed elsewhere (the palette): an open window shows them
+  func preferencesChanged() {
+    preferences?.reload()
   }
 
   func showPreferences() {

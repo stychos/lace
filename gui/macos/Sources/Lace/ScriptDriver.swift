@@ -56,7 +56,7 @@
 //   expect-status TEXT       the query toolbar's status contains TEXT
 //   expect-history N [TEXT]  the connection's history holds N entries, the
 //                            last one containing TEXT
-//   sheet add-row|history|preferences   open that sheet or window
+//   sheet add-row|history|preferences|saved-workspaces   open that sheet or window
 //   dismiss-sheet            close it again
 //   answer TEXT              what the next name prompt (rename, new table, the
 //                            counter, a comment) answers; empty: cancel
@@ -108,6 +108,29 @@
 //   expect-uri-masked        the URI line shows ••••• and not the typed password
 //   expect-open-uses TEXT    the string Open would connect with contains TEXT
 //                            (a Keychain password; never logged)
+//   undo                     ⌘Z in the grid: revert its newest write and wait
+//   expect-undo N [TITLE]    the table tab holds N undo steps, the newest
+//                            titled TITLE ("Edit of name", "Delete of 2 Rows")
+//   palette                  open the command palette (⇧⌘P)
+//   palette-filter TEXT      type TEXT into its search field
+//   expect-palette-row TEXT  a row shown contains TEXT (expect-no-palette-row: none)
+//   expect-palette-first TEXT   the selected (first) row contains TEXT
+//   palette-run TEXT         run the row titled TEXT (else the first containing it)
+//   palette-close            close it
+//   switch-database          File ▸ Switch Database… (the pick list, or a notice)
+//   expect-notice TEXT       the connection's last notice contains TEXT (waits)
+//   save-workspace           ⌥⌘S: the window's layout under the next `answer`
+//   open-saved-workspace NAME   open a saved layout (the script follows a new window)
+//   expect-saved-workspaces A|B   workspaces.json's layout names, in order
+//   saved-sheet open|rename|delete NAME   on the Manage sheet (rename takes
+//                            the next `answer`, delete asks: answer-alert)
+//   expect-saved-sheet A|B   the names the Manage sheet lists
+//   query-caret N            put the query editor's caret at UTF-8 byte offset N
+//   expect-query-caret N     the caret is at UTF-8 byte offset N
+//   expect-focus R C         the grid's focused cell (waits a moment)
+//   expect-appearance NAME   the app's appearance: system, light or dark
+//   quit-request             ⌘Q a turn later (the script goes on: expect-alert,
+//                            answer-alert)
 //
 // (c) iloveyou, 2025. MIT License.
 // https://github.com/stychos/lace
@@ -186,9 +209,13 @@ final class ScriptDriver {
   private var grid: GridController? { table?.grid ?? query?.grid }
   private var model: RowModel? { grid?.model }
 
-  /// The newest alert over the script's window containing text
+  /// The newest alert over the script's window (or a sheet of it) containing text
   private func alert(containing text: String) -> Alerts.Shown? {
-    Alerts.shown.last { $0.window === windowController.window && (text.isEmpty || $0.text.contains(text)) }
+    Alerts.shown.last { shown in
+      let over = shown.window === windowController.window
+        || (shown.window != nil && shown.window?.sheetParent === windowController.window)
+      return over && (text.isEmpty || shown.text.contains(text))
+    }
   }
 
   /// Poll a condition on the main actor until it holds or the timeout passes
@@ -521,6 +548,8 @@ final class ScriptDriver {
           connection.showHistory(nil)
         case "preferences":
           LaceApp.shared.showPreferences()
+        case "saved-workspaces":
+          (NSApp.delegate as? AppDelegate)?.manageSavedWorkspaces(nil)
         default:
           check(false, "sheet: unknown \(arg)")
         }
@@ -663,6 +692,8 @@ final class ScriptDriver {
       case "expect-entries":
         check(workspace.entryCount == Int(arg), "expect-entries \(arg): got \(workspace.entryCount)")
       case "expect-entry":
+        // a moment for a connect landing (the form's Open, the database switch)
+        _ = await waitUntil("the entry to be a \(arg)", quiet: true) { workspace.currentKind == arg }
         check(workspace.currentKind == arg, "expect-entry \(arg): got \(workspace.currentKind)")
       case "expect-title":
         check(workspace.currentTitle == arg, "expect-title \(arg): got \(workspace.currentTitle ?? "<none>")")
@@ -717,6 +748,121 @@ final class ScriptDriver {
       case "keychain-refuse":
         check(Keychain.isStandIn, "keychain-refuse: no Keychain stand-in")
         Keychain.standInRefuses = arg == "on"
+      case "undo":
+        guard let grid else {
+          check(false, "undo: no grid")
+          continue
+        }
+        check(grid.undoTitle?() != nil, "undo: nothing to undo")
+        grid.tableView.undo(nil)
+        try? await Task.sleep(for: .milliseconds(100))
+        await settle()
+      case "expect-undo":
+        let got = table?.undoCount ?? -1
+        check(got == Int(words.first ?? ""), "expect-undo \(arg): got \(got)")
+        if words.count > 1 {
+          let want = words[1...].joined(separator: " ")
+          let title = grid?.undoTitle?() ?? "<none>"
+          check(title == want, "expect-undo title \(want): got \(title)")
+        }
+      case "palette":
+        workspace.showPalette(nil)
+        let ok = await waitUntil("the palette", quiet: true) { PaletteController.current != nil }
+        check(ok, "palette: it did not open")
+      case "palette-filter":
+        guard let p = PaletteController.current else {
+          check(false, "palette-filter: no palette")
+          continue
+        }
+        p.setFilter(arg)
+      case "expect-palette-row", "expect-no-palette-row":
+        let titles = PaletteController.current?.visibleTitles ?? []
+        let found = titles.contains { $0.contains(arg) }
+        check(found == (verb == "expect-palette-row"), "\(verb) \(arg): rows \(titles.prefix(40))")
+      case "expect-palette-first":
+        let got = PaletteController.current?.selectedTitle ?? "<none>"
+        check(got.contains(arg), "expect-palette-first \(arg): got \(got)")
+      case "palette-run":
+        guard let p = PaletteController.current else {
+          check(false, "palette-run: no palette")
+          continue
+        }
+        check(p.run(titled: arg), "palette-run \(arg): no such row (\(p.visibleTitles.prefix(40)))")
+        try? await Task.sleep(for: .milliseconds(200))
+        await settle()
+      case "palette-close":
+        PaletteController.current?.close()
+      case "switch-database":
+        let before = connection?.content.lastNotice
+        workspace.switchDatabase(nil)
+        // the databases are read first: the pick list, or a notice
+        _ = await waitUntil("the database list", quiet: true) {
+          PaletteController.current != nil || connection?.content.lastNotice != before
+        }
+      case "expect-notice":
+        let ok = await waitUntil("a notice with \(arg)", quiet: true) {
+          connection?.content.lastNotice.contains(arg) ?? false
+        }
+        check(ok, "expect-notice \(arg): got \(connection?.content.lastNotice ?? "<no connection>")")
+      case "save-workspace":
+        windowController.saveWorkspaceAs(nil)
+        try? await Task.sleep(for: .milliseconds(300))
+      case "open-saved-workspace":
+        let before = LaceApp.shared.workspaces.count
+        SavedWorkspaceActions.open(name: arg)
+        try? await Task.sleep(for: .milliseconds(300))
+        await settle()
+        if LaceApp.shared.workspaces.count > before, let newest = LaceApp.shared.workspaces.last {
+          windowController = newest  // a new window: the script follows it
+        }
+      case "expect-saved-workspaces":
+        let names = ((try? SavedWorkspaces.list()) ?? []).map(\.name).joined(separator: "|")
+        check(names == arg, "expect-saved-workspaces \(arg): got \(names)")
+      case "saved-sheet":
+        guard let sheet = workspace.presentedViewControllers?.compactMap({ $0 as? SavedWorkspacesViewController }).first,
+          words.count == 2
+        else {
+          check(false, "saved-sheet: no saved workspaces sheet or bad arguments")
+          continue
+        }
+        check(sheet.select(name: words[1]), "saved-sheet: no layout \(words[1]) (\(sheet.names))")
+        switch words[0] {
+        case "open": sheet.openSelected(nil)
+        case "rename": sheet.renameSelected(nil)
+        case "delete": sheet.deleteSelected(nil)
+        default: check(false, "saved-sheet: unknown \(words[0])")
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        await settle()
+      case "expect-saved-sheet":
+        let sheet = workspace.presentedViewControllers?.compactMap({ $0 as? SavedWorkspacesViewController }).first
+        let got = sheet?.names.joined(separator: "|") ?? "<no sheet>"
+        check(got == arg, "expect-saved-sheet \(arg): got \(got)")
+      case "query-caret":
+        guard let query, let n = Int(arg) else {
+          check(false, "query-caret: bad arguments or no query view")
+          continue
+        }
+        query.restore(cursorUTF8Offset: n)
+      case "expect-query-caret":
+        let got = query?.cursorUTF8Offset ?? -1
+        check(got == Int(arg), "expect-query-caret \(arg): got \(got)")
+      case "expect-focus":
+        guard let grid, words.count == 2, let r = Int(words[0]), let c = Int(words[1]) else {
+          check(false, "expect-focus: bad arguments or no grid")
+          continue
+        }
+        let ok = await waitUntil("the focus on \(arg)", quiet: true) { grid.focusedCell.map { $0.row == r && $0.column == c } ?? false }
+        let got = grid.focusedCell.map { "\($0.row) \($0.column)" } ?? "<none>"
+        check(ok, "expect-focus \(arg): got \(got)")
+      case "expect-appearance":
+        let name = NSApp.appearance?.name
+        let got = name == .darkAqua ? "dark" : name == .aqua ? "light" : name == nil ? "system" : "\(name!.rawValue)"
+        check(got == arg, "expect-appearance \(arg): got \(got)")
+      case "quit-request":
+        // ⌘Q a turn later, so the script goes on to answer a question it asks
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+        try? await Task.sleep(for: .milliseconds(200))
       case "quit":
         log("\(checks) checks, \(failures) failed")
         exit(failures == 0 ? 0 : 1)
@@ -801,6 +947,11 @@ final class ScriptDriver {
     if let extra, let content = extra.contentView {
       content.layoutSubtreeIfNeeded()
       write(content.superview ?? content, to: "\(name)-sheet.png", in: dir)
+    }
+    // The palette is a child window of its own
+    if let palette = PaletteController.current?.contentView {
+      palette.layoutSubtreeIfNeeded()
+      write(palette.superview ?? palette, to: "\(name)-palette.png", in: dir)
     }
   }
 

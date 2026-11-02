@@ -1,0 +1,6 @@
+restore-session
+expect-tabs 2
+expect-query-caret 10
+table big
+expect-focus 2 1
+quit

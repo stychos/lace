@@ -1,0 +1,21 @@
+# config: {"general": {"daemon_spawn_mode": 1, "delete_confirmation": false, "page_size": 100, "quit_confirmation": true, "color_scheme": 2}, "macos": {"keychain_passwords": false}}
+# general.quit_confirmation: ⌘Q asks "Quit Lace?" and Cancel keeps the app;
+# the last window's close asks too, and a window opened while that question
+# is up means the close did not quit, so the next ⌘Q asks again (a quit
+# that skipped it would end the run before `quit`). general.color_scheme 2
+# is the dark appearance.
+expect-appearance dark
+quit-request
+expect-alert Quit Lace?
+answer-alert cancel
+expect-windows 1
+close-window
+expect-alert Quit Lace?
+new-window
+answer-alert go
+expect-windows 1
+quit-request
+expect-alert Quit Lace?
+answer-alert cancel
+expect-windows 1
+quit

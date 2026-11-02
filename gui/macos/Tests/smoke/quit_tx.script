@@ -1,0 +1,18 @@
+# A transaction open anywhere makes ⌘Q ask (Cancel the default) even with
+# quit_confirmation off, and the last window's close too when it quits
+connect $LACE_SMOKE_DB
+query BEGIN
+run
+expect-badge 1
+quit-request
+expect-alert transaction is open
+answer-alert cancel
+expect-windows 1
+close-window
+expect-alert transaction is open
+answer-alert cancel
+expect-windows 1
+query ROLLBACK
+run
+expect-badge 0
+quit

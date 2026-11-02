@@ -28,11 +28,16 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     checkboxWithTitle: "Closing a connection's last tab leaves a connection form", target: nil, action: nil)
   private let lastWindowPopup = NSPopUpButton()
   private let autoOpen = NSButton(checkboxWithTitle: "Open the first table on connect", target: nil, action: nil)
+  private let restoreCursor = NSButton(
+    checkboxWithTitle: "Put the cursor back where it was in each tab", target: nil, action: nil)
+  private let confirmQuit = NSButton(
+    checkboxWithTitle: "Ask before quitting (an open transaction always asks)", target: nil, action: nil)
+  private let schemePopup = NSPopUpButton()
   private let note = NSTextField(labelWithString: "")
 
   init() {
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
       styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.title = "Preferences"
     window.center()
@@ -44,7 +49,7 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
   required init?(coder: NSCoder) { fatalError("not used") }
 
   private func makeContent() -> NSView {
-    let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 520))
+    let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 640))
     for title in ["Shared daemon (Unix socket)", "Private daemon (stdio)", "Shared daemon (TCP 7433)", "Detect: a running daemon, else private"] {
       spawnPopup.addItem(withTitle: title)
     }
@@ -63,7 +68,12 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     }
     lastWindowPopup.target = self
     lastWindowPopup.action = #selector(changed)
-    for b in [confirmDelete, approximate, restoreSession, keychain, keepTab, autoOpen] {
+    for title in ["System", "Light", "Dark"] {
+      schemePopup.addItem(withTitle: title)
+    }
+    schemePopup.target = self
+    schemePopup.action = #selector(changed)
+    for b in [confirmDelete, approximate, restoreSession, keychain, keepTab, autoOpen, restoreCursor, confirmQuit] {
       b.target = self
       b.action = #selector(changed)
     }
@@ -109,6 +119,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
       let r = grid.addRow(with: [NSView(), l])
       r.topPadding = 8
     }
+    section("Appearance")
+    row("Colour scheme", schemePopup)
     section("Daemon (next launch)")
     row("Start", spawnPopup)
     row("Idle timeout", idleRow)
@@ -126,6 +138,8 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     row("Size", historyRow)
     section("Startup and passwords")
     row("Session", restoreSession)
+    row("Cursor", restoreCursor)
+    row("Quitting", confirmQuit)
     row("Passwords", keychain)
     grid.translatesAutoresizingMaskIntoConstraints = false
 
@@ -167,6 +181,14 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     keepTab.state = p.keepConnectionTab ? .on : .off
     lastWindowPopup.selectItem(at: Int(p.lastWorkspaceClose.rawValue))
     autoOpen.state = p.autoOpenFirstTable ? .on : .off
+    restoreCursor.state = p.restoreCursor ? .on : .off
+    confirmQuit.state = p.confirmQuit ? .on : .off
+    schemePopup.selectItem(at: Int(p.colorScheme.rawValue))
+  }
+
+  /// The values may have changed elsewhere (the palette's toggles)
+  func reload() {
+    load()
   }
 
   @objc private func changed() {
@@ -205,6 +227,9 @@ final class PreferencesWindowController: NSWindowController, NSTextFieldDelegate
     p.keepConnectionTab = keepTab.state == .on
     p.lastWorkspaceClose = SharedConfig.LastWorkspaceClose(rawValue: Int32(lastWindowPopup.indexOfSelectedItem)) ?? .quit
     p.autoOpenFirstTable = autoOpen.state == .on
+    p.restoreCursor = restoreCursor.state == .on
+    p.confirmQuit = confirmQuit.state == .on
+    p.colorScheme = SharedConfig.ColorScheme(rawValue: Int32(schemePopup.indexOfSelectedItem)) ?? .system
     do {
       try LaceApp.shared.savePrefs(p)
     } catch {

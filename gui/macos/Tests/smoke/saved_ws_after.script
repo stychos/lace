@@ -1,0 +1,24 @@
+expect-windows 1
+expect-entry form
+sheet saved-workspaces
+expect-saved-sheet Team|Junk
+saved-sheet open Team
+expect-windows 1
+expect-connections 1
+expect-tabs 2
+expect-title Local
+sheet saved-workspaces
+answer Crew
+saved-sheet rename Team
+expect-saved-sheet Junk|Crew
+saved-sheet delete Junk
+answer-alert go
+expect-saved-workspaces Crew
+dismiss-sheet
+palette
+expect-palette-row Open saved workspace Crew
+palette-run Open saved workspace Crew
+expect-windows 2
+expect-connections 1
+expect-open-connections 1
+quit

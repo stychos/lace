@@ -7,7 +7,8 @@
 # Needs the Command Line Tools (swift) and cJSON (brew install cjson); no
 # Xcode. liblace.a is linked by path from Package.swift, never with -llace.
 # Saved connections, recent connections, query history, config.json, the
-# session converters, the connection form's field model and the private
+# session converters, saved workspaces (workspaces.json), the palette's
+# fuzzy score, the connection form's field model and the private
 # file writer are the TUI's own sources (SHARED_NAMES), compiled here into
 # build/shared/liblaceshared.a with csrc/macos_shared.c, the bridge for
 # what Swift cannot call as it is (as the GTK Makefile does), so every
@@ -51,7 +52,7 @@ SHARED_DIR = $(BUILD_DIR)/shared
 SHARED_LIB = $(SHARED_DIR)/liblaceshared.a
 SHARED_NAMES = config/connections config/recent core/history platform/posix/platform_posix \
   core/catalog_rows core/utf8 config/config config/workspace_json config/session_json core/ui_event \
-  core/conn_fields views/text_input
+  core/conn_fields views/text_input core/fuzzy config/saved_workspaces
 SHARED_OBJS = $(addprefix $(SHARED_DIR)/,$(addsuffix .o,$(notdir $(SHARED_NAMES)))) $(SHARED_DIR)/macos_shared.o
 SHARED_CFLAGS = -std=c11 -Wall -Wextra -O2 -g -mmacosx-version-min=$(MACOS_MIN) \
   -I../../liblace/include -I$(TUI_SRC) $(shell pkg-config --cflags libcjson 2>/dev/null) $(EXTRA_CFLAGS)

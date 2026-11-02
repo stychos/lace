@@ -1,0 +1,59 @@
+# Undo (⌘Z in the grid): a cell edit goes back by a verified UPDATE (an
+# edited key column too: the step addresses the row by its new key); a
+# deleted row comes back by INSERT; a row changed since refuses (the step
+# is consumed); query results undo too; rows a delete cascaded away are
+# named as not restored
+connect $LACE_SMOKE_DB
+table big
+expect-undo 0
+cell 1 1
+edit 99
+expect-cell 1 1 99
+expect-undo 1 Edit of v
+undo
+expect-cell 1 1 20
+expect-undo 0
+cell 0 0
+edit 7
+expect-cell 0 0 7
+undo
+expect-cell 0 0 1
+expect-cell 0 1 10
+cell 2 0
+delete
+expect-total 2
+expect-undo 1 Delete of 1 Row
+undo
+expect-total 3
+expect-cell 2 1 30
+cell 0 1
+edit 11
+expect-undo 1
+query UPDATE big SET v = 12 WHERE id = 1
+run
+table big
+undo
+expect-alert Not undone
+answer-alert cancel
+expect-undo 0
+query SELECT * FROM big ORDER BY id
+run
+cell 1 1
+edit 5
+expect-cell 1 1 5
+undo
+expect-cell 1 1 20
+query CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT)\; CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) ON DELETE CASCADE)\; INSERT INTO parent VALUES (1, 'p')\; INSERT INTO child VALUES (1, 1)
+run-all
+table parent
+cell 0 0
+delete
+expect-total 0
+undo
+expect-total 1
+expect-alert Rows not restored
+answer-alert cancel
+query SELECT count(*) FROM child
+run
+expect-cell 0 0 0
+quit

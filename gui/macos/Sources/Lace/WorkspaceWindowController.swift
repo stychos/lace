@@ -57,7 +57,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
   }
 
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    if forceClose || !workspace.hasLastHeldTransaction {
+    if forceClose {
+      return true
+    }
+    let app = LaceApp.shared
+    // The last window's close quits (on_last_workspace_close "quit"): the
+    // quit's question, which covers an open transaction too
+    if !app.isTerminating, app.workspaces.count == 1, app.prefs.lastWorkspaceClose == .quit,
+      !app.quitConfirmed, app.quitQuestion() != nil
+    {
+      Task { [weak self] in
+        guard let self else { return }
+        if await app.confirmQuit(window: window) {
+          forceClose = true
+          window?.close()
+        }
+      }
+      return false
+    }
+    if !workspace.hasLastHeldTransaction {
       return true
     }
     Task { [weak self] in
@@ -89,9 +107,19 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate {
     }
     workspace.closeAllConnections()
     app.workspaceClosed(self)
+    if !app.workspaces.isEmpty {
+      // Another window came up while the quit question was answered: this
+      // close did not quit, so the next quit asks again
+      app.quitConfirmed = false
+    }
     if !app.isTerminating && app.workspaces.isEmpty {
       app.lastWorkspaceClosed()
     }
+  }
+
+  /// ⌥⌘S: the window's layout into workspaces.json under a name
+  @objc func saveWorkspaceAs(_ sender: Any?) {
+    SavedWorkspaceActions.save(self)
   }
 
   @objc func renameWorkspace(_ sender: Any?) {
@@ -305,8 +333,9 @@ final class WorkspaceViewController: NSViewController, NSUserInterfaceValidation
     }
   }
 
-  private func swapForForm(_ vc: ConnectionViewController) {
-    guard let i = entries.firstIndex(where: { $0 === vc }) else { return }
+  @discardableResult
+  private func swapForForm(_ vc: ConnectionViewController) -> ConnectionFormViewController? {
+    guard let i = entries.firstIndex(where: { $0 === vc }) else { return nil }
     let wasCurrent = currentID == vc.id
     vc.tearDown()
     entries.remove(at: i)
@@ -319,6 +348,7 @@ final class WorkspaceViewController: NSViewController, NSUserInterfaceValidation
     if wasCurrent || currentID == nil {
       select(form.id)
     }
+    return form
   }
 
   /// The connection as an entry at the end; autoOpen: its first table opens
@@ -418,6 +448,95 @@ final class WorkspaceViewController: NSViewController, NSUserInterfaceValidation
     }
   }
 
+  /// A saved connection (with its Keychain passwords): into an untouched
+  /// form's place, else at the end (the palette's "Connect to")
+  func connect(savedID: String) {
+    guard let saved = LaceApp.shared.savedConnection(id: savedID) else { return }
+    Task {
+      guard
+        let conn = await LaceApp.shared.connections.open(
+          connectionString: saved.connectionString(), saved: saved, window: view.window)
+      else { return }
+      if let form = currentForm, form.isPristine {
+        place(conn, saved: saved, from: form, background: false)
+      } else {
+        append(conn, saved: saved, select: true, autoOpen: true)
+      }
+    }
+  }
+
+  // MARK: Switching database
+
+  /// The current connection's server databases in a pick list; picking
+  /// another switches the entry there (switchDatabase(of:to:))
+  @objc func switchDatabase(_ sender: Any?) {
+    guard let vc = current, let window = view.window else { return }
+    let connection = vc.connection
+    guard connection.driver != .sqlite else {
+      vc.content.showNotice("A SQLite file is one database")
+      return
+    }
+    Task { [weak self, weak vc] in
+      let listed = await Result { try await connection.databases() }
+      let now = try? await connection.currentDatabase()
+      guard let self, let vc else { return }
+      switch listed {
+      case .failure(let error):
+        Alerts.error("Databases", "\(error)", window: window)
+      case .success(let names) where names.isEmpty:
+        vc.content.showNotice("No database to switch to")
+      case .success(let names):
+        let rows = names.map { name in
+          PaletteRow(
+            section: "", title: name, detail: name == now ? "current" : nil, marked: name == now
+          ) { [weak self, weak vc] in
+            guard let self, let vc else { return }
+            switchDatabase(of: vc, to: name, current: now)
+          }
+        }
+        PaletteController(title: "Switch Database", placeholder: "Database", rows: rows, parent: window).show()
+      }
+    }
+  }
+
+  /// The entry lets its connection go (a form in its place showing the
+  /// target) and connects to the same server's database name there, with
+  /// the same user, passwords and tunnel: a connection to it open
+  /// elsewhere is shared, and a failure lands on the form's message line.
+  /// The last holder of an open transaction is asked first.
+  func switchDatabase(of vc: ConnectionViewController, to name: String, current: String?) {
+    if name == current {
+      vc.content.showNotice("Already in \(name)")
+      return
+    }
+    guard let target = vc.connection.connectionString(database: name) else {
+      Alerts.error("Switch database", "No connection string could be built for \(name)", window: view.window)
+      return
+    }
+    let go: () -> Void = { [weak self, weak vc] in
+      guard let self, let vc, let form = swapForForm(vc) else { return }
+      form.setURI(target)
+      form.perform("open")
+    }
+    guard vc.hasOpenTransaction, vc.isLastHolder else {
+      go()
+      return
+    }
+    Task { [weak self] in
+      let ok = await Alerts.confirm(
+        "Switch to \(name)?", "A transaction is open on \(vc.connection.shortName). Switching rolls it back.",
+        action: "Switch", window: self?.view.window)
+      if ok {
+        go()
+      }
+    }
+  }
+
+  /// ⇧⌘P: the command palette over this window
+  @objc func showPalette(_ sender: Any?) {
+    CommandPalette.show(for: self)
+  }
+
   /// The connection for this target (one already open anywhere in the app,
   /// else a new one, with password prompts) as an entry at the end; nil
   /// when it failed or was cancelled (the error was shown). Session restore
@@ -467,11 +586,27 @@ final class WorkspaceViewController: NSViewController, NSUserInterfaceValidation
     closeIfEmpty()
   }
 
-  /// A window left with nothing closes (after the change that emptied it)
+  /// A window left with nothing closes (after the change that emptied it);
+  /// when that quits the app (the last window, on_last_workspace_close
+  /// "quit") and quitting asks, a Cancel keeps the window with a form
   private func closeIfEmpty() {
     guard entries.isEmpty else { return }
     DispatchQueue.main.async { [weak self] in
       guard let self, entries.isEmpty, let window = view.window, window.isVisible else { return }
+      let app = LaceApp.shared
+      if !app.isTerminating, app.workspaces.count == 1, app.prefs.lastWorkspaceClose == .quit,
+        !app.quitConfirmed, app.quitQuestion() != nil
+      {
+        Task { [weak self] in
+          guard let self else { return }
+          if await app.confirmQuit(window: window) {
+            window.close()
+          } else if entries.isEmpty {
+            addForm()
+          }
+        }
+        return
+      }
       window.close()
     }
   }
@@ -611,6 +746,8 @@ final class WorkspaceViewController: NSViewController, NSUserInterfaceValidation
     switch item.action {
     case #selector(newQuery(_:)):
       return current != nil
+    case #selector(switchDatabase(_:)):
+      return current.map { $0.connection.driver != .sqlite } ?? false
     case #selector(closeConnection(_:)):
       return currentEntry != nil
     case #selector(nextConnection(_:)), #selector(previousConnection(_:)):

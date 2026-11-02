@@ -14,9 +14,13 @@ import AppKit
 import LaceKit
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+  /// File ▸ Saved Workspaces, filled from workspaces.json each time it opens
+  private let savedWorkspacesMenu = NSMenu(title: "Saved Workspaces")
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.mainMenu = makeMainMenu()
+    LaceApp.shared.applyColorScheme()
     let first = LaceApp.shared.newWorkspace()
     if ScriptDriver.isRequested {
       ScriptDriver.startIfRequested(in: first)
@@ -45,8 +49,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return true
   }
 
+  /// A transaction open anywhere, or general.quit_confirmation, asks first
+  /// (not again after the last window's close asked). The quit is cancelled
+  /// meanwhile and asked for again once confirmed: .terminateLater would
+  /// run a modal loop in which the question's task never runs.
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    LaceApp.shared.isTerminating = true
+    let app = LaceApp.shared
+    if !app.quitConfirmed, !app.workspaces.isEmpty, app.quitQuestion() != nil {
+      Task { @MainActor in
+        if await app.confirmQuit(window: app.frontWorkspace?.window) {
+          NSApp.terminate(nil)
+        }
+      }
+      return .terminateCancel
+    }
+    app.isTerminating = true
     return .terminateNow
   }
 
@@ -75,6 +92,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   @objc func showPreferences(_ sender: Any?) {
     LaceApp.shared.showPreferences()
+  }
+
+  /// A saved layout from File ▸ Saved Workspaces (its name is the item's object)
+  @objc func openSavedWorkspace(_ sender: Any?) {
+    guard let name = (sender as? NSMenuItem)?.representedObject as? String else { return }
+    SavedWorkspaceActions.open(name: name)
+  }
+
+  @objc func manageSavedWorkspaces(_ sender: Any?) {
+    let workspace = LaceApp.shared.frontWorkspace ?? LaceApp.shared.newWorkspace()
+    workspace.workspace.presentAsSheet(SavedWorkspacesViewController())
+  }
+
+  /// Its items have no key equivalents: AppKit need not fill it (reading
+  /// workspaces.json) while it looks for the menu item of every ⌘ key
+  func menuHasKeyEquivalent(
+    _ menu: NSMenu, for event: NSEvent, target: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+    action: UnsafeMutablePointer<Selector?>
+  ) -> Bool {
+    false
+  }
+
+  /// The saved layouts, read again (another frontend may have changed the file)
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    guard menu === savedWorkspacesMenu else { return }
+    menu.removeAllItems()
+    let layouts = (try? SavedWorkspaces.list()) ?? []
+    for layout in layouts {
+      let item = menu.addItem(withTitle: layout.name, action: #selector(openSavedWorkspace(_:)), keyEquivalent: "")
+      item.representedObject = layout.name
+      item.target = self
+    }
+    if layouts.isEmpty {
+      menu.addItem(withTitle: "No Saved Workspaces", action: nil, keyEquivalent: "").isEnabled = false
+    }
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Manage Saved Workspaces…", action: #selector(manageSavedWorkspaces(_:)), keyEquivalent: "")
   }
 
   // MARK: Menu
@@ -106,12 +160,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     file.addItem(
       withTitle: "Open SQLite File…", action: #selector(WorkspaceViewController.openSQLiteFile(_:)),
       keyEquivalent: "o")
+    file.addItem(
+      withTitle: "Switch Database…", action: #selector(WorkspaceViewController.switchDatabase(_:)), keyEquivalent: "D")
     file.addItem(.separator())
     file.addItem(withTitle: "New Query", action: #selector(WorkspaceViewController.newQuery(_:)), keyEquivalent: "e")
     file.addItem(.separator())
     file.addItem(
       withTitle: "Rename Workspace…", action: #selector(WorkspaceWindowController.renameWorkspace(_:)),
       keyEquivalent: "R")
+    let saveLayout = file.addItem(
+      withTitle: "Save Workspace As…", action: #selector(WorkspaceWindowController.saveWorkspaceAs(_:)),
+      keyEquivalent: "s")
+    saveLayout.keyEquivalentModifierMask = [.command, .option]
+    savedWorkspacesMenu.delegate = self
+    file.addItem(submenu(savedWorkspacesMenu, title: "Saved Workspaces"))
     file.addItem(.separator())
     file.addItem(withTitle: "Close Tab", action: #selector(WorkspaceViewController.closeTab(_:)), keyEquivalent: "w")
     file.addItem(
@@ -152,6 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     main.addItem(submenu(edit, title: "Edit"))
 
     let view = NSMenu(title: "View")
+    view.addItem(
+      withTitle: "Command Palette…", action: #selector(WorkspaceViewController.showPalette(_:)), keyEquivalent: "P")
+    view.addItem(.separator())
     let sidebar = view.addItem(
       withTitle: "Toggle Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s")
     sidebar.keyEquivalentModifierMask = [.command, .control]
@@ -226,7 +291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     runAll.keyEquivalentModifierMask = [.command, .shift]
     query.addItem(
       withTitle: "Run in Transaction", action: #selector(QueryViewController.runInTransaction(_:)), keyEquivalent: "T")
-    query.addItem(withTitle: "Stop", action: #selector(QueryViewController.stop(_:)), keyEquivalent: ".")
+    // stopQuery:, not stop: (NSApplication.stop(_:) would end the run loop
+    // when no query view is in the responder chain)
+    query.addItem(withTitle: "Stop", action: #selector(QueryViewController.stopQuery(_:)), keyEquivalent: ".")
     query.addItem(.separator())
     query.addItem(
       withTitle: "Query History…", action: #selector(ConnectionViewController.showHistory(_:)), keyEquivalent: "y")

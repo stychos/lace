@@ -1,0 +1,16 @@
+# then: cursor_after.script
+# general.restore_cursor_position (on by default): a table tab's focused
+# cell and a query tab's caret (a UTF-8 byte offset, the TUIs' unit) go
+# into session.json and come back
+expect-appearance system
+connect $LACE_SMOKE_DB
+table big
+cell 2 1
+expect-focus 2 1
+query SELECT 'é' AS x
+query-caret 9
+expect-query-caret 8
+query-caret 10
+expect-query-caret 10
+save-session
+quit

@@ -91,6 +91,14 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     edit.confirmDelete = prefs.confirmDelete
     edit.onRowsDeleted = { [weak self] _ in self?.updateFooter() }
     edit.onWrite = { [weak self] sql in self?.record?(sql) }
+    edit.onUndone = { [weak self] in
+      guard let self else { return }
+      if paged && baseSQL != nil && !running {
+        refresh()
+      } else {
+        toast?("Undone; run the statement again to see it")
+      }
+    }
     grid.delegate = self
     grid.allowsSorting = false
     grid.allowsFiltering = false
@@ -146,7 +154,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     toolButton(runAllButton, "forward.fill", "Run every statement (⇧⌘↩)", #selector(runAll(_:)))
     toolButton(
       runTxButton, "checkmark.seal", "Run everything in one transaction (⇧⌘T)", #selector(runInTransaction(_:)))
-    toolButton(stopButton, "stop.fill", "Stop (⌘.)", #selector(stop(_:)))
+    toolButton(stopButton, "stop.fill", "Stop (⌘.)", #selector(stopQuery(_:)))
     stopButton.isEnabled = false
     statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
     statusLabel.textColor = .secondaryLabelColor
@@ -279,6 +287,29 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
     guard let line = trimmed.split(whereSeparator: \.isNewline).first else { return "Query \(number)" }
     let words = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).prefix(4).joined(separator: " ")
     return words.count > 28 ? String(words.prefix(28)) + "…" : words
+  }
+
+  /// The caret as a byte offset into the UTF-8 text (the TUIs' unit in session.json)
+  var cursorUTF8Offset: Int {
+    let text = editor.string
+    let location = min(editor.selectedRange().location, (text as NSString).length)
+    let index = String.Index(utf16Offset: location, in: text)
+    return text.utf8.distance(from: text.startIndex, to: index)
+  }
+
+  /// Session restore of the caret from a UTF-8 byte offset (clamped to the
+  /// text, moved back to the start of a character it falls inside)
+  func restore(cursorUTF8Offset offset: Int) {
+    loadViewIfNeeded()
+    let text = editor.string
+    let utf8 = text.utf8
+    var index = utf8.index(utf8.startIndex, offsetBy: min(offset, utf8.count))
+    while index > text.startIndex, index.samePosition(in: text.unicodeScalars) == nil {
+      index = utf8.index(before: index)
+    }
+    let location = index.utf16Offset(in: text)
+    editor.setSelectedRange(NSRange(location: location, length: 0))
+    editor.scrollRangeToVisible(NSRange(location: location, length: 0))
   }
 
   func insertText(_ sql: String) {
@@ -666,7 +697,7 @@ final class QueryViewController: NSViewController, GridDelegate, NSTextViewDeleg
   @objc func run(_ sender: Any?) { run(mode: .atCursor) }
   @objc func runAll(_ sender: Any?) { run(mode: .all) }
   @objc func runInTransaction(_ sender: Any?) { run(mode: .transaction) }
-  @objc func stop(_ sender: Any?) { cancel() }
+  @objc func stopQuery(_ sender: Any?) { cancel() }
   @objc func refresh(_ sender: Any?) { refresh() }
   @objc func deleteRows(_ sender: Any?) { edit.deleteSelected() }
 

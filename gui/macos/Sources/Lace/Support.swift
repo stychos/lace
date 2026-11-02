@@ -334,7 +334,11 @@ final class NoticeView: NSVisualEffectView {
 
   required init?(coder: NSCoder) { fatalError("not used") }
 
+  /// The last text shown (kept after it hides; the script driver)
+  private(set) var lastText = ""
+
   func show(_ text: String, for seconds: Double = 4) {
+    lastText = text
     label.stringValue = text
     isHidden = false
     hideTask?.cancel()

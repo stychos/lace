@@ -6,7 +6,11 @@
 // connection string; a connection form is {"form": true, "order": N} at its
 // place, nothing else, so no typed text or password is ever written) → tabs
 // (a table with its filters, search and sorts by column name, or a query's
-// text). A save reads the file again and keeps
+// text; with general.restore_cursor_position a table's cursor and scroll
+// [row, column] pairs and a query's caret as a UTF-8 byte offset, the TUIs'
+// units). The same workspace shape, without forms, geometry, cursor or
+// unsaved connections, is a saved layout in workspaces.json (layoutJSON,
+// open(layout:)). A save reads the file again and keeps
 // what other frontends keep there; a file that does not parse is never
 // written. The old macos-session.json is read when there is no
 // session.json and renamed macos-session.json.migrated after the first
@@ -77,13 +81,17 @@ enum Session {
   }
 
   private static func windowJSON(_ wc: WorkspaceWindowController) -> [String: Any] {
+    windowJSON(wc, cursor: withCursor)
+  }
+
+  private static func windowJSON(_ wc: WorkspaceWindowController, cursor: Bool) -> [String: Any] {
     var j: [String: Any] = ["name": wc.name]
     if let window = wc.window {
       j["macos"] = ["frame": NSStringFromRect(window.frame), "maximized": window.isZoomed] as [String: Any]
     }
     j["connections"] = wc.workspace.entryControllers.enumerated().map { i, entry -> [String: Any] in
       if let vc = entry as? ConnectionViewController {
-        return connectionJSON(vc)
+        return connectionJSON(vc, cursor: cursor)
       }
       // A form: its place and nothing else (a connection gets no "order":
       // the TUIs would add a placeholder tab where one is)
@@ -93,7 +101,7 @@ enum Session {
     return j
   }
 
-  private static func connectionJSON(_ vc: ConnectionViewController) -> [String: Any] {
+  private static func connectionJSON(_ vc: ConnectionViewController, cursor: Bool) -> [String: Any] {
     var j: [String: Any] = ["name": vc.tabTitle, "sidebar": vc.isSidebarVisible]
     if let saved = vc.saved {
       j["saved_id"] = saved.id
@@ -101,12 +109,12 @@ enum Session {
     if let cs = vc.connection.passwordlessConnectionString {
       j["connstr"] = cs
     }
-    j["tabs"] = vc.content.tabControllers.map(tabJSON)
+    j["tabs"] = vc.content.tabControllers.map { tabJSON($0, cursor: cursor) }
     j["current"] = vc.content.currentIndex ?? 0
     return j
   }
 
-  private static func tabJSON(_ controller: NSViewController) -> [String: Any] {
+  private static func tabJSON(_ controller: NSViewController, cursor withCursor: Bool) -> [String: Any] {
     if let t = controller as? TableViewController {
       var j: [String: Any] = ["type": "table", "table": t.table, "filters_visible": t.filtersVisible]
       // what differs from a table on Data, so other frontends read the file as before
@@ -124,12 +132,79 @@ enum Session {
       }
       if let s = t.search { j["search"] = s }
       j["sorts"] = t.sorts.map { ["column": $0.column, "desc": $0.descending] as [String: Any] }
+      // general.restore_cursor_position: the TUIs' [row, column] pairs
+      if withCursor, let c = t.cursorState {
+        j["cursor"] = [c.row, c.column]
+        j["scroll"] = [c.top, c.left]
+      }
       return j
     }
     if let q = controller as? QueryViewController {
-      return ["type": "query", "text": q.text]
+      var j: [String: Any] = ["type": "query", "text": q.text]
+      if withCursor {
+        j["cursor"] = q.cursorUTF8Offset  // a byte offset into the text, as the TUIs keep it
+      }
+      return j
     }
     return [:]
+  }
+
+  /// Whether the cursor goes into the file and comes back from it
+  /// (general.restore_cursor_position)
+  private static var withCursor: Bool { LaceApp.shared.prefs.restoreCursor }
+
+  // MARK: Saved workspaces (workspaces.json)
+
+  /// The window's layout for workspaces.json, as session.json holds a
+  /// workspace but with only the connections that are saved ones (others
+  /// could not be opened again) and no forms, geometry or cursor; nil when
+  /// it has no saved connection. leftOut: the connections without a saved entry.
+  static func layoutJSON(_ wc: WorkspaceWindowController) -> (workspace: [String: Any], leftOut: Int)? {
+    let entries = wc.workspace.entryControllers
+    let current = wc.workspace.currentEntry?.id
+    var connections: [[String: Any]] = []
+    var leftOut = 0
+    var currentIndex = 0
+    for entry in entries {
+      guard let vc = entry as? ConnectionViewController else { continue }
+      guard vc.saved != nil else {
+        leftOut += 1
+        continue
+      }
+      if vc.id == current {
+        currentIndex = connections.count
+      }
+      var j = connectionJSON(vc, cursor: false)
+      j["connstr"] = nil  // opened by its saved entry
+      connections.append(j)
+    }
+    guard !connections.isEmpty else { return nil }
+    return (["name": wc.name, "connections": connections, "current": currentIndex], leftOut)
+  }
+
+  /// Open a saved layout: in the front window while it holds only its
+  /// untouched form, else in a new window, named as it was saved; a window
+  /// that gets nothing back keeps a form
+  static func open(layout: SavedWorkspaces.Layout) async {
+    var target: WorkspaceWindowController?
+    if let front = LaceApp.shared.frontWorkspace, front.workspace.entryCount == 1,
+      let form = front.workspace.currentForm, form.isPristine
+    {
+      target = front
+    }
+    var ws = layout.workspace
+    ws["name"] = layout.name
+    let wc = target ?? LaceApp.shared.newWorkspace(withForm: false)
+    wc.window?.makeKeyAndOrderFront(nil)
+    await restoreWindow(ws, into: wc, startForm: target?.workspace.currentForm, geometry: false)
+  }
+
+  /// A pair of non-negative integers ([row, column]) from the file
+  private static func pair(_ v: Any?) -> (Int, Int)? {
+    guard let a = v as? [Any], a.count == 2, let x = (a[0] as? NSNumber)?.intValue, let y = (a[1] as? NSNumber)?.intValue,
+      x >= 0, y >= 0
+    else { return nil }
+    return (x, y)
   }
 
   // MARK: Restore
@@ -171,7 +246,6 @@ enum Session {
     }
     var any = false
     for wj in windows {
-      let connections = wj["connections"] as? [[String: Any]] ?? []
       let wc: WorkspaceWindowController
       var startForm: ConnectionFormViewController?
       if let r = reuse {
@@ -181,42 +255,53 @@ enum Session {
       } else {
         wc = LaceApp.shared.newWorkspace(withForm: false)
       }
-      if let name = wj["name"] as? String, !name.isEmpty {
-        wc.rename(name)
-      }
-      let geometry = wj["macos"] as? [String: Any]
-      if let frame = geometry?["frame"] as? String, let window = wc.window {
-        window.setFrame(NSRectFromString(frame), display: true)
-        if geometry?["maximized"] as? Bool == true, !window.isZoomed {
-          window.zoom(nil)
-        }
-      }
       any = true
-      let current = wj["current"] as? Int ?? 0
-      var select: UUID?
-      for (i, cj) in connections.enumerated() {
-        if wc.workspace.isClosed { break }  // closed while it was being restored
-        let entry: (any WorkspaceEntry)?
-        if cj["form"] as? Bool == true {
-          entry = wc.workspace.addForm(at: wc.workspace.entryCount)
-        } else {
-          entry = await restoreConnection(cj, into: wc.workspace)
-        }
-        if i == current, let entry {
-          select = entry.id
-        }
-      }
-      if wc.workspace.isClosed { continue }
-      if let startForm {
-        wc.workspace.dropPristineForm(startForm)
-      }
-      if wc.workspace.entryCount == 0 {
-        wc.workspace.addForm()  // nothing came back: never an empty window
-      } else if let select, let i = wc.workspace.entryControllers.firstIndex(where: { $0.id == select }) {
-        wc.workspace.select(index: i)
-      }
+      await restoreWindow(wj, into: wc, startForm: startForm, geometry: true)
     }
     return any
+  }
+
+  /// One saved window's name, geometry (session.json, not a saved layout)
+  /// and entries into wc; startForm (the untouched form wc started with)
+  /// goes once something came back; a window that gets nothing back keeps
+  /// a form
+  private static func restoreWindow(
+    _ wj: [String: Any], into wc: WorkspaceWindowController, startForm: ConnectionFormViewController?, geometry: Bool
+  ) async {
+    let connections = wj["connections"] as? [[String: Any]] ?? []
+    if let name = wj["name"] as? String, !name.isEmpty {
+      wc.rename(name)
+    }
+    let frame = geometry ? wj["macos"] as? [String: Any] : nil
+    if let rect = frame?["frame"] as? String, let window = wc.window {
+      window.setFrame(NSRectFromString(rect), display: true)
+      if frame?["maximized"] as? Bool == true, !window.isZoomed {
+        window.zoom(nil)
+      }
+    }
+    let current = wj["current"] as? Int ?? 0
+    var select: UUID?
+    for (i, cj) in connections.enumerated() {
+      if wc.workspace.isClosed { break }  // closed while it was being restored
+      let entry: (any WorkspaceEntry)?
+      if cj["form"] as? Bool == true {
+        entry = wc.workspace.addForm(at: wc.workspace.entryCount)
+      } else {
+        entry = await restoreConnection(cj, into: wc.workspace)
+      }
+      if i == current, let entry {
+        select = entry.id
+      }
+    }
+    if wc.workspace.isClosed { return }
+    if let startForm {
+      wc.workspace.dropPristineForm(startForm)
+    }
+    if wc.workspace.entryCount == 0 {
+      wc.workspace.addForm()  // nothing came back: never an empty window
+    } else if let select, let i = wc.workspace.entryControllers.firstIndex(where: { $0.id == select }) {
+      wc.workspace.select(index: i)
+    }
   }
 
   @discardableResult
@@ -259,8 +344,14 @@ enum Session {
         t.restore(
           filters: filters, search: tj["search"] as? String, sorts: sorts,
           filtersVisible: tj["filters_visible"] as? Bool ?? false)
+        if withCursor, let (row, column) = pair(tj["cursor"]) {
+          t.restore(cursorRow: row, column: column, top: pair(tj["scroll"])?.0)
+        }
       case "query":
-        vc.content.newQuery(text: tj["text"] as? String)
+        let q = vc.content.newQuery(text: tj["text"] as? String)
+        if withCursor, let offset = (tj["cursor"] as? NSNumber)?.intValue, offset >= 0 {
+          q.restore(cursorUTF8Offset: offset)
+        }
       default:
         continue
       }

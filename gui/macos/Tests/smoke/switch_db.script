@@ -1,0 +1,34 @@
+# needs: LACE_IT_POSTGRES
+# The database switch on a server (⇧⌘D): the server's databases in a pick
+# list; picking another turns the entry into a form showing the target and
+# connects there with the same user and password; the last holder of an
+# open transaction is asked first (Cancel keeps it where it is)
+connect $LACE_IT_POSTGRES
+query DROP DATABASE IF EXISTS lace_switch_target
+run
+query CREATE DATABASE lace_switch_target
+run
+switch-database
+expect-palette-row lace_switch_target
+expect-palette-row postgres
+palette-run lace_switch_target
+expect-entry connection
+expect-title lace_switch_target on 127.0.0.1
+query SELECT current_database()
+run
+expect-cell 0 0 lace_switch_target
+query BEGIN
+run
+switch-database
+palette-run postgres
+expect-alert transaction is open
+answer-alert cancel
+expect-title lace_switch_target on 127.0.0.1
+query ROLLBACK
+run
+switch-database
+palette-run postgres
+expect-entry connection
+expect-title postgres on 127.0.0.1
+expect-open-connections 1
+quit

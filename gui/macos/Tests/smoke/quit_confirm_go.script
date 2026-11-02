@@ -1,0 +1,6 @@
+# config: {"general": {"daemon_spawn_mode": 1, "delete_confirmation": false, "page_size": 100, "quit_confirmation": true}, "macos": {"keychain_passwords": false}}
+# expect-exit
+# general.quit_confirmation: Quit in the "Quit Lace?" question ends the app
+quit-request
+expect-alert Quit Lace?
+answer-alert go

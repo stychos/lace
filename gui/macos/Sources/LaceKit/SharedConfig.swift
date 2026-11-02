@@ -124,6 +124,28 @@ public final class SharedConfig {
     get { config.pointee.general.auto_open_first_table }
     set { config.pointee.general.auto_open_first_table = newValue }
   }
+  /// Session restore puts the cursor (and a table's scroll) back where it was
+  public var restoreCursorPosition: Bool {
+    get { config.pointee.general.restore_cursor_position }
+    set { config.pointee.general.restore_cursor_position = newValue }
+  }
+  /// Quitting asks first (a transaction open anywhere asks regardless)
+  public var quitConfirmation: Bool {
+    get { config.pointee.general.quit_confirmation }
+    set { config.pointee.general.quit_confirmation = newValue }
+  }
+
+  /// general.color_scheme
+  public enum ColorScheme: Int32, Sendable, CaseIterable {
+    /// The system's appearance
+    case system = 0
+    case light = 1
+    case dark = 2
+  }
+  public var colorScheme: ColorScheme {
+    get { ColorScheme(rawValue: config.pointee.general.color_scheme) ?? .system }
+    set { config.pointee.general.color_scheme = newValue.rawValue }
+  }
 
   // MARK: macos
 

@@ -1,0 +1,10 @@
+python3 - "$CONFIG_DIR/session.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+tabs = [c for c in s["workspaces"][0]["connections"] if "tabs" in c][0]["tabs"]
+t = [x for x in tabs if x["type"] == "table"][0]
+q = [x for x in tabs if x["type"] == "query"][0]
+assert t["cursor"] == [2, 1], t
+assert len(t["scroll"]) == 2, t
+assert q["cursor"] == 10, q
+PY

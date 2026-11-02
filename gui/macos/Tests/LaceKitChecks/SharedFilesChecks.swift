@@ -30,6 +30,74 @@ func checkSharedFiles(tmp: URL) {
   checkSharedConfigUnparsable(dir)
   checkSharedConfigSettings(dir)
   checkSessionFile()
+  checkSavedWorkspaces(home: tmp)
+  checkDatabaseConnectionString()
+}
+
+/// workspaces.json through the TUIs' saved_workspaces.c: a flat ncurses
+/// layout comes back nested; put replaces by name, rename re-stores at the
+/// end, remove; a file that does not parse is never written
+private func checkSavedWorkspaces(home: URL) {
+  // The private HOME main.swift set ($HOME, which the C side reads), never
+  // NSHomeDirectory(): that is the account's real home whatever $HOME says
+  guard ProcessInfo.processInfo.environment["HOME"] == home.path else {
+    Checks.fail("saved workspaces: $HOME is not the checks' private one; not touching workspaces.json")
+    return
+  }
+  let dir = home.appendingPathComponent("Library/Application Support/lace")
+  try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+  let file = dir.appendingPathComponent("workspaces.json")
+  try? FileManager.default.removeItem(at: file)
+  Checks.equal((try? SavedWorkspaces.list())?.count, 0, "no workspaces.json: no layouts")
+  write(
+    #"{"workspaces": [{"name": "old", "saved": 100, "workspace": {"tabs": [{"type": "TABLE", "connection_id": "c1", "table": "t"}]}}]}"#,
+    to: file)
+  let old = (try? SavedWorkspaces.list()) ?? []
+  Checks.equal(old.map(\.name), ["old"], "a flat layout is listed")
+  Checks.equal(old.first?.connections.first?["saved_id"] as? String, "c1", "a flat layout comes back nested")
+  Checks.equal(old.first?.saved.timeIntervalSince1970, 100, "saved time")
+  let layout: [String: Any] = ["name": "x", "connections": [["saved_id": "c2", "tabs": [] as [Any]]], "current": 0]
+  do {
+    try SavedWorkspaces.put(name: "new", workspace: layout)
+    try SavedWorkspaces.put(name: "new", workspace: layout)  // replaced, not added
+    try SavedWorkspaces.rename("old", to: "older")
+    Checks.equal(try SavedWorkspaces.list().map(\.name), ["new", "older"], "put replaces, rename goes last")
+    try SavedWorkspaces.remove(name: "new")
+    Checks.equal(try SavedWorkspaces.list().map(\.name), ["older"], "removed")
+  } catch {
+    Checks.fail("saved workspaces: \(error)")
+  }
+  Checks.expect((try? SavedWorkspaces.rename("older", to: "older")) == nil, "a rename onto an existing name is refused")
+  Checks.expect((try? SavedWorkspaces.remove(name: "nope")) == nil, "removing a missing layout is refused")
+  let attrs = try? FileManager.default.attributesOfItem(atPath: file.path)
+  Checks.equal(((attrs?[.posixPermissions] as? Int) ?? 0) & 0o777, 0o600, "workspaces.json is 0600")
+  write(#"{"workspaces": "#, to: file)
+  Checks.expect((try? SavedWorkspaces.list()) == nil, "a broken workspaces.json does not list")
+  Checks.expect((try? SavedWorkspaces.put(name: "y", workspace: layout)) == nil, "a broken workspaces.json is not written")
+  Checks.equal(try? String(contentsOf: file, encoding: .utf8), #"{"workspaces": "#, "the broken file untouched")
+  try? FileManager.default.removeItem(at: file)
+}
+
+/// The database switch's target: the same server, user, passwords and tunnel
+private func checkDatabaseConnectionString() {
+  Checks.equal(
+    Connection.connectionString("postgres://u:p%40ss@db.example:5433/shop", database: "crm"),
+    "postgres://u:p%40ss@db.example:5433/crm", "another database, the password kept")
+  let tls = Connection.connectionString(
+    "postgres://u:p@db.example/shop?sslmode=verify-full&connect_timeout=5", database: "crm") ?? ""
+  Checks.expect(
+    tls.hasPrefix("postgres://u:p@db.example") && tls.contains("/crm?") && tls.contains("sslmode=verify-full")
+      && tls.contains("connect_timeout=5"),
+    "the URL's options kept: \(tls.replacingOccurrences(of: ":p@", with: ":•@"))")
+  let key = Connection.connectionString(
+    "postgres+ssh://jump@bastion:22/app@10.0.0.5:5432/shop?ssh_key=%2Ftmp%2Fk&sslmode=require", database: "crm") ?? ""
+  Checks.equal(key.components(separatedBy: "ssh_key=").count, 2, "ssh_key written once: \(key)")
+  Checks.expect(key.contains("sslmode=require"), "an option of a tunnelled URL kept: \(key)")
+  let ssh = Connection.connectionString(
+    "postgres+ssh://jump@bastion:22/app:secret@10.0.0.5:5432/shop", database: "crm") ?? ""
+  Checks.expect(
+    ssh.hasPrefix("postgres+ssh://jump@bastion") && ssh.contains("app:secret@10.0.0.5") && ssh.hasSuffix("/crm"),
+    "the tunnel kept: \(ssh.replacingOccurrences(of: "secret", with: "•"))")
 }
 
 /// macos.json's values go into general/macos once, for what config.json lacks
@@ -126,6 +194,12 @@ private func checkSharedConfigSettings(_ dir: URL) {
   Checks.equal(c.lastWorkspaceClose, .quit, "on_last_workspace_close default")
   Checks.equal(c.autoOpenFirstTable, false, "auto_open_first_table default")
   Checks.equal(c.keychainPasswords, true, "keychain_passwords default")
+  Checks.equal(c.restoreCursorPosition, true, "restore_cursor_position default")
+  Checks.equal(c.quitConfirmation, false, "quit_confirmation default")
+  Checks.equal(c.colorScheme, .system, "color_scheme default")
+  c.restoreCursorPosition = false
+  c.quitConfirmation = true
+  c.colorScheme = .dark
   c.keepConnectionTab = false
   c.lastWorkspaceClose = .new
   c.autoOpenFirstTable = true
@@ -159,6 +233,10 @@ private func checkSharedConfigSettings(_ dir: URL) {
   Checks.equal(back.daemonIdleTimeout, 600, "daemon_idle_timeout back")
   Checks.equal(back.rowNumbers, 2, "row_numbers back")
   Checks.equal(back.deleteConfirmation, false, "delete_confirmation back")
+  Checks.equal(back.restoreCursorPosition, false, "restore_cursor_position back")
+  Checks.equal(back.quitConfirmation, true, "quit_confirmation back")
+  Checks.equal(back.colorScheme, .dark, "color_scheme back")
+  Checks.equal(general?["color_scheme"] as? Int, 2, "color_scheme written as 2")
 }
 
 private func checkSessionFile() {

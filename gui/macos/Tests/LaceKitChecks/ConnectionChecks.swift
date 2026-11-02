@@ -121,6 +121,22 @@ private func roundTrip(client: LaceClient, url: String) async throws {
     }, matching: { $0.isRowNotFound && $0.message.contains("changed") })
   Checks.equal(try await conn.read("SELECT name FROM t WHERE id = 1").value(row: 0, column: 0), .text("alicia"))
 
+  // An undo: the verification expects the value the edit wrote (a snapshot
+  // of names and values), so it goes back once and is refused after that
+  let wrote = RowSnapshot(names: ["name"], values: [.text("alicia")])
+  Checks.equal(wrote.count, 1)
+  _ = try await conn.update(table: "t", key: key, snapshot: wrote, column: "name", value: .text("alice"))
+  Checks.equal(try await conn.read("SELECT name FROM t WHERE id = 1").value(row: 0, column: 0), .text("alice"))
+  await Checks.throwsLaceError(
+    "undo of a value no longer there",
+    {
+      _ = try await conn.update(table: "t", key: key, snapshot: wrote, column: "name", value: .text("x"))
+    }, matching: { $0.isRowNotFound })
+  // The key after an edit of a key column holds the new value; the old key is left alone
+  Checks.equal(key.replacing(column: "id", with: .int(5)).values, [.int(5)])
+  Checks.equal(key.replacing(column: "name", with: .int(5)).values, [.int(1)])
+  Checks.equal(key.values, [.int(1)])
+
   // Delete, verified over every table column
   let fresh = try await conn.read("SELECT * FROM t ORDER BY id")
   let bobKey = try RowKey.build(for: 1, in: fresh, schema: schema, uniqueNames: true)

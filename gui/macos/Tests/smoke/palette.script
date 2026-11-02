@@ -1,0 +1,39 @@
+# The command palette (⇧⌘P): every enabled menu item, the connection's
+# tables and tabs, Connect rows, the preferences' toggles; the TUIs' fuzzy
+# filter; running a row; the database switch is refused on SQLite (not in
+# the palette, a notice from the menu action)
+saved-add Local sqlite://$LACE_SMOKE_DB
+connect $LACE_SMOKE_DB
+table big
+palette
+expect-palette-row Open table big
+expect-palette-row Refresh
+expect-palette-row Go to Row…
+expect-palette-row New Connection Tab
+expect-palette-row Connect to Local
+expect-palette-row Restore the cursor position: on
+expect-no-palette-row Switch Database…
+expect-no-palette-row Command Palette…
+palette-filter refr
+expect-palette-first Refresh
+palette-filter zzzqqq
+expect-no-palette-row Refresh
+palette-filter new query
+palette-run New Query
+expect-tabs 2
+palette
+palette-filter big
+palette-run Open table big
+expect-table big
+palette
+palette-run Restore the cursor position: on
+expect-notice Restore the cursor position: off
+palette
+expect-palette-row Restore the cursor position: off
+palette-close
+switch-database
+expect-notice A SQLite file is one database
+palette
+palette-run Connect to Local
+expect-connections 2
+quit

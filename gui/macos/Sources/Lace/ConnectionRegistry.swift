@@ -45,6 +45,12 @@ final class ConnectionRegistry {
     }?.connection
   }
 
+  /// The short name of a connection with a transaction open (or failed), if any
+  func openTransactionName() -> String? {
+    entries.first { $0.connection.transactionState == .open || $0.connection.transactionState == .failed }?
+      .connection.shortName
+  }
+
   func savedID(of c: Connection) -> String? {
     entries.first { $0.connection === c }?.savedID
   }

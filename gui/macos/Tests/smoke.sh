@@ -159,6 +159,9 @@ PY
 #   # expect-exit           the app must end by itself (no quit command)
 #   # then: OTHER.script    a second run in the same HOME afterwards
 #   # session: {...}        session.json before the run
+#   # needs: VAR            skipped unless $VAR is set (LACE_IT_POSTGRES: a
+#                           PostgreSQL URL, substituted for $LACE_IT_POSTGRES
+#                           in the script, as tests/integration/run.py gives it)
 #   # keychain              the Keychain preference may stay on: the items go to
 #                           $HOME/keychain.json, a stand-in for the login
 #                           Keychain (which would ask the person at the screen)
@@ -173,7 +176,9 @@ has() { grep -Eq "^# $2(:|\$)" "$1"; }
 # scenario_run SCRIPT HOME [KEYCHAIN_FILE]: one run; prints why it failed, if it did
 scenario_run() {
   sfile=$1 shome=$2 kcfile=${3:-}
-  text=$(grep -v '^#' "$sfile" | grep -v '^[[:space:]]*$' | sed "s|\$LACE_SMOKE_DB|$shome/t.sqlite|g" | paste -sd ';' -)
+  pg=$(printf '%s' "${LACE_IT_POSTGRES:-}" | sed 's/[&|\\]/\\&/g')
+  text=$(grep -v '^#' "$sfile" | grep -v '^[[:space:]]*$' | sed -e "s|\$LACE_SMOKE_DB|$shome/t.sqlite|g" \
+    -e "s|\$LACE_IT_POSTGRES|$pg|g" | paste -sd ';' -)
   HOME="$shome/home" XDG_RUNTIME_DIR= LACED_LOG="$shome/laced.log" LACE_MACOS_SHOTS="$shome/shots" \
     LACE_MACOS_KEYCHAIN_FILE="$kcfile" LACE_MACOS_SCRIPT="$text" "$app" -s 2>>"$shome/script.log" &
   pid=$!
@@ -206,6 +211,11 @@ for sfile in "$here"/smoke/*.script; do
   name=$(basename "$sfile" .script)
   case "$name" in *_after) continue ;; esac
   case "$name" in *"$filter"*) ;; *) continue ;; esac
+  needs=$(header "$sfile" needs)
+  if [ -n "$needs" ] && [ -z "$(printenv "$needs")" ]; then
+    echo "  skip $name (no \$$needs)"
+    continue
+  fi
   total=$((total + 1))
   shome="$tmp/$name"
   mkdir -p "$shome/home/Library/Application Support/lace" "$shome/shots"

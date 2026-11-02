@@ -12,7 +12,7 @@ A fast, lightweight database viewer and manager for SQLite, PostgreSQL, MySQL an
 - SQL editor tabs whose text survives restarts; run a statement, a script, or a script in one transaction
 - Multi-column filters and sorts, raw SQL filters included
 - Inline editing, checked against the database before every write; row insertion and bulk deletion
-- Undo of edits and deletes (terminal frontends)
+- Undo of edits and deletes (terminal frontends and the macOS app)
 - Table sub-views: data, structure, indexes, foreign keys and table information
 - Views, functions and triggers listed beside the tables, with their definitions
 - Structure editing: columns, primary keys, indexes, check and foreign key constraints; every statement is shown before it runs
@@ -28,7 +28,7 @@ A fast, lightweight database viewer and manager for SQLite, PostgreSQL, MySQL an
 - **lace**: the ncurses terminal frontend (`tui/ncurses/`)
 - **lace-nc**: the notcurses terminal frontend (`tui/notcurses/`); both terminal frontends look and work alike, with a command palette (Ctrl+P or `:`)
 - **lace-gtk**: a GTK4/libadwaita desktop frontend (`gui/gtk/`)
-- **Lace.app**: a native macOS frontend (`gui/macos/`)
+- **Lace.app**: a native macOS frontend (`gui/macos/`), with a command palette (⇧⌘P)
 
 The frontends never connect to a database themselves. **laced**, a small daemon started on demand, owns the database drivers and serves every frontend. They all share saved connections, settings, sessions and query history.
 

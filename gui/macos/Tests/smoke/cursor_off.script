@@ -1,0 +1,9 @@
+# config: {"general": {"daemon_spawn_mode": 1, "delete_confirmation": false, "page_size": 100, "restore_cursor_position": false}, "macos": {"keychain_passwords": false}}
+# With general.restore_cursor_position off no cursor reaches session.json
+connect $LACE_SMOKE_DB
+table big
+cell 2 1
+query SELECT 1
+query-caret 5
+save-session
+quit

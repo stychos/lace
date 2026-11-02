@@ -21,7 +21,7 @@
 import AppKit
 import LaceKit
 
-final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate {
+final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate, NSUserInterfaceValidations {
   let connection: Connection
   /// What the tab shows: a table, a database view, a routine or a trigger
   /// (a rename changes the name: rename(to:))
@@ -104,6 +104,8 @@ final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate 
     edit.confirmDelete = prefs.confirmDelete
     edit.onRowsDeleted = { [weak self] _ in self?.updateStatus() }
     edit.onWrite = { [weak self] sql in self?.record?(sql) }
+    // The value, or the rows, come back where the order puts them
+    edit.onUndone = { [weak self] in self?.startLoad() }
     grid.delegate = self
     grid.allowsAdding = true
     grid.showRowNumbers = prefs.rowNumbers != .never
@@ -206,6 +208,7 @@ final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate 
   /// A change to the object ran: everything is read again
   func reloadAfterChange() {
     dropCatalog()
+    edit.clearUndo()  // the steps may not fit the table's new shape
     if SubView.available(for: object.kind).contains(.data) {
       loadSchema()
     } else {
@@ -223,6 +226,9 @@ final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate 
     strip.isEnabled = !locked
     actionsButton.isEnabled = !locked
   }
+
+  /// Undo steps this tab holds (the script driver)
+  var undoCount: Int { edit.undo.count }
 
   /// The lock banner's text, for scripts; nil when hidden
   var lockBannerText: String? { lockBanner.isHidden ? nil : lockBanner.text }
@@ -397,6 +403,9 @@ final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate 
       s += " · read only: \(why)"
     }
     statusLabel.stringValue = s
+    if pendingCursor != nil {
+      applyPendingCursor()
+    }
   }
 
   // MARK: Public
@@ -418,6 +427,34 @@ final class TableViewController: NSViewController, GridDelegate, NSMenuDelegate 
   }
   /// A schema, page or count load is in flight
   var isLoading: Bool { inFlight > 0 || countPending }
+
+  /// The focused cell and the grid's first visible row and column (the session file)
+  var cursorState: (row: Int, column: Int, top: Int, left: Int)? {
+    guard let cell = grid.focusedCell else { return nil }
+    let top = grid.firstVisibleRow
+    return (cell.row, cell.column, top, grid.firstVisibleColumn)
+  }
+
+  /// Session restore of the cursor: applied once the row is there (the
+  /// count known, or the pages reaching it); top is the first visible row
+  private var pendingCursor: (row: Int, column: Int, top: Int?)?
+
+  func restore(cursorRow row: Int, column: Int, top: Int?) {
+    pendingCursor = (row, column, top)
+    applyPendingCursor()
+  }
+
+  private func applyPendingCursor() {
+    guard let c = pendingCursor, !model.columns.isEmpty, model.count > 0,
+      model.totalKnown || model.count > c.row
+    else { return }
+    pendingCursor = nil
+    let row = min(c.row, model.count - 1)
+    if let top = c.top, top <= row {
+      grid.scrollToTop(row: top)
+    }
+    grid.focusCell(row: row, column: c.column)
+  }
 
   func addFilter(_ filter: Filter) {
     filterBar.isHidden = false

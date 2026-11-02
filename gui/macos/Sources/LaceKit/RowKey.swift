@@ -72,6 +72,18 @@ public final class RowKey: @unchecked Sendable {
     lace_row_key_copy(&c, &raw)
     return RowKey(owning: c)
   }
+
+  /// The key with the part named column holding value (the row's key after
+  /// an edit of a key column); a copy as it is when column is not a part
+  public func replacing(column: String, with value: Value) -> RowKey {
+    var c = LaceRowKey()
+    lace_row_key_copy(&c, &raw)
+    for i in 0..<Int(c.count) where c.names[i].map({ String(cString: $0) }) == column {
+      lace_value_free(&c.values[i])
+      c.values[i] = value.makeLaceValue()
+    }
+    return RowKey(owning: c)
+  }
 }
 
 /// The columns of a row that a verification compares, as they were loaded
@@ -87,6 +99,24 @@ public final class RowSnapshot: @unchecked Sendable {
     // SIZE_MAX means "every column" to liblace
     let col = column ?? Int(bitPattern: UInt.max)
     lace_row_snapshot_build(&raw, result.raw, row, col, schema.raw)
+  }
+
+  /// Columns and the values a verification expects to find in them (an
+  /// undo: the value the edit wrote)
+  public init(names: [String], values: [Value]) {
+    precondition(names.count == values.count, "one value per column")
+    let n = names.count
+    // malloc'd: lace_row_snapshot_free() frees them with free()
+    let cnames = calloc(max(n, 1), MemoryLayout<UnsafeMutablePointer<CChar>?>.stride)!
+      .assumingMemoryBound(to: UnsafeMutablePointer<CChar>?.self)
+    let cvalues = calloc(max(n, 1), MemoryLayout<LaceValue>.stride)!.assumingMemoryBound(to: LaceValue.self)
+    for i in 0..<n {
+      cnames[i] = strdup(names[i])
+      cvalues[i] = values[i].makeLaceValue()
+    }
+    raw.names = cnames
+    raw.values = cvalues
+    raw.count = n
   }
 
   deinit {

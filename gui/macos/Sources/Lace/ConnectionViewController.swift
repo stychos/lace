@@ -303,6 +303,9 @@ final class ContentViewController: NSViewController {
     notice.show(text)
   }
 
+  /// The last notice shown (the script driver)
+  var lastNotice: String { notice.lastText }
+
   /// Put SQL from the history into the current query tab, or a new one
   func useSQL(_ sql: String) {
     if let query = current?.controller as? QueryViewController {

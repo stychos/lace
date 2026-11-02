@@ -46,6 +46,10 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
   weak var delegate: GridDelegate?
   /// Short messages for the user (read-only reasons)
   var toast: ((String) -> Void)?
+  /// What ⌘Z would revert ("Edit of name"), nil when nothing (EditController)
+  var undoTitle: (() -> String?)?
+  /// ⌘Z with the grid focused: revert the newest write
+  var onUndo: (() -> Void)?
 
   var isEditable = false
   var readOnlyReason: String?
@@ -357,6 +361,37 @@ final class GridController: NSObject, NSTableViewDataSource, NSTableViewDelegate
     focusCell(row: row, column: currentColumn)
   }
 
+  /// The first row shown (0 when none is)
+  var firstVisibleRow: Int {
+    var rect = tableView.visibleRect
+    let inset = scrollView.contentView.contentInsets.top  // under the header
+    rect.origin.y += inset
+    rect.size.height = max(0, rect.size.height - inset)
+    let rows = tableView.rows(in: rect)
+    return rows.length > 0 ? rows.location : 0
+  }
+
+  /// The model column of the leftmost column shown (0 when none is)
+  var firstVisibleColumn: Int {
+    let cols = tableView.columnIndexes(in: tableView.visibleRect)
+    for i in cols {
+      if let m = modelColumn(of: tableView.tableColumns[i]) {
+        return m
+      }
+    }
+    return 0
+  }
+
+  /// Scroll so that row is the first one shown (as far as the rows below allow)
+  func scrollToTop(row: Int) {
+    guard row >= 0, row < tableView.numberOfRows else { return }
+    let clip = scrollView.contentView
+    // the header sits in the clip view's top inset, over the first rows
+    let y = tableView.rect(ofRow: row).minY - clip.contentInsets.top
+    clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+    scrollView.reflectScrolledClipView(clip)
+  }
+
   /// Move the current column in visual order, skipping the row numbers
   fileprivate func moveColumn(by delta: Int) {
     let cols = tableView.tableColumns.filter { $0.identifier != GridController.rowNumberID }
@@ -629,6 +664,21 @@ final class GridTableView: NSTableView {
 
   @objc func copy(_ sender: Any?) {
     grid?.copySelection()
+  }
+
+  /// Edit ▸ Undo with the grid focused: the newest write of this view (the
+  /// SQL editor's ⌘Z is the text system's: it never reaches here)
+  @objc func undo(_ sender: Any?) {
+    grid?.onUndo?()
+  }
+
+  override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+    if item.action == #selector(undo(_:)) {
+      let title = grid?.undoTitle?()
+      (item as? NSMenuItem)?.title = title.map { "Undo \($0)" } ?? "Undo"
+      return title != nil
+    }
+    return super.validateUserInterfaceItem(item)
   }
 }
 

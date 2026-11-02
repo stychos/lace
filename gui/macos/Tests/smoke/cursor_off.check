@@ -1,0 +1,6 @@
+python3 - "$CONFIG_DIR/session.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+for t in [c for c in s["workspaces"][0]["connections"] if "tabs" in c][0]["tabs"]:
+    assert "cursor" not in t and "scroll" not in t, t
+PY

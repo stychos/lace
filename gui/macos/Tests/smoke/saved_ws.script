@@ -1,0 +1,19 @@
+# then: saved_ws_after.script
+# Save Workspace As (⌥⌘S) keeps the window's saved connections' tabs in
+# workspaces.json (an unsaved connection is left out, said so); the next
+# launch opens the layout from the Manage sheet into the untouched start
+# window, renames one layout (stored again at the end, as the TUIs do) and
+# deletes another
+saved-add Local sqlite://$LACE_SMOKE_DB
+connect-saved Local
+table big
+query SELECT 1
+connect sqlite://$LACE_SMOKE_DB-other?create=1
+answer Team
+save-workspace
+expect-notice left out
+expect-saved-workspaces Team
+answer Junk
+save-workspace
+expect-saved-workspaces Team|Junk
+quit
